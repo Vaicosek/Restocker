@@ -1,0 +1,474 @@
+"""Stock-exchange commands (/stock). The pricing/trade engine, loops, UI views
+and dividend logic stay in Restocker_main and are bound from the core module."""
+import sys
+import discord
+from discord import app_commands
+from discord.ext import commands
+
+from typing import Optional
+
+core = sys.modules.get("Restocker_main") or sys.modules["__main__"]
+STOCK_DIVIDEND_PCT = core.STOCK_DIVIDEND_PCT
+STOCK_LIMIT_ORDERS_ENABLED = core.STOCK_LIMIT_ORDERS_ENABLED
+StockPanelView = core.StockPanelView
+_build_market_dashboard_embed = core._build_market_dashboard_embed
+_build_stock_panel_embed = core._build_stock_panel_embed
+_check_limit_orders = core._check_limit_orders
+_exec_stock_buy = core._exec_stock_buy
+_exec_stock_sell = core._exec_stock_sell
+_etf_invest = core._etf_invest
+_etf_redeem = core._etf_redeem
+_etf_info_embed = core._etf_info_embed
+_etf_nav = core._etf_nav
+_get_market = core._get_market
+_is_market_manager = core._is_market_manager
+_load_markets = core._load_markets
+_public_market_autocomplete = core._public_market_autocomplete
+_recompute_share_price = core._recompute_share_price
+_remember_holder_name = core._remember_holder_name
+is_manager = core.is_manager
+_market_backing = core._market_backing
+_get_insurance_fund = core._get_insurance_fund
+_add_insurance_fund = core._add_insurance_fund
+add_coins = core.add_coins
+STOCK_BACK_CASH_PCT = core.STOCK_BACK_CASH_PCT
+STOCK_BACK_ASSET_PCT = core.STOCK_BACK_ASSET_PCT
+STOCK_BACK_FUND_PCT = core.STOCK_BACK_FUND_PCT
+save_yaml = core.save_yaml
+
+class StockCog(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+
+    stock = app_commands.Group(name="stock", description="Buy and sell shares of markets that have gone public, priced off their real CSN profit")
+
+    @stock.command(name="list", description="See every market currently listed on the stock exchange")
+    async def stock_list(self, interaction: discord.Interaction):
+        import Restocker_db as _db
+        public = _db.get_public_markets()
+        if not public:
+            return await interaction.response.send_message(
+                "📭 No markets are public yet. `/market go_public` to list one.", ephemeral=True
+            )
+        data = _load_markets()
+        markets = data.get("markets", {})
+        lines = []
+        for mid, listing in sorted(public.items(), key=lambda kv: -kv[1]["share_price"]):
+            name = markets.get(mid, {}).get("name", mid)
+            lines.append(
+                f"**{name}** (`{mid}`) — `{listing['share_price']:,.2f}` 🪙/share "
+                f"· `{listing['shares_outstanding']:,.0f}` shares · {listing['pe_multiplier']:,.1f}x P/E"
+            )
+        embed = discord.Embed(title="📈 Stock Exchange", description="\n".join(lines), color=0x3498DB)
+        await interaction.response.send_message(embed=embed)
+
+    @stock.command(name="price", description="Check a market's current share price and recent pricing history")
+    @app_commands.describe(market_id="The public market to check")
+    @app_commands.autocomplete(market_id=_public_market_autocomplete)
+    async def stock_price(self, interaction: discord.Interaction, market_id: str):
+        import Restocker_db as _db
+        listing = _db.get_market_shares(market_id)
+        if not listing or not listing.get("active"):
+            return await interaction.response.send_message(f"❌ `{market_id}` isn't public.", ephemeral=True)
+        market = _get_market(market_id) or {}
+        history = _db.get_price_history(market_id, limit=5)
+        embed = discord.Embed(title=f"📊 {market.get('name', market_id)} — `{market_id}`", color=0x3498DB)
+        embed.add_field(name="Share Price", value=f"`{listing['share_price']:,.2f}` 🪙", inline=True)
+        embed.add_field(name="Shares Outstanding", value=f"`{listing['shares_outstanding']:,.0f}`", inline=True)
+        embed.add_field(name="P/E Multiplier", value=f"`{listing['pe_multiplier']:,.1f}x`", inline=True)
+        embed.add_field(name="Last Priced", value=str(listing.get("last_priced_month") or "—"), inline=True)
+        if history:
+            lines = [f"`{h['price']:,.2f}` 🪙 — {h['reason'] or '?'} ({h['logged_at']})" for h in history]
+            embed.add_field(name="Recent Price Changes", value="\n".join(lines), inline=False)
+        await interaction.response.send_message(embed=embed)
+
+    @stock.command(name="buy", description="Buy shares of a public market using your server currency")
+    @app_commands.describe(market_id="The public market to invest in", shares="How many shares to buy")
+    @app_commands.autocomplete(market_id=_public_market_autocomplete)
+    async def stock_buy(self,
+        interaction: discord.Interaction,
+        market_id: str,
+        shares: app_commands.Range[int, 1, 1_000_000],
+    ):
+        ok, msg = _exec_stock_buy(interaction.user.id, market_id, shares, interaction.user.display_name)
+        await interaction.response.send_message(msg, ephemeral=not ok)
+
+    @stock.command(name="sell", description="Sell shares of a public market back for server currency")
+    @app_commands.describe(market_id="The market you hold shares in", shares="How many shares to sell")
+    @app_commands.autocomplete(market_id=_public_market_autocomplete)
+    async def stock_sell(self,
+        interaction: discord.Interaction,
+        market_id: str,
+        shares: app_commands.Range[int, 1, 1_000_000],
+    ):
+        ok, msg = _exec_stock_sell(interaction.user.id, market_id, shares, interaction.user.display_name)
+        await interaction.response.send_message(msg, ephemeral=not ok)
+
+    @stock.command(name="panel", description="Open an interactive live trading panel for a market")
+    @app_commands.describe(market_id="The public market to trade")
+    @app_commands.autocomplete(market_id=_public_market_autocomplete)
+    async def stock_panel(self, interaction: discord.Interaction, market_id: str):
+        import Restocker_db as _db
+        listing = _db.get_market_shares(market_id)
+        if not listing or not listing.get("active"):
+            return await interaction.response.send_message(f"❌ `{market_id}` isn't public.", ephemeral=True)
+        embed = _build_stock_panel_embed(market_id)
+        await interaction.response.send_message(embed=embed, view=StockPanelView(market_id))
+
+    @stock.command(name="dashboard", description="(Manager) Post a live, auto-updating market dashboard in this channel")
+    async def stock_dashboard(self, interaction: discord.Interaction):
+        if not is_manager(interaction):
+            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
+        msg = await interaction.channel.send(embed=_build_market_dashboard_embed())
+        try:
+            await msg.pin()
+        except Exception:
+            pass
+        save_yaml("stock_dashboard.yml", {"channel_id": interaction.channel.id, "message_id": msg.id})
+        await interaction.followup.send(
+            "✅ Live market dashboard posted and pinned here — it refreshes every 5 minutes.", ephemeral=True
+        )
+
+    @stock.command(name="portfolio", description="See your stock holdings and unrealized profit/loss")
+    @app_commands.describe(user="(Manager) View another user's portfolio")
+    async def stock_portfolio(self, interaction: discord.Interaction, user: Optional[discord.Member] = None):
+        target = user or interaction.user
+        if user and user.id != interaction.user.id and not is_manager(interaction):
+            return await interaction.response.send_message(
+                "⛔ Managers only can view someone else's portfolio.", ephemeral=True
+            )
+
+        import Restocker_db as _db
+        holdings = _db.get_portfolio(target.id)
+        if not holdings:
+            return await interaction.response.send_message(f"📭 {target.mention} doesn't own any shares.", ephemeral=True)
+
+        data = _load_markets()
+        markets = data.get("markets", {})
+        lines = []
+        total_value = 0.0
+        total_cost = 0.0
+        for h in holdings:
+            listing = _db.get_market_shares(h["market_id"])
+            price = float(listing["share_price"]) if listing else 0.0
+            value = price * h["shares"]
+            total_value += value
+            total_cost += h["cost_basis"]
+            name = markets.get(h["market_id"], {}).get("name", h["market_id"])
+            pl = value - h["cost_basis"]
+            lines.append(
+                f"**{name}** (`{h['market_id']}`) — `{h['shares']:,.0f}` shares @ `{price:,.2f}` 🪙 "
+                f"= `{value:,.0f}` 🪙 ({'📈' if pl >= 0 else '📉'} `{pl:+,.0f}` 🪙)"
+            )
+
+        embed = discord.Embed(title=f"💼 {target.display_name}'s Portfolio", color=0x9B59B6)
+        embed.add_field(name="Holdings", value="\n".join(lines), inline=False)
+        embed.add_field(name="Total Value", value=f"`{total_value:,.0f}` 🪙", inline=True)
+        embed.add_field(name="Total Cost Basis", value=f"`{total_cost:,.0f}` 🪙", inline=True)
+        embed.add_field(name="Unrealized P/L", value=f"`{(total_value - total_cost):+,.0f}` 🪙", inline=True)
+        await interaction.response.send_message(embed=embed, ephemeral=(target.id == interaction.user.id))
+
+    @stock.command(name="holders", description="(Manager/Owner) List who owns shares of a market")
+    @app_commands.describe(market_id="The market to check")
+    @app_commands.autocomplete(market_id=_public_market_autocomplete)
+    async def stock_holders(self, interaction: discord.Interaction, market_id: str):
+        if not _is_market_manager(interaction, market_id):
+            return await interaction.response.send_message(
+                "⛔ Managers or this market's owner/managers only.", ephemeral=True
+            )
+
+        import Restocker_db as _db
+        holders = _db.get_holders(market_id)
+        if not holders:
+            return await interaction.response.send_message(f"📭 Nobody holds shares of `{market_id}` yet.", ephemeral=True)
+
+        lines = []
+        for h in holders:
+            try:
+                member = interaction.guild.get_member(int(h["user_id"])) if interaction.guild else None
+            except Exception:
+                member = None
+            label = member.mention if member else f"`{h['user_id']}`"
+            lines.append(f"{label} — `{h['shares']:,.0f}` shares (cost basis `{h['cost_basis']:,.0f}` 🪙)")
+
+        embed = discord.Embed(title=f"👥 Holders of `{market_id}`", description="\n".join(lines[:25]), color=0x9B59B6)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @stock.command(
+        name="set_params",
+        description="(Manager) Tune a public market's shares outstanding / P-E multiplier",
+    )
+    @app_commands.describe(
+        market_id="The market to tune",
+        shares_outstanding="New total shares outstanding",
+        pe_multiplier="New price multiplier applied to monthly net profit per share",
+    )
+    @app_commands.autocomplete(market_id=_public_market_autocomplete)
+    async def stock_set_params(self,
+        interaction: discord.Interaction,
+        market_id: str,
+        shares_outstanding: Optional[app_commands.Range[float, 1.0, 100_000_000.0]] = None,
+        pe_multiplier: Optional[app_commands.Range[float, 0.1, 1000.0]] = None,
+    ):
+        if not is_manager(interaction):
+            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
+        import Restocker_db as _db
+        listing = _db.get_market_shares(market_id)
+        if not listing:
+            return await interaction.response.send_message(f"❌ `{market_id}` has never been public.", ephemeral=True)
+        if shares_outstanding is None and pe_multiplier is None:
+            return await interaction.response.send_message(
+                "❌ Provide at least one of `shares_outstanding` or `pe_multiplier`.", ephemeral=True
+            )
+        if shares_outstanding is not None:
+            held = sum(float(h.get("shares") or 0) for h in _db.get_holders(market_id))
+            if float(shares_outstanding) < held:
+                return await interaction.response.send_message(
+                    f"❌ Holders already own `{held:,.0f}` shares — shares outstanding can't go below that. "
+                    f"Buy shares back first or pick a number ≥ `{held:,.0f}`.", ephemeral=True)
+
+        _db.upsert_market_shares(market_id, shares_outstanding=shares_outstanding, pe_multiplier=pe_multiplier)
+        price = _recompute_share_price(market_id, reason="params_changed")
+        shown_price = price if price is not None else listing["share_price"]
+        await interaction.response.send_message(f"✅ `{market_id}` updated. New share price: `{shown_price:,.2f}` 🪙.")
+
+    @stock.command(name="limit_buy", description="Place a trigger order: buy when the price falls to or below your max")
+    @app_commands.describe(market_id="Public market", shares="How many shares", max_price="Fill when price is at or below this")
+    @app_commands.autocomplete(market_id=_public_market_autocomplete)
+    async def stock_limit_buy(self, interaction: discord.Interaction, market_id: str,
+                              shares: app_commands.Range[int, 1, 1_000_000],
+                              max_price: app_commands.Range[float, 0.01, 100_000_000.0]):
+        if not STOCK_LIMIT_ORDERS_ENABLED:
+            return await interaction.response.send_message("❌ Limit orders are disabled.", ephemeral=True)
+        import Restocker_db as _db
+        listing = _db.get_market_shares(market_id)
+        if not listing or not listing.get("active"):
+            return await interaction.response.send_message(f"❌ `{market_id}` isn't public.", ephemeral=True)
+        oid = _db.add_limit_order(interaction.user.id, market_id, "buy", int(shares), float(max_price))
+        _remember_holder_name(interaction.user.id, interaction.user.display_name)
+        _check_limit_orders(market_id)
+        o = _db.get_limit_order(oid)
+        if o and o.get("status") == "filled":
+            return await interaction.response.send_message(
+                f"✅ Limit buy #{oid} filled instantly at `{float(o['fill_price']):,.2f}` 🪙/share.", ephemeral=True)
+        await interaction.response.send_message(
+            f"🧾 Limit **buy** #{oid}: `{int(shares):,}` shares of `{market_id}` when price ≤ `{float(max_price):,.2f}` 🪙. "
+            f"You need the coins in your wallet when it triggers, or it's cancelled. "
+            f"Cancel anytime with `/stock limit_cancel order_id:{oid}`.", ephemeral=True)
+
+    @stock.command(name="limit_sell", description="Place a trigger order: sell when the price rises to or above your min")
+    @app_commands.describe(market_id="Public market", shares="How many shares", min_price="Fill when price is at or above this")
+    @app_commands.autocomplete(market_id=_public_market_autocomplete)
+    async def stock_limit_sell(self, interaction: discord.Interaction, market_id: str,
+                               shares: app_commands.Range[int, 1, 1_000_000],
+                               min_price: app_commands.Range[float, 0.01, 100_000_000.0]):
+        if not STOCK_LIMIT_ORDERS_ENABLED:
+            return await interaction.response.send_message("❌ Limit orders are disabled.", ephemeral=True)
+        import Restocker_db as _db
+        listing = _db.get_market_shares(market_id)
+        if not listing or not listing.get("active"):
+            return await interaction.response.send_message(f"❌ `{market_id}` isn't public.", ephemeral=True)
+        oid = _db.add_limit_order(interaction.user.id, market_id, "sell", int(shares), float(min_price))
+        _remember_holder_name(interaction.user.id, interaction.user.display_name)
+        _check_limit_orders(market_id)
+        o = _db.get_limit_order(oid)
+        if o and o.get("status") == "filled":
+            return await interaction.response.send_message(
+                f"✅ Limit sell #{oid} filled instantly at `{float(o['fill_price']):,.2f}` 🪙/share.", ephemeral=True)
+        await interaction.response.send_message(
+            f"🧾 Limit **sell** #{oid}: `{int(shares):,}` shares of `{market_id}` when price ≥ `{float(min_price):,.2f}` 🪙. "
+            f"You need the shares when it triggers, or it's cancelled. "
+            f"Cancel anytime with `/stock limit_cancel order_id:{oid}`.", ephemeral=True)
+
+    @stock.command(name="limit_list", description="See your open limit / trigger orders")
+    async def stock_limit_list(self, interaction: discord.Interaction):
+        import Restocker_db as _db
+        orders = _db.get_user_limit_orders(interaction.user.id, include_resolved=False)
+        if not orders:
+            return await interaction.response.send_message("📭 You have no open limit orders.", ephemeral=True)
+        lines = []
+        for o in orders:
+            cond = "≤" if o["side"] == "buy" else "≥"
+            lines.append(f"#{o['id']} · **{o['side']}** `{int(o['shares']):,}` `{o['market_id']}` "
+                         f"when price {cond} `{float(o['limit_price']):,.2f}` 🪙")
+        embed = discord.Embed(title="🧾 Your open limit orders", description="\n".join(lines), color=0x3498DB)
+        embed.set_footer(text="Cancel one with /stock limit_cancel order_id:<id>")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @stock.command(name="limit_cancel", description="Cancel one of your open limit / trigger orders")
+    @app_commands.describe(order_id="The order # from /stock limit_list")
+    async def stock_limit_cancel(self, interaction: discord.Interaction, order_id: int):
+        import Restocker_db as _db
+        ok = _db.cancel_limit_order(int(order_id), user_id=interaction.user.id, reason="cancelled_by_user")
+        if ok:
+            await interaction.response.send_message(f"✅ Cancelled limit order #{order_id}.", ephemeral=True)
+        else:
+            await interaction.response.send_message(
+                f"❌ Couldn't cancel #{order_id} — it isn't open, or isn't yours.", ephemeral=True)
+
+    @stock.command(name="dividends", description="Show (or set) a market's shareholder dividend payout")
+    @app_commands.describe(market_id="Public market",
+                           set_pct="(Manager/Owner) Set this market's dividend % of monthly net (0 disables)")
+    @app_commands.autocomplete(market_id=_public_market_autocomplete)
+    async def stock_dividends(self, interaction: discord.Interaction, market_id: str, set_pct: Optional[float] = None):
+        import Restocker_db as _db
+        listing = _db.get_market_shares(market_id)
+        if not listing:
+            return await interaction.response.send_message(f"❌ `{market_id}` isn't listed.", ephemeral=True)
+        if set_pct is not None:
+            if not _is_market_manager(interaction, market_id):
+                return await interaction.response.send_message("⛔ Managers or this market's owner only.", ephemeral=True)
+            set_pct = max(0.0, min(100.0, float(set_pct)))
+            _db.upsert_market_shares(market_id, dividend_pct=set_pct)
+            return await interaction.response.send_message(
+                f"✅ `{market_id}` dividend rate set to `{set_pct:.1f}%` of monthly net "
+                f"({'paid to shareholders on each CSN report' if set_pct > 0 else 'dividends off for this market'}).",
+                ephemeral=True)
+        market = _get_market(market_id) or {}
+        ov = listing.get("dividend_pct")
+        eff = float(ov) if ov is not None else STOCK_DIVIDEND_PCT
+        last = _db.get_last_dividend(market_id)
+        embed = discord.Embed(title=f"💸 {market.get('name', market_id)} — Dividends", color=0x9B59B6)
+        embed.add_field(name="Payout rate", value=(f"`{eff:.1f}%` of monthly net" if eff > 0 else "Off"), inline=True)
+        embed.add_field(name="Source", value=("market override" if ov is not None else "server default"), inline=True)
+        embed.add_field(name="Last paid month", value=str(listing.get("last_dividend_month") or "—"), inline=True)
+        if last:
+            embed.add_field(name="Last distribution",
+                            value=f"`{int(last['total_paid']):,}` 🪙 to `{last['holders']}` holders "
+                                  f"(`{float(last['per_share']):,.2f}`/share) — {last['month']}", inline=False)
+        embed.set_footer(text="Dividends pay to shareholders pro-rata automatically on each CSN report.")
+        await interaction.response.send_message(embed=embed)
+
+
+    # ── ABX Index Fund (investable ETF) ──────────────────────────────────────
+    @stock.command(name="invest_index",
+                   description="Invest coins into the ABX Index — buys the whole market basket by cap weight")
+    @app_commands.describe(coins="How many coins to invest into the index")
+    async def invest_index(self, interaction: discord.Interaction,
+                           coins: app_commands.Range[int, 1, 1_000_000_000]):
+        await interaction.response.defer(ephemeral=True)
+        r = _etf_invest(interaction.user.id, coins, interaction.user.display_name)
+        await interaction.followup.send(r["msg"], ephemeral=True)
+
+    @stock.command(name="sell_index",
+                   description="Redeem ABX Index units back for coins (sells the basket at market)")
+    @app_commands.describe(units="How many units to redeem, or leave blank to redeem ALL")
+    async def sell_index(self, interaction: discord.Interaction, units: Optional[float] = None):
+        await interaction.response.defer(ephemeral=True)
+        r = _etf_redeem(interaction.user.id, units if units is not None else "all",
+                        interaction.user.display_name)
+        await interaction.followup.send(r["msg"], ephemeral=True)
+
+    @stock.command(name="index_fund",
+                   description="See the ABX Index fund: NAV, size, weights, and your stake")
+    async def index_fund(self, interaction: discord.Interaction):
+        import Restocker_db as _db
+        embed = _etf_info_embed()
+        try:
+            held = float(_db.get_etf_units(str(interaction.user.id)) or 0)
+        except Exception:
+            held = 0.0
+        if held > 0:
+            nav = _etf_nav()["nav"]
+            embed.add_field(
+                name="Your stake",
+                value=f"{held:,.4f} units · ~`{int(held * nav):,}` coins at current NAV",
+                inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+    @stock.command(name="backing", description="How well a stock is backed (cash + assets + exchange fund)")
+    @app_commands.describe(market_id="The public market")
+    @app_commands.autocomplete(market_id=_public_market_autocomplete)
+    async def backing(self, interaction: discord.Interaction, market_id: str):
+        b = _market_backing(market_id)
+        m = _get_market(market_id) or {}
+        color = 0x22FF7A if b["ok"] else 0xE5A13A
+        embed = discord.Embed(title=f"🛡️ Backing — {m.get('name', market_id)}", color=color)
+        embed.add_field(name="Cash (treasury)",
+                        value=f"`{int(b['cash']):,}` · {b['cash_pct']:.1f}% / {STOCK_BACK_CASH_PCT:g}%", inline=True)
+        embed.add_field(name="Assets (inventory)",
+                        value=f"`{int(b['assets']):,}` · {b['asset_pct']:.1f}% / {STOCK_BACK_ASSET_PCT:g}%", inline=True)
+        embed.add_field(name="Exchange fund",
+                        value=f"`{int(b['fund_share']):,}` · {b['fund_pct']:.1f}% / {STOCK_BACK_FUND_PCT:g}%", inline=True)
+        embed.add_field(name="Total backed",
+                        value=f"**{b['total_pct']:.1f}%** of `{int(b['mcap']):,}` cap (target {b['target_pct']:.0f}%)",
+                        inline=False)
+        if not b["ok"]:
+            embed.add_field(name="⚠ Under-backed",
+                            value="Below target — higher loss for shareholders if it goes bankrupt.", inline=False)
+        embed.set_footer(text=f"Central exchange insurance fund: {int(_get_insurance_fund()):,} coins")
+        await interaction.response.send_message(embed=embed)
+
+    @stock.command(name="delist",
+                   description="(Manager/Owner) Bankrupt + delist a market, paying shareholders from its backing")
+    @app_commands.describe(market_id="Market to delist", confirm="Set true to actually pay out + remove the stock")
+    @app_commands.autocomplete(market_id=_public_market_autocomplete)
+    async def delist(self, interaction: discord.Interaction, market_id: str, confirm: bool = False):
+        if not (is_manager(interaction) or _is_market_manager(interaction, market_id)):
+            return await interaction.response.send_message("Managers / market owner only.", ephemeral=True)
+        import Restocker_db as _db
+        listing = _db.get_market_shares(market_id)
+        if not listing or not listing.get("active"):
+            return await interaction.response.send_message(f"`{market_id}` isn't a listed stock.", ephemeral=True)
+        m = _get_market(market_id) or {}
+        name = m.get("name", market_id)
+        holders = _db.get_holders(market_id)
+        total_shares = sum(float(h.get("shares") or 0) for h in holders)
+        b = _market_backing(market_id)
+        pool = int(b["cashable"])  # treasury + this market's fund share = real coins payable
+        if not confirm:
+            return await interaction.response.send_message(
+                f"⚠️ Delisting **{name}** pays ~`{pool:,}` coins (cash `{int(b['cash']):,}` + fund "
+                f"`{int(b['fund_share']):,}`) pro-rata to **{len(holders)}** holder(s), then removes the stock. "
+                f"Asset backing (`{int(b['assets']):,}`) is honored off-exchange by the owner. "
+                f"Re-run with `confirm:true`.", ephemeral=True)
+        await interaction.response.defer()   # payouts can exceed the 3s interaction window
+        if total_shares <= 0 or pool <= 0:
+            _db.upsert_market_shares(market_id, active=0)
+            return await interaction.followup.send(
+                f"🪦 **{name}** delisted. No payout ({'no holders' if total_shares<=0 else 'no cash backing'}).")
+        paid = 0
+        failed = []
+        for h in holders:
+            sh = float(h.get("shares") or 0)
+            amt = int(pool * (sh / total_shares))
+            try:
+                if amt > 0:
+                    add_coins(int(h["user_id"]), amt, counts_as_principal=True)
+                    paid += amt
+                # Only clear the holding AFTER the payout succeeded — a failed credit
+                # must never cost a shareholder their shares.
+                _db.adjust_holding(h["user_id"], market_id, delta_shares=-sh,
+                                   delta_cost_basis=-float(h.get("cost_basis") or 0))
+            except Exception:
+                failed.append(str(h.get("user_id")))
+        # remove exactly what we paid from the backing sources (treasury first, then fund)
+        from_treasury = min(int(b["cash"]), paid)
+        from_fund = paid - from_treasury
+        try:
+            if from_treasury > 0:
+                _db.adjust_treasury(market_id, -float(from_treasury), allow_negative=False)
+            if from_fund > 0:
+                _add_insurance_fund(-float(from_fund))
+        except Exception:
+            pass
+        note = ""
+        if failed:
+            # Keep the listing ACTIVE so re-running /stock delist retries the unpaid
+            # holders (paid holders' shares are already cleared, so the retry only
+            # sees the remainder and the remaining backing).
+            note = (f"\n⚠️ {len(failed)} holder(s) could not be paid — their shares were KEPT and the "
+                    f"listing stays active: " + ", ".join(f"<@{u}>" for u in failed[:10])
+                    + ". Re-run `/stock delist confirm:true` to retry them.")
+        else:
+            _db.upsert_market_shares(market_id, active=0)
+        await interaction.followup.send(
+            f"🪦 **{name}** declared bankrupt{' & delisted' if not failed else ''}. Paid `{paid:,}` coins to "
+            f"**{len(holders) - len(failed)}** shareholder(s) pro-rata "
+            f"(cash `{from_treasury:,}` + fund `{from_fund:,}`).{note}")
+
+
+async def setup(bot):
+    await bot.add_cog(StockCog(bot))

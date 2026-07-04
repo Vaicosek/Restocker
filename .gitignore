@@ -1,0 +1,36 @@
+# ---- Secrets / environment (NEVER commit) ----
+.env
+env
+*.env
+.env.*
+
+# ---- Live data & logs (per-host, never sync) ----
+restocker.db
+*.db
+*.sqlite
+*.sqlite3
+restocker.log
+*.log
+data/
+csn_stock_MERGED.csv
+
+# ---- Binaries (differ by OS, too large for git) ----
+cloudflared
+cloudflared.exe
+*.exe
+
+# ---- Python / venv / caches ----
+.venv/
+venv/
+__pycache__/
+__pycache_/
+*.pyc
+*.pyo
+.cache/
+.local/
+
+# ---- Editor / IDE ----
+.idea/
+.vscode/
+*.swp
+.DS_Store

@@ -1,0 +1,1 @@
+# Restocker views package.

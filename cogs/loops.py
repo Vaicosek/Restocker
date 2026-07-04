@@ -1,0 +1,563 @@
+"""Background task loops (extracted from Restocker_main). Started in cog_load;
+each loop's before_loop waits until the bot is ready, so starting pre-connect is fine."""
+import sys
+import discord
+from discord.ext import commands, tasks
+
+from datetime import datetime
+from datetime import timedelta
+from datetime import timezone
+import asyncio
+import time
+
+core = sys.modules.get("Restocker_main") or sys.modules["__main__"]
+EMPLOYEE_BATCH_LOOP_SECONDS = core.EMPLOYEE_BATCH_LOOP_SECONDS
+EMPLOYEE_ROLE_NAME = core.EMPLOYEE_ROLE_NAME
+LOYALTY_DECAY_IDLE_DAYS = core.LOYALTY_DECAY_IDLE_DAYS
+LOYALTY_DECAY_PCT_WEEKLY = core.LOYALTY_DECAY_PCT_WEEKLY
+LOYALTY_IGN_DEADLINE_DAYS = core.LOYALTY_IGN_DEADLINE_DAYS
+OrdersBrowser = core.OrdersBrowser
+WORKER_CHANNEL_ID = core.WORKER_CHANNEL_ID
+_build_market_dashboard_embed = core._build_market_dashboard_embed
+_coin_rates_for_order = core._coin_rates_for_order
+_coins_for_pieces = core._coins_for_pieces
+_get_employee_batch_lock = core._get_employee_batch_lock
+_get_ui_store = core._get_ui_store
+_get_worker_announce_lock = core._get_worker_announce_lock
+_load_balances = core._load_balances
+_load_items = core._load_items
+_load_markets = core._load_markets
+_order_is_claimed_closed = core._order_is_claimed_closed
+_revert_price_toward_fundamental = core._revert_price_toward_fundamental
+_save_balances = core._save_balances
+_send_funds_report = core._send_funds_report
+_track_batch_dm_message = core._track_batch_dm_message
+apply_weekly_interest = core.apply_weekly_interest
+bot = core.bot
+cleanup_claimed_order_dms_scan = core.cleanup_claimed_order_dms_scan
+fmt_coin = core.fmt_coin
+fmt_qty = core.fmt_qty
+hashlib = core.hashlib
+load_orders = core.load_orders
+load_yaml = core.load_yaml
+log = core.log
+parse_iso = core.parse_iso
+remaining_to_assign = core.remaining_to_assign
+safe_dm = core.safe_dm
+save_orders = core.save_orders
+save_yaml = core.save_yaml
+update_order_messages = core.update_order_messages
+_team_perf_embed = core._team_perf_embed
+_team_post = core._team_post
+
+class LoopsCog(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+
+    @tasks.loop(seconds=15)
+    async def worker_announce_loop(self, ):
+        async with _get_worker_announce_lock():
+            try:
+
+
+                channel = bot.get_channel(WORKER_CHANNEL_ID)
+                if not channel or not channel.guild:
+                    return
+
+                role = discord.utils.get(channel.guild.roles, name=EMPLOYEE_ROLE_NAME)
+                mention = role.mention if role else ""
+
+                now = datetime.now(timezone.utc)
+
+                data = load_orders()
+                orders_list = data.get("orders", []) or []
+
+                ready = [
+                    o for o in orders_list
+                    if isinstance(o, dict)
+                    and not _order_is_claimed_closed(o)
+                    and not bool(o.get("worker_announced", False))
+                    and o.get("employee_announce_at")
+                    and parse_iso(o["employee_announce_at"]) <= now
+                ]
+
+                if not ready:
+                    return
+
+                ready.sort(key=lambda o: int(o.get("id", 0) or 0))
+
+                ui = data.setdefault("ui", {})
+                last_sig = ui.get("last_worker_batch_sig")
+                last_ts = ui.get("last_worker_batch_ts")
+
+                ids_sig = ",".join(str(int(o["id"])) for o in ready)
+                now_ts = int(time.time())
+
+                if last_sig == ids_sig and last_ts and now_ts - int(last_ts) < 180:
+                    return
+
+                ui["last_worker_batch_sig"] = ids_sig
+                ui["last_worker_batch_ts"] = now_ts
+
+                for o in ready:
+                    o["worker_announced"] = True
+
+                if not save_orders(data):
+                    for o in ready:
+                        o["worker_announced"] = False
+                    return
+
+                for o in ready:
+                    try:
+                        await update_order_messages(bot, o, allow_post=True)
+                    except Exception:
+                        pass
+
+                lines = []
+                _items_data_ping = _load_items().get("items", {})
+                _markets_ping    = _load_markets().get("markets", {})
+                for o in ready[:25]:
+                    rem       = remaining_to_assign(o)
+                    item_name = o.get('item', '')
+                    item_info = _items_data_ping.get(item_name, {})
+                    mid       = item_info.get("market_id", "main")
+                    mkt_name  = (_markets_ping.get(mid) or {}).get("name", mid.capitalize())
+                    lines.append(f"• **#{o['id']}** {item_name} · rem {fmt_qty(o, rem)} `[{mkt_name}]`")
+
+                header     = "New restock requests:" if len(ready) > 1 else "New restock request:"
+                content    = f"{mention} 🔔 **{header}**\n" + "\n".join(lines)
+                dm_content = f"🔔 **{header}**\n" + "\n".join(lines)
+
+                content_hash = hashlib.sha1(content.encode("utf-8", errors="ignore")).hexdigest()
+
+                data2 = load_orders()
+                ui2 = data2.setdefault("ui", {})
+                last_hash = ui2.get("last_worker_ping_hash")
+                last_hash_ts = ui2.get("last_worker_ping_ts")
+                now_ts2 = int(time.time())
+
+                if last_hash == content_hash and last_hash_ts and now_ts2 - int(last_hash_ts) < 180:
+                    return
+
+                me = getattr(bot, "user", None)
+                if me:
+                    try:
+                        dupes = []
+                        async for msg in channel.history(limit=10, oldest_first=False):
+                            if msg.author and msg.author.id == me.id and (msg.content or "") == content:
+                                dupes.append(msg)
+                        if dupes:
+                            dupes.sort(key=lambda m: m.created_at, reverse=True)
+                            for extra in dupes[1:]:
+                                try:
+                                    await extra.delete()
+                                except Exception:
+                                    pass
+
+                            ui2["last_worker_ping_hash"] = content_hash
+                            ui2["last_worker_ping_ts"] = now_ts2
+                            save_orders(data2)
+                            return
+                    except Exception:
+                        pass
+
+                await channel.send(content, allowed_mentions=discord.AllowedMentions(roles=True))
+
+                worker_role = discord.utils.get(channel.guild.roles, name=EMPLOYEE_ROLE_NAME)
+                if worker_role:
+                    for member in list(worker_role.members):
+                        if member.bot:
+                            continue
+                        try:
+                            await safe_dm(member, dm_content)
+                        except Exception:
+                            pass
+
+                ui2["last_worker_ping_hash"] = content_hash
+                ui2["last_worker_ping_ts"] = now_ts2
+                save_orders(data2)
+
+            except Exception as e:
+                print(f"[worker_announce_loop] error: {e}")
+
+    @worker_announce_loop.before_loop
+    async def _wait_ready_worker_announce(self, ):
+        await bot.wait_until_ready()
+
+    @tasks.loop(minutes=10)
+    async def claimed_dm_cleanup_loop(self, ):
+        try:
+            await cleanup_claimed_order_dms_scan(bot)
+        except Exception:
+            return
+
+    @claimed_dm_cleanup_loop.before_loop
+    async def _wait_ready_claimed_dm_cleanup(self, ):
+        await bot.wait_until_ready()
+
+    @tasks.loop(seconds=EMPLOYEE_BATCH_LOOP_SECONDS)
+    async def employee_batch_dispatch_loop(self, ):
+        async with _get_employee_batch_lock():
+            try:
+                await asyncio.sleep(3)
+
+                worker_channel = bot.get_channel(WORKER_CHANNEL_ID)
+                if not worker_channel or not getattr(worker_channel, "guild", None):
+                    return
+                guild = worker_channel.guild
+
+                employee_role = discord.utils.get(guild.roles, name=EMPLOYEE_ROLE_NAME)
+                if not employee_role:
+                    return
+
+                now = datetime.now(timezone.utc)
+
+                data = load_orders()
+                orders_list = data.get("orders", []) or []
+
+                ready = []
+                for o in orders_list:
+                    if not isinstance(o, dict):
+                        continue
+                    st = str(o.get("status", "")).lower()
+                    if st in ("fulfilled", "cancelled"):
+                        continue
+                    if bool(o.get("employee_announced", False)):
+                        continue
+                    if not o.get("employee_announce_at"):
+                        continue
+                    if parse_iso(o["employee_announce_at"]) <= now:
+                        ready.append(o)
+
+                if not ready:
+                    return
+
+                ready.sort(key=lambda o: int(o.get("id", 0) or 0))
+                show = ready[:25]
+
+                try:
+                    items_data = _load_items()
+                except Exception:
+                    items_data = {"items": {}}
+
+                lines: list[str] = []
+                for o in show:
+                    rem = remaining_to_assign(o)
+                    price_piece, _, price_barrel, _ppb = _coin_rates_for_order(o, items_data)
+                    total_rem = _coins_for_pieces(o, int(rem), items_data)
+
+                    lines.append(
+                        f"• **#{o['id']}** {o.get('item','')}\n"
+                        f"rem {fmt_qty(o, rem)} · {fmt_coin(price_piece)}c/piece · {fmt_coin(price_barrel)}c/barrel · ≈ {fmt_coin(total_rem)}c"
+                    )
+
+                embed = discord.Embed(
+                    title="📦 New Production Requests (batch)",
+                    description="\n".join(lines),
+                    color=discord.Color.orange()
+                )
+
+                for o in ready:
+                    o["employee_announced"] = True
+                if not save_orders(data):
+                    log.error("[employee_batch_dispatch_loop] save_orders failed; NOT sending to avoid duplicates.")
+                    return
+
+                data = load_orders()
+                store = _get_ui_store(data)
+
+                sent = 0
+                edited = 0
+                failed = 0
+
+                members = [m for m in list(employee_role.members) if not getattr(m, "bot", False)]
+
+                for member in members:
+                    uid_str = str(int(member.id))
+                    tracked = store.get(uid_str)
+                    tracked_ids = tracked if isinstance(tracked, list) else ([tracked] if tracked else [])
+                    tracked_ids = [int(x) for x in tracked_ids if str(x).isdigit()]
+                    last_id = tracked_ids[-1] if tracked_ids else None
+
+                    try:
+                        dm = member.dm_channel or await member.create_dm()
+                        view = OrdersBrowser(show, viewer_id=int(member.id))
+
+                        if last_id:
+                            try:
+                                msg = await dm.fetch_message(int(last_id))
+                                await msg.edit(embed=embed, view=view)
+                                edited += 1
+
+                                for old_id in tracked_ids[:-1]:
+                                    try:
+                                        old_msg = await dm.fetch_message(int(old_id))
+                                        await old_msg.delete()
+                                    except Exception:
+                                        pass
+
+                                _track_batch_dm_message(data, member.id, int(last_id))
+                                continue
+                            except Exception:
+                                pass
+
+                        msg = await dm.send(embed=embed, view=view)
+                        sent += 1
+
+                        for old_id in tracked_ids:
+                            try:
+                                old_msg = await dm.fetch_message(int(old_id))
+                                await old_msg.delete()
+                            except Exception:
+                                pass
+
+                        _track_batch_dm_message(data, member.id, int(msg.id))
+
+                    except discord.Forbidden:
+                        failed += 1
+                    except Exception:
+                        failed += 1
+
+                save_orders(data)
+                log.info("[employee_batch_dispatch_loop] edited=%d sent=%d failed=%d ready=%d", edited, sent, failed, len(ready))
+
+            except Exception as e:
+                log.error("[employee_batch_dispatch_loop] error: %s", e, exc_info=True)
+
+    @employee_batch_dispatch_loop.before_loop
+    async def _before_employee_batch_dispatch_loop(self, ):
+        await bot.wait_until_ready()
+
+    @tasks.loop(hours=24)
+    async def weekly_interest_loop(self, ):
+        try:
+            applied_users, total_paid = apply_weekly_interest(force=False)
+            if applied_users <= 0 or total_paid <= 0:
+                return
+        except Exception:
+            return
+
+    @weekly_interest_loop.before_loop
+    async def _wait_ready_interest(self, ):
+        await bot.wait_until_ready()
+
+    @tasks.loop(hours=24)
+    async def weekly_funds_report_loop(self, ):
+        # Fully guarded: an unhandled exception would permanently stop this loop.
+        try:
+            data = _load_balances()
+            meta = data.setdefault("meta", {})
+            last = meta.get("last_funds_report_week")
+            now = datetime.now(timezone.utc)
+            iso_week = f"{now.isocalendar().year}-W{now.isocalendar().week}"
+            if last == iso_week:
+                return
+            if now.weekday() != 0:
+                return
+            if now.hour < 0 or now.hour > 2:
+                return
+            ok = await _send_funds_report(bot)
+            if ok:
+                meta["last_funds_report_week"] = iso_week
+                _save_balances(data)
+        except Exception as e:
+            log.warning("[weekly_funds_report_loop] %s", e)
+
+    @weekly_funds_report_loop.before_loop
+    async def _wait_ready_weekly_report(self, ):
+        await bot.wait_until_ready()
+
+    @tasks.loop(hours=24)
+    async def loyalty_decay_loop(self, ):
+        """Apply point decay to users inactive for > LOYALTY_DECAY_IDLE_DAYS."""
+        try:
+            import Restocker_db as _db_decay
+            now = datetime.now(timezone.utc)
+            idle_threshold = (now - timedelta(days=LOYALTY_DECAY_IDLE_DAYS)).isoformat()
+            all_loy = _db_decay.get_all_loyalty()
+            updates = []
+            for row in all_loy:
+                last = row.get("last_activity")
+                if not last:
+                    continue
+                if last >= idle_threshold:
+                    continue
+                pts = float(row.get("points", 0))
+                if pts <= 0:
+                    continue
+                new_pts = max(0.0, pts * (1.0 - LOYALTY_DECAY_PCT_WEEKLY / 100.0))
+                if abs(new_pts - pts) > 0.5:
+                    updates.append((new_pts, row["user_id"]))
+            if updates:
+                _db_decay.update_loyalty_points_bulk(updates)
+                log.info("[loyalty] Decay applied to %d users", len(updates))
+        except Exception as e:
+            log.warning("[loyalty] decay_loop failed: %s", e)
+
+    @loyalty_decay_loop.before_loop
+    async def _before_loyalty_decay(self, ):
+        await bot.wait_until_ready()
+
+    @tasks.loop(hours=24)
+    async def ign_deadline_loop(self, ):
+        """Remove employee role from users who didn't register IGN within deadline."""
+        try:
+            import Restocker_db as _db_ign_dl
+            now = datetime.now(timezone.utc).isoformat()
+            overdue = [p for p in _db_ign_dl.get_all_ign_pending() if p["deadline"] < now]
+            for pending in overdue:
+                uid = int(pending["user_id"])
+                guild = bot.get_guild(int(pending["guild_id"]))
+                if not guild:
+                    continue
+                member = guild.get_member(uid)
+                if member:
+                    role = guild.get_role(int(pending["role_id"]))
+                    if role and role in member.roles:
+                        try:
+                            await member.remove_roles(role, reason="IGN not registered within 3 days")
+                            await member.send(
+                                f"⚠️ Your **{role.name}** role was removed because you didn't register "
+                                f"your in-game username within {LOYALTY_IGN_DEADLINE_DAYS} days.\n"
+                                f"Contact a manager to be reinstated."
+                            )
+                            log.info("[ign] Removed role %s from %s (deadline passed)", role.name, member)
+                        except Exception:
+                            pass
+                _db_ign_dl.delete_ign_pending(str(uid))
+        except Exception as e:
+            log.warning("[ign] deadline_loop failed: %s", e)
+
+    @ign_deadline_loop.before_loop
+    async def _before_ign_deadline(self, ):
+        await bot.wait_until_ready()
+
+    @tasks.loop(hours=24)
+    async def stock_reversion_loop(self, ):
+        """Daily mean-reversion pass over every public market."""
+        try:
+            import Restocker_db as _db
+            for mid in list(_db.get_public_markets().keys()):
+                try:
+                    _revert_price_toward_fundamental(mid)
+                except Exception as e:
+                    log.warning("[stock_reversion_loop] %s: %s", mid, e)
+        except Exception as e:
+            log.warning("[stock_reversion_loop] %s", e)
+
+    @stock_reversion_loop.before_loop
+    async def _before_stock_reversion(self, ):
+        await bot.wait_until_ready()
+
+    @tasks.loop(minutes=5)
+    async def stock_dashboard_loop(self, ):
+        """Keep the registered market dashboard message fresh."""
+        try:
+            core._snapshot_market_index(force=True)   # 5-min heartbeat for the Abexilas index
+        except Exception:
+            pass
+        try:
+            import Restocker_db as _dbrb
+            if _dbrb.get_config("etf_rebalance_pending") == "1":
+                _dbrb.set_config("etf_rebalance_pending", "0")
+                if core._etf_nav().get("units", 0) > 0:
+                    core._etf_rebalance("composition_change")
+        except Exception as e:
+            log.warning("[etf-rebalance loop] %s", e)
+        try:
+            state = load_yaml("stock_dashboard.yml", {}) or {}
+            ch_id, msg_id = state.get("channel_id"), state.get("message_id")
+            if not ch_id or not msg_id:
+                return
+            channel = bot.get_channel(int(ch_id))
+            if channel is None:
+                return
+            try:
+                msg = await channel.fetch_message(int(msg_id))
+            except discord.NotFound:
+                save_yaml("stock_dashboard.yml", {})
+                return
+            await msg.edit(embed=_build_market_dashboard_embed())
+        except Exception as e:
+            log.warning("[stock_dashboard_loop] %s", e)
+
+    @stock_dashboard_loop.before_loop
+    async def _wait_ready_stock_dashboard(self, ):
+        await bot.wait_until_ready()
+
+    @tasks.loop(hours=24)
+    async def team_digest_loop(self, ):
+        import Restocker_db as _db
+        now = datetime.now(timezone.utc)
+        iso_week = f"{now.isocalendar().year}-W{now.isocalendar().week}"
+        if _db.get_config("last_team_digest_week") == iso_week:
+            return
+        if now.weekday() != 0:      # Mondays only
+            return
+        if now.hour > 2:            # early-UTC window
+            return
+        try:
+            managers = sorted({r["manager_id"] for r in _db.get_all_team_perf(None)})
+        except Exception:
+            managers = []
+        posted = 0
+        for mgr in managers:
+            st = _db.get_team_settings(mgr)
+            if not st or not ((st.get("webhook_url") or "").strip() or (st.get("channel_id") or "").strip()):
+                continue
+            try:
+                embed = _team_perf_embed(mgr, 7)
+                ok = await _team_post(mgr, content="📅 Weekly team performance digest", embed=embed)
+                if ok:
+                    posted += 1
+            except Exception as e:
+                log.warning("[team-digest] %s failed: %s", mgr, e)
+        _db.set_config("last_team_digest_week", iso_week)
+        log.info("[team-digest] posted %d team digest(s)", posted)
+
+    @team_digest_loop.before_loop
+    async def _wait_ready_team_digest(self, ):
+        await bot.wait_until_ready()
+
+    @tasks.loop(hours=24)
+    async def db_backup_loop(self, ):
+        import Restocker_db as _db
+        import os, glob, asyncio as _aio
+        now = datetime.now(timezone.utc)
+        today = now.strftime("%Y-%m-%d")
+        if _db.get_config("last_db_backup_day") == today:
+            return
+        if now.hour > 4:
+            return
+        try:
+            os.makedirs("backups", exist_ok=True)
+            dest = os.path.join("backups", f"restocker_{now.strftime('%Y%m%d_%H%M%S')}.db")
+            await _aio.to_thread(_db.backup_database, dest)
+            keep = int(getattr(core, "DB_BACKUP_KEEP", 14))
+            files = sorted(glob.glob(os.path.join("backups", "restocker_*.db")))
+            for f in files[:-keep] if keep > 0 else []:
+                try:
+                    os.remove(f)
+                except Exception:
+                    pass
+            _db.set_config("last_db_backup_day", today)
+            log.info("[db-backup] wrote %s (retain %d)", dest, keep)
+        except Exception as e:
+            log.warning("[db-backup] failed: %s", e)
+
+    @db_backup_loop.before_loop
+    async def _wait_ready_db_backup(self, ):
+        await bot.wait_until_ready()
+
+    async def cog_load(self):
+        for _lp in (self.worker_announce_loop, self.claimed_dm_cleanup_loop, self.employee_batch_dispatch_loop, self.weekly_interest_loop, self.weekly_funds_report_loop, self.loyalty_decay_loop, self.ign_deadline_loop, self.stock_reversion_loop, self.stock_dashboard_loop, self.team_digest_loop, self.db_backup_loop):
+            if not _lp.is_running():
+                _lp.start()
+
+    def cog_unload(self):
+        for _lp in (self.worker_announce_loop, self.claimed_dm_cleanup_loop, self.employee_batch_dispatch_loop, self.weekly_interest_loop, self.weekly_funds_report_loop, self.loyalty_decay_loop, self.ign_deadline_loop, self.stock_reversion_loop, self.stock_dashboard_loop, self.team_digest_loop, self.db_backup_loop):
+            _lp.cancel()
+
+
+async def setup(bot):
+    await bot.add_cog(LoopsCog(bot))
