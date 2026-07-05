@@ -32,5 +32,14 @@ cloudflared.exe
 *.swp
 .DS_Store
 
-# NOTE: restocker.db, data/, *.yml and *.csv ARE tracked on purpose
-# (public Minecraft economy data). Only .env / env stay out.
+# ---- Live database + bot-written state — CANNOT be tracked in git ----
+# The running bot writes these constantly, so every `git pull` conflicts and aborts.
+# Keep them per-host (upload manually / reinstall). Code still syncs via git fine.
+restocker.db
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+data/
+csn_stock_MERGED.csv
