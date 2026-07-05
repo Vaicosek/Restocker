@@ -21,6 +21,33 @@ load_yaml = core.load_yaml
 save_yaml = core.save_yaml
 utcnow_iso = core.utcnow_iso
 
+
+async def _my_market_autocomplete(interaction: discord.Interaction, current: str):
+    """For /market_code: Managers see every market; anyone else sees only the
+    markets whose leader role they actually hold (so owners only pick their own)."""
+    data = _load_markets()
+    markets = data.get("markets", {}) or {}
+    mgr = is_manager(interaction)
+    member = interaction.user
+    guild = interaction.guild
+    cur = (current or "").lower()
+    out = []
+    for k, v in markets.items():
+        if not isinstance(v, dict):
+            continue
+        if not mgr:
+            role_name = (v.get("discord_role_name") or "").strip()
+            if not role_name or guild is None:
+                continue
+            role = discord.utils.get(guild.roles, name=role_name)
+            if not (role and role in getattr(member, "roles", [])):
+                continue
+        name = v.get("name", k)
+        if cur in k.lower() or cur in str(name).lower():
+            out.append(app_commands.Choice(name=f"{name} [{k}]", value=k))
+    return out[:25]
+
+
 class MiscCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -55,7 +82,7 @@ class MiscCog(commands.Cog):
         market_id="Market to get a code for (optional if you only lead one)",
         leader="(Managers) The market leader to generate the code for and DM directly",
     )
-    @app_commands.autocomplete(market_id=_market_autocomplete)
+    @app_commands.autocomplete(market_id=_my_market_autocomplete)
     async def market_code_cmd(self,
         interaction: discord.Interaction,
         market_id: Optional[str] = None,

@@ -1968,6 +1968,16 @@ def _load_teams_data(days: int = 7) -> dict:
         w = t["workers"].setdefault(wid, {"id": wid, "coins": 0.0})
         if k in ("order", "sales"):
             w["coins"] += c
+    # Include every team that has members, even with no activity yet, so new teams show up.
+    try:
+        for mgr in db.get_all_team_managers():
+            mgr = str(mgr)
+            t = teams.setdefault(mgr, {"manager_id": mgr, "order_coins": 0.0, "sales_coins": 0.0,
+                                       "orders": 0, "futures_qty": 0, "workers": {}})
+            for wid in db.get_team(mgr):
+                t["workers"].setdefault(str(wid), {"id": str(wid), "coins": 0.0})
+    except Exception as e:
+        print(f"[teams] roster merge failed: {e}")
     out = []
     for m, t in teams.items():
         try:
@@ -1982,9 +1992,13 @@ def _load_teams_data(days: int = 7) -> dict:
                 ign = None
             workers.append({"ign": ign or "Worker", "coins": round(w["coins"])})
         workers.sort(key=lambda x: x["coins"], reverse=True)
-        captain = cap_ign or ((workers[0]["ign"] + "'s team") if workers else "Unnamed team")
+        try:
+            tname = (db.get_config(f"team_name:{m}") or "").strip()
+        except Exception:
+            tname = ""
+        captain = tname or cap_ign or ((workers[0]["ign"] + "'s team") if workers else "Unnamed team")
         total = t["order_coins"] + t["sales_coins"]
-        out.append({"captain": captain, "members": len(t["workers"]),
+        out.append({"captain": captain, "members": len(t["workers"]) + 1,  # +1 = the manager/captain
                     "orders": t["orders"], "order_coins": round(t["order_coins"]),
                     "sales_coins": round(t["sales_coins"]), "futures": t["futures_qty"],
                     "total": round(total), "top_workers": workers[:5]})

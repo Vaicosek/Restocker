@@ -1037,6 +1037,13 @@ def get_team(manager_id: str) -> list:
             (str(manager_id),)).fetchall()]
 
 
+def get_all_team_managers() -> list:
+    """Every manager who has at least one worker on their team (for the dashboard roster)."""
+    with db() as conn:
+        return [r["manager_id"] for r in conn.execute(
+            "SELECT DISTINCT manager_id FROM team_members").fetchall()]
+
+
 def set_team_settings(manager_id: str, *, webhook_url: str = "__keep__", channel_id: str = "__keep__") -> None:
     """Upsert a team's delivery binding. Pass webhook_url/channel_id to set (or "" to clear);
     omit a field to leave it unchanged."""
