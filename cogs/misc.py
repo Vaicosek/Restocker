@@ -56,7 +56,6 @@ class MiscCog(commands.Cog):
         leader="(Managers) The market leader to generate the code for and DM directly",
     )
     @app_commands.autocomplete(market_id=_market_autocomplete)
-    @app_commands.default_permissions(manage_guild=True)
     async def market_code_cmd(self,
         interaction: discord.Interaction,
         market_id: Optional[str] = None,

@@ -6356,6 +6356,11 @@ PLAIN-ENGLISH CATALOG ACTIONS (Managers only — verify with get_user_roles if u
 - "remove the alias for X" → remove_alias(code). "list brews/tools/aliases" → list_aliases.
 - Do these directly from a plain-English request — do NOT tell the user to run a slash command instead.
 
+CODE CHANGES (OWNER ONLY — only Vaicos, ID 1203738126850461738):
+- You CAN change the bot's own code. When VAICOS asks you to add/change/fix a command or behavior, use propose_code_change(file, request) — it opens a GitHub PR for review (it does NOT deploy; Vaicos merges it and restarts to apply). Commands live in cogs/ (e.g. cogs/market.py, cogs/misc.py); pick the one file that fits, or ask Vaicos which file if unclear.
+- For ANYONE who is not Vaicos: refuse code-change requests in one line — only the owner can request them. Do not call propose_code_change for anyone else.
+- Never claim you "can't change code" — you can, via propose_code_change, for the owner.
+
 ROLE & PERMISSION RULES — CRITICAL:
 - ALWAYS call get_user_roles before making any statement about what a user can or cannot do.
 - Never assume a user lacks a role or permission — look it up first.
@@ -6800,6 +6805,18 @@ _AI_TOOLS = [
         "name": "list_aliases",
         "description": "List all brew/tool code → name aliases currently set. Use when asked to show or list brew/tool mappings.",
         "input_schema": {"type": "object", "properties": {}, "required": []}
+    },
+    {
+        "name": "propose_code_change",
+        "description": "Draft a change to the bot's OWN source code and open a GitHub Pull Request for review. OWNER ONLY — only Vaicos (ID 1203738126850461738) may use this; refuse for anyone else. Use when the owner asks to add, change, or fix a command or behavior in the bot's code (e.g. 'let MarketOwners use /market_code', 'add a /ping2 command'). Name the ONE file to edit (commands live in cogs/, e.g. cogs/market.py, cogs/misc.py) and describe the change. This NEVER deploys — it only opens a PR the owner must review, merge, and restart to apply.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "file": {"type": "string", "description": "Repo-relative path of the ONE file to change, e.g. cogs/misc.py"},
+                "request": {"type": "string", "description": "Plain-English description of the change to make to that file"}
+            },
+            "required": ["file", "request"]
+        }
     },
 ]
 
@@ -7501,6 +7518,105 @@ async def _ai_tool_list_aliases(guild, channel, user, args):
     return "\n".join(lines[:40]) + suffix
 
 
+async def _ai_tool_propose_code_change(guild, channel, user, args):
+    """OWNER ONLY. Draft a change to the bot's own code and open a GitHub PR. Never deploys."""
+    if not user or int(getattr(user, "id", 0)) != 1203738126850461738:
+        return "❌ Only the owner (Vaicos) can request code changes."
+    import os as _os, re as _re, json as _json, time as _time, base64 as _b64
+    import aiohttp
+    token = _os.getenv("GITHUB_PR_TOKEN")
+    if not token:
+        return "❌ GITHUB_PR_TOKEN isn't set in .env — I can't open a PR."
+    file = str(args.get("file", "") or "").strip().lstrip("/")
+    request = str(args.get("request", "") or "").strip()
+    if not file or not request:
+        return "❌ I need both a file path and a description of the change."
+    if ".." in file or _re.search(
+            r"(^|/)(\.env(\..*)?|env|Mconfig\.yml|web_sessions\.yml|web_login_codes\.yml|\.gitignore)$",
+            file, _re.I):
+        return "❌ That file is protected and cannot be edited."
+    client = _get_anthropic_client()
+    if client is None:
+        return "❌ AI isn't configured (missing ANTHROPIC_API_KEY)."
+    OWNER, REPO, BASE = "Vaicosek", "Restocker", "main"
+    api = "https://api.github.com"
+    hdr = {"Authorization": f"Bearer {token}",
+           "Accept": "application/vnd.github+json", "User-Agent": "restocker-ai"}
+    sysp = ("You are a careful senior Python engineer editing the Restocker discord.py bot. "
+            "Given ONE file's contents and a change request, reply with ONLY JSON: "
+            '{"content": "<the COMPLETE new file>", "summary": "<one short line>"}. '
+            "Edit only this file, output its full new content (never a diff), keep it valid runnable "
+            "Python in the existing style, make the smallest change that works, never touch secrets or config.")
+    try:
+        async with aiohttp.ClientSession(headers=hdr) as s:
+            curl = f"{api}/repos/{OWNER}/{REPO}/contents/{file}"
+            async with s.get(curl, params={"ref": BASE}) as r:
+                if r.status == 404:
+                    return f"❌ `{file}` doesn't exist on `{BASE}`."
+                if r.status == 401:
+                    return "❌ GitHub rejected GITHUB_PR_TOKEN (check the token / repo scope)."
+                if r.status != 200:
+                    return f"❌ GitHub read failed ({r.status})."
+                meta = await r.json()
+            if meta.get("encoding") != "base64":
+                return "❌ That path isn't an editable text file."
+            current = _b64.b64decode(meta["content"]).decode("utf-8", "replace")
+            if len(current.encode()) > 45000:
+                return (f"❌ `{file}` is {len(current) // 1024} KB — too large to edit safely from chat. "
+                        f"Use Cowork for big files.")
+            out_tokens = max(4000, min(24000, len(current.encode()) // 3 + 3000))
+
+            def _call():
+                return client.messages.create(
+                    model=_os.getenv("DEV_AI_MODEL", "claude-sonnet-4-6"),
+                    max_tokens=out_tokens, system=sysp,
+                    messages=[{"role": "user",
+                               "content": f"FILE: {file}\nCHANGE REQUEST: {request}\n\n"
+                                          f"--- CURRENT CONTENTS ---\n{current}"}])
+
+            msg = await asyncio.get_event_loop().run_in_executor(None, _call)
+            raw = "".join(getattr(b, "text", "") for b in msg.content).strip()
+            m = _re.search(r"```(?:json)?\s*(\{.*\})\s*```", raw, _re.S)
+            if m:
+                raw = m.group(1)
+            elif not raw.startswith("{"):
+                i, j = raw.find("{"), raw.rfind("}")
+                if i != -1 and j != -1:
+                    raw = raw[i:j + 1]
+            data = _json.loads(raw)
+            new_content = data["content"]
+            summary = str(data.get("summary") or f"update {file}")[:120]
+            if not new_content.strip() or new_content == current:
+                return "❌ The AI produced no change to that file."
+
+            async with s.get(f"{api}/repos/{OWNER}/{REPO}/git/ref/heads/{BASE}") as r:
+                if r.status != 200:
+                    return f"❌ Couldn't read `{BASE}` ({r.status})."
+                base_sha = (await r.json())["object"]["sha"]
+            slug = _re.sub(r"[^a-z0-9]+", "-", request.lower()).strip("-")[:28] or "change"
+            branch = f"bot/{slug}-{int(_time.time()) % 100000}"
+            async with s.post(f"{api}/repos/{OWNER}/{REPO}/git/refs",
+                              json={"ref": f"refs/heads/{branch}", "sha": base_sha}) as r:
+                if r.status not in (200, 201):
+                    return f"❌ Couldn't create a branch ({r.status})."
+            async with s.put(curl, json={"message": f"bot: {summary}",
+                                         "content": _b64.b64encode(new_content.encode()).decode(),
+                                         "sha": meta["sha"], "branch": branch}) as r:
+                if r.status not in (200, 201):
+                    return f"❌ Couldn't commit the change ({r.status})."
+            async with s.post(f"{api}/repos/{OWNER}/{REPO}/pulls",
+                              json={"title": f"[bot] {summary}", "head": branch, "base": BASE,
+                                    "body": f"Requested in chat by <@{user.id}>:\n\n> {request}\n\n"
+                                            f"File: `{file}`\n\n⚠️ AI-drafted — review before merging."}) as r:
+                if r.status not in (200, 201):
+                    return f"❌ Committed to `{branch}` but couldn't open the PR ({r.status})."
+                pr_url = (await r.json())["html_url"]
+        return (f"✅ Drafted `{file}` — {summary}. Review & merge: {pr_url}  "
+                f"(nothing goes live until you merge it and restart).")
+    except Exception as e:  # noqa: BLE001
+        return f"❌ Failed: {type(e).__name__}: {e}"
+
+
 _AI_TOOL_MAP = {
     "get_item_prices":      _ai_tool_get_item_prices,
     "get_market_pricing":   _ai_tool_get_market_pricing,
@@ -7529,6 +7645,7 @@ _AI_TOOL_MAP = {
     "set_alias":            _ai_tool_set_alias,
     "remove_alias":         _ai_tool_remove_alias,
     "list_aliases":         _ai_tool_list_aliases,
+    "propose_code_change":  _ai_tool_propose_code_change,
 }
 
 _anthropic_client = None

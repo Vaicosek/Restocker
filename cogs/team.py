@@ -21,6 +21,14 @@ _all_teams_leaderboard = core._all_teams_leaderboard
 _IGN_RE = re.compile(r"^[A-Za-z0-9_]{3,16}$")
 
 
+def _team_name(manager_id) -> str:
+    """A manager's chosen display name for their team, or '' if unset."""
+    try:
+        return (db.get_config(f"team_name:{manager_id}") or "").strip()
+    except Exception:
+        return ""
+
+
 class TeamCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -97,6 +105,21 @@ class TeamCog(commands.Cog):
             f"{worker.mention} is now on your team - you earn **{MANAGER_OVERRIDE_ORDER_PCT:g}%** "
             f"on their order payouts." + ign_note, ephemeral=True)
 
+    @team.command(name="name", description="(Manager) Set a display name for your team")
+    @app_commands.describe(name="Your team's name, e.g. 'The Miners' — leave blank to clear it")
+    async def team_name_cmd(self, interaction: discord.Interaction, name: str = None):
+        if not is_manager(interaction):
+            return await interaction.response.send_message("Managers only.", ephemeral=True)
+        val = (name or "").strip()[:40]
+        db.set_config(f"team_name:{interaction.user.id}", val)
+        if val:
+            await interaction.response.send_message(
+                f"Your team is now called **{val}** — it'll show that on `/team list` and the leaderboard.",
+                ephemeral=True)
+        else:
+            await interaction.response.send_message(
+                "Cleared your team name — it'll show as your @mention again.", ephemeral=True)
+
     @team.command(name="remove", description="(Manager) Remove a worker from your team")
     @app_commands.describe(worker="The worker to remove")
     async def remove(self, interaction: discord.Interaction, worker: discord.Member):
@@ -118,7 +141,9 @@ class TeamCog(commands.Cog):
         for w in members:
             ign = db.get_ign(w)
             lines.append(f"- <@{w}> - " + (f"`{ign}`" if ign else "no IGN set"))
-        embed = discord.Embed(title=f"Your team ({len(members)})",
+        _tn = _team_name(interaction.user.id)
+        _title = f"{_tn} ({len(members)})" if _tn else f"Your team ({len(members)})"
+        embed = discord.Embed(title=_title,
                               description="\n".join(lines), color=0x22FF7A)
         embed.set_footer(text=f"You earn {MANAGER_OVERRIDE_ORDER_PCT:g}% on their order payouts; IGNs link to CSN sales")
         await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -160,7 +185,9 @@ class TeamCog(commands.Cog):
             tag = f" [{latest}]" if latest else ""
             body = f"net {wnet:,.0f}{tag}" if mids else "no shop linked"
             lines.append(f"- <@{w}> (`{ign}`) - {body}")
-        embed = discord.Embed(title=f"Team CSN sales ({len(members)})",
+        _tn = _team_name(interaction.user.id)
+        _title = f"{_tn} — CSN sales ({len(members)})" if _tn else f"Team CSN sales ({len(members)})"
+        embed = discord.Embed(title=_title,
                               description="\n".join(lines), color=0x22FF7A)
         embed.set_footer(text=f"Latest-month net per worker; team total {grand:,.0f}")
         await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -213,8 +240,10 @@ class TeamCog(commands.Cog):
         lines = []
         for i, tm in enumerate(board[:10], 1):
             medal = ["\U0001F947", "\U0001F948", "\U0001F949"][i - 1] if i <= 3 else f"{i}."
+            _tn = _team_name(tm['manager_id'])
+            _label = f"**{_tn}**" if _tn else f"<@{tm['manager_id']}>'s team"
             lines.append(
-                f"{medal} <@{tm['manager_id']}>'s team - **{int(tm['total']):,}c** "
+                f"{medal} {_label} - **{int(tm['total']):,}c** "
                 f"({tm['orders']} orders, sales {int(tm['sales_coins']):,}c)")
         embed = discord.Embed(title=f"\U0001F3C6 Team leaderboard - last {days}d",
                               description="\n".join(lines), color=0x22FF7A)
