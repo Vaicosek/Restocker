@@ -38,6 +38,50 @@ update_order_messages = core.update_order_messages
 utcnow_iso = core.utcnow_iso
 _ensure_order_dm_panel = core._ensure_order_dm_panel
 
+import re as _re
+
+_GEAR_TOOLS = {   # keyword -> canonical piece (longest matched first: chestplate before chest)
+    "chestplate": "Chestplate", "leggings": "Leggings", "pickaxe": "Pickaxe",
+    "shovel": "Shovel", "helmet": "Helmet", "boots": "Boots", "sword": "Sword",
+    "spade": "Shovel", "chest": "Chestplate", "legs": "Leggings", "pants": "Leggings",
+    "helm": "Helmet", "pick": "Pickaxe", "axe": "Axe",
+}
+_GEAR_ENCH = [   # (regex, canonical enchant) — matched loosely; sorted after to match the mod
+    (r"eff(?:iciency)?\s*(?:v|5)\b", "Efficiency V"),
+    (r"eff(?:iciency)?\s*(?:iv|4)\b", "Efficiency IV"),
+    (r"fort(?:une)?(?:\s*(?:iii|3))?\b", "Fortune III"),
+    (r"silk(?:\s*touch)?\b", "Silk Touch"),
+    (r"sharp(?:ness)?\s*(?:v|5)\b", "Sharpness V"),
+    (r"fire\s*asp(?:ect)?(?:\s*(?:ii|2))?\b", "Fire Aspect II"),
+    (r"(?:knock\s*back|kb)(?:\s*(?:ii|2))?\b", "Knockback II"),
+    (r"prot(?:ection)?\s*(?:iv|4)\b", "Protection IV"),
+    (r"unbreak(?:ing)?\s*(?:iii|3)\b", "Unbreaking III"),
+]
+
+
+def _resolve_gear(text: str):
+    """Loose plain-text ('eff 5 unbreak 3 axe fort 3') -> canonical Diamond gear name matching
+    the mod/catalog ('Diamond Axe - Efficiency V, Fortune III, Unbreaking III'), or None.
+    Unbreaking III is auto-added (it's core on every enchanted item)."""
+    t = (text or "").lower()
+    tool = None
+    for kw in sorted(_GEAR_TOOLS, key=len, reverse=True):
+        if _re.search(rf"\b{kw}\b", t):
+            tool = _GEAR_TOOLS[kw]
+            break
+    if not tool:
+        return None
+    ench = []
+    for rx, canon in _GEAR_ENCH:
+        if _re.search(rx, t) and canon not in ench:
+            ench.append(canon)
+    if not any(e != "Unbreaking III" for e in ench):
+        return None   # need a real enchant besides Unbreaking to be confident
+    if "Unbreaking III" not in ench:
+        ench.append("Unbreaking III")
+    ench.sort()
+    return f"Diamond {tool} - {', '.join(ench)}"
+
 class OrdersCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -235,6 +279,91 @@ class OrdersCog(commands.Cog):
                 f"⏱️ Workers ping + Employee DM will go out in **{ANNOUNCE_DELAY_MINUTES} min**.",
                 **ephemeral_kwargs(interaction)
             )
+
+    @app_commands.command(name="order_bulk",
+        description="(Managers) Create many orders at once from a pasted list")
+    @app_commands.describe(
+        orders="One per line: `Item name | quantity`  (e.g. Diamond Shovel - Fortune III, Unbreaking III, Efficiency V | 500)",
+        unit_type="Unit for every line (default pieces)",
+    )
+    @app_commands.choices(unit_type=[
+        app_commands.Choice(name="Pieces", value="pieces"),
+        app_commands.Choice(name="Stacks", value="stacks"),
+        app_commands.Choice(name="Barrels", value="barrels"),
+    ])
+    async def order_bulk(self, interaction: discord.Interaction, orders: str, unit_type: str = "pieces"):
+        if not is_manager(interaction):
+            return await interaction.response.send_message(
+                "⛔ You need the @Managers role to create orders.", **ephemeral_kwargs(interaction))
+        await interaction.response.defer(**ephemeral_kwargs(interaction), thinking=True)
+        import re as _re
+        unit = str(unit_type).lower().strip()
+        if unit not in ("pieces", "stacks", "barrels"):
+            unit = "pieces"
+        shops = _load_items()
+        items = (shops.get("items") or {})
+        lines = [l.strip() for l in orders.replace("\\n", "\n").split("\n") if l.strip()]
+        data_orders = load_orders()
+        base_id = max([o.get("id", 0) for o in data_orders.get("orders", [])] or [0])
+        now_utc = datetime.now(timezone.utc)
+        announce_at = next_batch_slot(ANNOUNCE_DELAY_MINUTES)
+        created, unpriced, failed = [], [], []
+        for line in lines:
+            # Prefer "name | qty" (safe — item names contain commas); fall back to "name x qty" / "name qty".
+            name = qty = None
+            if "|" in line:
+                a, b = line.rsplit("|", 1)
+                name = a.strip()
+                digs = _re.sub(r"[^\d]", "", b)
+                qty = int(digs) if digs else 0
+            else:
+                m = _re.match(r"^(.*?)\s+x?\s*(\d[\d,]*)\s*$", line, _re.I)
+                if m:
+                    name = m.group(1).strip(); qty = int(m.group(2).replace(",", ""))
+            if not name or not qty or qty <= 0:
+                failed.append(line[:60]); continue
+            info = items.get(name)
+            if not isinstance(info, dict):
+                _rg = _resolve_gear(name)        # plain-text? "eff 5 unbreak 3 axe fort 3" -> canonical
+                if _rg and isinstance(items.get(_rg), dict):
+                    name, info = _rg, items.get(_rg)
+            if isinstance(info, dict):
+                try:
+                    price = int(info.get("coin", 0) or 0)
+                except Exception:
+                    price = 0
+                stackable = bool(info.get("stackable", True))
+            else:
+                price, stackable = 0, False      # lenient: unknown item still posts (price 0)
+                unpriced.append(name)
+            requested_pieces = unit_to_pieces(int(qty), unit, stackable=stackable)
+            base_id += 1
+            data_orders.setdefault("orders", []).append({
+                "id": base_id, "shop": "", "item": name,
+                "requested": requested_pieces, "produced": 0,
+                "status": "open", "claimed_by": None, "claims": [],
+                "created_at": utcnow_iso(),
+                "messages": {"channel_id": None, "message_id": None, "dms": {}},
+                "unit_type": unit, "amount": int(qty),
+                "stackable": bool(stackable), "stack_size": 64 if stackable else 1, "barrel_slots": 54,
+                "employee_announce_at": announce_at.isoformat(),
+                "employee_announced": False, "worker_announced": False,
+                "priority_until": (now_utc + timedelta(hours=PRIORITY_HOURS)).isoformat(),
+                "priority_role": EMPLOYEE_ROLE_NAME,
+            })
+            created.append(f"#{base_id} {name} × {qty} {unit}" + (" ⚠️unpriced" if price <= 0 else ""))
+        if created:
+            save_orders(data_orders)
+        msg = f"✅ Created **{len(created)}** order(s)."
+        if created:
+            msg += "\n" + "\n".join(created[:20]) + (f"\n…and {len(created)-20} more." if len(created) > 20 else "")
+        if unpriced:
+            msg += (f"\n\n⚠️ {len(unpriced)} item(s) not in the catalog — posted at **price 0** "
+                    f"(set a price before approving): " + ", ".join(f"`{u}`" for u in unpriced[:8]))
+        if failed:
+            msg += f"\n\n❌ Couldn't parse {len(failed)} line(s): " + " · ".join(f"`{f}`" for f in failed[:6])
+        msg += f"\n\n⏱️ Cards post to the worker channel in ~{ANNOUNCE_DELAY_MINUTES} min."
+        await interaction.followup.send(msg[:1950], **ephemeral_kwargs(interaction))
 
     @app_commands.command(name="ping_unclaimed", description="(Managers) Ping the Workers about unclaimed orders.")
 

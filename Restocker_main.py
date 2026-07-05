@@ -2321,7 +2321,7 @@ async def _send_stock_alarm(market_id, report_channel):
             log.warning("[stock-alarm] post failed: %s", e)
 
 
-_HARVEST_RATES = [("honey comb", 70), ("honey block", 80)]  # (item-name substring, coins per unit); checked in order
+_HARVEST_RATES = [("honeycomb", 64), ("honey block", 76)]  # (item-name substring, coins/unit = 20% of 320/380); checked in order (honeycomb first)
 
 
 def _harvest_rate_for(item_name: str) -> int:
@@ -2390,6 +2390,102 @@ async def _pay_honey_harvesters(rows: list, market_id: str, report_channel):
     return paid_lines
 
 
+def _honey_harvest_rows(csv_text: str):
+    """From an export CSV, list (actor, item, qty, ts) for honey the actor SOLD to the shop."""
+    import io as _io, csv as _csv
+    out = []
+    reader = _csv.reader(_io.StringIO(csv_text))
+    header = None
+    for row in reader:
+        if not row:
+            continue
+        first = (row[0] or "").strip()
+        if first.startswith("#"):
+            continue
+        if first == "actor":
+            header = row
+            continue
+        if header is None:
+            continue
+        rec = {header[i]: (row[i] if i < len(row) else "") for i in range(len(header))}
+        if (rec.get("verb") or "").strip().lower() != "sold":
+            continue
+        item = (rec.get("item") or "").strip()
+        if _harvest_rate_for(item) <= 0:
+            continue
+        actor = (rec.get("actor") or "").strip()
+        if not actor:
+            continue
+        try:
+            qty = int(float((rec.get("quantity") or "0").strip()))
+        except Exception:
+            continue
+        if qty > 0:
+            out.append((actor, item, qty, (rec.get("timestamp_iso") or "").strip()))
+    return out
+
+
+async def _pay_honey_from_export(csv_text: str, market_id: str, report_channel):
+    """Pay hive harvesters from an export CSV — the 'sold honey to shop' rows, matched by IGN.
+    HiveHarvesting is a permanent TEAM project: each harvester gets qty*rate coins + loyalty,
+    the payout logs to the team's project total, and their manager earns their override.
+    Forward-only per-market timestamp marker → re-uploading the same export never double-pays."""
+    import Restocker_db as _db
+    rows = _honey_harvest_rows(csv_text)
+    if not rows:
+        return []
+    key = f"harvest_last_ts:{market_id}"
+    try:
+        last_ts = _db.get_config(key) or ""
+    except Exception:
+        last_ts = ""
+    new = [r for r in rows if r[3] and r[3] > last_ts]
+    if not new:
+        return []
+    max_ts = max(r[3] for r in new)
+    agg = {}
+    for actor, item, qty, _ts in new:
+        agg[(actor, item)] = agg.get((actor, item), 0) + qty
+    paid_lines = []
+    for (actor, item), qty in sorted(agg.items(), key=lambda kv: -kv[1]):
+        rate = _harvest_rate_for(item)
+        coins = qty * rate
+        uid = _db.get_user_id_by_ign(actor)
+        if not uid:
+            paid_lines.append(f"⚠️ `{actor}` harvested {qty:,}× {item} — not linked "
+                              f"(`/team add ign:{actor}` to pay them).")
+            continue
+        add_coins(int(uid), coins, reason=f"hiveharvest:{item}")
+        try:
+            _award_loyalty_points(int(uid), qty, reason=f"hiveharvest:{item}")
+        except Exception:
+            pass
+        try:
+            _log_team_event(str(uid), "project", coins=float(coins), points=float(qty),
+                            qty=qty, detail=f"HiveHarvesting:{item}")
+        except Exception:
+            pass
+        try:
+            _pay_manager_sales_override(str(uid), float(coins), f"hiveharvest:{item}")
+        except Exception:
+            pass
+        paid_lines.append(f"🍯 <@{uid}> (`{actor}`) +**{coins:,}c** & {qty:,} pts — {qty:,}× {item}")
+        log.info("[hiveharvest] paid %s (%s) +%sc for %s x %s", uid, actor, coins, qty, item)
+    try:
+        _db.set_config(key, max_ts)   # advance the dedup marker
+    except Exception:
+        pass
+    if paid_lines and report_channel is not None:
+        try:
+            embed = discord.Embed(title="🍯 Hive-harvest payouts (team project)",
+                                  description="\n".join(paid_lines[:25]), color=0xFFC83D)
+            embed.set_footer(text="Paid for honey sold since the last export · credited to each harvester's team")
+            await report_channel.send(embed=embed)
+        except Exception as e:
+            log.warning("[hiveharvest] summary send failed: %s", e)
+    return paid_lines
+
+
 async def _record_stock_report(rows: list, market_id: str, report_channel, filename: str):
     """Store a live shop-stock snapshot, post a fullness summary, and alert on low stock."""
     import Restocker_db as _db
@@ -2421,11 +2517,6 @@ async def _record_stock_report(rows: list, market_id: str, report_channel, filen
                                     buy_price=r.get("buy_price"), sell_price=r.get("sell_price"))
         except Exception as e:
             log.warning("[stock] upsert failed for %s: %s", r.get("item"), e)
-    # Honey-harvest payout: pay harvesters for what they newly added since last report.
-    try:
-        await _pay_honey_harvesters(rows, market_id, report_channel)
-    except Exception as e:
-        log.warning("[harvest] hook failed: %s", e)
     st = _db.get_market_stock(market_id)
     if not st:
         return
@@ -2673,6 +2764,13 @@ async def _process_csn_attachment(attachment: discord.Attachment, report_channel
                 continue
     except Exception as _e:
         log.debug("[loyalty] CSN hook skipped: %s", _e)
+
+    # HiveHarvesting payout: pay harvesters from an EXPORT CSV's "sold honey" rows (per-actor).
+    if csv_type == "export":
+        try:
+            await _pay_honey_from_export(csv_text, effective_market_id, report_channel)
+        except Exception as _e:
+            log.warning("[hiveharvest] export hook failed: %s", _e)
 
     market_info = _get_market(effective_market_id)
     market_name = (market_info or {}).get("name", effective_market_id) if effective_market_id != DEFAULT_MARKET_ID else None
