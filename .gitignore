@@ -1,25 +1,14 @@
-# ---- Secrets / environment (NEVER commit) ----
+# ---- Secrets & auth — never commit (token + live dashboard sessions) ----
 .env
 env
 *.env
 .env.*
+Mconfig.yml
+data/state/Mconfig.yml
+data/state/web_sessions.yml
+data/state/web_login_codes.yml
 
-# ---- Live data & logs (per-host, never sync) ----
-restocker.db
-*.db
-*.sqlite
-*.sqlite3
-restocker.log
-*.log
-data/
-csn_stock_MERGED.csv
-
-# ---- Binaries (differ by OS, too large for git) ----
-cloudflared
-cloudflared.exe
-*.exe
-
-# ---- Python / venv / caches ----
+# ---- Environment / virtualenv / caches (not useful in git) ----
 .venv/
 venv/
 __pycache__/
@@ -29,8 +18,19 @@ __pycache_/
 .cache/
 .local/
 
+# ---- Logs ----
+*.log
+
+# ---- Large OS-specific binaries (upload per-host; 38-52 MB each) ----
+cloudflared
+cloudflared.exe
+*.exe
+
 # ---- Editor / IDE ----
 .idea/
 .vscode/
 *.swp
 .DS_Store
+
+# NOTE: restocker.db, data/, *.yml and *.csv ARE tracked on purpose
+# (public Minecraft economy data). Only .env / env stay out.

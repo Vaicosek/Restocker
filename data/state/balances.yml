@@ -1,0 +1,12 @@
+users:
+  '1203738126850461738':
+    lp: 0
+    coins: 131328
+    principal: 130600
+  '1451606730751344894':
+    coins: 54296
+    principal: 54000
+meta:
+  last_interest_week: 2026-W20
+  interest_monthly_rate: 0.003
+  interest_weekly_factor: 0.0007

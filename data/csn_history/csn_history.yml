@@ -1,0 +1,209 @@
+months:
+  2024-04:
+    label: Apr 2024
+    source: import:greyhames_earnings_actuals.csv
+    recorded_at: '2026-06-30T18:21:12.508272+00:00'
+    income: 1790000.0
+    spent: 411700.0
+    net: 1378300.0
+    items: {}
+  2024-05:
+    label: May 2024
+    source: import:greyhames_earnings_actuals.csv
+    recorded_at: '2026-06-30T18:21:12.578173+00:00'
+    income: 1393000.0
+    spent: 445760.0
+    net: 947240.0
+    items: {}
+  2024-06:
+    label: Jun 2024
+    source: import:greyhames_earnings_actuals.csv
+    recorded_at: '2026-06-30T18:21:12.647053+00:00'
+    income: 3600000.0
+    spent: 972000.0
+    net: 2628000.0
+    items: {}
+  2024-07:
+    label: Jul 2024
+    source: import:greyhames_earnings_actuals.csv
+    recorded_at: '2026-06-30T18:21:12.700857+00:00'
+    income: 3862000.0
+    spent: 1081360.0
+    net: 2780640.0
+    items: {}
+  2024-08:
+    label: Aug 2024
+    source: import:greyhames_earnings_actuals.csv
+    recorded_at: '2026-06-30T18:21:12.769123+00:00'
+    income: 4950000.0
+    spent: 1287000.0
+    net: 3663000.0
+    items: {}
+  2024-09:
+    label: Sep 2024
+    source: import:greyhames_earnings_actuals.csv
+    recorded_at: '2026-06-30T18:21:12.831030+00:00'
+    income: 6775000.0
+    spent: 1626000.0
+    net: 5149000.0
+    items: {}
+  2024-10:
+    label: Oct 2024
+    source: import:greyhames_earnings_actuals.csv
+    recorded_at: '2026-06-30T18:21:12.890142+00:00'
+    income: 3775000.0
+    spent: 1019250.0
+    net: 2755750.0
+    items: {}
+  2024-11:
+    label: Nov 2024
+    source: import:greyhames_earnings_actuals.csv
+    recorded_at: '2026-06-30T18:21:12.952131+00:00'
+    income: 3443000.0
+    spent: 593000.0
+    net: 2850000.0
+    items: {}
+  2024-12:
+    label: Dec 2024
+    source: import:greyhames_earnings_actuals.csv
+    recorded_at: '2026-06-30T18:21:13.028151+00:00'
+    income: 3770000.0
+    spent: 700000.0
+    net: 3070000.0
+    items: {}
+  2025-01:
+    label: Jan 2025
+    source: import:greyhames_earnings_actuals.csv
+    recorded_at: '2026-06-30T18:21:13.106869+00:00'
+    income: 3770000.0
+    spent: 945000.0
+    net: 2825000.0
+    items: {}
+  2025-02:
+    label: Feb 2025
+    source: import:greyhames_earnings_actuals.csv
+    recorded_at: '2026-06-30T18:21:13.178325+00:00'
+    income: 3200000.0
+    spent: 960000.0
+    net: 2240000.0
+    items: {}
+  2025-03:
+    label: Mar 2025
+    source: import:greyhames_earnings_actuals.csv
+    recorded_at: '2026-06-30T18:21:13.246042+00:00'
+    income: 1290000.0
+    spent: 387000.0
+    net: 903000.0
+    items: {}
+  2025-04:
+    label: Apr 2025
+    source: import:greyhames_earnings_actuals.csv
+    recorded_at: '2026-06-30T18:21:13.313447+00:00'
+    income: 2740000.0
+    spent: 822000.0
+    net: 1918000.0
+    items: {}
+  2025-05:
+    label: May 2025
+    source: import:greyhames_earnings_actuals.csv
+    recorded_at: '2026-06-30T18:21:13.383658+00:00'
+    income: 2870000.0
+    spent: 861000.0
+    net: 2009000.0
+    items: {}
+  2025-06:
+    label: Jun 2025
+    source: import:greyhames_earnings_actuals.csv
+    recorded_at: '2026-06-30T18:21:13.453011+00:00'
+    income: 2600000.0
+    spent: 780000.0
+    net: 1820000.0
+    items: {}
+  2025-07:
+    label: Jul 2025
+    source: import:greyhames_earnings_actuals.csv
+    recorded_at: '2026-06-30T18:21:13.530775+00:00'
+    income: 3380000.0
+    spent: 1014000.0
+    net: 2366000.0
+    items: {}
+  2025-08:
+    label: Aug 2025
+    source: import:greyhames_earnings_actuals.csv
+    recorded_at: '2026-06-30T18:21:13.607577+00:00'
+    income: 2700000.0
+    spent: 810000.0
+    net: 1890000.0
+    items: {}
+  2025-09:
+    label: Sep 2025
+    source: import:greyhames_earnings_actuals.csv
+    recorded_at: '2026-06-30T18:21:13.677586+00:00'
+    income: 3250000.0
+    spent: 975000.0
+    net: 2275000.0
+    items: {}
+  2025-10:
+    label: Oct 2025
+    source: import:greyhames_earnings_actuals.csv
+    recorded_at: '2026-06-30T18:21:13.719225+00:00'
+    income: 4200000.0
+    spent: 1260000.0
+    net: 2940000.0
+    items: {}
+  2025-11:
+    label: Nov 2025
+    source: import:greyhames_earnings_actuals.csv
+    recorded_at: '2026-06-30T18:21:13.774738+00:00'
+    income: 3700000.0
+    spent: 1110000.0
+    net: 2590000.0
+    items: {}
+  2025-12:
+    label: Dec 2025
+    source: import:greyhames_earnings_actuals.csv
+    recorded_at: '2026-06-30T18:21:13.866073+00:00'
+    income: 3000000.0
+    spent: 900000.0
+    net: 2100000.0
+    items: {}
+  2026-01:
+    label: Jan 2026
+    source: import:greyhames_earnings_actuals.csv
+    recorded_at: '2026-06-30T18:21:13.924763+00:00'
+    income: 3200000.0
+    spent: 960000.0
+    net: 2240000.0
+    items: {}
+  2026-02:
+    label: Feb 2026
+    source: import:greyhames_earnings_actuals.csv
+    recorded_at: '2026-06-30T18:21:13.966547+00:00'
+    income: 3400000.0
+    spent: 1020000.0
+    net: 2380000.0
+    items: {}
+  2026-03:
+    label: Mar 2026
+    source: import:greyhames_earnings_actuals.csv
+    recorded_at: '2026-06-30T18:21:14.025932+00:00'
+    income: 3600000.0
+    spent: 1080000.0
+    net: 2520000.0
+    items: {}
+  2026-04:
+    label: Apr 2026
+    source: import:greyhames_earnings_actuals.csv
+    recorded_at: '2026-06-30T18:21:14.105493+00:00'
+    income: 3800000.0
+    spent: 1140000.0
+    net: 2660000.0
+    items: {}
+  2026-05:
+    label: May 2026
+    source: import:greyhames_earnings_actuals.csv
+    recorded_at: '2026-06-30T18:21:14.167530+00:00'
+    income: 4000000.0
+    spent: 1200000.0
+    net: 2800000.0
+    items: {}

@@ -1,0 +1,1186 @@
+# PERIOD,csn_export_2026-05-01.csv
+actor,seller,verb,quantity,item,amount_coins,timestamp_iso
+MrSoap,Jacob1304,bought,64,Experience Bottle,475,2026-05-30T20:34:58.056Z
+MrSoap,Jacob1304,bought,40,Iron Ingot,1100,2026-05-30T20:33:58.074Z
+MrSoap,Jacob1304,sold,35,Lapis Block,-287.11,2026-05-30T20:13:58.074Z
+Kenemekian,Jacob1304,bought,1216,Dirt,3401,2026-05-30T18:51:58.075Z
+Ajhastoes,Jacob1304,bought,192,Sugar Cane,240,2026-05-30T18:45:58.075Z
+Ajhastoes,Jacob1304,sold,8,Gunpowder,-720,2026-05-30T18:45:58.076Z
+Ajhastoes,Jacob1304,bought,200,Gunpowder,21980,2026-05-30T18:45:58.076Z
+Kittsunas,Jacob1304,bought,256,Dirt,716,2026-05-30T18:44:58.076Z
+Kittsunas,Jacob1304,sold,64,Coarse Dirt,-100,2026-05-30T18:44:58.076Z
+Kittsunas,Jacob1304,bought,192,Coarse Dirt,330,2026-05-30T18:44:58.919Z
+Kenemekian,Jacob1304,bought,1920,Dirt,5370,2026-05-30T18:30:58.919Z
+Kenemekian,Jacob1304,bought,21,Grass Block,98.44,2026-05-30T18:30:58.920Z
+Szelumi,Jacob1304,sold,41,Redstone Block,-784.77,2026-05-30T18:09:58.920Z
+Szelumi,Jacob1304,sold,64,Redstone Block,-1225,2026-05-30T18:09:58.920Z
+Szelumi,Jacob1304,bought,41,Redstone Block,800.78,2026-05-30T18:09:58.920Z
+Szelumi,Jacob1304,bought,64,Redstone Block,1250,2026-05-30T18:09:58.920Z
+Szelumi,Jacob1304,bought,256,Spruce Log,680,2026-05-30T18:05:58.920Z
+Szelumi,Jacob1304,bought,192,Potato,114,2026-05-30T18:00:58.920Z
+Aqua455531,Jacob1304,bought,128,Experience Bottle,950,2026-05-30T17:50:58.921Z
+Aqua455531,Jacob1304,bought,6,Emerald,1260,2026-05-30T17:50:59.749Z
+Giraffecat77,Jacob1304,sold,8,Netherite Scrap,-7200,2026-05-30T17:40:59.749Z
+Giraffecat77,Jacob1304,sold,448,Glass,-1750,2026-05-30T17:22:59.750Z
+Ajhastoes,Jacob1304,bought,960,Gunpowder,105504,2026-05-30T17:14:59.750Z
+Ajhastoes,Jacob1304,bought,576,Tnt,138240,2026-05-30T17:13:59.750Z
+Ajhastoes,Jacob1304,sold,1,Tnt,-200,2026-05-30T17:10:59.750Z
+Ajhastoes,Jacob1304,bought,316,Tnt,75840,2026-05-30T17:08:59.750Z
+AngelNamedOuz,Jacob1304,bought,38,Tnt,9120,2026-05-30T17:06:59.751Z
+Kittsunas,Jacob1304,bought,64,Stone,120,2026-05-30T16:38:59.751Z
+Kittsunas,Jacob1304,bought,64,Tuff,150,2026-05-30T16:38:59.751Z
+Kittsunas,Jacob1304,bought,64,Andesite,162,2026-05-30T16:39:00.556Z
+Kittsunas,Jacob1304,bought,64,Smooth Stone,190,2026-05-30T16:39:00.557Z
+Kittsunas,Jacob1304,bought,128,Stone Bricks,240,2026-05-30T16:39:00.557Z
+Kittsunas,Jacob1304,bought,64,Dirt,179,2026-05-30T16:39:00.557Z
+MrSoap,Jacob1304,bought,192,Experience Bottle,1425,2026-05-30T16:24:00.557Z
+MrSoap,Jacob1304,bought,20,Book,300,2026-05-30T16:20:00.558Z
+MrSoap,Jacob1304,bought,64,Lapis Block,530,2026-05-30T16:20:00.558Z
+MrSoap,Jacob1304,sold,5,Book,-70,2026-05-30T16:12:00.558Z
+MrSoap,Jacob1304,bought,50,Book,750,2026-05-30T16:12:00.558Z
+MrSoap,Jacob1304,sold,60,Obsidian,-703.13,2026-05-30T16:11:00.558Z
+MrSoap,Jacob1304,bought,64,Obsidian,800,2026-05-30T16:11:01.404Z
+Infinicht,Jacob1304,bought,2,Cooked Beef,28.91,2026-05-30T15:46:01.404Z
+Infinicht,Jacob1304,bought,64,Cooked Beef,925,2026-05-30T15:46:01.404Z
+vansito11,Jacob1304,sold,10,Book,-140,2026-05-30T12:36:01.404Z
+Giraffecat77,Jacob1304,sold,55,Resin Clump,-73.05,2026-05-30T12:19:01.404Z
+Giraffecat77,Jacob1304,bought,64,Resin Clump,130,2026-05-30T12:19:01.404Z
+Giraffecat77,Jacob1304,sold,192,Dirt,-522,2026-05-30T12:17:01.404Z
+Giraffecat77,Jacob1304,sold,17,Red Nether Bricks,-92.97,2026-05-30T12:17:01.405Z
+Giraffecat77,Jacob1304,sold,128,Red Nether Bricks,-700,2026-05-30T12:17:01.405Z
+Giraffecat77,Jacob1304,sold,88,Stone,-123.75,2026-05-30T12:14:01.405Z
+Giraffecat77,Jacob1304,sold,110,Diorite,-206.25,2026-05-30T12:14:02.271Z
+Giraffecat77,Jacob1304,sold,1024,Andesite,-2320,2026-05-30T12:14:02.272Z
+Giraffecat77,Jacob1304,sold,960,Glass,-3750,2026-05-30T12:13:02.272Z
+Giraffecat77,Jacob1304,sold,192,Tuff,-360,2026-05-30T12:00:02.272Z
+Giraffecat77,Jacob1304,sold,9,Stone,-12.66,2026-05-30T12:00:02.272Z
+Giraffecat77,Jacob1304,sold,1728,Stone,-2430,2026-05-30T12:00:02.272Z
+Giraffecat77,Jacob1304,sold,256,Stone Bricks,-360,2026-05-30T11:57:02.272Z
+Giraffecat77,Jacob1304,sold,23,Andesite,-52.11,2026-05-30T11:57:02.272Z
+Giraffecat77,Jacob1304,sold,448,Andesite,-1015,2026-05-30T11:57:02.272Z
+Giraffecat77,Jacob1304,sold,1216,Sandstone,-5700,2026-05-30T11:56:03.134Z
+BeLuz10,Jacob1304,bought,384,Cobbled Deepslate,360,2026-05-30T11:10:03.135Z
+zarrolo,Jacob1304,bought,128,Glass,600,2026-05-30T10:35:03.135Z
+zarrolo,Jacob1304,bought,50,Ink Sac,2500,2026-05-30T10:35:03.135Z
+Szelumi,Jacob1304,bought,448,Baked Potato,448,2026-05-30T10:27:03.136Z
+Dominic_Graykey,Jacob1304,sold,2,Grass Block,-7.03,2026-05-30T07:56:03.136Z
+Dominic_Graykey,Jacob1304,sold,256,Grass Block,-900,2026-05-30T07:56:03.136Z
+Dominic_Graykey,Jacob1304,sold,47,Amethyst Block,-183.59,2026-05-30T07:37:03.136Z
+Dominic_Graykey,Jacob1304,sold,1344,Amethyst Block,-5250,2026-05-30T07:37:03.136Z
+GlitchYOKO,Jacob1304,sold,1152,Sugar Cane,-1152,2026-05-30T05:45:03.137Z
+GlitchYOKO,Jacob1304,sold,2,Cooked Beef,-15.63,2026-05-30T05:45:03.947Z
+GlitchYOKO,Jacob1304,sold,10,Leather,-70.31,2026-05-30T05:45:03.948Z
+GlitchYOKO,Jacob1304,sold,64,Cooked Beef,-500,2026-05-30T05:45:03.948Z
+GlitchYOKO,Jacob1304,sold,1,Redstone Block,-19.14,2026-05-30T05:45:03.948Z
+CalebTheSecond,Jacob1304,sold,34,Light Blue Wool,-239.06,2026-05-30T05:41:03.949Z
+CalebTheSecond,Jacob1304,sold,320,Light Blue Wool,-2250,2026-05-30T05:41:03.949Z
+CalebTheSecond,Jacob1304,sold,52,Light Blue Wool,-365.63,2026-05-30T05:33:03.949Z
+CalebTheSecond,Jacob1304,sold,576,Light Blue Wool,-4050,2026-05-30T05:33:03.949Z
+Tamyrille,Jacob1304,bought,20,Diamond,1020,2026-05-30T04:05:03.950Z
+Tamyrille,Jacob1304,sold,1,Glowstone,-25,2026-05-30T04:02:03.950Z
+Tamyrille,Jacob1304,sold,11,Quartz Block,-68.92,2026-05-30T04:01:04.713Z
+CalebTheSecond,Jacob1304,bought,2,Sponge,5000,2026-05-30T02:56:04.713Z
+CalebTheSecond,Jacob1304,sold,4,Light Blue Wool,-28.13,2026-05-30T02:31:04.714Z
+Kittsunas,Jacob1304,bought,256,Dark Oak Log,680,2026-05-30T01:08:04.714Z
+MrSoap,Jacob1304,bought,30,Iron Ingot,825,2026-05-30T00:39:04.714Z
+MrSoap,Jacob1304,sold,38,Apple,-798,2026-05-30T00:00:04.714Z
+MrSoap,Jacob1304,bought,38,Apple,836,2026-05-30T00:00:04.714Z
+MrSoap,Jacob1304,sold,20,Copper Block,-200,2026-05-29T23:55:04.714Z
+Tamyrille,Jacob1304,bought,4,Sponge,10000,2026-05-29T23:29:04.714Z
+MrSoap,Jacob1304,sold,7,Gold Ingot,-707,2026-05-29T23:07:04.714Z
+MrSoap,Jacob1304,bought,5,Gold Ingot,510,2026-05-29T23:07:05.493Z
+MrSoap,Jacob1304,sold,11,Hay Block,-154.69,2026-05-29T23:06:05.493Z
+Kittsunas,Jacob1304,bought,36,Spruce Log,95.63,2026-05-29T22:53:05.493Z
+Kittsunas,Jacob1304,bought,256,Spruce Log,680,2026-05-29T22:53:05.493Z
+Kittsunas,Jacob1304,bought,64,Carrot,48,2026-05-29T22:47:05.493Z
+Kittsunas,Jacob1304,bought,128,Spruce Log,340,2026-05-29T22:47:05.494Z
+MrSoap,Jacob1304,sold,1,Name Tag,-25,2026-05-29T22:29:05.494Z
+MrSoap,Jacob1304,bought,1,Name Tag,30,2026-05-29T22:29:05.494Z
+MrSoap,Jacob1304,sold,11,Ink Sac,-330,2026-05-29T22:27:05.494Z
+Kittsunas,Jacob1304,bought,192,Dirt,537,2026-05-29T21:53:05.494Z
+Deft710,Jacob1304,bought,64,Lime Concrete Powder,110,2026-05-29T21:24:06.340Z
+Deft710,Jacob1304,bought,64,Spruce Log,170,2026-05-29T21:24:06.341Z
+MrSoap,Jacob1304,bought,5,String,7.81,2026-05-29T21:22:06.341Z
+MrSoap,Jacob1304,bought,36,Iron Ingot,990,2026-05-29T21:21:06.341Z
+MrSoap,Jacob1304,sold,9,Redstone Block,-172.27,2026-05-29T21:21:06.341Z
+MrSoap,Jacob1304,bought,20,Redstone Block,390.62,2026-05-29T21:20:06.342Z
+MrSoap,Jacob1304,sold,10,Redstone Block,-191.41,2026-05-29T21:20:06.342Z
+MrSoap,Jacob1304,bought,64,Oak Log,220,2026-05-29T21:20:06.342Z
+MrSoap,Jacob1304,sold,20,Iron Ingot,-530,2026-05-29T21:19:06.342Z
+Kittsunas,Jacob1304,bought,10,Diamond,510,2026-05-29T21:18:06.342Z
+MotixDiabolic,Jacob1304,bought,1536,Stone,2880,2026-05-29T21:17:07.187Z
+MotixDiabolic,Jacob1304,sold,64,Cobblestone,-80,2026-05-29T21:17:07.188Z
+MotixDiabolic,Jacob1304,bought,64,Cobblestone,85,2026-05-29T21:17:07.189Z
+MrSoap,Jacob1304,sold,37,Redstone Block,-708.2,2026-05-29T21:16:07.189Z
+MrSoap,Jacob1304,bought,37,Redstone Block,722.66,2026-05-29T21:16:07.190Z
+Mertilizm,Jacob1304,bought,192,Baked Potato,192,2026-05-29T20:43:07.190Z
+Kittsunas,Jacob1304,bought,64,Lantern,1950,2026-05-29T20:34:07.190Z
+Kittsunas,Jacob1304,bought,64,White Wool,485,2026-05-29T20:34:07.190Z
+Kittsunas,Jacob1304,bought,64,Spruce Leaves,155,2026-05-29T20:32:07.190Z
+Deft710,Jacob1304,bought,64,Experience Bottle,475,2026-05-29T20:14:08.032Z
+Deft710,Jacob1304,bought,64,Prismarine Bricks,750,2026-05-29T20:14:08.033Z
+Kittsunas,Jacob1304,bought,60,Iron Ingot,1650,2026-05-29T20:09:08.034Z
+Saliz10,Jacob1304,bought,58,Hay Block,906.25,2026-05-29T20:08:08.034Z
+JKritical,Jacob1304,bought,10,Iron Ingot,275,2026-05-29T19:56:08.034Z
+Deft710,Jacob1304,bought,10,Blaze Rod,580,2026-05-29T19:28:08.034Z
+MotixDiabolic,Jacob1304,bought,62,Andesite,156.94,2026-05-29T19:26:08.034Z
+MotixDiabolic,Jacob1304,bought,1472,Andesite,3726,2026-05-29T19:26:08.035Z
+Frostcarp,Jacob1304,bought,15,Glowstone,450,2026-05-29T19:19:08.035Z
+Frostcarp,Jacob1304,bought,20,Iron Ingot,550,2026-05-29T19:18:08.036Z
+ciprilu28,Jacob1304,bought,64,Lantern,1950,2026-05-29T19:09:08.887Z
+ciprilu28,Jacob1304,bought,64,Experience Bottle,475,2026-05-29T19:09:08.887Z
+previseclient,Jacob1304,bought,64,Jungle Sapling,210,2026-05-29T18:35:08.887Z
+previseclient,Jacob1304,bought,48,Cooked Beef,693.75,2026-05-29T18:35:08.887Z
+Krispy_Wafflez,Jacob1304,bought,64,Yellow Concrete Powder,110,2026-05-29T17:54:08.887Z
+AlarmingDoc,Jacob1304,sold,34,Quartz Block,-213.03,2026-05-29T17:22:08.888Z
+AlarmingDoc,Jacob1304,sold,192,Quartz Block,-1203,2026-05-29T17:22:08.888Z
+NavyCircle21209,Jacob1304,bought,1152,Honey Block,10800,2026-05-29T16:47:08.888Z
+Szelumi,Jacob1304,bought,768,Cobbled Deepslate,720,2026-05-29T16:34:08.888Z
+Szelumi,Jacob1304,bought,64,Deepslate Tiles,70,2026-05-29T16:31:08.888Z
+Tylerhello,Jacob1304,sold,1,Emerald,-205,2026-05-29T16:24:09.672Z
+Krispy_Wafflez,Jacob1304,bought,64,Soul Sand,249,2026-05-29T16:24:09.672Z
+Budgegarus_,Jacob1304,sold,428,Experience Bottle,-2006.25,2026-05-29T15:48:09.672Z
+Budgegarus_,Jacob1304,sold,128,Experience Bottle,-600,2026-05-29T15:24:09.672Z
+gk2yt,Jacob1304,sold,64,Sweet Berries,-25,2026-05-29T15:10:09.673Z
+gk2yt,Jacob1304,sold,58,Hay Block,-815.63,2026-05-29T15:10:09.673Z
+MotixDiabolic,Jacob1304,bought,256,Glass,1200,2026-05-29T12:44:09.674Z
+LeoVit_,Jacob1304,bought,64,Spruce Log,170,2026-05-29T12:09:09.674Z
+LeoVit_,Jacob1304,bought,128,Experience Bottle,950,2026-05-29T12:08:09.674Z
+Mertilizm,Jacob1304,bought,128,Tuff,300,2026-05-29T11:23:10.742Z
+Mertilizm,Jacob1304,bought,128,Red Terracotta,350,2026-05-29T11:22:10.742Z
+Mertilizm,Jacob1304,bought,384,Cobbled Deepslate,360,2026-05-29T11:21:10.742Z
+CalebTheSecond,Jacob1304,sold,17,Lime Wool,-119.53,2026-05-29T10:54:10.743Z
+CalebTheSecond,Jacob1304,sold,896,Lime Wool,-6300,2026-05-29T10:54:10.743Z
+AlarmingDoc,Jacob1304,bought,8,Netherite Scrap,7600,2026-05-29T05:30:10.743Z
+AlarmingDoc,Jacob1304,bought,10,Gold Ingot,1020,2026-05-29T05:30:10.743Z
+amincrafttrex,Jacob1304,sold,128,Deepslate Tiles,-120,2026-05-29T04:49:10.743Z
+amincrafttrex,Jacob1304,sold,1,Deepslate Tiles,-0.94,2026-05-29T04:45:10.743Z
+amincrafttrex,Jacob1304,sold,2,Polished Deepslate,-1.88,2026-05-29T04:45:10.743Z
+amincrafttrex,Jacob1304,sold,18,Diorite,-33.75,2026-05-29T04:45:11.768Z
+amincrafttrex,Jacob1304,sold,11,Granite,-10.66,2026-05-29T04:45:11.769Z
+amincrafttrex,Jacob1304,sold,24,Copper Block,-240,2026-05-29T04:43:11.769Z
+amincrafttrex,Jacob1304,sold,31,Stone,-43.59,2026-05-29T03:59:11.769Z
+Aqua455531,Jacob1304,bought,576,Glass,2700,2026-05-29T03:45:11.769Z
+eminem_rondonia,Jacob1304,sold,400,Experience Bottle,-1875,2026-05-29T03:10:11.769Z
+MrSoap,Jacob1304,sold,128,Baked Potato,-120,2026-05-29T02:44:11.769Z
+MrSoap,Jacob1304,bought,64,Baked Potato,64,2026-05-29T02:44:11.769Z
+amincrafttrex,Jacob1304,sold,2,Jungle Log,-7.03,2026-05-29T02:41:11.769Z
+amincrafttrex,Jacob1304,sold,192,Jungle Log,-675,2026-05-29T02:41:11.769Z
+IvyLeagueCollage,Jacob1304,bought,1344,Experience Bottle,9975,2026-05-29T02:40:12.699Z
+IvyLeagueCollage,Jacob1304,bought,2,Experience Bottle,14.84,2026-05-29T02:38:12.699Z
+IvyLeagueCollage,Jacob1304,sold,128,Copper Block,-1280,2026-05-29T02:37:12.699Z
+IvyLeagueCollage,Jacob1304,bought,128,Copper Block,1300,2026-05-29T02:37:12.699Z
+Dominic_Graykey,Jacob1304,sold,3456,Honeycomb Block,-10800,2026-05-29T02:36:12.699Z
+amincrafttrex,Jacob1304,sold,157,Iron Ingot,-4160.5,2026-05-29T02:35:12.699Z
+eminem_rondonia,Jacob1304,sold,51,Oak Log,-171.33,2026-05-29T02:31:12.699Z
+eminem_rondonia,Jacob1304,sold,1152,Oak Log,-3870,2026-05-29T02:31:12.700Z
+amincrafttrex,Jacob1304,sold,343,Iron Ingot,-9089.5,2026-05-29T02:29:12.700Z
+amincrafttrex,Jacob1304,bought,145,Iron Ingot,3987.5,2026-05-29T02:29:12.700Z
+amincrafttrex,Jacob1304,sold,45,Iron Ingot,-1192.5,2026-05-29T02:24:13.542Z
+Aqua455531,Jacob1304,bought,30,Diamond,1530,2026-05-29T02:20:13.542Z
+Silonnz,Jacob1304,bought,1984,Feather,21700,2026-05-29T02:18:13.542Z
+Cloudy4life,Jacob1304,bought,250,Iron Ingot,6875,2026-05-29T02:11:13.542Z
+PVT_PYLE5h13t,Jacob1304,sold,10,Gunpowder,-900,2026-05-29T01:56:13.542Z
+PVT_PYLE5h13t,Jacob1304,sold,18,Ender Pearl,-2160,2026-05-29T01:56:13.542Z
+PVT_PYLE5h13t,Jacob1304,sold,48,Cooked Beef,-375,2026-05-29T01:54:13.543Z
+PVT_PYLE5h13t,Jacob1304,sold,64,Bone Block,-400,2026-05-29T01:54:13.543Z
+PVT_PYLE5h13t,Jacob1304,sold,15,Shroomlight,-795,2026-05-29T01:53:13.543Z
+PVT_PYLE5h13t,Jacob1304,sold,192,Red Nether Bricks,-1050,2026-05-29T01:52:13.543Z
+PVT_PYLE5h13t,Jacob1304,sold,1,Ancient Debris,-1650,2026-05-29T01:52:14.338Z
+Diwky,Jacob1304,sold,575,Sugar Cane,-575,2026-05-29T00:57:14.338Z
+NavyCircle21209,Jacob1304,bought,64,Clay,260,2026-05-29T00:50:14.338Z
+Matrix7200,Jacob1304,sold,5,Dragon Breath,-425,2026-05-29T00:31:14.339Z
+VelvetyCake,Jacob1304,sold,64,Granite,-62,2026-05-29T00:03:14.339Z
+VelvetyCake,Jacob1304,sold,16,Oak Log,-53.75,2026-05-29T00:03:14.339Z
+VelvetyCake,Jacob1304,sold,2,Glowstone,-50,2026-05-29T00:02:14.339Z
+VelvetyCake,Jacob1304,sold,26,Warped Wart Block,-26.41,2026-05-29T00:02:14.339Z
+MotixDiabolic,Jacob1304,bought,128,Glass,600,2026-05-28T22:35:14.339Z
+Foxy_0,Jacob1304,sold,55,Bamboo,-85.94,2026-05-28T22:34:14.339Z
+Foxy_0,Jacob1304,sold,896,Bamboo,-1400,2026-05-28T22:34:15.190Z
+Dominic_Graykey,Jacob1304,sold,20,Blaze Powder,-400,2026-05-28T22:20:15.190Z
+FlavivsOfTheEast,Jacob1304,bought,448,Sandstone,2450,2026-05-28T22:15:15.190Z
+ThousandTricks,Jacob1304,bought,192,Spruce Log,510,2026-05-28T22:03:15.190Z
+ThousandTricks,Jacob1304,bought,128,Spruce Log,340,2026-05-28T21:56:15.190Z
+Tea_L0ver,Jacob1304,bought,64,Oak Log,220,2026-05-28T21:49:15.190Z
+Id10tplaygam,Jacob1304,sold,64,Flint,-72,2026-05-28T20:48:15.190Z
+Tea_L0ver,Jacob1304,bought,256,Polished Deepslate,280,2026-05-28T20:46:15.191Z
+Tea_L0ver,Jacob1304,bought,256,Deepslate Tiles,280,2026-05-28T20:46:15.191Z
+Tea_L0ver,Jacob1304,bought,64,Calcite,255,2026-05-28T20:46:15.191Z
+Tea_L0ver,Jacob1304,bought,128,Diorite,254,2026-05-28T20:46:16.049Z
+Tea_L0ver,Jacob1304,bought,192,Granite,192,2026-05-28T20:46:16.049Z
+Dominic_Graykey,Jacob1304,sold,1152,Honey Block,-6300,2026-05-28T20:46:16.049Z
+FlavivsOfTheEast,Jacob1304,bought,64,Yellow Concrete Powder,110,2026-05-28T20:44:16.049Z
+FlavivsOfTheEast,Jacob1304,bought,64,Orange Concrete Powder,110,2026-05-28T20:44:16.049Z
+Dominic_Graykey,Jacob1304,bought,3,Shulker Box,29400,2026-05-28T20:42:16.050Z
+Dominic_Graykey,Jacob1304,sold,208,Resin Clump,-276.25,2026-05-28T20:41:16.050Z
+Tea_L0ver,Jacob1304,bought,512,Sandstone,2800,2026-05-28T20:41:16.050Z
+Dominic_Graykey,Jacob1304,sold,18,Resin Block,-450,2026-05-28T20:41:16.050Z
+Tea_L0ver,Jacob1304,bought,64,Quartz Block,600,2026-05-28T20:39:16.050Z
+Tea_L0ver,Jacob1304,bought,128,Pale Oak Log,480,2026-05-28T20:39:16.845Z
+Tea_L0ver,Jacob1304,bought,64,Terracotta,185,2026-05-28T20:38:16.846Z
+Tea_L0ver,Jacob1304,bought,50,Packed Mud,308.59,2026-05-28T20:37:16.846Z
+Tea_L0ver,Jacob1304,bought,384,Packed Mud,2370,2026-05-28T20:37:16.846Z
+Tea_L0ver,Jacob1304,sold,320,Spruce Log,-825,2026-05-28T20:37:16.857Z
+Tea_L0ver,Jacob1304,bought,64,Spruce Log,170,2026-05-28T20:37:16.858Z
+MotixDiabolic,Jacob1304,bought,512,Glass,2400,2026-05-28T19:59:16.858Z
+Moonmaster1000,Jacob1304,sold,24,Jungle Log,-84.38,2026-05-28T18:54:16.858Z
+Moonmaster1000,Jacob1304,sold,320,Jungle Log,-1125,2026-05-28T18:54:16.858Z
+Sofrita2005,Jacob1304,bought,10,Gold Ingot,1020,2026-05-28T18:34:16.859Z
+Giraffecat77,Jacob1304,bought,21,Sculk Catalyst,20790,2026-05-28T18:32:17.741Z
+BeLuz10,Jacob1304,bought,40,Iron Ingot,1100,2026-05-28T18:14:17.741Z
+BeLuz10,Jacob1304,bought,64,Experience Bottle,475,2026-05-28T18:14:17.741Z
+Sofrita2005,Jacob1304,bought,10,Gunpowder,1099,2026-05-28T17:45:17.741Z
+Sofrita2005,Jacob1304,bought,20,Diamond,1020,2026-05-28T17:45:17.742Z
+StonecutterChair,Jacob1304,bought,30,Item Frame,450,2026-05-28T17:37:17.742Z
+Jguy123,Jacob1304,bought,64,Baked Potato,64,2026-05-28T17:14:17.742Z
+TheWeirdManS,Jacob1304,bought,39,Smooth Sandstone,182.81,2026-05-28T17:14:17.742Z
+CopingPlains522,Jacob1304,bought,256,Experience Bottle,1900,2026-05-28T17:11:17.742Z
+BeLuz10,Jacob1304,bought,64,Obsidian,800,2026-05-28T17:11:17.742Z
+BeLuz10,Jacob1304,bought,10,Blaze Powder,310,2026-05-28T17:06:18.543Z
+BeLuz10,Jacob1304,bought,256,Cobbled Deepslate,240,2026-05-28T16:55:18.544Z
+F3lixFoox,Jacob1304,bought,1498,Sugar Cane,1872.5,2026-05-28T16:54:18.544Z
+Diwky,Jacob1304,sold,22,Copper Block,-220,2026-05-28T16:43:18.544Z
+Diwky,Jacob1304,sold,51,Acacia Log,-195.23,2026-05-28T16:43:18.544Z
+Diwky,Jacob1304,sold,64,Acacia Log,-245,2026-05-28T16:43:18.544Z
+gk2yt,Jacob1304,sold,45,Cobbled Deepslate,-28.13,2026-05-28T16:26:18.544Z
+gk2yt,Jacob1304,sold,41,Dark Oak Sapling,-115.31,2026-05-28T16:26:18.544Z
+gk2yt,Jacob1304,sold,320,Dark Oak Sapling,-900,2026-05-28T16:26:18.544Z
+gk2yt,Jacob1304,sold,62,Grass Block,-217.97,2026-05-28T16:21:18.544Z
+gk2yt,Jacob1304,sold,128,Oak Sapling,-400,2026-05-28T16:21:19.411Z
+gk2yt,Jacob1304,sold,37,Birch Sapling,-115.63,2026-05-28T16:21:19.411Z
+gk2yt,Jacob1304,sold,64,Dark Oak Sapling,-180,2026-05-28T16:21:19.412Z
+Diwky,Jacob1304,sold,3,Clay,-11.95,2026-05-28T15:36:19.412Z
+Diwky,Jacob1304,sold,21,Sandstone,-98.44,2026-05-28T15:35:19.413Z
+Diwky,Jacob1304,sold,39,Smooth Sandstone,-170.63,2026-05-28T15:35:19.413Z
+Budgegarus_,Jacob1304,bought,128,Grass Block,600,2026-05-28T15:07:19.413Z
+Diwky,Jacob1304,sold,64,Copper Block,-640,2026-05-28T15:05:19.413Z
+Diwky,Jacob1304,sold,64,Lapis Block,-525,2026-05-28T15:04:19.413Z
+Diwky,Jacob1304,sold,3,Netherite Scrap,-2700,2026-05-28T15:04:19.414Z
+Diwky,Jacob1304,sold,128,Redstone Block,-2450,2026-05-28T14:58:20.210Z
+Diwky,Jacob1304,bought,3,Netherite Scrap,2850,2026-05-28T14:57:20.212Z
+Diwky,Jacob1304,sold,704,Bamboo,-1100,2026-05-28T14:44:20.212Z
+Diwky,Jacob1304,sold,118,Torch,-118,2026-05-28T14:18:20.212Z
+Diwky,Jacob1304,sold,29,Oak Sapling,-90.63,2026-05-28T14:17:20.212Z
+Diwky,Jacob1304,sold,11,Acacia Sapling,-48.13,2026-05-28T14:17:20.213Z
+RealBjornV2012,Jacob1304,bought,40,Iron Ingot,1100,2026-05-28T14:17:20.213Z
+Diwky,Jacob1304,sold,46,Amethyst Block,-179.69,2026-05-28T14:17:20.213Z
+Diwky,Jacob1304,sold,16,Egg,-20,2026-05-28T14:14:20.213Z
+Diwky,Jacob1304,sold,1,Diamond,-40,2026-05-28T14:11:20.213Z
+Diwky,Jacob1304,sold,40,Oak Log,-134.38,2026-05-28T14:11:20.986Z
+Fun1x,Jacob1304,bought,10,Iron Ingot,275,2026-05-28T13:27:20.987Z
+l0adinguy,Jacob1304,bought,896,Experience Bottle,6650,2026-05-28T13:18:20.987Z
+l0adinguy,Jacob1304,bought,18,Experience Bottle,133.59,2026-05-28T13:18:20.987Z
+Mertilizm,Jacob1304,bought,1,Sponge,2500,2026-05-28T12:57:20.987Z
+Yasuosu,Jacob1304,sold,3456,Sand,-4860,2026-05-28T11:57:20.987Z
+Mertilizm,Jacob1304,bought,64,Orange Wool,485,2026-05-28T10:48:20.987Z
+Mertilizm,Jacob1304,bought,64,Redstone Block,1250,2026-05-28T10:48:20.987Z
+Mertilizm,Jacob1304,bought,320,Cobbled Deepslate,300,2026-05-28T10:47:20.987Z
+Mertilizm,Jacob1304,bought,512,Spruce Log,1360,2026-05-28T10:46:21.840Z
+Mertilizm,Jacob1304,bought,128,Dark Oak Log,340,2026-05-28T10:45:21.840Z
+Mertilizm,Jacob1304,bought,60,Iron Ingot,1650,2026-05-28T10:45:21.840Z
+Mertilizm,Jacob1304,bought,64,Calcite,255,2026-05-28T10:44:21.840Z
+Ravengames4526,Jacob1304,bought,1,Honey Block,9.38,2026-05-28T10:18:21.841Z
+Budgegarus_,Jacob1304,sold,1,Honey Block,-5.47,2026-05-28T07:47:21.841Z
+Budgegarus_,Jacob1304,bought,192,Grass Block,900,2026-05-28T07:47:21.841Z
+Flordiaman_1969,Jacob1304,bought,1,Sponge,2500,2026-05-28T05:41:21.841Z
+zarrolo,Jacob1304,bought,384,Magma Block,1200,2026-05-28T03:55:21.841Z
+Rexjopeck,Jacob1304,bought,128,Light Gray Wool,970,2026-05-28T03:43:21.841Z
+Rexjopeck,Jacob1304,bought,64,Gray Wool,485,2026-05-28T03:39:22.636Z
+Rexjopeck,Jacob1304,bought,128,Stone Bricks,240,2026-05-28T03:29:22.636Z
+Rexjopeck,Jacob1304,bought,320,Stone,600,2026-05-28T03:29:22.636Z
+Sofrita2005,Jacob1304,bought,1,Dragon Breath,90,2026-05-28T03:24:22.636Z
+DragonSentinel,Jacob1304,bought,32,Resin Brick,250,2026-05-28T03:11:22.636Z
+Tea_L0ver,Jacob1304,bought,256,Sandstone,1400,2026-05-28T01:56:22.636Z
+Tea_L0ver,Jacob1304,bought,64,Tuff,150,2026-05-28T01:55:22.636Z
+deepdragooner,Jacob1304,bought,64,Apple,1408,2026-05-28T01:45:22.637Z
+LavaaX,Jacob1304,sold,330,Gunpowder,-29700,2026-05-27T23:30:22.637Z
+PVT_PYLE5h13t,Jacob1304,sold,51,Shroomlight,-2703,2026-05-27T22:59:22.637Z
+PVT_PYLE5h13t,Jacob1304,sold,6,Glowstone,-150,2026-05-27T22:59:23.487Z
+StonecutterChair,Jacob1304,bought,10,Spider Eye,195,2026-05-27T22:47:23.487Z
+ExpressMars,Jacob1304,bought,64,Feather,700,2026-05-27T21:53:23.487Z
+Yasuosu,Jacob1304,bought,1152,Cooked Beef,16650,2026-05-27T21:50:23.487Z
+Yasuosu,Jacob1304,sold,2256,Glass,-8812.5,2026-05-27T21:50:23.488Z
+NavyCircle21209,Jacob1304,bought,25,Sand,39.06,2026-05-27T21:38:23.488Z
+NavyCircle21209,Jacob1304,bought,1408,Sand,2200,2026-05-27T21:38:23.488Z
+CopingPlains522,Jacob1304,bought,704,Experience Bottle,5225,2026-05-27T21:03:23.488Z
+Altra_Pendragon,Jacob1304,sold,25,Feather,-265.63,2026-05-27T21:03:23.488Z
+Altra_Pendragon,Jacob1304,sold,256,Feather,-2720,2026-05-27T21:03:23.488Z
+Altra_Pendragon,Jacob1304,bought,1216,Feather,13300,2026-05-27T21:02:24.315Z
+Altra_Pendragon,Jacob1304,sold,64,Sugar Cane,-64,2026-05-27T21:02:24.316Z
+Altra_Pendragon,Jacob1304,bought,64,Sugar Cane,80,2026-05-27T21:02:24.316Z
+vansito11,Jacob1304,sold,128,Spider Eye,-2112,2026-05-27T20:37:24.316Z
+TheWeirdManS,Jacob1304,bought,832,Granite,832,2026-05-27T20:00:24.316Z
+BBK5488,Jacob1304,sold,18,Gunpowder,-1620,2026-05-27T19:52:24.316Z
+BBK5488,Jacob1304,bought,10,Gunpowder,1099,2026-05-27T19:52:24.316Z
+Axolotl_In_Suit,Jacob1304,bought,64,Lapis Block,530,2026-05-27T19:50:24.316Z
+Jakkascid1,Jacob1304,bought,64,Experience Bottle,550,2026-05-27T19:43:24.316Z
+Jakkascid1,Jacob1304,bought,20,Diamond,1020,2026-05-27T19:43:24.316Z
+BBK5488,Jacob1304,bought,150,Iron Ingot,4125,2026-05-27T19:34:25.105Z
+BBK5488,Jacob1304,sold,10,Iron Ingot,-265,2026-05-27T19:34:25.105Z
+BBK5488,Jacob1304,sold,64,Experience Bottle,-300,2026-05-27T19:34:25.105Z
+BBK5488,Jacob1304,bought,64,Experience Bottle,475,2026-05-27T19:34:25.105Z
+BBK5488,Jacob1304,sold,236,Cobbled Deepslate,-147.5,2026-05-27T19:33:25.105Z
+BBK5488,Jacob1304,sold,64,Cobblestone,-80,2026-05-27T19:33:25.122Z
+BBK5488,Jacob1304,bought,64,Cobblestone,85,2026-05-27T19:33:25.122Z
+BBK5488,Jacob1304,sold,1,Netherite Ingot,-3800,2026-05-27T19:16:25.122Z
+BBK5488,Jacob1304,bought,1,Netherite Ingot,4050,2026-05-27T19:16:25.122Z
+BBK5488,Jacob1304,bought,64,Baked Potato,64,2026-05-27T19:15:25.122Z
+BBK5488,Jacob1304,bought,192,Oak Log,660,2026-05-27T19:15:25.909Z
+BBK5488,Jacob1304,bought,64,Spruce Log,170,2026-05-27T19:15:25.909Z
+BBK5488,Jacob1304,bought,64,Birch Log,220,2026-05-27T19:15:25.909Z
+BBK5488,Jacob1304,bought,20,Iron Ingot,550,2026-05-27T19:15:25.909Z
+gk2yt,Jacob1304,bought,128,Experience Bottle,950,2026-05-27T17:31:25.909Z
+RealBjornV2012,Jacob1304,bought,64,Sugar Cane,80,2026-05-27T17:23:25.910Z
+Giraffecat77,Jacob1304,bought,390,Sea Lantern,72150,2026-05-27T16:14:25.910Z
+Giraffecat77,Jacob1304,bought,128,Sea Lantern,23680,2026-05-27T16:01:25.910Z
+Giraffecat77,Jacob1304,bought,18,Gilded Blackstone,3600,2026-05-27T16:00:26.680Z
+Giraffecat77,Jacob1304,sold,1200,Glass,-4687.5,2026-05-27T15:59:26.681Z
+Sofrita2005,Jacob1304,sold,10,Copper Block,-100,2026-05-27T14:00:26.681Z
+Moonmaster1000,Jacob1304,sold,38,Jungle Log,-133.59,2026-05-27T13:59:26.681Z
+Moonmaster1000,Jacob1304,sold,640,Jungle Log,-2250,2026-05-27T13:59:26.681Z
+VEoN_Marten,Jacob1304,bought,64,Jungle Log,230,2026-05-27T13:26:26.681Z
+clawru,Jacob1304,bought,1792,Sand,2800,2026-05-27T13:11:26.681Z
+PaledForest,Jacob1304,bought,1,Shulker Box,9800,2026-05-27T11:57:26.681Z
+Alithium12,Jacob1304,sold,21,Copper Block,-210,2026-05-27T11:40:26.681Z
+ILoveABGSSs,Jacob1304,sold,1,Beacon,-25000,2026-05-27T10:41:26.681Z
+Yasuosu,Jacob1304,sold,15,Sand,-21.09,2026-05-27T10:35:27.597Z
+Yasuosu,Jacob1304,sold,256,Red Sandstone,-1600,2026-05-27T10:25:27.597Z
+Yasuosu,Jacob1304,sold,896,Prismarine Bricks,-9800,2026-05-27T10:24:27.597Z
+Yasuosu,Jacob1304,sold,1088,Prismarine,-6630,2026-05-27T10:24:27.597Z
+Yasuosu,Jacob1304,sold,26,Packed Ice,-233.59,2026-05-27T10:17:27.597Z
+Yasuosu,Jacob1304,sold,960,Dirt,-2610,2026-05-27T10:17:27.597Z
+Yasuosu,Jacob1304,sold,192,Gravel,-216,2026-05-27T10:16:27.597Z
+Infinicht,Jacob1304,sold,10,Sand,-14.06,2026-05-27T10:16:27.597Z
+Infinicht,Jacob1304,sold,512,Sand,-720,2026-05-27T10:16:27.597Z
+Yasuosu,Jacob1304,bought,1,Oak Leaves,2.42,2026-05-27T10:03:27.597Z
+Yasuosu,Jacob1304,bought,1792,Oak Leaves,4340,2026-05-27T10:03:28.415Z
+Yasuosu,Jacob1304,bought,36,Birch Leaves,87.19,2026-05-27T10:03:28.415Z
+Yasuosu,Jacob1304,bought,64,Birch Leaves,155,2026-05-27T10:02:28.415Z
+Yasuosu,Jacob1304,sold,704,Dark Oak Leaves,-2200,2026-05-27T10:02:28.415Z
+Yasuosu,Jacob1304,bought,800,Azalea Leaves,1875,2026-05-27T09:57:28.415Z
+Yasuosu,Jacob1304,sold,2304,Dark Oak Leaves,-7200,2026-05-27T09:57:28.415Z
+Yasuosu,Jacob1304,bought,1984,Cherry Leaves,4805,2026-05-27T09:55:28.415Z
+Yasuosu,Jacob1304,bought,320,Cherry Log,875,2026-05-27T09:54:28.415Z
+Yasuosu,Jacob1304,sold,1408,Mangrove Log,-13090,2026-05-27T09:54:28.415Z
+Yasuosu,Jacob1304,sold,896,Jungle Log,-3150,2026-05-27T09:54:28.415Z
+Yasuosu,Jacob1304,sold,256,Bricks,-1480,2026-05-27T09:51:29.214Z
+Yasuosu,Jacob1304,sold,256,Tuff,-480,2026-05-27T09:51:29.214Z
+Yasuosu,Jacob1304,sold,960,Deepslate,-780,2026-05-27T09:51:29.214Z
+Yasuosu,Jacob1304,sold,384,Stone,-540,2026-05-27T09:50:29.214Z
+universitieee2,Jacob1304,sold,3,Netherite Ingot,-11400,2026-05-27T08:08:29.214Z
+universitieee2,Jacob1304,bought,3,Netherite Ingot,12150,2026-05-27T07:57:29.214Z
+StonecutterChair,Jacob1304,bought,64,Mushroom Stem,350,2026-05-27T06:26:29.214Z
+StonecutterChair,Jacob1304,bought,64,Red Mushroom Block,290,2026-05-27T06:26:29.215Z
+StonecutterChair,Jacob1304,bought,64,Apple,1408,2026-05-27T03:39:29.215Z
+Zxevi,Jacob1304,sold,50,Experience Bottle,-234.38,2026-05-27T02:23:29.215Z
+Zxevi,Jacob1304,sold,128,Experience Bottle,-600,2026-05-27T02:23:30.031Z
+Sofrita2005,Jacob1304,sold,48,Baked Potato,-45,2026-05-27T01:56:30.031Z
+Sofrita2005,Jacob1304,bought,2,Dragon Breath,180,2026-05-27T01:55:30.031Z
+Sofrita2005,Jacob1304,sold,63,Birch Log,-211.64,2026-05-27T01:54:30.031Z
+Sofrita2005,Jacob1304,sold,61,Oak Log,-204.92,2026-05-27T01:54:30.031Z
+Sofrita2005,Jacob1304,sold,1,Dragon Breath,-85,2026-05-27T01:37:30.031Z
+Sofrita2005,Jacob1304,bought,3,Dragon Breath,270,2026-05-27T01:36:30.031Z
+Sofrita2005,Jacob1304,bought,20,Spider Eye,390,2026-05-27T01:36:30.031Z
+Sofrita2005,Jacob1304,bought,64,Sugar Cane,80,2026-05-27T01:33:30.031Z
+Proletini,Jacob1304,sold,19,Apple,-399,2026-05-26T23:47:30.031Z
+Silonnz,Jacob1304,bought,512,Red Concrete Powder,880,2026-05-26T22:52:30.860Z
+MooDengFan,Jacob1304,bought,256,Jungle Log,920,2026-05-26T22:32:30.861Z
+MooDengFan,Jacob1304,bought,64,Stone,120,2026-05-26T22:19:30.861Z
+YoNoble,Jacob1304,bought,192,Hay Block,3000,2026-05-26T21:55:30.861Z
+Sofrita2005,Jacob1304,bought,64,Feather,700,2026-05-26T21:53:30.861Z
+Sofrita2005,Jacob1304,bought,64,String,100,2026-05-26T21:53:30.861Z
+Sofrita2005,Jacob1304,sold,10,Cobweb,-125,2026-05-26T21:40:30.861Z
+Sofrita2005,Jacob1304,bought,64,Flint,78,2026-05-26T21:39:30.861Z
+Sofrita2005,Jacob1304,bought,10,Cobweb,175,2026-05-26T21:38:30.861Z
+Sofrita2005,Jacob1304,sold,38,Lapis Block,-311.72,2026-05-26T21:35:30.861Z
+Sofrita2005,Jacob1304,bought,38,Lapis Block,314.69,2026-05-26T21:35:31.694Z
+Sofrita2005,Jacob1304,sold,63,Cactus,-73.83,2026-05-26T21:24:31.694Z
+Sofrita2005,Jacob1304,sold,64,Cactus,-75,2026-05-26T21:24:31.695Z
+Sofrita2005,Jacob1304,sold,60,Oak Log,-201.56,2026-05-26T21:20:31.695Z
+Noctua_h,Jacob1304,bought,64,Glow Berries,76,2026-05-26T21:04:31.695Z
+Tea_L0ver,Jacob1304,bought,128,Tuff,300,2026-05-26T20:10:31.695Z
+Sofrita2005,Jacob1304,bought,1,Emerald,210,2026-05-26T19:24:31.695Z
+Sofrita2005,Jacob1304,bought,10,Iron Ingot,275,2026-05-26T19:23:31.695Z
+Sofrita2005,Jacob1304,bought,10,Diamond,510,2026-05-26T19:23:31.695Z
+Sofrita2005,Jacob1304,sold,61,Birch Log,-204.92,2026-05-26T19:20:31.695Z
+Sofrita2005,Jacob1304,sold,63,Oak Log,-211.64,2026-05-26T19:20:49.488Z
+Sofrita2005,Jacob1304,sold,4,Apple,-84,2026-05-26T19:20:49.489Z
+Zxevi,Jacob1304,bought,192,Sand,300,2026-05-26T19:18:49.489Z
+biloblue,Jacob1304,bought,40,Ancient Debris,78200,2026-05-26T19:16:49.489Z
+Sofrita2005,Jacob1304,bought,64,Baked Potato,64,2026-05-26T19:00:49.489Z
+Sofrita2005,Jacob1304,sold,64,Oak Log,-215,2026-05-26T18:59:49.489Z
+Sofrita2005,Jacob1304,sold,62,Oak Log,-208.28,2026-05-26T18:52:49.489Z
+BBK5488,Jacob1304,bought,11,Experience Bottle,81.64,2026-05-26T18:40:49.489Z
+BBK5488,Jacob1304,bought,704,Experience Bottle,5225,2026-05-26T18:40:49.489Z
+gk2yt,Jacob1304,sold,30,Iron Ingot,-795,2026-05-26T18:40:49.489Z
+gk2yt,Jacob1304,bought,10,Iron Ingot,275,2026-05-26T18:39:50.348Z
+BBK5488,Jacob1304,bought,448,Experience Bottle,3325,2026-05-26T18:32:50.349Z
+BBK5488,Jacob1304,bought,64,Carrot,48,2026-05-26T18:30:50.349Z
+Mertilizm,Jacob1304,bought,128,Red Nether Bricks,800,2026-05-26T18:28:50.349Z
+Alithium12,Jacob1304,sold,17,Gray Wool,-119.53,2026-05-26T18:25:50.349Z
+Alithium12,Jacob1304,sold,64,Gray Wool,-450,2026-05-26T18:25:50.349Z
+rol1er_the_great,Jacob1304,sold,1024,Grass Block,-3600,2026-05-26T17:03:50.349Z
+rol1er_the_great,Jacob1304,sold,1216,Grass Block,-4275,2026-05-26T16:52:50.349Z
+rol1er_the_great,Jacob1304,sold,1280,Dirt,-3480,2026-05-26T16:28:51.103Z
+Biryanicus,Jacob1304,bought,128,Mangrove Leaves,310,2026-05-26T16:10:51.103Z
+Altra_Pendragon,Jacob1304,bought,1152,Feather,12600,2026-05-26T16:08:51.104Z
+rol1er_the_great,Jacob1304,sold,3,Cherry Log,-7.97,2026-05-26T15:51:51.104Z
+rol1er_the_great,Jacob1304,sold,192,Cherry Log,-510,2026-05-26T15:51:51.104Z
+rol1er_the_great,Jacob1304,sold,64,Birch Log,-215,2026-05-26T15:51:51.104Z
+rol1er_the_great,Jacob1304,sold,13,Spruce Log,-33.52,2026-05-26T15:44:51.104Z
+rol1er_the_great,Jacob1304,sold,576,Spruce Log,-1485,2026-05-26T15:44:51.104Z
+Bigfooot00,Jacob1304,sold,1,Shroomlight,-53,2026-05-26T12:59:51.104Z
+Bigfooot00,Jacob1304,bought,3,Shroomlight,174,2026-05-26T12:59:51.104Z
+Giraffecat77,Jacob1304,sold,2432,Sand,-3420,2026-05-26T12:17:51.941Z
+Yasuosu,Jacob1304,bought,3024,Crimson Stem,17482.5,2026-05-26T11:23:51.941Z
+Yasuosu,Jacob1304,bought,5,Warped Stem,28.91,2026-05-26T11:18:51.941Z
+Yasuosu,Jacob1304,bought,960,Warped Stem,5550,2026-05-26T11:18:51.941Z
+Yasuosu,Jacob1304,sold,384,Diorite,-720,2026-05-26T11:18:51.941Z
+Yasuosu,Jacob1304,sold,64,Soul Soil,-415,2026-05-26T11:18:51.941Z
+Yasuosu,Jacob1304,sold,256,Netherrack,-160,2026-05-26T11:18:51.941Z
+Yasuosu,Jacob1304,sold,1728,Red Nether Bricks,-9450,2026-05-26T11:18:51.941Z
+Yasuosu,Jacob1304,sold,1504,Stone Bricks,-2115,2026-05-26T11:11:51.941Z
+Yasuosu,Jacob1304,sold,512,Tuff,-960,2026-05-26T11:11:51.941Z
+Yasuosu,Jacob1304,sold,320,Diorite,-600,2026-05-26T11:10:52.756Z
+Giraffecat77,Jacob1304,sold,320,Sandstone,-1500,2026-05-26T11:09:52.756Z
+Giraffecat77,Jacob1304,sold,1,Netherite Ingot,-3800,2026-05-26T11:09:52.757Z
+Yasuosu,Jacob1304,sold,40,Andesite,-90.63,2026-05-26T11:05:52.757Z
+Yasuosu,Jacob1304,sold,640,Andesite,-1450,2026-05-26T11:05:52.757Z
+Yasuosu,Jacob1304,sold,51,Smooth Stone,-119.53,2026-05-26T11:05:52.757Z
+Yasuosu,Jacob1304,sold,1152,Smooth Stone,-2700,2026-05-26T11:05:52.757Z
+Yasuosu,Jacob1304,sold,512,Deepslate,-416,2026-05-26T11:05:52.757Z
+Infinicht,Jacob1304,bought,28,Cooked Beef,404.69,2026-05-26T11:01:52.757Z
+grimAuxiliatrix9,Jacob1304,bought,1088,Dirt,3043,2026-05-26T10:47:52.757Z
+grimAuxiliatrix9,Jacob1304,sold,28,Cooked Beef,-218.75,2026-05-26T10:46:53.594Z
+grimAuxiliatrix9,Jacob1304,bought,10,Diamond,510,2026-05-26T10:46:53.594Z
+StonecutterChair,Jacob1304,bought,64,Warped Stem,370,2026-05-26T09:38:53.594Z
+T1_Cheap,Jacob1304,bought,64,Tuff,150,2026-05-26T05:35:53.594Z
+Jakkascid1,Jacob1304,bought,512,Experience Bottle,4400,2026-05-26T05:34:53.594Z
+Jakkascid1,Jacob1304,sold,128,Wheat Seeds,-58,2026-05-26T05:33:53.594Z
+Jakkascid1,Jacob1304,bought,70,Iron Ingot,1925,2026-05-26T05:33:53.594Z
+Jakkascid1,Jacob1304,sold,9,Lapis Block,-73.83,2026-05-26T05:33:53.594Z
+Jakkascid1,Jacob1304,sold,58,Oak Log,-194.84,2026-05-26T05:33:53.594Z
+Jakkascid1,Jacob1304,sold,64,Oak Log,-215,2026-05-26T05:33:54.434Z
+Jakkascid1,Jacob1304,sold,3,Coal Block,-39.84,2026-05-26T05:32:54.434Z
+Jakkascid1,Jacob1304,sold,80,Stone Bricks,-112.5,2026-05-26T05:32:54.435Z
+Jakkascid1,Jacob1304,sold,192,Stone,-270,2026-05-26T05:32:54.435Z
+Jakkascid1,Jacob1304,sold,108,Copper Block,-1080,2026-05-26T05:31:54.435Z
+Jakkascid1,Jacob1304,sold,32,Leather,-225,2026-05-26T05:24:54.451Z
+Jakkascid1,Jacob1304,sold,5,Egg,-6.25,2026-05-26T05:24:54.452Z
+Jakkascid1,Jacob1304,sold,128,Feather,-1360,2026-05-26T05:24:54.452Z
+Jakkascid1,Jacob1304,sold,23,Apple,-483,2026-05-26T05:23:54.452Z
+Jakkascid1,Jacob1304,sold,1690,Sugar Cane,-1690,2026-05-26T05:23:54.452Z
+StonecutterChair,Jacob1304,bought,8,Glowstone,240,2026-05-26T05:21:55.225Z
+Jakkascid1,Jacob1304,sold,18,Pumpkin,-14.06,2026-05-26T05:20:55.225Z
+Jakkascid1,Jacob1304,sold,544,Egg,-680,2026-05-26T05:05:55.225Z
+Jakkascid1,Jacob1304,sold,192,Hay Block,-2700,2026-05-26T04:58:55.225Z
+Jakkascid1,Jacob1304,sold,1,Pumpkin,-0.78,2026-05-26T04:57:55.225Z
+Jakkascid1,Jacob1304,sold,192,Pumpkin,-150,2026-05-26T04:57:55.225Z
+Jakkascid1,Jacob1304,sold,13,Melon Slice,-11.17,2026-05-26T04:57:55.226Z
+Jakkascid1,Jacob1304,sold,832,Melon Slice,-715,2026-05-26T04:57:55.226Z
+T1_Cheap,Jacob1304,bought,192,Spruce Log,510,2026-05-26T04:05:55.226Z
+Tylerhello,Jacob1304,sold,38,Emerald,-7790,2026-05-26T03:47:55.226Z
+Sleepy_maybe,Jacob1304,bought,47,Hay Block,734.38,2026-05-26T01:35:56.064Z
+Mertilizm,Jacob1304,bought,256,Cobbled Deepslate,240,2026-05-26T01:11:56.064Z
+Mertilizm,Jacob1304,bought,256,Diorite,508,2026-05-26T01:09:56.064Z
+Mertilizm,Jacob1304,bought,192,Dark Oak Log,510,2026-05-26T01:09:56.064Z
+Mertilizm,Jacob1304,bought,128,Spruce Log,340,2026-05-26T01:09:56.064Z
+Tea_L0ver,Jacob1304,bought,64,Cyan Concrete Powder,110,2026-05-26T00:53:56.064Z
+Jakkascid1,Jacob1304,sold,49,Melon Slice,-42.11,2026-05-26T00:53:56.065Z
+Jakkascid1,Jacob1304,sold,192,Melon Slice,-165,2026-05-26T00:53:56.065Z
+Jakkascid1,Jacob1304,sold,17,Hay Block,-239.06,2026-05-26T00:52:56.065Z
+Tea_L0ver,Jacob1304,bought,128,Stone Bricks,240,2026-05-26T00:38:56.065Z
+Tea_L0ver,Jacob1304,bought,64,Stone,120,2026-05-26T00:38:56.901Z
+Tea_L0ver,Jacob1304,bought,448,Andesite,1134,2026-05-26T00:38:56.902Z
+Tea_L0ver,Jacob1304,bought,320,Tuff,750,2026-05-25T23:51:56.902Z
+KingTurtle168,Jacob1304,bought,436,Stone Bricks,817.5,2026-05-25T23:49:56.902Z
+Tea_L0ver,Jacob1304,bought,8,Lodestone,656,2026-05-25T23:35:56.902Z
+Tea_L0ver,Jacob1304,bought,128,Smooth Stone,380,2026-05-25T23:35:56.902Z
+Tea_L0ver,Jacob1304,bought,128,Stone,240,2026-05-25T23:35:56.902Z
+Tea_L0ver,Jacob1304,bought,192,Gravel,360,2026-05-25T23:34:56.902Z
+Tea_L0ver,Jacob1304,bought,192,Andesite,486,2026-05-25T23:34:56.902Z
+Tea_L0ver,Jacob1304,sold,192,Red Terracotta,-510,2026-05-25T23:21:57.690Z
+Tea_L0ver,Jacob1304,sold,192,Jungle Log,-675,2026-05-25T23:21:57.691Z
+Tea_L0ver,Jacob1304,sold,64,Spruce Sapling,-165,2026-05-25T23:20:57.691Z
+Tea_L0ver,Jacob1304,bought,64,Spruce Sapling,170,2026-05-25T23:20:57.691Z
+Jakkascid1,Jacob1304,sold,256,Melon Slice,-220,2026-05-25T23:19:57.691Z
+Jakkascid1,Jacob1304,sold,30,Hay Block,-421.88,2026-05-25T23:18:57.691Z
+Tea_L0ver,Jacob1304,sold,37,Podzol,-116.78,2026-05-25T23:15:57.691Z
+Tea_L0ver,Jacob1304,sold,192,Podzol,-606,2026-05-25T23:15:57.691Z
+Tea_L0ver,Jacob1304,bought,64,Podzol,205,2026-05-25T23:15:57.691Z
+Tea_L0ver,Jacob1304,sold,12,Cobblestone,-15,2026-05-25T23:11:57.691Z
+Tea_L0ver,Jacob1304,bought,12,Cobblestone,15.94,2026-05-25T23:11:58.499Z
+Mertilizm,Jacob1304,bought,64,Feather,700,2026-05-25T23:02:58.499Z
+Mertilizm,Jacob1304,bought,64,String,100,2026-05-25T23:02:58.499Z
+Mertilizm,Jacob1304,bought,64,Packed Mud,395,2026-05-25T23:01:58.499Z
+Mertilizm,Jacob1304,bought,128,Mud,478,2026-05-25T23:01:58.499Z
+Mertilizm,Jacob1304,bought,320,Sandstone,1750,2026-05-25T23:01:58.499Z
+Mertilizm,Jacob1304,bought,10,Book,150,2026-05-25T23:00:58.500Z
+Mertilizm,Jacob1304,bought,128,Magenta Terracotta,350,2026-05-25T22:59:58.500Z
+Mertilizm,Jacob1304,bought,13,Blue Terracotta,35.55,2026-05-25T22:59:58.500Z
+Mertilizm,Jacob1304,bought,128,Blue Terracotta,350,2026-05-25T22:59:58.500Z
+Mertilizm,Jacob1304,bought,64,Leather,550,2026-05-25T22:57:59.333Z
+Mertilizm,Jacob1304,bought,64,Spruce Log,170,2026-05-25T22:57:59.333Z
+Mertilizm,Jacob1304,bought,256,Birch Log,880,2026-05-25T22:56:59.333Z
+Jakkascid1,Jacob1304,sold,7,Lantern,-164.06,2026-05-25T22:25:59.333Z
+Jakkascid1,Jacob1304,bought,64,Granite,64,2026-05-25T22:24:59.333Z
+PaulPanzer007,Jacob1304,bought,256,Netherrack,180,2026-05-25T21:54:59.333Z
+PaulPanzer007,Jacob1304,bought,128,Crimson Stem,740,2026-05-25T21:54:59.333Z
+deepdragans,Jacob1304,bought,186,Ender Pearl,27900,2026-05-25T20:31:59.334Z
+deepdragans,Jacob1304,sold,1,Ender Pearl,-120,2026-05-25T20:31:59.334Z
+C00kieM0nster__,Jacob1304,sold,2,Gunpowder,-180,2026-05-25T20:05:00.134Z
+C00kieM0nster__,Jacob1304,bought,130,Gunpowder,14287,2026-05-25T20:05:00.134Z
+KekyoinRamsay,Jacob1304,bought,3,Lodestone,246,2026-05-25T19:42:00.134Z
+Moonmaster1000,Jacob1304,sold,64,Dirt,-174,2026-05-25T18:47:00.134Z
+Moonmaster1000,Jacob1304,bought,256,Pointed Dripstone,288,2026-05-25T18:46:00.134Z
+RealSwagGuest,Jacob1304,sold,45,Magenta Wool,-316.41,2026-05-25T18:35:00.134Z
+RealSwagGuest,Jacob1304,sold,64,Orange Wool,-450,2026-05-25T18:35:00.134Z
+DaOldGuard,Jacob1304,bought,256,Experience Bottle,1900,2026-05-25T18:31:00.134Z
+DaOldGuard,Jacob1304,bought,1,Netherite Ingot,4050,2026-05-25T18:31:00.134Z
+DaOldGuard,Jacob1304,sold,34,Bamboo,-53.13,2026-05-25T18:30:00.134Z
+DaOldGuard,Jacob1304,sold,1152,Bamboo,-1800,2026-05-25T18:30:00.935Z
+l0adinguy,Jacob1304,bought,64,Leather,550,2026-05-25T18:29:00.935Z
+l0adinguy,Jacob1304,bought,64,Sugar Cane,80,2026-05-25T18:28:00.935Z
+Teddy56,Jacob1304,sold,64,Cactus,-75,2026-05-25T18:08:00.935Z
+Teddy56,Jacob1304,bought,64,Cactus,80,2026-05-25T18:08:00.935Z
+Teddy56,Jacob1304,sold,1,Cactus,-1.17,2026-05-25T18:08:00.935Z
+RealSwagGuest,Jacob1304,bought,128,Cactus,160,2026-05-25T18:07:00.935Z
+RealSwagGuest,Jacob1304,sold,64,Experience Bottle,-300,2026-05-25T18:03:00.935Z
+rol1er_the_great,Jacob1304,sold,1152,Dirt,-3132,2026-05-25T17:45:00.935Z
+RealSwagGuest,Jacob1304,bought,192,Sand,300,2026-05-25T17:34:00.935Z
+RealSwagGuest,Jacob1304,sold,64,Soul Sand,-240,2026-05-25T17:32:01.836Z
+RealSwagGuest,Jacob1304,sold,64,Quartz Block,-401,2026-05-25T17:32:01.837Z
+RealSwagGuest,Jacob1304,sold,192,Spruce Log,-495,2026-05-25T17:32:01.837Z
+kalense,Jacob1304,bought,70,Blaze Rod,4060,2026-05-25T17:13:01.837Z
+Techixyi,Jacob1304,sold,128,Experience Bottle,-600,2026-05-25T17:13:01.837Z
+Techixyi,Jacob1304,bought,128,Experience Bottle,950,2026-05-25T17:13:01.837Z
+Techixyi,Jacob1304,sold,64,Beetroot,-100,2026-05-25T17:08:01.837Z
+RealSwagGuest,Jacob1304,sold,37,Netherrack,-23.13,2026-05-25T17:08:01.837Z
+RealSwagGuest,Jacob1304,sold,320,Netherrack,-200,2026-05-25T17:08:01.837Z
+RealSwagGuest,Jacob1304,bought,64,Netherrack,45,2026-05-25T17:07:01.838Z
+kalense,Jacob1304,bought,192,Copper Block,1950,2026-05-25T17:04:02.736Z
+kalense,Jacob1304,sold,128,Smooth Basalt,-440,2026-05-25T17:04:02.737Z
+kalense,Jacob1304,bought,128,Smooth Basalt,450,2026-05-25T17:04:02.737Z
+kalense,Jacob1304,bought,1152,Deepslate,1170,2026-05-25T17:04:02.737Z
+kalense,Jacob1304,bought,576,Smooth Stone,1710,2026-05-25T17:03:02.737Z
+Moonmaster1000,Jacob1304,bought,128,Experience Bottle,950,2026-05-25T16:52:02.737Z
+VEoN_Marten,Jacob1304,sold,64,Smooth Basalt,-220,2026-05-25T16:38:02.737Z
+VEoN_Marten,Jacob1304,bought,64,Smooth Basalt,225,2026-05-25T16:38:02.737Z
+rol1er_the_great,Jacob1304,sold,1088,Dirt,-2958,2026-05-25T16:35:02.737Z
+Nagito_k0m43d4,Jacob1304,bought,128,Dark Oak Log,340,2026-05-25T16:19:02.737Z
+Moonmaster1000,Jacob1304,sold,63,Jungle Log,-221.48,2026-05-25T16:18:04.037Z
+Moonmaster1000,Jacob1304,bought,64,Jungle Sapling,210,2026-05-25T16:00:04.037Z
+Moonmaster1000,Jacob1304,sold,42,Spruce Log,-108.28,2026-05-25T16:00:04.038Z
+Moonmaster1000,Jacob1304,sold,192,Spruce Log,-495,2026-05-25T16:00:04.038Z
+NavyCircle21209,Jacob1304,bought,1084,Pumpkin,2032.5,2026-05-25T15:53:04.038Z
+NavyCircle21209,Jacob1304,bought,26,Beetroot,44.69,2026-05-25T15:53:04.038Z
+NavyCircle21209,Jacob1304,bought,256,Beetroot,440,2026-05-25T15:53:04.038Z
+NavyCircle21209,Jacob1304,bought,1856,Pumpkin,3480,2026-05-25T15:43:04.038Z
+Aqua455531,Jacob1304,bought,1216,Honeycomb Block,7410,2026-05-25T15:03:04.038Z
+Aqua455531,Jacob1304,bought,832,Copper Block,8450,2026-05-25T15:03:04.838Z
+Mertilizm,Jacob1304,bought,64,Soul Soil,419,2026-05-25T14:25:04.838Z
+Mertilizm,Jacob1304,bought,64,Dripstone Block,320,2026-05-25T14:25:04.838Z
+Mertilizm,Jacob1304,bought,64,Warped Stem,370,2026-05-25T14:25:04.838Z
+Mertilizm,Jacob1304,bought,448,Diorite,889,2026-05-25T14:24:04.838Z
+Mertilizm,Jacob1304,bought,100,Iron Ingot,2750,2026-05-25T14:22:04.839Z
+Mertilizm,Jacob1304,bought,20,Gold Ingot,2040,2026-05-25T14:21:04.839Z
+Mertilizm,Jacob1304,bought,128,Birch Log,440,2026-05-25T14:21:04.839Z
+Mertilizm,Jacob1304,bought,384,Dark Oak Log,1020,2026-05-25T14:21:05.840Z
+Mertilizm,Jacob1304,bought,64,Spruce Leaves,155,2026-05-25T14:20:05.840Z
+l0adinguy,Jacob1304,bought,200,Diamond,10200,2026-05-25T14:15:05.840Z
+Alithium12,Jacob1304,sold,4,Gray Wool,-28.13,2026-05-25T13:16:05.840Z
+gbfoust99,Jacob1304,bought,10,Gunpowder,1099,2026-05-25T12:35:05.840Z
+MrSven007,Jacob1304,sold,22,Magenta Terracotta,-58.44,2026-05-25T12:33:05.840Z
+MrSven007,Jacob1304,sold,384,Magenta Terracotta,-1020,2026-05-25T12:33:05.841Z
+CalebTheSecond,Jacob1304,bought,30,Gold Ingot,3060,2026-05-25T10:37:05.841Z
+CalebTheSecond,Jacob1304,sold,17,Light Blue Wool,-119.53,2026-05-25T10:36:05.841Z
+CalebTheSecond,Jacob1304,sold,128,Light Blue Wool,-900,2026-05-25T10:36:05.841Z
+Infinicht,Jacob1304,bought,16,Pearlescent Froglight,125,2026-05-25T10:36:06.741Z
+CalebTheSecond,Jacob1304,bought,20,Iron Ingot,550,2026-05-25T10:08:06.741Z
+CalebTheSecond,Jacob1304,bought,10,Gold Ingot,1020,2026-05-25T10:08:06.741Z
+CalebTheSecond,Jacob1304,bought,64,Redstone Block,1250,2026-05-25T10:08:06.741Z
+CalebTheSecond,Jacob1304,sold,64,Light Blue Wool,-450,2026-05-25T10:08:06.741Z
+CalebTheSecond,Jacob1304,sold,256,Cyan Wool,-1800,2026-05-25T10:08:06.741Z
+Infinicht,Jacob1304,sold,24,Baked Potato,-22.5,2026-05-25T10:07:06.741Z
+Infinicht,Jacob1304,bought,42,Cooked Beef,607.03,2026-05-25T10:07:06.741Z
+Infinicht,Jacob1304,bought,128,Cooked Beef,1850,2026-05-25T10:07:06.741Z
+CalebTheSecond,Jacob1304,bought,40,Iron Ingot,1100,2026-05-25T09:49:07.543Z
+CalebTheSecond,Jacob1304,sold,45,Cyan Wool,-316.41,2026-05-25T09:49:07.544Z
+CalebTheSecond,Jacob1304,sold,384,Cyan Wool,-2700,2026-05-25T09:49:07.544Z
+VEoN_Marten,Jacob1304,bought,10,Slime Ball,345,2026-05-25T09:16:07.544Z
+VEoN_Marten,Jacob1304,bought,30,Iron Ingot,825,2026-05-25T08:36:07.544Z
+CalebTheSecond,Jacob1304,sold,60,Cyan Wool,-421.88,2026-05-25T08:06:07.544Z
+CalebTheSecond,Jacob1304,sold,192,Cyan Wool,-1350,2026-05-25T08:06:07.544Z
+CalebTheSecond,Jacob1304,sold,28,Red Wool,-196.88,2026-05-25T08:06:07.544Z
+CalebTheSecond,Jacob1304,sold,53,Cyan Wool,-372.66,2026-05-25T08:00:07.544Z
+CalebTheSecond,Jacob1304,sold,448,Cyan Wool,-3150,2026-05-25T08:00:08.444Z
+CalebTheSecond,Jacob1304,sold,11,Light Blue Wool,-77.34,2026-05-25T08:00:08.444Z
+CalebTheSecond,Jacob1304,sold,256,Light Blue Wool,-1800,2026-05-25T08:00:08.444Z
+CalebTheSecond,Jacob1304,sold,18,Cyan Wool,-126.56,2026-05-25T07:54:08.445Z
+CalebTheSecond,Jacob1304,sold,640,Cyan Wool,-4500,2026-05-25T07:54:08.445Z
+CalebTheSecond,Jacob1304,sold,6,Cyan Wool,-42.19,2026-05-25T07:42:08.445Z
+CalebTheSecond,Jacob1304,sold,192,Light Blue Wool,-1350,2026-05-25T07:42:08.445Z
+CalebTheSecond,Jacob1304,sold,5,Light Blue Wool,-35.16,2026-05-25T07:26:09.243Z
+CalebTheSecond,Jacob1304,bought,50,Iron Ingot,1375,2026-05-25T07:12:09.244Z
+CalebTheSecond,Jacob1304,bought,40,Gold Ingot,4080,2026-05-25T07:12:09.244Z
+CalebTheSecond,Jacob1304,sold,960,Light Blue Wool,-6750,2026-05-25T07:11:09.244Z
+Luabee,Jacob1304,bought,768,Experience Bottle,5700,2026-05-25T06:58:09.244Z
+CalebTheSecond,Jacob1304,bought,20,Gold Ingot,2040,2026-05-25T06:56:09.244Z
+Hamburger___Man,Jacob1304,bought,3306,Hay Block,51656.25,2026-05-25T05:02:09.244Z
+Hamburger___Man,Jacob1304,sold,256,Hay Block,-3600,2026-05-25T04:59:09.244Z
+SirElite360,Jacob1304,bought,1,Ender Pearl,150,2026-05-25T04:58:09.244Z
+Normal_DragonMan,Jacob1304,sold,1,Cactus,-1.17,2026-05-25T04:02:10.045Z
+Normal_DragonMan,Jacob1304,sold,128,Cactus,-150,2026-05-25T04:02:10.046Z
+Normal_DragonMan,Jacob1304,sold,128,Bone Block,-800,2026-05-25T04:02:10.046Z
+Normal_DragonMan,Jacob1304,sold,192,Scaffolding,-216,2026-05-25T04:01:10.046Z
+Normal_DragonMan,Jacob1304,sold,14,Coal Block,-185.94,2026-05-25T04:01:10.046Z
+Normal_DragonMan,Jacob1304,sold,64,Coal Block,-850,2026-05-25T04:01:10.046Z
+Normal_DragonMan,Jacob1304,sold,54,Birch Log,-181.41,2026-05-25T04:01:10.046Z
+Normal_DragonMan,Jacob1304,sold,128,Birch Log,-430,2026-05-25T04:01:10.046Z
+Normal_DragonMan,Jacob1304,sold,64,Experience Bottle,-300,2026-05-25T04:00:10.046Z
+StufdMonkey,Jacob1304,bought,2,Ender Pearl,300,2026-05-25T03:55:10.046Z
+Normal_DragonMan,Jacob1304,sold,64,Wheat Seeds,-29,2026-05-25T03:37:10.946Z
+Normal_DragonMan,Jacob1304,sold,64,Cocoa Beans,-43,2026-05-25T03:37:10.946Z
+Normal_DragonMan,Jacob1304,sold,64,Apple,-1344,2026-05-25T03:36:10.946Z
+Normal_DragonMan,Jacob1304,sold,64,Sweet Berries,-25,2026-05-25T03:36:10.946Z
+Normal_DragonMan,Jacob1304,sold,128,Cooked Beef,-1000,2026-05-25T03:36:10.946Z
+Normal_DragonMan,Jacob1304,sold,16,Egg,-20,2026-05-25T03:36:10.946Z
+Normal_DragonMan,Jacob1304,sold,64,Sugar Cane,-64,2026-05-25T03:36:10.946Z
+Normal_DragonMan,Jacob1304,sold,64,Bamboo,-100,2026-05-25T03:35:10.946Z
+Normal_DragonMan,Jacob1304,sold,64,Cherry Sapling,-250,2026-05-25T03:35:10.946Z
+Normal_DragonMan,Jacob1304,sold,32,Mangrove Propagule,-200,2026-05-25T03:35:10.947Z
+Normal_DragonMan,Jacob1304,sold,64,Acacia Sapling,-280,2026-05-25T03:35:11.848Z
+Normal_DragonMan,Jacob1304,sold,64,Birch Sapling,-200,2026-05-25T03:35:11.848Z
+Normal_DragonMan,Jacob1304,sold,37,Dark Oak Sapling,-104.06,2026-05-25T03:35:11.848Z
+Normal_DragonMan,Jacob1304,sold,64,Oak Sapling,-200,2026-05-25T03:35:11.848Z
+Normal_DragonMan,Jacob1304,sold,64,Acacia Log,-245,2026-05-25T03:35:11.848Z
+Normal_DragonMan,Jacob1304,sold,61,Cherry Log,-162.03,2026-05-25T03:35:11.848Z
+Normal_DragonMan,Jacob1304,sold,64,Oak Log,-215,2026-05-25T03:35:11.848Z
+Normal_DragonMan,Jacob1304,sold,1,Shulker Box,-9700,2026-05-25T03:22:11.848Z
+Normal_DragonMan,Jacob1304,sold,192,Book,-2688,2026-05-25T03:21:11.848Z
+Normal_DragonMan,Jacob1304,sold,128,Copper Block,-1280,2026-05-25T03:21:11.848Z
+Normal_DragonMan,Jacob1304,sold,192,Bone Block,-1200,2026-05-25T03:20:12.649Z
+Normal_DragonMan,Jacob1304,sold,128,Lapis Block,-1050,2026-05-25T02:39:12.649Z
+Normal_DragonMan,Jacob1304,sold,320,Copper Block,-3200,2026-05-25T02:39:12.649Z
+Normal_DragonMan,Jacob1304,sold,256,Experience Bottle,-1200,2026-05-25T02:38:12.649Z
+Chidius,Jacob1304,bought,18,Dirt,50.34,2026-05-25T02:38:12.650Z
+Chidius,Jacob1304,bought,1664,Dirt,4654,2026-05-25T02:38:12.650Z
+Chidius,Jacob1304,sold,256,Coarse Dirt,-400,2026-05-25T02:38:12.650Z
+Chidius,Jacob1304,bought,256,Coarse Dirt,440,2026-05-25T02:38:12.650Z
+Chidius,Jacob1304,bought,1728,Dirt,4833,2026-05-25T02:24:12.650Z
+Chidius,Jacob1304,bought,46,Dirt,128.66,2026-05-25T02:24:13.549Z
+Silonnz,Jacob1304,bought,1,Beacon,30000,2026-05-25T01:24:13.549Z
+nanamustdie,Jacob1304,bought,78,Tnt,18720,2026-05-24T23:58:13.549Z
+nanamustdie,Jacob1304,sold,2,Cobweb,-25,2026-05-24T23:57:13.549Z
+nanamustdie,Jacob1304,bought,130,Cobweb,2275,2026-05-24T23:57:13.549Z
+nanamustdie,Jacob1304,bought,3,Shulker Box,29400,2026-05-24T23:57:13.549Z
+VelvetyCake,Jacob1304,bought,192,Hay Block,3000,2026-05-24T23:11:13.550Z
+MinervaThorn,Jacob1304,bought,64,Mycelium,130,2026-05-24T22:20:13.550Z
+Nagito_k0m43d4,Jacob1304,bought,64,Baked Potato,64,2026-05-24T22:19:13.550Z
+Alithium12,Jacob1304,sold,34,Gray Wool,-239.06,2026-05-24T22:09:14.349Z
+Alithium12,Jacob1304,sold,1280,Gray Wool,-9000,2026-05-24T22:09:14.350Z
+Alithium12,Jacob1304,sold,6,Gray Wool,-42.19,2026-05-24T22:05:14.350Z
+Alithium12,Jacob1304,sold,57,Light Gray Wool,-400.78,2026-05-24T22:05:14.350Z
+Alithium12,Jacob1304,sold,1280,Light Gray Wool,-9000,2026-05-24T22:05:14.350Z
+prince_emperor,Jacob1304,sold,15,Red Wool,-105.47,2026-05-24T21:42:14.350Z
+gbfoust99,Jacob1304,sold,64,Gilded Blackstone,-9600,2026-05-24T21:12:14.350Z
+gbfoust99,Jacob1304,bought,64,Gilded Blackstone,12800,2026-05-24T21:10:14.350Z
+SirElite360,Jacob1304,bought,64,Cooked Beef,925,2026-05-24T21:01:14.350Z
+SirElite360,Jacob1304,sold,39,Spider Eye,-643.5,2026-05-24T21:01:14.350Z
+Saxn_,Jacob1304,bought,3392,Glass,15900,2026-05-24T20:37:15.150Z
+generalskeleto2,Jacob1304,bought,1984,Sand,3100,2026-05-24T20:17:15.150Z
+Infinicht,Jacob1304,bought,14,Cooked Beef,202.34,2026-05-24T20:05:15.150Z
+Infinicht,Jacob1304,bought,8,Cooked Beef,115.63,2026-05-24T20:04:15.151Z
+Infinicht,Jacob1304,bought,192,Cooked Beef,2775,2026-05-24T20:04:15.151Z
+Infinicht,Jacob1304,bought,2816,Cooked Beef,40700,2026-05-24T19:24:15.151Z
+Infinicht,Jacob1304,sold,4,Hay Block,-56.25,2026-05-24T19:23:15.151Z
+ZAXCHSO,Jacob1304,bought,64,Glass,300,2026-05-24T18:52:15.151Z
+Aqua455531,Jacob1304,bought,20,Diamond,1020,2026-05-24T18:40:15.151Z
+KingTurtle168,Jacob1304,bought,894,Stone Bricks,1676.25,2026-05-24T18:06:15.151Z
+Ganondorfer,Jacob1304,bought,64,Spruce Log,170,2026-05-24T17:54:15.951Z
+Maulladora,Jacob1304,bought,70,Cobweb,1225,2026-05-24T17:32:15.951Z
+Maulladora,Jacob1304,bought,64,Tnt,15360,2026-05-24T17:32:15.951Z
+SkipiusTG,Jacob1304,bought,1088,Grass Block,5100,2026-05-24T16:14:15.951Z
+KingTurtle168,Jacob1304,bought,320,Sand,500,2026-05-24T16:12:15.951Z
+SkipiusTG,Jacob1304,bought,704,Grass Block,3300,2026-05-24T16:07:15.951Z
+AlarmingDoc,Jacob1304,sold,6,Magma Block,-18.28,2026-05-24T16:07:15.951Z
+AlarmingDoc,Jacob1304,sold,320,Netherrack,-200,2026-05-24T16:07:15.952Z
+Giraffecat77,Jacob1304,bought,1,Shulker Box,9800,2026-05-24T16:06:15.952Z
+Giraffecat77,Jacob1304,sold,192,Glass,-750,2026-05-24T16:06:15.952Z
+KingTurtle168,Jacob1304,bought,512,Sand,800,2026-05-24T15:54:16.852Z
+KingTurtle168,Jacob1304,bought,3,Sponge,7500,2026-05-24T15:51:16.854Z
+AlarmingDoc,Jacob1304,sold,16,Pearlescent Froglight,-87.5,2026-05-24T15:42:16.854Z
+Giraffecat77,Jacob1304,bought,64,Hay Block,1000,2026-05-24T15:41:16.854Z
+Giraffecat77,Jacob1304,sold,53,Hay Block,-745.31,2026-05-24T15:41:16.854Z
+Giraffecat77,Jacob1304,bought,192,Hay Block,3000,2026-05-24T15:36:16.854Z
+Silonnz,Jacob1304,bought,192,Packed Mud,1185,2026-05-24T15:30:16.854Z
+SonsyPython7532,Jacob1304,sold,64,Obsidian,-750,2026-05-24T15:25:16.854Z
+Silonnz,Jacob1304,bought,320,Packed Mud,1975,2026-05-24T15:22:16.854Z
+rol1er_the_great,Jacob1304,sold,16,Dirt,-43.5,2026-05-24T15:21:16.855Z
+Silonnz,Jacob1304,bought,448,Packed Mud,2765,2026-05-24T15:07:17.655Z
+Silonnz,Jacob1304,bought,448,Smooth Stone,1330,2026-05-24T15:06:17.655Z
+Infinicht,Jacob1304,sold,2796,Hay Block,-39318.75,2026-05-24T14:07:17.655Z
+Giraffecat77,Jacob1304,sold,896,Red Nether Bricks,-4900,2026-05-24T12:53:17.655Z
+Giraffecat77,Jacob1304,sold,1280,Magenta Wool,-9000,2026-05-24T12:43:17.655Z
+Giraffecat77,Jacob1304,sold,1024,Yellow Wool,-7200,2026-05-24T12:42:17.655Z
+Giraffecat77,Jacob1304,sold,1216,Green Wool,-8550,2026-05-24T12:42:17.655Z
+Giraffecat77,Jacob1304,sold,384,Red Wool,-2700,2026-05-24T12:42:17.656Z
+Giraffecat77,Jacob1304,sold,2176,Green Wool,-15300,2026-05-24T12:37:17.656Z
+FunneMonke123,Jacob1304,bought,64,Obsidian,800,2026-05-24T12:36:18.556Z
+FunneMonke123,Jacob1304,bought,10,Blaze Powder,310,2026-05-24T12:36:18.556Z
+FunneMonke123,Jacob1304,bought,1,Ender Pearl,150,2026-05-24T12:36:18.556Z
+Giraffecat77,Jacob1304,sold,576,Yellow Wool,-4050,2026-05-24T12:35:18.556Z
+Giraffecat77,Jacob1304,sold,152,Red Wool,-1068.75,2026-05-24T12:35:18.556Z
+Giraffecat77,Jacob1304,bought,29,Verdant Froglight,226.56,2026-05-24T12:19:18.556Z
+Giraffecat77,Jacob1304,bought,576,Verdant Froglight,4500,2026-05-24T12:19:18.556Z
+Giraffecat77,Jacob1304,bought,9,Pearlescent Froglight,70.31,2026-05-24T12:19:18.557Z
+Giraffecat77,Jacob1304,bought,192,Pearlescent Froglight,1500,2026-05-24T12:19:18.557Z
+Giraffecat77,Jacob1304,bought,2,Ochre Froglight,15.63,2026-05-24T12:18:18.557Z
+Giraffecat77,Jacob1304,bought,64,Ochre Froglight,500,2026-05-24T12:18:19.357Z
+Giraffecat77,Jacob1304,sold,2,Ancient Debris,-3300,2026-05-24T12:18:19.357Z
+Silonnz,Jacob1304,bought,8,Sponge,20000,2026-05-24T11:47:19.358Z
+VEoN_Marten,Jacob1304,bought,192,Glass,900,2026-05-24T11:44:19.358Z
+CalebTheSecond,Jacob1304,sold,62,Gray Wool,-435.94,2026-05-24T11:41:19.358Z
+CalebTheSecond,Jacob1304,sold,384,Gray Wool,-2700,2026-05-24T11:41:19.358Z
+Mertilizm,Jacob1304,bought,64,Cooked Beef,925,2026-05-24T11:13:19.358Z
+Mertilizm,Jacob1304,bought,192,Grass Block,900,2026-05-24T11:12:19.358Z
+Giraffecat77,Jacob1304,sold,5,Sandstone,-23.44,2026-05-24T11:03:19.358Z
+Giraffecat77,Jacob1304,sold,720,Sand,-1012.5,2026-05-24T11:03:19.358Z
+Giraffecat77,Jacob1304,sold,2432,Stone,-3420,2026-05-24T10:55:20.159Z
+Giraffecat77,Jacob1304,sold,59,Sandstone,-276.56,2026-05-24T10:52:20.159Z
+Giraffecat77,Jacob1304,sold,512,Sandstone,-2400,2026-05-24T10:52:20.159Z
+Giraffecat77,Jacob1304,bought,8,Gilded Blackstone,1600,2026-05-24T10:47:20.159Z
+Giraffecat77,Jacob1304,sold,1024,Stone,-1440,2026-05-24T10:47:20.159Z
+Giraffecat77,Jacob1304,sold,640,Andesite,-1450,2026-05-24T10:47:20.159Z
+Giraffecat77,Jacob1304,sold,44,Dirt,-119.63,2026-05-24T10:47:20.160Z
+Giraffecat77,Jacob1304,sold,320,Dirt,-870,2026-05-24T10:46:20.160Z
+Giraffecat77,Jacob1304,sold,384,Glass,-1500,2026-05-24T10:46:20.160Z
+Giraffecat77,Jacob1304,bought,21,Spore Blossom,7350,2026-05-24T10:33:20.160Z
+rol1er_the_great,Jacob1304,sold,62,Dirt,-168.56,2026-05-24T10:01:21.139Z
+Alithium12,Jacob1304,sold,64,Light Gray Wool,-450,2026-05-24T09:57:21.140Z
+rol1er_the_great,Jacob1304,sold,18,Dirt,-48.94,2026-05-24T09:47:21.140Z
+rol1er_the_great,Jacob1304,sold,1024,Dirt,-2784,2026-05-24T09:47:21.140Z
+rol1er_the_great,Jacob1304,sold,52,Dirt,-141.38,2026-05-24T09:35:21.140Z
+rol1er_the_great,Jacob1304,sold,640,Dirt,-1740,2026-05-24T09:35:21.140Z
+T1_Cheap,Jacob1304,bought,320,Honeycomb Block,1950,2026-05-24T09:28:21.140Z
+LavaaX,Jacob1304,bought,8,Torchflower,480,2026-05-24T08:26:21.140Z
+LavaaX,Jacob1304,bought,192,Wildflowers,960,2026-05-24T08:25:21.946Z
+Binkusthe1st,Jacob1304,bought,320,Glow Berries,380,2026-05-24T07:12:21.946Z
+DariusJOHNSON,Jacob1304,bought,1344,Hay Block,21000,2026-05-24T07:02:21.946Z
+Jguy123,Jacob1304,bought,320,Hay Block,5000,2026-05-24T06:30:21.946Z
+T1_Cheap,Jacob1304,bought,64,Amethyst Block,260,2026-05-24T03:56:21.946Z
+T1_Cheap,Jacob1304,bought,128,Honeycomb Block,780,2026-05-24T03:04:21.946Z
+T1_Cheap,Jacob1304,bought,256,Amethyst Block,1040,2026-05-24T03:04:21.946Z
+NavyCircle21209,Jacob1304,sold,36,Obsidian,-421.88,2026-05-24T02:51:21.946Z
+Infinicht,Jacob1304,bought,10,Cooked Beef,144.53,2026-05-24T00:34:21.946Z
+nanamustdie,Jacob1304,sold,840,Prismarine Bricks,-9187.5,2026-05-24T00:14:21.946Z
+nanamustdie,Jacob1304,sold,6,Hay Block,-84.38,2026-05-24T00:14:22.795Z
+nanamustdie,Jacob1304,sold,640,Hay Block,-9000,2026-05-24T00:14:22.796Z
+T1_Cheap,Jacob1304,bought,128,Amethyst Block,520,2026-05-24T00:07:22.796Z
+VelvetyCake,Jacob1304,bought,384,Glass,1800,2026-05-23T23:46:22.796Z
+T1_Cheap,Jacob1304,bought,192,Honeycomb Block,1170,2026-05-23T23:41:22.796Z
+T1_Cheap,Jacob1304,bought,320,Amethyst Block,1300,2026-05-23T23:41:22.796Z
+VelvetyCake,Jacob1304,bought,256,Hay Block,4000,2026-05-23T23:36:22.796Z
+BlackManSwag,Jacob1304,bought,200,Gunpowder,21980,2026-05-23T23:30:22.796Z
+azareoth,Jacob1304,bought,1472,Dirt,4117,2026-05-23T22:31:22.796Z
+johnsmat,Jacob1304,bought,640,Hay Block,10000,2026-05-23T22:21:23.645Z
+EyelessMC,Jacob1304,bought,320,Mangrove Log,3000,2026-05-23T22:12:23.645Z
+EyelessMC,Jacob1304,bought,192,Sandstone,1050,2026-05-23T22:12:23.647Z
+EyelessMC,Jacob1304,bought,256,Sand,400,2026-05-23T22:12:23.647Z
+azareoth,Jacob1304,bought,1100,Stone,2062.5,2026-05-23T22:08:23.647Z
+Alithium12,Jacob1304,sold,424,Light Gray Wool,-2981.25,2026-05-23T21:54:23.647Z
+Alithium12,Jacob1304,sold,62,Gray Wool,-435.94,2026-05-23T21:54:23.647Z
+Alithium12,Jacob1304,sold,256,Gray Wool,-1800,2026-05-23T21:54:23.647Z
+Alithium12,Jacob1304,sold,13,Black Wool,-91.41,2026-05-23T21:54:23.647Z
+Alithium12,Jacob1304,sold,1664,Black Wool,-11700,2026-05-23T21:54:23.647Z
+Alithium12,Jacob1304,sold,49,Black Wool,-344.53,2026-05-23T21:50:24.486Z
+Alithium12,Jacob1304,sold,192,Light Gray Wool,-1350,2026-05-23T21:49:24.486Z
+Alithium12,Jacob1304,sold,2,Brown Wool,-14.06,2026-05-23T21:33:24.486Z
+Alithium12,Jacob1304,sold,64,Brown Wool,-450,2026-05-23T21:33:24.486Z
+Alithium12,Jacob1304,sold,2,Black Wool,-14.06,2026-05-23T21:33:24.486Z
+Alithium12,Jacob1304,sold,640,Black Wool,-4500,2026-05-23T21:33:24.486Z
+Alithium12,Jacob1304,sold,56,Gray Wool,-393.75,2026-05-23T21:33:24.486Z
+azareoth,Jacob1304,bought,1536,Stone,2880,2026-05-23T21:29:24.486Z
+MrSven007,Jacob1304,sold,1,Cherry Sapling,-3.91,2026-05-23T19:59:24.486Z
+MrSven007,Jacob1304,sold,64,Cherry Sapling,-250,2026-05-23T19:59:24.486Z
+MrSven007,Jacob1304,sold,31,Oak Sapling,-96.88,2026-05-23T19:59:25.288Z
+MrSven007,Jacob1304,sold,256,Oak Sapling,-800,2026-05-23T19:59:25.288Z
+MrSven007,Jacob1304,sold,76,Dark Oak Sapling,-213.75,2026-05-23T19:58:25.289Z
+MrSven007,Jacob1304,sold,15,Birch Sapling,-46.88,2026-05-23T19:58:25.289Z
+MrSven007,Jacob1304,sold,33,Acacia Sapling,-144.38,2026-05-23T19:58:25.289Z
+MrSven007,Jacob1304,sold,442,Jungle Sapling,-1381.25,2026-05-23T19:58:25.289Z
+_Klova,Jacob1304,bought,64,Brown Wool,485,2026-05-23T19:58:25.289Z
+_Klova,Jacob1304,bought,3,Ender Pearl,450,2026-05-23T19:58:25.289Z
+zarrolo,Jacob1304,bought,448,Hay Block,7000,2026-05-23T19:52:25.289Z
+CopingPlains522,Jacob1304,sold,10,Cooked Beef,-78.13,2026-05-23T19:50:25.289Z
+PVT_PYLE5h13t,Jacob1304,bought,1088,Experience Bottle,8075,2026-05-23T18:55:26.144Z
+PVT_PYLE5h13t,Jacob1304,sold,320,Netherrack,-200,2026-05-23T18:50:26.145Z
+VelvetyCake,Jacob1304,sold,32,Honeycomb Block,-100,2026-05-23T18:37:26.145Z
+PVT_PYLE5h13t,Jacob1304,sold,64,Hay Block,-900,2026-05-23T18:19:26.145Z
+Giraffecat77,Jacob1304,bought,512,Hay Block,8000,2026-05-23T17:33:26.145Z
+rol1er_the_great,Jacob1304,sold,64,Honeycomb Block,-200,2026-05-23T16:06:26.145Z
+azareoth,Jacob1304,bought,60,Iron Ingot,1650,2026-05-23T15:52:26.145Z
+Giraffecat77,Jacob1304,bought,54,Gilded Blackstone,10800,2026-05-23T14:55:26.145Z
+GreenEnderL,Jacob1304,bought,320,Andesite,810,2026-05-23T13:34:26.145Z
+MrSven007,Jacob1304,sold,24,Jungle Sapling,-75,2026-05-23T12:56:26.145Z
+MrSven007,Jacob1304,sold,300,Acacia Sapling,-1312.5,2026-05-23T12:56:26.981Z
+MrSven007,Jacob1304,sold,47,Birch Sapling,-146.88,2026-05-23T12:56:26.981Z
+MrSven007,Jacob1304,sold,192,Birch Sapling,-600,2026-05-23T12:56:26.981Z
+MrSven007,Jacob1304,sold,614,Oak Sapling,-1918.75,2026-05-23T12:56:26.981Z
+MrSven007,Jacob1304,sold,13,Blue Terracotta,-34.53,2026-05-23T12:53:26.981Z
+MrSven007,Jacob1304,sold,128,Blue Terracotta,-340,2026-05-23T12:53:26.981Z
+MrSven007,Jacob1304,sold,35,Oak Leaves,-82.03,2026-05-23T12:53:26.981Z
+MrSven007,Jacob1304,sold,256,Oak Leaves,-600,2026-05-23T12:53:26.981Z
+MrSven007,Jacob1304,sold,23,Glow Berries,-25.88,2026-05-23T12:33:26.981Z
+MrSven007,Jacob1304,sold,1600,Glow Berries,-1800,2026-05-23T12:33:26.981Z
+MrSven007,Jacob1304,sold,896,Oak Sapling,-2800,2026-05-23T12:33:27.785Z
+MrSven007,Jacob1304,sold,251,Mangrove Propagule,-1568.75,2026-05-23T12:30:27.785Z
+MrSven007,Jacob1304,sold,19,Dark Oak Sapling,-53.44,2026-05-23T12:30:27.785Z
+MrSven007,Jacob1304,sold,320,Dark Oak Sapling,-900,2026-05-23T12:30:27.785Z
+MrSven007,Jacob1304,sold,8,Spruce Sapling,-20.63,2026-05-23T12:30:27.786Z
+MrSven007,Jacob1304,sold,1024,Spruce Sapling,-2640,2026-05-23T12:30:27.801Z
+MrSven007,Jacob1304,sold,1584,Cherry Sapling,-6187.5,2026-05-23T12:28:27.801Z
+MrSven007,Jacob1304,sold,403,Spider Eye,-6649.5,2026-05-23T12:28:27.801Z
+Infinicht,Jacob1304,bought,6,Cooked Beef,86.72,2026-05-23T11:27:27.801Z
+epicbasketballr,Jacob1304,bought,4,Ancient Debris,7820,2026-05-23T11:08:28.637Z
+geolero,Jacob1304,bought,128,Sand,200,2026-05-23T09:04:28.654Z
+VEoN_Marten,Jacob1304,bought,64,Yellow Wool,485,2026-05-23T07:31:28.654Z
+VEoN_Marten,Jacob1304,bought,64,Blue Wool,485,2026-05-23T07:31:28.654Z
+VEoN_Marten,Jacob1304,bought,64,Red Wool,485,2026-05-23T07:31:28.654Z
+VEoN_Marten,Jacob1304,bought,64,Orange Wool,485,2026-05-23T07:31:28.654Z
+3drop,Jacob1304,bought,128,Stone,240,2026-05-23T07:09:28.654Z
+Mertilizm,Jacob1304,bought,10,Iron Ingot,275,2026-05-23T06:56:28.655Z
+Project_43,Jacob1304,bought,384,Oak Leaves,930,2026-05-23T06:52:28.655Z
+Project_43,Jacob1304,bought,1152,Birch Leaves,2790,2026-05-23T06:52:53.709Z
+godwatcher1,Jacob1304,bought,2638,Nether Wart Block,3297.5,2026-05-23T06:39:53.710Z
+zarrolo,Jacob1304,bought,1984,Dirt,5549,2026-05-23T05:59:53.710Z
+zarrolo,Jacob1304,bought,64,Bamboo,110,2026-05-23T05:33:53.710Z
+zarrolo,Jacob1304,bought,3328,Honey Block,31200,2026-05-23T04:46:53.710Z
+Melodough,Jacob1304,bought,26,Packed Ice,243.75,2026-05-23T04:32:53.710Z
+Melodough,Jacob1304,bought,20,Diamond,1020,2026-05-23T04:29:53.710Z
+SirElite360,Jacob1304,sold,52,Experience Bottle,-243.75,2026-05-23T04:09:53.710Z
+SirElite360,Jacob1304,sold,29,Pearlescent Froglight,-158.59,2026-05-23T04:08:53.710Z
+SirElite360,Jacob1304,sold,23,Ochre Froglight,-125.78,2026-05-23T04:08:53.710Z
+SirElite360,Jacob1304,sold,18,Verdant Froglight,-98.44,2026-05-23T04:08:54.515Z
+Lordlardes,Jacob1304,bought,320,Experience Bottle,2375,2026-05-23T04:07:54.515Z
+JOHNWICK5513,Jacob1304,sold,35,Baked Potato,-32.81,2026-05-23T03:57:54.515Z
+JOHNWICK5513,Jacob1304,sold,384,Baked Potato,-360,2026-05-23T03:57:54.515Z
+Lordlardes,Jacob1304,bought,64,Experience Bottle,475,2026-05-23T03:52:54.516Z
+AmethystXY,Jacob1304,bought,384,Sandstone,2100,2026-05-23T03:52:54.516Z
+AmethystXY,Jacob1304,bought,896,Smooth Sandstone,4200,2026-05-23T03:52:54.516Z
+ukclutch,Jacob1304,bought,2479,Sugar Cane,3098.75,2026-05-23T03:50:54.516Z
+Roranges120,Jacob1304,bought,36,Obsidian,450,2026-05-23T03:25:54.516Z
+Roranges120,Jacob1304,bought,128,Soul Sand,498,2026-05-23T03:25:54.516Z
+Roranges120,Jacob1304,sold,64,Soul Sand,-240,2026-05-23T03:25:55.340Z
+Rexjopeck,Jacob1304,sold,128,Leather,-900,2026-05-23T03:19:55.340Z
+Rexjopeck,Jacob1304,bought,896,Cooked Beef,12950,2026-05-23T02:40:55.340Z
+Rexjopeck,Jacob1304,sold,64,Cooked Beef,-500,2026-05-23T02:40:55.341Z
+Roranges120,Jacob1304,sold,9,Spruce Log,-23.2,2026-05-23T02:28:55.341Z
+Roranges120,Jacob1304,sold,58,Orange Wool,-407.81,2026-05-23T02:27:55.341Z
+Roranges120,Jacob1304,sold,28,Redstone Block,-535.94,2026-05-23T02:27:55.341Z
+Roranges120,Jacob1304,sold,64,Redstone Block,-1225,2026-05-23T02:27:55.341Z
+_ltx,Jacob1304,bought,190,Diamond,9690,2026-05-23T01:53:55.341Z
+_ltx,Jacob1304,bought,256,Cooked Beef,3700,2026-05-23T01:51:55.341Z
+BlackManSwag,Jacob1304,sold,5,Netherite Scrap,-4500,2026-05-23T01:33:56.195Z
+Luabee,Jacob1304,bought,64,Honeycomb Block,390,2026-05-23T01:31:56.195Z
+Luabee,Jacob1304,bought,64,Prismarine Bricks,750,2026-05-23T01:31:56.195Z
+Luabee,Jacob1304,bought,128,Sugar Cane,160,2026-05-23T01:30:56.195Z
+Luabee,Jacob1304,bought,64,Melon Slice,60,2026-05-23T01:30:56.196Z
+Luabee,Jacob1304,bought,64,Beetroot,110,2026-05-23T01:30:56.196Z
+3drop,Jacob1304,bought,64,Baked Potato,64,2026-05-23T01:23:56.196Z
+Rexjopeck,Jacob1304,bought,70,Diamond,3570,2026-05-23T01:05:56.196Z
+WalnutTundra855,Jacob1304,bought,320,Oak Log,1100,2026-05-23T00:51:56.196Z
+Temptingg,Jacob1304,bought,20,Diamond,1020,2026-05-22T23:55:56.196Z
+silly_plays_game,Jacob1304,bought,26,Iron Ingot,715,2026-05-22T23:47:57Z
+Rexjopeck,Jacob1304,bought,30,Blaze Rod,1740,2026-05-22T23:26:57Z
+azareoth,Jacob1304,sold,62,Brown Wool,-435.94,2026-05-22T23:21:57Z
+azareoth,Jacob1304,bought,64,Brown Wool,485,2026-05-22T23:21:57Z
+Temptingg,Jacob1304,bought,10,Diamond,510,2026-05-22T22:58:57Z
+Harvester0,Jacob1304,bought,1728,Spider Eye,33696,2026-05-22T22:33:57Z
+VelvetyCake,Jacob1304,bought,9,Egg,25.31,2026-05-22T22:29:57Z
+VelvetyCake,Jacob1304,bought,208,Egg,585,2026-05-22T22:29:57Z
+VelvetyCake,Jacob1304,bought,7,Egg,19.69,2026-05-22T22:24:57.001Z
+Rexjopeck,Jacob1304,sold,45,Bamboo,-70.31,2026-05-22T22:19:57.001Z
+Rexjopeck,Jacob1304,sold,512,Bamboo,-800,2026-05-22T22:19:57.839Z
+SirElite360,Jacob1304,sold,4,Netherite Scrap,-3600,2026-05-22T22:08:57.839Z
+EyelessMC,Jacob1304,bought,64,Birch Leaves,155,2026-05-22T21:43:57.839Z
+CopingPlains522,Jacob1304,bought,192,Mud,717,2026-05-22T21:22:57.839Z
+azareoth,Jacob1304,bought,128,Birch Leaves,310,2026-05-22T20:47:57.839Z
+TCodee,Jacob1304,bought,192,Cobbled Deepslate,180,2026-05-22T20:04:57.839Z
+TCodee,Jacob1304,sold,192,Ender Pearl,-23040,2026-05-22T19:28:57.839Z
+azareoth,Jacob1304,bought,64,Acacia Leaves,185,2026-05-22T19:27:57.839Z
+azareoth,Jacob1304,bought,64,Birch Leaves,155,2026-05-22T19:27:57.839Z
+azareoth,Jacob1304,bought,128,Dark Oak Log,340,2026-05-22T19:17:57.839Z
+azareoth,Jacob1304,bought,320,Andesite,810,2026-05-22T19:00:58.685Z
+azareoth,Jacob1304,bought,128,Grass Block,600,2026-05-22T18:59:58.685Z
+VEoN_Marten,Jacob1304,bought,64,Coal Block,950,2026-05-22T18:53:58.685Z
+azareoth,Jacob1304,bought,128,Podzol,410,2026-05-22T18:49:58.685Z
+azareoth,Jacob1304,bought,64,Clay,260,2026-05-22T18:48:58.686Z
+azareoth,Jacob1304,bought,128,Rooted Dirt,240,2026-05-22T18:48:58.686Z
+azareoth,Jacob1304,bought,128,Coarse Dirt,220,2026-05-22T18:48:58.686Z
+CopingPlains522,Jacob1304,bought,64,Packed Mud,395,2026-05-22T18:44:58.686Z
+PVT_PYLE5h13t,Jacob1304,sold,8,Blackstone,-35.63,2026-05-22T18:44:58.686Z
+PVT_PYLE5h13t,Jacob1304,sold,128,Blackstone,-570,2026-05-22T18:44:58.687Z
+PVT_PYLE5h13t,Jacob1304,sold,157,Soul Sand,-588.75,2026-05-22T18:43:59.514Z
+PVT_PYLE5h13t,Jacob1304,sold,64,Soul Soil,-415,2026-05-22T18:43:59.514Z
+PVT_PYLE5h13t,Jacob1304,sold,34,Red Nether Bricks,-185.94,2026-05-22T18:43:59.514Z
+PVT_PYLE5h13t,Jacob1304,sold,3,Ancient Debris,-4950,2026-05-22T18:43:59.515Z
+VEoN_Marten,Jacob1304,bought,256,Coal Block,3800,2026-05-22T17:37:59.531Z
+SkipsenPB,Jacob1304,bought,192,Terracotta,555,2026-05-22T17:37:59.531Z
+BlackManSwag,Jacob1304,sold,20,Gold Ingot,-2020,2026-05-22T17:02:59.531Z
+BlackManSwag,Jacob1304,sold,13,Emerald,-2665,2026-05-22T17:02:59.531Z
+SirElite360,Jacob1304,sold,25,Ochre Froglight,-136.72,2026-05-22T16:59:59.531Z
+SirElite360,Jacob1304,sold,47,Pearlescent Froglight,-257.03,2026-05-22T17:00:00.369Z
+SirElite360,Jacob1304,sold,51,Verdant Froglight,-278.91,2026-05-22T17:00:00.369Z
+SirElite360,Jacob1304,sold,1,Netherite Scrap,-900,2026-05-22T17:00:00.369Z
+MooDengFan,Jacob1304,bought,64,Glow Berries,76,2026-05-22T16:19:00.369Z
+godwatcher1,Jacob1304,bought,160,Slime Ball,5520,2026-05-22T15:29:00.369Z
+godwatcher1,Jacob1304,bought,171,Ender Pearl,25650,2026-05-22T15:28:00.370Z
+Giraffecat77,Jacob1304,bought,192,Experience Bottle,1425,2026-05-22T14:13:00.370Z
+Giraffecat77,Jacob1304,sold,9,Dirt,-24.47,2026-05-22T14:12:00.370Z
+Giraffecat77,Jacob1304,sold,1344,Dirt,-3654,2026-05-22T14:12:00.370Z
+Giraffecat77,Jacob1304,sold,768,Andesite,-1740,2026-05-22T14:11:00.370Z
+Giraffecat77,Jacob1304,sold,192,Gravel,-216,2026-05-22T14:11:01.189Z
+Giraffecat77,Jacob1304,sold,128,Cobblestone,-160,2026-05-22T14:07:01.189Z
+Giraffecat77,Jacob1304,bought,64,Coarse Dirt,110,2026-05-22T14:05:01.189Z
+Giraffecat77,Jacob1304,sold,17,Cobbled Deepslate,-10.63,2026-05-22T14:05:01.189Z
+Giraffecat77,Jacob1304,sold,576,Cobbled Deepslate,-360,2026-05-22T14:05:01.189Z
+Giraffecat77,Jacob1304,sold,806,Sugar Cane,-806,2026-05-22T14:04:01.189Z
+Giraffecat77,Jacob1304,sold,54,Deepslate Tiles,-50.63,2026-05-22T14:04:01.190Z
+Infinicht,Jacob1304,bought,1664,Cooked Beef,24050,2026-05-22T13:16:01.190Z
+Enofonka,Jacob1304,bought,64,Cooked Beef,925,2026-05-22T11:37:01.190Z
+Enofonka,Jacob1304,bought,64,Experience Bottle,550,2026-05-22T11:37:01.190Z
+Enofonka,Jacob1304,sold,126,Diamond,-5040,2026-05-22T11:36:02.092Z
+SirElite360,Jacob1304,sold,53,String,-41.41,2026-05-22T09:03:02.092Z
+SirElite360,Jacob1304,sold,64,String,-50,2026-05-22T09:03:02.092Z
+SirElite360,Jacob1304,sold,22,Cobweb,-275,2026-05-22T09:02:02.092Z
+SirElite360,Jacob1304,sold,18,Ochre Froglight,-98.44,2026-05-22T09:02:02.092Z
+SirElite360,Jacob1304,sold,39,Pearlescent Froglight,-213.28,2026-05-22T09:02:02.092Z
+SirElite360,Jacob1304,sold,28,Verdant Froglight,-153.13,2026-05-22T09:02:02.092Z
+SirElite360,Jacob1304,sold,2,Netherite Scrap,-1800,2026-05-22T09:02:02.092Z
+SirElite360,Jacob1304,sold,62,Dragon Breath,-5270,2026-05-22T08:04:02.092Z
+SirElite360,Jacob1304,sold,22,Pearlescent Froglight,-120.31,2026-05-22T08:03:02.092Z
+SirElite360,Jacob1304,sold,64,Pearlescent Froglight,-350,2026-05-22T08:03:02.916Z
+SirElite360,Jacob1304,sold,60,Verdant Froglight,-328.13,2026-05-22T08:03:02.916Z
+SirElite360,Jacob1304,sold,448,Verdant Froglight,-2450,2026-05-22T08:03:02.916Z
+SirElite360,Jacob1304,sold,79,Cobweb,-987.5,2026-05-22T08:01:02.916Z
+SirElite360,Jacob1304,sold,2,Ancient Debris,-3300,2026-05-22T08:00:02.916Z
+ukclutch,Jacob1304,bought,1655,Sugar Cane,2068.75,2026-05-22T05:18:02.917Z
+Rexjopeck,Jacob1304,bought,256,Sand,400,2026-05-22T03:59:02.917Z
+PVT_PYLE5h13t,Jacob1304,sold,220,Glowstone,-5500,2026-05-22T03:36:03.702Z
+PVT_PYLE5h13t,Jacob1304,sold,19,Netherrack,-11.88,2026-05-22T03:36:03.702Z
+PVT_PYLE5h13t,Jacob1304,sold,64,Netherrack,-40,2026-05-22T03:36:03.702Z
+Rexjopeck,Jacob1304,bought,16,Sand,25,2026-05-22T03:25:03.702Z
+CopingPlains522,Jacob1304,bought,64,Pale Oak Leaves,160,2026-05-22T03:09:03.702Z
+Xgunner103,Jacob1304,sold,25,Netherite Ingot,-95000,2026-05-22T02:22:03.702Z
+BlackManSwag,Jacob1304,sold,4,Netherite Ingot,-15200,2026-05-22T02:21:03.702Z
+Rexjopeck,Jacob1304,bought,40,Iron Ingot,1100,2026-05-22T01:45:03.702Z
+Rexjopeck,Jacob1304,sold,1,Iron Ingot,-26.5,2026-05-22T01:45:03.702Z
+AlarmingDoc,Jacob1304,bought,64,Glow Berries,76,2026-05-22T01:11:03.702Z
+Rexjopeck,Jacob1304,bought,20,Blaze Rod,1160,2026-05-22T01:09:04.678Z
+Rexjopeck,Jacob1304,sold,19,Blaze Powder,-380,2026-05-22T01:09:04.680Z
+Rexjopeck,Jacob1304,bought,10,Blaze Powder,310,2026-05-22T01:09:04.681Z
+TinyTurbs,Jacob1304,bought,64,Grass Block,300,2026-05-22T00:47:04.681Z
+Flordiaman_1969,Jacob1304,sold,32,Prismarine,-195,2026-05-21T23:43:04.681Z
+dragonz9010,Jacob1304,sold,64,White Wool,-450,2026-05-21T22:56:04.682Z
+dragonz9010,Jacob1304,bought,64,White Wool,485,2026-05-21T22:56:04.682Z
+MrSven007,Jacob1304,sold,2176,Grass Block,-7650,2026-05-21T22:36:04.683Z
+MrSven007,Jacob1304,bought,64,Shroomlight,3712,2026-05-21T22:33:04.683Z
+Emperor_Bato,Jacob1304,bought,128,Andesite,324,2026-05-21T21:37:04.683Z
+Emperor_Bato,Jacob1304,bought,200,Stone,375,2026-05-21T21:37:05.676Z
+Emperor_Bato,Jacob1304,bought,320,Andesite,810,2026-05-21T21:24:05.677Z
+Emperor_Bato,Jacob1304,bought,192,Deepslate,195,2026-05-21T21:24:05.677Z
+Emperor_Bato,Jacob1304,bought,128,Cobblestone,170,2026-05-21T21:24:05.677Z
+TCodee,Jacob1304,bought,4,Sea Lantern,740,2026-05-21T21:21:05.677Z
+TCodee,Jacob1304,bought,128,Glowstone,3840,2026-05-21T21:21:05.677Z
+TCodee,Jacob1304,bought,64,Black Wool,485,2026-05-21T21:19:05.677Z
+Deadliii,Jacob1304,bought,3,Emerald,630,2026-05-21T21:00:05.677Z
+Emperor_Bato,Jacob1304,bought,128,Cobbled Deepslate,120,2026-05-21T20:35:05.677Z
+Emperor_Bato,Jacob1304,bought,128,Deepslate,130,2026-05-21T20:35:05.677Z
+Emperor_Bato,Jacob1304,bought,320,Stone,600,2026-05-21T20:35:06.477Z
+Eatdonut12,Jacob1304,bought,64,Coal Block,950,2026-05-21T20:01:06.477Z
+Fun1x,Jacob1304,bought,64,Cooked Beef,925,2026-05-21T19:44:06.477Z
+Fun1x,Jacob1304,bought,3,Ender Pearl,450,2026-05-21T19:43:06.477Z
+Fun1x,Jacob1304,sold,4,Netherite Ingot,-15200,2026-05-21T19:43:06.477Z
+Oscar_Gaming_YT,Jacob1304,bought,1,Ender Pearl,150,2026-05-21T18:47:06.477Z
+Oscar_Gaming_YT,Jacob1304,bought,128,Baked Potato,128,2026-05-21T18:46:06.477Z
+azareoth,Jacob1304,bought,256,Orange Wool,1940,2026-05-21T17:58:06.477Z
+azareoth,Jacob1304,sold,4,Orange Wool,-28.13,2026-05-21T17:57:06.477Z
+ZamanXZero,Jacob1304,bought,32,Netherite Ingot,129600,2026-05-21T17:29:06.478Z
+ZamanXZero,Jacob1304,bought,20,Iron Ingot,550,2026-05-21T17:27:07.279Z
+ZamanXZero,Jacob1304,bought,64,Oak Log,220,2026-05-21T17:27:07.279Z
+ZamanXZero,Jacob1304,bought,10,Diamond,510,2026-05-21T17:27:07.279Z
+NavyCircle21209,Jacob1304,bought,20,Gold Ingot,2040,2026-05-21T17:01:07.279Z
+Baderoyt,Jacob1304,sold,50,White Wool,-351.56,2026-05-21T16:51:07.279Z
+Baderoyt,Jacob1304,sold,576,White Wool,-4050,2026-05-21T16:51:07.279Z
+NavyCircle21209,Jacob1304,bought,16,Netherite Scrap,15200,2026-05-21T16:05:07.279Z
+Emperor_Bato,Jacob1304,bought,360,Andesite,911.25,2026-05-21T15:05:07.279Z
+Emperor_Bato,Jacob1304,bought,128,Stone,240,2026-05-21T15:05:07.279Z
+grimAuxiliatrix9,Jacob1304,bought,768,Dirt,2148,2026-05-21T14:53:08.079Z
+ShadowsQueen,Jacob1304,bought,1954,Quartz Block,18318.75,2026-05-21T14:37:08.079Z
+ShadowsQueen,Jacob1304,bought,31,Quartz Block,290.63,2026-05-21T14:33:08.079Z
+ShadowsQueen,Jacob1304,bought,63,Quartz Block,590.63,2026-05-21T14:29:08.079Z
+ShadowsQueen,Jacob1304,bought,1408,Quartz Block,13200,2026-05-21T14:29:08.079Z
+Giraffecat77,Jacob1304,sold,191,Ghast Tear,-21487.5,2026-05-21T14:25:08.080Z
+Giraffecat77,Jacob1304,sold,10,Shulker Box,-97000,2026-05-21T14:25:08.080Z
+TCodee,Jacob1304,sold,200,Gunpowder,-18000,2026-05-21T13:29:08.080Z
+grimAuxiliatrix9,Jacob1304,bought,47,Grass Block,220.31,2026-05-21T11:56:08.080Z
+grimAuxiliatrix9,Jacob1304,bought,960,Grass Block,4500,2026-05-21T11:56:08.980Z
+Giraffecat77,Jacob1304,sold,448,Diorite,-840,2026-05-21T11:24:08.980Z
+Giraffecat77,Jacob1304,sold,192,Sandstone,-900,2026-05-21T11:24:08.980Z
+Giraffecat77,Jacob1304,sold,55,Deepslate,-44.69,2026-05-21T11:24:08.980Z
+Giraffecat77,Jacob1304,sold,896,Deepslate,-728,2026-05-21T11:24:08.980Z
+Giraffecat77,Jacob1304,sold,576,Dirt,-1566,2026-05-21T11:23:08.980Z
+Giraffecat77,Jacob1304,sold,192,Deepslate Bricks,-180,2026-05-21T11:16:08.980Z
+Giraffecat77,Jacob1304,sold,2880,Andesite,-6525,2026-05-21T11:16:08.980Z
+Giraffecat77,Jacob1304,sold,576,Smooth Stone,-1350,2026-05-21T11:16:08.980Z
+Giraffecat77,Jacob1304,sold,1408,Stone,-1980,2026-05-21T11:16:08.981Z
+Giraffecat77,Jacob1304,bought,63,Ochre Froglight,492.19,2026-05-21T11:04:09.782Z
+Giraffecat77,Jacob1304,bought,320,Ochre Froglight,2500,2026-05-21T11:04:09.782Z
+Giraffecat77,Jacob1304,bought,63,Verdant Froglight,492.19,2026-05-21T11:04:09.782Z
+Giraffecat77,Jacob1304,bought,384,Verdant Froglight,3000,2026-05-21T11:04:09.783Z
+Giraffecat77,Jacob1304,bought,63,Pearlescent Froglight,492.19,2026-05-21T11:03:09.783Z
+Giraffecat77,Jacob1304,bought,64,Pearlescent Froglight,500,2026-05-21T11:03:09.783Z
+Giraffecat77,Jacob1304,sold,20,Stone,-28.13,2026-05-21T11:03:09.783Z
+Giraffecat77,Jacob1304,sold,216,Smooth Stone,-506.25,2026-05-21T11:03:09.783Z
+Giraffecat77,Jacob1304,sold,64,Stone,-90,2026-05-21T11:03:09.783Z
+Giraffecat77,Jacob1304,bought,38,Gilded Blackstone,7600,2026-05-21T10:49:09.783Z
+TheMoltenOne,Jacob1304,sold,29,Cobbled Deepslate,-18.13,2026-05-21T08:52:10.582Z
+TheMoltenOne,Jacob1304,sold,512,Cobbled Deepslate,-320,2026-05-21T08:52:10.582Z
+TheMoltenOne,Jacob1304,sold,128,Cobblestone,-160,2026-05-21T08:50:10.583Z
+CageyStorm79284,Jacob1304,bought,576,Egg,1620,2026-05-21T08:23:10.584Z
+AlarmingDoc,Jacob1304,sold,64,Quartz Block,-401,2026-05-21T06:44:10.584Z
+AlarmingDoc,Jacob1304,sold,512,Netherrack,-320,2026-05-21T06:40:10.584Z
+AlarmingDoc,Jacob1304,bought,64,Netherrack,45,2026-05-21T06:40:10.584Z
+Rexjopeck,Jacob1304,bought,1,Netherite Ingot,4050,2026-05-21T06:10:10.584Z
+Baderoyt,Jacob1304,bought,3,Shulker Box,29400,2026-05-21T06:09:10.584Z
+Flordiaman_1969,Jacob1304,sold,14,White Wool,-98.44,2026-05-21T06:08:10.585Z
+Flordiaman_1969,Jacob1304,sold,192,White Wool,-1350,2026-05-21T06:08:11.385Z
+Rexjopeck,Jacob1304,sold,192,White Wool,-1350,2026-05-21T06:08:11.385Z
+Baderoyt,Jacob1304,sold,128,White Wool,-900,2026-05-21T06:08:11.385Z
+MooDengFan,Jacob1304,bought,288,Sculk,864,2026-05-21T05:27:11.385Z
+Wolstice_,Jacob1304,sold,94,Bone Block,-587.5,2026-05-21T05:19:11.385Z
+Serius_Joker,Jacob1304,bought,24,Sponge,60000,2026-05-21T05:11:11.385Z
+x1dagger,Jacob1304,sold,64,Andesite,-145,2026-05-21T05:03:11.385Z
+x1dagger,Jacob1304,bought,1600,Andesite,4050,2026-05-21T05:03:11.385Z
+CopingPlains522,Jacob1304,bought,192,Packed Mud,1185,2026-05-21T03:10:11.385Z
+Emperor_Bato,Jacob1304,bought,256,Grass Block,1200,2026-05-21T02:54:11.386Z
+AlarmingDoc,Jacob1304,bought,64,Apple,1408,2026-05-21T02:32:12.185Z
+Emperor_Bato,Jacob1304,bought,448,Grass Block,2100,2026-05-21T02:26:12.185Z
+MooDengFan,Jacob1304,bought,256,Nether Wart Block,320,2026-05-21T02:25:12.185Z
+Emperor_Bato,Jacob1304,bought,55,Deepslate,55.86,2026-05-21T01:54:12.185Z
+Emperor_Bato,Jacob1304,bought,3,Cobbled Deepslate,2.81,2026-05-21T01:54:12.185Z
+Emperor_Bato,Jacob1304,bought,384,Andesite,972,2026-05-21T01:53:12.986Z
+Emperor_Bato,Jacob1304,bought,256,Stone,480,2026-05-21T01:53:12.986Z
+Emperor_Bato,Jacob1304,bought,256,Andesite,648,2026-05-21T01:37:12.986Z
+Emperor_Bato,Jacob1304,bought,64,Deepslate,65,2026-05-21T01:30:12.986Z
+Emperor_Bato,Jacob1304,bought,192,Andesite,486,2026-05-21T01:30:12.986Z
+Emperor_Bato,Jacob1304,bought,64,Cobbled Deepslate,60,2026-05-21T01:21:13.787Z
+Deadliii,Jacob1304,sold,57,Blackstone,-253.83,2026-05-21T01:15:13.787Z
+Deadliii,Jacob1304,bought,64,Blackstone,300,2026-05-21T01:15:13.787Z
+Lordlardes,Jacob1304,sold,10,Gold Ingot,-1010,2026-05-21T01:07:13.787Z
+eminem_rondonia,Jacob1304,sold,2,Experience Bottle,-9.38,2026-05-21T01:02:13.787Z
+eminem_rondonia,Jacob1304,sold,256,Experience Bottle,-1200,2026-05-21T01:02:13.787Z
+JerichoPvE,Jacob1304,bought,92,Glowstone,2760,2026-05-21T00:57:13.787Z
+Emperor_Bato,Jacob1304,bought,128,Grass Block,600,2026-05-21T00:55:14.587Z
+Emperor_Bato,Jacob1304,bought,192,Stone,360,2026-05-21T00:54:14.587Z
+Emperor_Bato,Jacob1304,bought,2,Lodestone,164,2026-05-21T00:54:14.587Z
+azareoth,Jacob1304,bought,128,Red Wool,970,2026-05-21T00:11:14.587Z
+azareoth,Jacob1304,sold,2,Red Wool,-14.06,2026-05-21T00:11:14.587Z
+azareoth,Jacob1304,bought,64,Soul Soil,419,2026-05-20T23:58:14.589Z
+AlarmingDoc,Jacob1304,bought,64,Coal Block,950,2026-05-20T23:51:14.589Z
+Roranges120,Jacob1304,bought,4,Tnt,960,2026-05-20T23:49:14.589Z
+Roranges120,Jacob1304,sold,128,Sandstone,-600,2026-05-20T23:49:15.489Z
+Roranges120,Jacob1304,bought,128,Sandstone,700,2026-05-20T23:47:15.489Z
+Roranges120,Jacob1304,bought,40,Diamond,2040,2026-05-20T23:46:15.489Z
+Roranges120,Jacob1304,sold,4,Netherite Scrap,-3600,2026-05-20T23:46:15.489Z
+AlarmingDoc,Jacob1304,bought,64,Acacia Log,250,2026-05-20T23:37:15.489Z
+Roranges120,Jacob1304,bought,20,Iron Ingot,550,2026-05-20T23:35:15.489Z
+Roranges120,Jacob1304,bought,64,Clay,260,2026-05-20T23:34:15.489Z
+Roranges120,Jacob1304,bought,64,Cactus,80,2026-05-20T23:32:15.489Z
+Roranges120,Jacob1304,bought,30,Book,450,2026-05-20T23:31:15.489Z
+Roranges120,Jacob1304,bought,128,Spruce Log,340,2026-05-20T23:24:15.489Z
+Roranges120,Jacob1304,sold,64,Spruce Log,-165,2026-05-20T23:24:16.388Z
+Roranges120,Jacob1304,bought,4,Netherite Scrap,3800,2026-05-20T22:50:16.388Z
+Roranges120,Jacob1304,bought,64,Orange Wool,485,2026-05-20T22:50:16.388Z
+Roranges120,Jacob1304,bought,32,Resin Brick,250,2026-05-20T22:49:16.388Z
+T1_Cheap,Jacob1304,bought,16,Ender Pearl,2400,2026-05-20T22:04:16.388Z
+T1_Cheap,Jacob1304,bought,64,Cooked Beef,975,2026-05-20T22:03:16.388Z
+cvee_,Jacob1304,sold,64,Gilded Blackstone,-9600,2026-05-20T21:04:16.388Z
+CopingPlains522,Jacob1304,sold,64,Terracotta,-180,2026-05-20T20:44:16.388Z
+CopingPlains522,Jacob1304,bought,64,Terracotta,185,2026-05-20T20:43:17.344Z
+meddleh,Jacob1304,sold,37,Diamond,-1480,2026-05-20T20:36:17.345Z
+meddleh,Jacob1304,bought,10,Diamond,510,2026-05-20T20:36:17.345Z
+Giraffecat77,Jacob1304,bought,128,Pearlescent Froglight,1000,2026-05-20T20:15:17.345Z
+Giraffecat77,Jacob1304,bought,128,Experience Bottle,950,2026-05-20T20:11:17.345Z
+Giraffecat77,Jacob1304,bought,4,Gilded Blackstone,800,2026-05-20T20:11:17.360Z
+MooDengFan,Jacob1304,bought,128,Birch Log,440,2026-05-20T20:11:17.361Z
+Yuvlo,Jacob1304,bought,64,Experience Bottle,475,2026-05-20T20:05:17.361Z
+Ajhastoes,Jacob1304,sold,128,Sandstone,-600,2026-05-20T19:29:17.361Z
+Ajhastoes,Jacob1304,bought,320,Sandstone,1750,2026-05-20T19:29:17.361Z
+Infinicht,Jacob1304,bought,59,Cooked Beef,898.83,2026-05-20T19:28:18.199Z
+Infinicht,Jacob1304,bought,2240,Cooked Beef,34125,2026-05-20T19:28:18.199Z
+Infinicht,Jacob1304,sold,33,Baked Potato,-30.94,2026-05-20T19:28:18.199Z
+Infinicht,Jacob1304,bought,5,Cooked Beef,76.17,2026-05-20T19:27:18.199Z
+Mertilizm,Jacob1304,bought,64,Oak Log,220,2026-05-20T19:18:18.200Z
+Mertilizm,Jacob1304,bought,256,Spruce Log,680,2026-05-20T19:18:18.200Z
+CopingPlains522,Jacob1304,bought,64,Egg,180,2026-05-20T19:11:18.200Z
+Giraffecat77,Jacob1304,sold,256,Sandstone,-1200,2026-05-20T19:10:18.200Z
+Giraffecat77,Jacob1304,bought,2880,Verdant Froglight,22500,2026-05-20T19:05:19.043Z
+Giraffecat77,Jacob1304,bought,2880,Pearlescent Froglight,22500,2026-05-20T19:03:19.044Z
+Giraffecat77,Jacob1304,sold,64,Ochre Froglight,-350,2026-05-20T19:03:19.044Z
+Giraffecat77,Jacob1304,bought,2944,Ochre Froglight,23000,2026-05-20T19:01:19.044Z
+Giraffecat77,Jacob1304,bought,320,Pearlescent Froglight,2500,2026-05-20T17:21:19.044Z
+Giraffecat77,Jacob1304,bought,192,Ochre Froglight,1500,2026-05-20T17:21:19.044Z
+Giraffecat77,Jacob1304,bought,128,Flowering Azalea,640,2026-05-20T17:19:19.044Z
+Giraffecat77,Jacob1304,bought,64,Azalea,151,2026-05-20T17:19:19.044Z
+Giraffecat77,Jacob1304,sold,668,Deepslate Tiles,-626.25,2026-05-20T16:40:19.044Z
+Giraffecat77,Jacob1304,sold,1,Deepslate Bricks,-0.94,2026-05-20T16:40:19.887Z
+Giraffecat77,Jacob1304,sold,448,Deepslate Bricks,-420,2026-05-20T16:40:19.888Z
+Giraffecat77,Jacob1304,sold,736,Polished Deepslate,-690,2026-05-20T16:40:19.888Z
+Giraffecat77,Jacob1304,sold,320,Smooth Stone,-750,2026-05-20T16:40:19.888Z
+Giraffecat77,Jacob1304,sold,256,Basalt,-700,2026-05-20T16:40:19.888Z
+Giraffecat77,Jacob1304,sold,1,Diorite,-1.88,2026-05-20T16:34:19.888Z
+Giraffecat77,Jacob1304,sold,1024,Diorite,-1920,2026-05-20T16:34:19.888Z
+Giraffecat77,Jacob1304,sold,448,Tuff,-840,2026-05-20T16:34:19.889Z
+Giraffecat77,Jacob1304,sold,128,Glass,-500,2026-05-20T16:34:19.889Z
+Giraffecat77,Jacob1304,sold,55,Dirt,-149.53,2026-05-20T16:33:20.734Z
+Giraffecat77,Jacob1304,bought,12,Spore Blossom,4200,2026-05-20T16:28:20.734Z
+Giraffecat77,Jacob1304,sold,1344,Smooth Stone,-3150,2026-05-20T16:27:20.734Z
+Giraffecat77,Jacob1304,sold,61,Stone Bricks,-85.78,2026-05-20T16:27:20.734Z
+Giraffecat77,Jacob1304,sold,896,Stone Bricks,-1260,2026-05-20T16:27:20.734Z
+Giraffecat77,Jacob1304,bought,21,Gilded Blackstone,4200,2026-05-20T16:14:20.734Z
+Giraffecat77,Jacob1304,sold,1,Ancient Debris,-1650,2026-05-20T16:14:20.735Z
+d3ead_,Jacob1304,bought,64,Cooked Beef,975,2026-05-20T16:07:20.735Z
+d3ead_,Jacob1304,sold,64,Lantern,-1500,2026-05-20T16:07:20.735Z
+d3ead_,Jacob1304,bought,128,Lantern,3900,2026-05-20T16:07:21.585Z
+godwatcher1,Jacob1304,sold,3,Spruce Log,-7.73,2026-05-20T15:57:21.586Z
+godwatcher1,Jacob1304,sold,1280,Spruce Log,-3300,2026-05-20T15:57:21.586Z
+PVT_PYLE5h13t,Jacob1304,sold,384,Diorite,-720,2026-05-20T15:08:21.586Z
+PVT_PYLE5h13t,Jacob1304,sold,1,Granite,-0.97,2026-05-20T15:08:21.587Z
+PVT_PYLE5h13t,Jacob1304,sold,64,Granite,-62,2026-05-20T15:08:21.587Z
+PVT_PYLE5h13t,Jacob1304,sold,288,Glowstone,-7200,2026-05-20T15:07:21.587Z
+PVT_PYLE5h13t,Jacob1304,sold,64,Magma Block,-195,2026-05-20T15:05:21.587Z
+PVT_PYLE5h13t,Jacob1304,sold,2752,Blackstone,-12255,2026-05-20T15:05:21.587Z
+PVT_PYLE5h13t,Jacob1304,sold,64,Nether Bricks,-250,2026-05-20T15:04:21.587Z
+# RUN,2026-05-30T20:43:57.882660500Z,parsed=1163,pages=122
+# RUN_SUMMARY,profit=2213106.97,loss=-1078498.68,net=1134608.29
+Aqua455531,Jacob1304,bought,576,Honeycomb Block,3510,2026-05-31T05:35:51.170Z
+Ajhastoes,Jacob1304,bought,576,Sugar Cane,720,2026-05-31T05:01:51.172Z
+Ajhastoes,Jacob1304,bought,1730,Gunpowder,190127,2026-05-31T05:01:51.173Z
+CopingPlains522,Jacob1304,sold,12,Amethyst Block,-46.88,2026-05-31T03:41:51.173Z
+CopingPlains522,Jacob1304,sold,128,Amethyst Block,-500,2026-05-31T03:41:51.174Z
+Ajhastoes,Jacob1304,bought,490,Gunpowder,53851,2026-05-31T03:19:51.174Z
+CalebTheSecond,Jacob1304,bought,448,Deepslate,455,2026-05-31T01:55:51.175Z
+PVT_PYLE5h13t,Jacob1304,sold,2304,Quartz Block,-14436,2026-05-31T01:33:52.522Z
+Kittsunas,Jacob1304,bought,128,Experience Bottle,950,2026-05-30T23:35:52.523Z
+Kittsunas,Jacob1304,sold,57,Lapis Block,-467.58,2026-05-30T23:35:52.523Z
+Kittsunas,Jacob1304,bought,64,Lapis Block,530,2026-05-30T23:35:52.523Z
+Kittsunas,Jacob1304,bought,60,Book,900,2026-05-30T23:03:52.523Z
+Kittsunas,Jacob1304,sold,160,Obsidian,-1875,2026-05-30T23:03:52.524Z
+Kittsunas,Jacob1304,bought,192,Obsidian,2400,2026-05-30T23:03:52.524Z
+Dominic_Graykey,Jacob1304,sold,1472,Yellow Concrete Powder,-2415,2026-05-30T22:34:52.524Z
+Tea_L0ver,Jacob1304,bought,20,Ink Sac,1000,2026-05-30T21:43:52.525Z
+MrSoap,Jacob1304,sold,640,Baked Potato,-600,2026-05-30T20:53:52.525Z
+# RUN,2026-05-31T06:49:50.510167900Z,parsed=17,pages=2
+# RUN_SUMMARY,profit=254443,loss=-20340.46,net=234102.54
