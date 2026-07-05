@@ -7808,7 +7808,8 @@ async def _main():
         return
     for _ext in ("cogs.loyalty", "cogs.brew", "cogs.admin", "cogs.market", "cogs.stock",
                  "cogs.shop", "cogs.orders", "cogs.money", "cogs.reports", "cogs.misc",
-                 "cogs.loops", "cogs.events", "cogs.config", "cogs.team", "cogs.inventory", "cogs.projects", "cogs.tool"):
+                 "cogs.loops", "cogs.events", "cogs.config", "cogs.team", "cogs.inventory", "cogs.projects", "cogs.tool",
+                 "cogs.devassist"):
         try:
             await bot.load_extension(_ext)
         except Exception as e:
