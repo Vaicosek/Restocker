@@ -2321,6 +2321,75 @@ async def _send_stock_alarm(market_id, report_channel):
             log.warning("[stock-alarm] post failed: %s", e)
 
 
+_HARVEST_RATES = [("honey comb", 70), ("honey block", 80)]  # (item-name substring, coins per unit); checked in order
+
+
+def _harvest_rate_for(item_name: str) -> int:
+    n = (item_name or "").lower()
+    for frag, rate in _HARVEST_RATES:
+        if frag in n:
+            return rate
+    return 0
+
+
+async def _pay_honey_harvesters(rows: list, market_id: str, report_channel):
+    """Pay honey harvesters for what they've NEWLY added to the chest since the last
+    CSN report, matched by IGN. Uses a per-(market,owner,item) 'seen' marker in
+    bot_config so re-running /csn never double-pays. Credits qty*rate coins + 1 loyalty
+    point/unit to the IGN's linked Discord account. Rates: comb 70, block 80 (20% of price)."""
+    import Restocker_db as _db
+    paid_lines = []
+    for r in rows:
+        try:
+            item = (r.get("item") or "").strip()
+            owner = (r.get("owner") or "").strip()
+            rate = _harvest_rate_for(item)
+            if rate <= 0 or not owner:
+                continue
+            new = int(r.get("stock") or 0)
+            key = f"harvest_seen:{market_id}:{owner}:{item}"
+            try:
+                prev = int(float(_db.get_config(key) or 0))
+            except Exception:
+                prev = 0
+            _db.set_config(key, new)          # advance the 'seen' marker every run
+            delta = new - prev
+            if delta <= 0:
+                continue                       # nothing newly harvested (or stock dropped)
+            uid = _db.get_user_id_by_ign(owner)
+            if not uid:
+                paid_lines.append(f"⚠️ `{owner}` harvested {delta:,} × {item} but has no linked "
+                                  f"Discord account — `/team add` them with ign `{owner}` to pay them.")
+                continue
+            coins = delta * rate
+            points = delta                     # 1 loyalty point per unit harvested (tunable)
+            add_coins(int(uid), coins, reason=f"harvest:{item}")
+            try:
+                _award_loyalty_points(int(uid), points, reason=f"harvest:{item}")
+            except Exception:
+                pass
+            try:
+                _log_team_event(str(uid), "sales", coins=float(coins), points=float(points),
+                                qty=delta, detail=f"harvest:{item}")
+            except Exception:
+                pass
+            paid_lines.append(f"💰 <@{uid}> (`{owner}`) +**{coins:,}c** & {points:,} pts — "
+                              f"{delta:,} × {item}")
+            log.info("[harvest] paid %s (%s) +%sc +%spts for %s x %s",
+                     uid, owner, coins, points, delta, item)
+        except Exception as e:
+            log.warning("[harvest] payout failed for %s: %s", r.get("owner"), e)
+    if paid_lines and report_channel is not None:
+        try:
+            embed = discord.Embed(title="🍯 Honey harvest payouts",
+                                  description="\n".join(paid_lines[:25]), color=0xFFC83D)
+            embed.set_footer(text="Paid for newly-harvested honey since the last CSN report")
+            await report_channel.send(embed=embed)
+        except Exception as e:
+            log.warning("[harvest] summary send failed: %s", e)
+    return paid_lines
+
+
 async def _record_stock_report(rows: list, market_id: str, report_channel, filename: str):
     """Store a live shop-stock snapshot, post a fullness summary, and alert on low stock."""
     import Restocker_db as _db
@@ -2352,6 +2421,11 @@ async def _record_stock_report(rows: list, market_id: str, report_channel, filen
                                     buy_price=r.get("buy_price"), sell_price=r.get("sell_price"))
         except Exception as e:
             log.warning("[stock] upsert failed for %s: %s", r.get("item"), e)
+    # Honey-harvest payout: pay harvesters for what they newly added since last report.
+    try:
+        await _pay_honey_harvesters(rows, market_id, report_channel)
+    except Exception as e:
+        log.warning("[harvest] hook failed: %s", e)
     st = _db.get_market_stock(market_id)
     if not st:
         return
