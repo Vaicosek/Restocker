@@ -126,7 +126,7 @@ class OrdersCog(commands.Cog):
         amount="How many (in the unit you choose)",
         unit_type="Choose pieces, stacks, or barrels",
         worker="Optional: assign directly to ONE worker (DMs only them, no mass ping). Blank = ask all workers.",
-        stackable="Is this item stackable? (affects conversions and barrel math only)"
+        stackable="Optional — auto-detected from the catalog per item; only set to override"
     )
     @app_commands.choices(unit_type=[
         app_commands.Choice(name="Pieces", value="pieces"),
@@ -140,7 +140,7 @@ class OrdersCog(commands.Cog):
         amount: int,
         unit_type: str,
         worker: Optional[discord.Member] = None,
-        stackable: bool = True,
+        stackable: Optional[bool] = None,
     ):
         if not is_manager(interaction):
             return await interaction.response.send_message(
@@ -199,6 +199,21 @@ class OrdersCog(commands.Cog):
                 **ephemeral_kwargs(interaction)
             )
 
+        # Auto-detect stackability from the catalog when the manager didn't pick it,
+        # so gear (stackable=False, size 1) vs blocks/items (stackable=True, real stack
+        # size) is handled per-item without the manager having to know each one.
+        cat_stackable = bool(info.get("stackable", True))
+        try:
+            cat_stack_size = int(info.get("stack_size") or (64 if cat_stackable else 1))
+        except Exception:
+            cat_stack_size = 64 if cat_stackable else 1
+        if stackable is None:
+            stackable = cat_stackable
+            stack_size = cat_stack_size
+        else:
+            stackable = bool(stackable)
+            stack_size = 64 if stackable else 1
+
         unit = str(unit_type).lower().strip()
         if unit not in ("pieces", "stacks", "barrels"):
             unit = "pieces"
@@ -222,7 +237,7 @@ class OrdersCog(commands.Cog):
                 "created_at": utcnow_iso(),
                 "messages": {"channel_id": None, "message_id": None, "dms": {}},
                 "unit_type": unit, "amount": int(amount),
-                "stackable": bool(stackable), "stack_size": 64 if stackable else 1, "barrel_slots": 54,
+                "stackable": bool(stackable), "stack_size": stack_size, "barrel_slots": 54,
                 "employee_announce_at": None, "employee_announced": True, "worker_announced": True,
                 "priority_until": None,
             }
@@ -236,7 +251,7 @@ class OrdersCog(commands.Cog):
                 "created_at": utcnow_iso(),
                 "messages": {"channel_id": None, "message_id": None, "dms": {}},
                 "unit_type": unit, "amount": int(amount),
-                "stackable": bool(stackable), "stack_size": 64 if stackable else 1, "barrel_slots": 54,
+                "stackable": bool(stackable), "stack_size": stack_size, "barrel_slots": 54,
                 "employee_announce_at": announce_at.isoformat(),
                 "employee_announced": False, "worker_announced": False,
                 "priority_until": (now_utc + timedelta(hours=PRIORITY_HOURS)).isoformat(),
@@ -333,8 +348,12 @@ class OrdersCog(commands.Cog):
                 except Exception:
                     price = 0
                 stackable = bool(info.get("stackable", True))
+                try:
+                    stack_size = int(info.get("stack_size") or (64 if stackable else 1))
+                except Exception:
+                    stack_size = 64 if stackable else 1
             else:
-                price, stackable = 0, False      # lenient: unknown item still posts (price 0)
+                price, stackable, stack_size = 0, False, 1   # lenient: unknown item still posts (price 0)
                 unpriced.append(name)
             requested_pieces = unit_to_pieces(int(qty), unit, stackable=stackable)
             base_id += 1
@@ -345,7 +364,7 @@ class OrdersCog(commands.Cog):
                 "created_at": utcnow_iso(),
                 "messages": {"channel_id": None, "message_id": None, "dms": {}},
                 "unit_type": unit, "amount": int(qty),
-                "stackable": bool(stackable), "stack_size": 64 if stackable else 1, "barrel_slots": 54,
+                "stackable": bool(stackable), "stack_size": stack_size, "barrel_slots": 54,
                 "employee_announce_at": announce_at.isoformat(),
                 "employee_announced": False, "worker_announced": False,
                 "priority_until": (now_utc + timedelta(hours=PRIORITY_HOURS)).isoformat(),
