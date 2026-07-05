@@ -429,6 +429,38 @@ class OrdersCog(commands.Cog):
         )
         return await interaction.response.send_message(f"🔔 Pinged {len(unclaimed)} unclaimed order(s).", **ephemeral_kwargs(interaction))
 
+    @app_commands.command(
+        name="orders_resend",
+        description="(Managers) Re-broadcast all open, unclaimed orders — fixes orders stuck as 'announced'."
+    )
+    @app_commands.default_permissions(manage_guild=True)
+    async def orders_resend(self, interaction: discord.Interaction):
+        if not is_manager(interaction):
+            return await interaction.response.send_message("⛔ Managers only.", **ephemeral_kwargs(interaction))
+        data = load_orders()
+        now_iso = utcnow_iso()
+        n = 0
+        for o in data.get("orders", []):
+            if not isinstance(o, dict):
+                continue
+            # skip closed/cancelled and anything already claimed by a worker
+            if _order_is_claimed_closed(o):
+                continue
+            if o.get("claims"):
+                continue
+            # clear the "already announced" flags and mark it due NOW so the
+            # worker_announce_loop rebroadcasts the card + @Employee ping next tick
+            o["worker_announced"] = False
+            o["employee_announced"] = False
+            o["employee_announce_at"] = now_iso
+            n += 1
+        save_orders(data)
+        await interaction.response.send_message(
+            f"🔁 Re-queued **{n}** open order(s) — they'll post to the worker channel within ~1 min.\n"
+            f"(If nothing shows up, the announce loop can't reach the channel — tell me.)",
+            **ephemeral_kwargs(interaction)
+        )
+
     @app_commands.command(name="manager_panel", description="Open the Manager control panel")
     @app_commands.default_permissions(manage_guild=True)
     async def manager_panel(self, interaction: discord.Interaction):
