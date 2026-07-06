@@ -549,13 +549,34 @@ class LoopsCog(commands.Cog):
     async def _wait_ready_db_backup(self, ):
         await bot.wait_until_ready()
 
-    async def cog_load(self):
-        for _lp in (self.worker_announce_loop, self.claimed_dm_cleanup_loop, self.employee_batch_dispatch_loop, self.weekly_interest_loop, self.weekly_funds_report_loop, self.loyalty_decay_loop, self.ign_deadline_loop, self.stock_reversion_loop, self.stock_dashboard_loop, self.team_digest_loop, self.db_backup_loop):
+    def _all_loops(self):
+        return (self.worker_announce_loop, self.claimed_dm_cleanup_loop, self.employee_batch_dispatch_loop,
+                self.weekly_interest_loop, self.weekly_funds_report_loop, self.loyalty_decay_loop,
+                self.ign_deadline_loop, self.stock_reversion_loop, self.stock_dashboard_loop,
+                self.team_digest_loop, self.db_backup_loop)
+
+    def _start_loops(self):
+        for _lp in self._all_loops():
             if not _lp.is_running():
                 _lp.start()
 
+    async def cog_load(self):
+        # NOTE: cog_load runs during load_extension, which happens BEFORE bot.start().
+        # Starting the loops here made each before_loop call wait_until_ready() while the
+        # client was still uninitialised -> RuntimeError "Client has not been properly
+        # initialised" -> every loop died at boot (no order posts, no employee DMs, no
+        # dashboard/report/backup loops). So only start here if the bot is ALREADY ready
+        # (e.g. a live cog reload); the normal boot path starts them from on_ready below.
+        if self.bot.is_ready():
+            self._start_loops()
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        # Fires after login -> wait_until_ready() now returns instantly, loops run for real.
+        self._start_loops()
+
     def cog_unload(self):
-        for _lp in (self.worker_announce_loop, self.claimed_dm_cleanup_loop, self.employee_batch_dispatch_loop, self.weekly_interest_loop, self.weekly_funds_report_loop, self.loyalty_decay_loop, self.ign_deadline_loop, self.stock_reversion_loop, self.stock_dashboard_loop, self.team_digest_loop, self.db_backup_loop):
+        for _lp in self._all_loops():
             _lp.cancel()
 
 

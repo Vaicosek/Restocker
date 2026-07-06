@@ -459,9 +459,12 @@ class OrdersCog(commands.Cog):
 
         posted, errors = 0, []
         for o in open_orders:
-            # flag as announced up front so the loop won't also post them (no double-up)
+            # Post the CARD directly now (worker side done -> loop won't double-post it),
+            # but leave the employee-DM side OPEN and due now, so the (now-fixed) employee
+            # batch-DM loop sends the DM digest to every @Employee.
             o["worker_announced"] = True
-            o["employee_announced"] = True
+            o["employee_announced"] = False
+            o["employee_announce_at"] = utcnow_iso()
             try:
                 await update_order_messages(interaction.client, o, allow_post=True)
                 posted += 1
@@ -469,7 +472,8 @@ class OrdersCog(commands.Cog):
                 errors.append(f"#{o.get('id')}: {type(e).__name__}: {e}")
         save_orders(data)
 
-        msg = f"📮 Posted **{posted}/{len(open_orders)}** order card(s) directly to <#{WORKER_CHANNEL_ID}> — no ping sent."
+        msg = (f"📮 Posted **{posted}/{len(open_orders)}** order card(s) to <#{WORKER_CHANNEL_ID}>, "
+               f"and queued the **@Employee DM digest** — it goes out within ~1 min once the loop fix is live.")
         if errors:
             msg += "\n\n⚠️ Real errors (this is what the loop was hiding):\n" + "\n".join(f"`{e}`" for e in errors[:8])
         elif posted == 0:
