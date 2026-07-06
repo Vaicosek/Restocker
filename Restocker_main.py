@@ -3056,28 +3056,36 @@ def _get_worker_announce_lock() -> asyncio.Lock:
 async def any_item_autocomplete(interaction: discord.Interaction, current: str):
     """Suggest items from EVERY known source so the field always autofills:
     the catalog (items table) + live shop stock + the latest CSN month per market."""
+    cur = (current or "").strip().lower()
     names: set = set()
     try:
         import Restocker_db as _db
         try:
-            names.update((_db.get_items() or {}).keys())
+            names.update((_db.get_items() or {}).keys())   # catalog: primary + fast
         except Exception:
             pass
-        try:
-            for _r in (_db.get_all_market_stock() or []):
-                _it = _r.get("item")
-                if _it:
-                    names.add(_it)
-        except Exception:
-            pass
-        try:
-            for _mid in (_db.csn_all_market_ids() or []):
-                _months = (_db.csn_get_market(_mid) or {}).get("months", {}) or {}
-                if _months:
-                    _latest = _months.get(max(_months.keys())) or {}
-                    names.update((_latest.get("items") or {}).keys())
-        except Exception:
-            pass
+        # Live stock (hundreds of rows) + CSN history (hundreds) made this autocomplete
+        # exceed Discord's 3s limit -> "Loading options failed". Only touch those big
+        # secondary sources once the user has typed 2+ chars, and only keep names that
+        # match, so the working set stays tiny.
+        if len(cur) >= 2:
+            try:
+                for _r in (_db.get_all_market_stock() or []):
+                    _it = _r.get("item")
+                    if _it and cur in _it.lower():
+                        names.add(_it)
+            except Exception:
+                pass
+            try:
+                for _mid in (_db.csn_all_market_ids() or []):
+                    _months = (_db.csn_get_market(_mid) or {}).get("months", {}) or {}
+                    if _months:
+                        _latest = _months.get(max(_months.keys())) or {}
+                        for _k in (_latest.get("items") or {}).keys():
+                            if _k and cur in _k.lower():
+                                names.add(_k)
+            except Exception:
+                pass
     except Exception as e:
         log.warning("[item autocomplete] load failed: %s", e)
         return []
