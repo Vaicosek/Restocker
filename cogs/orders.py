@@ -431,35 +431,50 @@ class OrdersCog(commands.Cog):
 
     @app_commands.command(
         name="orders_resend",
-        description="(Managers) Re-broadcast all open, unclaimed orders — fixes orders stuck as 'announced'."
+        description="(Managers) Post all open order cards straight to the worker channel — no mass ping."
     )
     @app_commands.default_permissions(manage_guild=True)
     async def orders_resend(self, interaction: discord.Interaction):
         if not is_manager(interaction):
             return await interaction.response.send_message("⛔ Managers only.", **ephemeral_kwargs(interaction))
+        await interaction.response.defer(**ephemeral_kwargs(interaction), thinking=True)
+
+        # Post the cards DIRECTLY, bypassing the background announce loop (which is
+        # silently swallowing its post errors). Also surfaces the real error if any.
+        channel = interaction.client.get_channel(WORKER_CHANNEL_ID)
+        if channel is None:
+            return await interaction.followup.send(
+                f"❌ `get_channel({WORKER_CHANNEL_ID})` returned **nothing** — the bot can't see the worker "
+                f"channel even though the ID is right and it has Administrator. That's the actual bug "
+                f"(missing Guilds intent, or the channel isn't cached).",
+                **ephemeral_kwargs(interaction)
+            )
+
         data = load_orders()
-        now_iso = utcnow_iso()
-        n = 0
-        for o in data.get("orders", []):
-            if not isinstance(o, dict):
-                continue
-            # skip closed/cancelled and anything already claimed by a worker
-            if _order_is_claimed_closed(o):
-                continue
-            if o.get("claims"):
-                continue
-            # clear the "already announced" flags and mark it due NOW so the
-            # worker_announce_loop rebroadcasts the card + @Employee ping next tick
-            o["worker_announced"] = False
-            o["employee_announced"] = False
-            o["employee_announce_at"] = now_iso
-            n += 1
+        open_orders = [
+            o for o in data.get("orders", [])
+            if isinstance(o, dict) and not _order_is_claimed_closed(o) and not o.get("claims")
+        ]
+        open_orders.sort(key=lambda o: int(o.get("id", 0) or 0))
+
+        posted, errors = 0, []
+        for o in open_orders:
+            # flag as announced up front so the loop won't also post them (no double-up)
+            o["worker_announced"] = True
+            o["employee_announced"] = True
+            try:
+                await update_order_messages(interaction.client, o, allow_post=True)
+                posted += 1
+            except Exception as e:
+                errors.append(f"#{o.get('id')}: {type(e).__name__}: {e}")
         save_orders(data)
-        await interaction.response.send_message(
-            f"🔁 Re-queued **{n}** open order(s) — they'll post to the worker channel within ~1 min.\n"
-            f"(If nothing shows up, the announce loop can't reach the channel — tell me.)",
-            **ephemeral_kwargs(interaction)
-        )
+
+        msg = f"📮 Posted **{posted}/{len(open_orders)}** order card(s) directly to <#{WORKER_CHANNEL_ID}> — no ping sent."
+        if errors:
+            msg += "\n\n⚠️ Real errors (this is what the loop was hiding):\n" + "\n".join(f"`{e}`" for e in errors[:8])
+        elif posted == 0:
+            msg += "\n\n(No open orders to post.)"
+        await interaction.followup.send(msg[:1900], **ephemeral_kwargs(interaction))
 
     @app_commands.command(name="manager_panel", description="Open the Manager control panel")
     @app_commands.default_permissions(manage_guild=True)
