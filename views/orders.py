@@ -53,6 +53,47 @@ save_orders = core.save_orders
 update_order_messages = core.update_order_messages
 utcnow_iso = core.utcnow_iso
 
+
+def _order_id_from_message(interaction) -> int | None:
+    """Recover the order id from the message a button was clicked on.
+
+    Persistent views are registered as OrderView(0), so after a bot restart the
+    per-message order id stored on the view instance is lost (every old card would
+    resolve to id 0 -> "Order not found"). We stored each card's message id in
+    order["messages"] (channel card = message_id, DM card = dms[user_id]), so we
+    look the order up by the clicked message's id. This reads fresh state on every
+    call and never mutates shared view state, so it's race-safe across concurrent
+    clicks on the shared persistent instance."""
+    msg = getattr(interaction, "message", None)
+    mid = getattr(msg, "id", None)
+    if not mid:
+        return None
+    try:
+        mid = int(mid)
+    except Exception:
+        return None
+    try:
+        data = load_orders()
+    except Exception:
+        return None
+    for o in data.get("orders", []) or []:
+        if not isinstance(o, dict):
+            continue
+        msgs = o.get("messages") or {}
+        try:
+            if msgs.get("message_id") is not None and int(msgs["message_id"]) == mid:
+                return int(o["id"])
+        except Exception:
+            pass
+        for v in (msgs.get("dms") or {}).values():
+            try:
+                if v is not None and int(v) == mid:
+                    return int(o["id"])
+            except Exception:
+                pass
+    return None
+
+
 class CloseTicketView(View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -342,13 +383,43 @@ class ManagerReviewView(View):
         self.order_id = order_id
         self.channel_id = channel_id
 
+    def _resolve(self, interaction):
+        """Recover (order_id, channel_id) for THIS click. The persistent view is
+        registered as ManagerReviewView(0, 0), so after a bot restart the ids stored
+        on the instance are lost. The Approve/Reject message always lives in the
+        order's verification channel, so we take the channel from the interaction and
+        find the order whose verification_ticket_id points at it. Reads fresh state,
+        mutates nothing on the shared instance -> race-safe under concurrent clicks."""
+        ch_id = getattr(interaction, "channel_id", None) or self.channel_id
+        oid = self.order_id
+        try:
+            valid = oid and any(
+                isinstance(o, dict) and int(o.get("id", 0) or 0) == int(oid)
+                for o in load_orders().get("orders", []) or []
+            )
+        except Exception:
+            valid = bool(oid)
+        if not valid and ch_id:
+            try:
+                for o in load_orders().get("orders", []) or []:
+                    if not isinstance(o, dict):
+                        continue
+                    vt = o.get("verification_ticket_id")
+                    if vt and int(vt) == int(ch_id):
+                        oid = int(o["id"])
+                        break
+            except Exception:
+                pass
+        return oid, ch_id
+
     async def _load(self, interaction: discord.Interaction):
+        oid, ch_id = self._resolve(interaction)
         data = load_orders()
-        order = next((o for o in data["orders"] if o["id"] == self.order_id), None)
-        chan = interaction.client.get_channel(self.channel_id)
+        order = next((o for o in data["orders"] if o["id"] == oid), None)
+        chan = interaction.client.get_channel(ch_id)
         return data, order, chan
 
-    @discord.ui.button(label="✅ Approve", style=discord.ButtonStyle.green)
+    @discord.ui.button(label="✅ Approve", style=discord.ButtonStyle.green, custom_id="mrv_approve")
     async def approve(self, interaction: discord.Interaction, button: Button):
         if not is_manager(interaction):
             return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
@@ -358,7 +429,8 @@ class ManagerReviewView(View):
         except Exception:
             pass
 
-        chan = interaction.client.get_channel(self.channel_id)
+        oid, ch_id = self._resolve(interaction)
+        chan = interaction.client.get_channel(ch_id)
 
         def _claim_approval(order):
             if str(order.get("status", "")).lower() == "fulfilled":
@@ -370,7 +442,7 @@ class ManagerReviewView(View):
             order["verification_ticket_id"] = None
             return {"remaining_to_stock": max(0, requested - old_produced)}
 
-        order, res = await _mutate_order(self.order_id, _claim_approval)
+        order, res = await _mutate_order(oid, _claim_approval)
         if order is None:
             try:
                 return await interaction.followup.send("❌ Order missing.", ephemeral=True)
@@ -493,12 +565,13 @@ class ManagerReviewView(View):
                 await chan.delete(reason="Order approved.")
         except Exception:
             pass
-    @discord.ui.button(label="❌ Reject (needs fix)", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label="❌ Reject (needs fix)", style=discord.ButtonStyle.danger, custom_id="mrv_reject")
     async def reject(self, interaction: discord.Interaction, button: Button):
         if not is_manager(interaction):
             return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
 
-        chan = interaction.client.get_channel(self.channel_id)
+        oid, ch_id = self._resolve(interaction)
+        chan = interaction.client.get_channel(ch_id)
         captured = {}
 
         def _reject(order):
@@ -510,7 +583,7 @@ class ManagerReviewView(View):
             order["claimed_by"] = None
             return True
 
-        order, ok = await _mutate_order(self.order_id, _reject)
+        order, ok = await _mutate_order(oid, _reject)
         if order is None:
             return await interaction.response.send_message("Order missing.", ephemeral=True)
         await update_order_messages(interaction.client, order)
@@ -720,28 +793,37 @@ class OrderView(View):
         super().__init__(timeout=None)
         self.order_id = order_id
 
+    def _oid(self, interaction) -> int:
+        """Resolve the order id for THIS click. Prefer recovery from the clicked
+        message (correct even after a restart, when the shared persistent instance
+        has order_id=0); fall back to the instance's own id for fresh in-memory
+        views. Never mutates shared state, so it's safe under concurrent clicks."""
+        return _order_id_from_message(interaction) or self.order_id
+
     @discord.ui.button(label="✅ Claim all", style=discord.ButtonStyle.green, custom_id="order_claim_all")
     async def claim_all(self, interaction: discord.Interaction, button: Button):
         await interaction.response.defer(**ephemeral_kwargs(interaction))
+        oid = self._oid(interaction)
         data = load_orders()
-        order = next((o for o in data["orders"] if o["id"] == self.order_id), None)
+        order = next((o for o in data["orders"] if o["id"] == oid), None)
         if order:
             guard = await _priority_guard(interaction, order)
             if guard:
                 return await interaction.followup.send(guard, **ephemeral_kwargs(interaction))
-        res = await _apply_claim(interaction, self.order_id, "all")
-        return await _finish_claim(interaction, self.order_id, res)
+        res = await _apply_claim(interaction, oid, "all")
+        return await _finish_claim(interaction, oid, res)
     @discord.ui.button(label="🧩 Claim part…", style=discord.ButtonStyle.secondary, custom_id="order_claim_part")
     async def claim_part(self, interaction: discord.Interaction, button: Button):
+        oid = self._oid(interaction)
         data = load_orders()
-        order = next((o for o in data["orders"] if o["id"] == self.order_id), None)
+        order = next((o for o in data["orders"] if o["id"] == oid), None)
 
         if not order:
             dummy = discord.Embed(title="⚠️ Order not found", description="This order no longer exists.")
             return await _close_ui_in_place(
                 interaction,
                 embed=dummy,
-                view=_disable_view_children(OrderView(self.order_id)),
+                view=_disable_view_children(OrderView(oid)),
                 note=None
             )
 
@@ -751,7 +833,7 @@ class OrderView(View):
             except Exception:
                 items_data = {"items": {}}
             embed = build_order_embed(order, items_data)
-            view = _disable_view_children(OrderView(self.order_id))
+            view = _disable_view_children(OrderView(oid))
             return await _close_ui_in_place(interaction, embed=embed, view=view, note=None)
 
         guard = await _priority_guard(interaction, order)
@@ -764,17 +846,18 @@ class OrderView(View):
                 **ephemeral_kwargs(interaction)
             )
 
-        return await interaction.response.send_modal(ClaimPartModal(self.order_id))
+        return await interaction.response.send_modal(ClaimPartModal(oid))
 
     @discord.ui.button(label="↩️ Release claim", style=discord.ButtonStyle.secondary, custom_id="order_release_claim")
     async def release_claim(self, interaction: discord.Interaction, button: Button):
+        oid = self._oid(interaction)
         data = load_orders()
-        order = next((o for o in data["orders"] if o["id"] == self.order_id), None)
+        order = next((o for o in data["orders"] if o["id"] == oid), None)
         if not order:
             dummy = discord.Embed(title="⚠️ Order not found", description="This order no longer exists.")
             return await _close_ui_in_place(
                 interaction, embed=dummy,
-                view=_disable_view_children(OrderView(self.order_id)), note=None
+                view=_disable_view_children(OrderView(oid)), note=None
             )
         # only someone who actually holds a claim can release it
         me = next((c for c in (order.get("claims") or []) if c.get("user_id") == interaction.user.id), None)
@@ -783,7 +866,7 @@ class OrderView(View):
                 "⚠️ You don't have a claim on this order to release.",
                 **ephemeral_kwargs(interaction)
             )
-        return await interaction.response.send_modal(ReleaseClaimModal(self.order_id))
+        return await interaction.response.send_modal(ReleaseClaimModal(oid))
 
     @discord.ui.button(
         label="🧪 Request recipe/materials",
@@ -794,11 +877,12 @@ class OrderView(View):
         return await self._request_recipe_impl(interaction)
 
     async def _request_recipe_impl(self, interaction: discord.Interaction):
+        oid = self._oid(interaction)
         data = load_orders()
-        order = next((o for o in data["orders"] if o["id"] == self.order_id), None)
+        order = next((o for o in data["orders"] if o["id"] == oid), None)
         if not order:
             dummy = discord.Embed(title="⚠️ Order not found", description="This order no longer exists.")
-            view = _disable_view_children(OrderView(self.order_id))
+            view = _disable_view_children(OrderView(oid))
             return await _close_ui_in_place(interaction, embed=dummy, view=view, note=None)
         if _order_is_claimed_closed(order):
             try:
@@ -806,7 +890,7 @@ class OrderView(View):
             except Exception:
                 items_data = {"items": {}}
             embed = build_order_embed(order, items_data)
-            view = _disable_view_children(OrderView(self.order_id))
+            view = _disable_view_children(OrderView(oid))
             return await _close_ui_in_place(interaction, embed=embed, view=view, note=None)
         base = interaction.client.get_channel(WORKER_CHANNEL_ID)
         if not base or not base.guild:
@@ -819,7 +903,7 @@ class OrderView(View):
             return await interaction.response.send_message(
                 "⚠️ I can't find you in the guild.", **ephemeral_kwargs(interaction))
 
-        state, existing_id = await _reserve_ticket_slot(self.order_id, "assist_ticket_ids", interaction.user.id)
+        state, existing_id = await _reserve_ticket_slot(oid, "assist_ticket_ids", interaction.user.id)
         if state == "gone":
             return await interaction.response.send_message("❌ Order not found.", **ephemeral_kwargs(interaction))
         if state == "pending":
@@ -830,8 +914,8 @@ class OrderView(View):
             if chan is not None:
                 return await interaction.response.send_message(
                     f"🧵 Your assist ticket is already open: {chan.mention}", **ephemeral_kwargs(interaction))
-            await _release_ticket_slot(self.order_id, "assist_ticket_ids", interaction.user.id)
-            state, existing_id = await _reserve_ticket_slot(self.order_id, "assist_ticket_ids", interaction.user.id)
+            await _release_ticket_slot(oid, "assist_ticket_ids", interaction.user.id)
+            state, existing_id = await _reserve_ticket_slot(oid, "assist_ticket_ids", interaction.user.id)
             if state != "reserved":
                 return await interaction.response.send_message(
                     "🧵 Your assist ticket is already being set up.", **ephemeral_kwargs(interaction))
@@ -839,10 +923,10 @@ class OrderView(View):
         await interaction.response.defer(**ephemeral_kwargs(interaction), thinking=True)
         chan_id = await _open_assist_ticket(interaction, order, member)
         if not chan_id:
-            await _release_ticket_slot(self.order_id, "assist_ticket_ids", interaction.user.id)
+            await _release_ticket_slot(oid, "assist_ticket_ids", interaction.user.id)
             return await interaction.followup.send(
                 "❌ Could not open an assist ticket. Tell a manager.", **ephemeral_kwargs(interaction))
-        await _commit_ticket_slot(self.order_id, "assist_ticket_ids", interaction.user.id, chan_id)
+        await _commit_ticket_slot(oid, "assist_ticket_ids", interaction.user.id, chan_id)
         link = f"https://discord.com/channels/{guild.id}/{chan_id}"
         return await interaction.followup.send(
             f"🧵 Opened your **Recipe/Materials** ticket: {link}", **ephemeral_kwargs(interaction))
@@ -856,11 +940,12 @@ class OrderView(View):
         return await self._request_trust_impl(interaction)
 
     async def _request_trust_impl(self, interaction: discord.Interaction):
+        oid = self._oid(interaction)
         data = load_orders()
-        order = next((o for o in data["orders"] if o["id"] == self.order_id), None)
+        order = next((o for o in data["orders"] if o["id"] == oid), None)
         if not order:
             dummy = discord.Embed(title="⚠️ Order not found", description="This order no longer exists.")
-            view = _disable_view_children(OrderView(self.order_id))
+            view = _disable_view_children(OrderView(oid))
             return await _close_ui_in_place(interaction, embed=dummy, view=view, note=None)
         if _order_is_claimed_closed(order):
             try:
@@ -868,7 +953,7 @@ class OrderView(View):
             except Exception:
                 items_data = {"items": {}}
             embed = build_order_embed(order, items_data)
-            view = _disable_view_children(OrderView(self.order_id))
+            view = _disable_view_children(OrderView(oid))
             return await _close_ui_in_place(interaction, embed=embed, view=view, note=None)
         base = interaction.client.get_channel(WORKER_CHANNEL_ID)
         if not base or not base.guild:
@@ -881,7 +966,7 @@ class OrderView(View):
             return await interaction.response.send_message(
                 "⚠️ I can't find you in the guild.", **ephemeral_kwargs(interaction))
 
-        state, existing_id = await _reserve_ticket_slot(self.order_id, "trust_ticket_ids", interaction.user.id)
+        state, existing_id = await _reserve_ticket_slot(oid, "trust_ticket_ids", interaction.user.id)
         if state == "gone":
             return await interaction.response.send_message("❌ Order not found.", **ephemeral_kwargs(interaction))
         if state == "pending":
@@ -892,8 +977,8 @@ class OrderView(View):
             if chan is not None:
                 return await interaction.response.send_message(
                     f"🔑 Your trust request ticket is already open: {chan.mention}", **ephemeral_kwargs(interaction))
-            await _release_ticket_slot(self.order_id, "trust_ticket_ids", interaction.user.id)
-            state, existing_id = await _reserve_ticket_slot(self.order_id, "trust_ticket_ids", interaction.user.id)
+            await _release_ticket_slot(oid, "trust_ticket_ids", interaction.user.id)
+            state, existing_id = await _reserve_ticket_slot(oid, "trust_ticket_ids", interaction.user.id)
             if state != "reserved":
                 return await interaction.response.send_message(
                     "🔑 Your trust ticket is already being set up.", **ephemeral_kwargs(interaction))
@@ -901,10 +986,10 @@ class OrderView(View):
         await interaction.response.defer(**ephemeral_kwargs(interaction), thinking=True)
         chan_id = await _open_assist_ticket(interaction, order, member, kind="trust")
         if not chan_id:
-            await _release_ticket_slot(self.order_id, "trust_ticket_ids", interaction.user.id)
+            await _release_ticket_slot(oid, "trust_ticket_ids", interaction.user.id)
             return await interaction.followup.send(
                 "❌ Could not open a trust ticket. Tell a manager.", **ephemeral_kwargs(interaction))
-        await _commit_ticket_slot(self.order_id, "trust_ticket_ids", interaction.user.id, chan_id)
+        await _commit_ticket_slot(oid, "trust_ticket_ids", interaction.user.id, chan_id)
         link = f"https://discord.com/channels/{guild.id}/{chan_id}"
         try:
             ign = ""
@@ -942,15 +1027,16 @@ class OrderView(View):
 
     @discord.ui.button(label="➕ Add produced", style=discord.ButtonStyle.secondary, custom_id="order_add_produced")
     async def add_produced(self, interaction: discord.Interaction, button: Button):
+        oid = self._oid(interaction)
         data = load_orders()
-        order = next((o for o in data["orders"] if o["id"] == self.order_id), None)
+        order = next((o for o in data["orders"] if o["id"] == oid), None)
 
         if not order:
             dummy = discord.Embed(title="⚠️ Order not found", description="This order no longer exists.")
             return await _close_ui_in_place(
                 interaction,
                 embed=dummy,
-                view=_disable_view_children(OrderView(self.order_id)),
+                view=_disable_view_children(OrderView(oid)),
                 note=None
             )
 
@@ -960,7 +1046,7 @@ class OrderView(View):
             except Exception:
                 items_data = {"items": {}}
             embed = build_order_embed(order, items_data)
-            view = _disable_view_children(OrderView(self.order_id))
+            view = _disable_view_children(OrderView(oid))
             return await _close_ui_in_place(interaction, embed=embed, view=view, note=None)
 
         if not is_manager(interaction):
@@ -970,7 +1056,7 @@ class OrderView(View):
                     "⚠️ You must have a claim on this order to add produced.",
                     **ephemeral_kwargs(interaction)
                 )
-        return await interaction.response.send_modal(PartialFulfillModal(self.order_id))
+        return await interaction.response.send_modal(PartialFulfillModal(oid))
 
     async def fulfill_impl(self, interaction: discord.Interaction):
         return await self._fulfill_core(interaction)
@@ -982,15 +1068,21 @@ class OrderView(View):
     async def _fulfill_core(self, interaction: discord.Interaction):
 
         async def reply(content: str, *, ephemeral: bool = True):
+            # Ephemeral replies only work inside a guild interaction. In a DM
+            # (direct-assigned orders) passing ephemeral=True makes Discord reject
+            # the response, so the worker would see nothing. Drop it when there's
+            # no guild so the worker always gets feedback.
+            eph = ephemeral and interaction.guild is not None
             try:
                 if interaction.response.is_done():
-                    return await interaction.followup.send(content, ephemeral=ephemeral)
-                return await interaction.response.send_message(content, ephemeral=ephemeral)
+                    return await interaction.followup.send(content, ephemeral=eph)
+                return await interaction.response.send_message(content, ephemeral=eph)
             except Exception:
                 return None
 
+        oid = self._oid(interaction)
         data = load_orders()
-        order = next((o for o in data["orders"] if o["id"] == self.order_id), None)
+        order = next((o for o in data["orders"] if o["id"] == oid), None)
         if not order:
             return await reply("❌ Order not found.", ephemeral=True)
         if order.get("status") == "fulfilled":
@@ -1019,7 +1111,7 @@ class OrderView(View):
             o["status"] = "awaiting_verification"
             o["verification_ticket_id"] = -1
             return True
-        order, reserved = await _mutate_order(self.order_id, _reserve)
+        order, reserved = await _mutate_order(oid, _reserve)
         if order is None:
             return await reply("❌ Order not found.", ephemeral=True)
         if reserved is False:
@@ -1053,7 +1145,7 @@ class OrderView(View):
                 reason=f"Order #{order['id']} verification"
             )
         except Exception as e:
-            await _mutate_order(self.order_id, _release_verify_reservation)
+            await _mutate_order(oid, _release_verify_reservation)
             return await reply(f"❌ Could not create channel: {e}", ephemeral=True)
 
         requested = int(order.get("requested", order.get("amount", 0)) or 0)
@@ -1070,7 +1162,7 @@ class OrderView(View):
         try:
             await chan.send(intro, view=ManagerReviewView(order['id'], chan.id))
         except Exception as e:
-            await _mutate_order(self.order_id, _release_verify_reservation)
+            await _mutate_order(oid, _release_verify_reservation)
             try:
                 await chan.delete(reason="verification setup failed")
             except Exception:
@@ -1081,7 +1173,7 @@ class OrderView(View):
             o["verification_ticket_id"] = int(chan.id)
             o["status"] = "awaiting_verification"
             return True
-        o2, _ = await _mutate_order(self.order_id, _set_ticket)
+        o2, _ = await _mutate_order(oid, _set_ticket)
         order = o2 or order
 
         try:

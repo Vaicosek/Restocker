@@ -2870,6 +2870,7 @@ async def on_ready():
     try:
         bot.add_view(WorkerView())
         bot.add_view(OrderView(0))
+        bot.add_view(ManagerReviewView(0, 0))
         bot.add_view(OrdersBrowser([]))
         bot.add_view(WebOrderView(0))
         bot.add_view(FuturesOrderView(0))
@@ -3292,37 +3293,94 @@ async def orders_cmd(interaction: discord.Interaction):
         if isinstance(o, dict) and str(o.get("status", "")).lower() not in ("fulfilled", "cancelled")
     ]
 
-    open_for_embed = [
-        o for o in all_active_for_view
-        if remaining_to_assign(o) > 0
-    ]
-
-    open_for_embed.sort(key=lambda o: int(o.get("id", 0) or 0), reverse=True)
-    show_embed = open_for_embed[:25]
-
-    if show_embed:
-        lines = [
-            f"• **#{o['id']}** {o.get('item','')} · rem {fmt_qty(o, remaining_to_assign(o))}"
-            for o in show_embed
-        ]
-        desc = "\n".join(lines)
-        footer_note = None
-    else:
-        desc = (
-            "📭 No open orders right now.\n\n"
-            "✅ If you already claimed something, pick it from the dropdown below (it will show your claimed orders too)."
+    if is_manager(interaction):
+        # Owner / manager view: show EVERY order and every status — including
+        # fulfilled, cancelled, and directly-assigned orders (e.g. #29) that never
+        # appear on the public worker board. Workers still get the open-only board.
+        _STATUS_BADGE = {
+            "open": "🟠 Open",
+            "claimed": "🟡 Claimed",
+            "awaiting_verification": "🔎 Awaiting proof",
+            "fulfilled": "✅ Fulfilled",
+            "cancelled": "❌ Cancelled",
+        }
+        all_sorted = sorted(
+            (o for o in orders_all if isinstance(o, dict)),
+            key=lambda o: int(o.get("id", 0) or 0), reverse=True,
         )
-        footer_note = None
 
-    embed = Embed(
-        title="📦 Open Production Requests",
-        description=desc,
-        color=discord.Color.orange()
-    )
-    if footer_note:
-        embed.set_footer(text=footer_note)
+        all_lines = []
+        for o in all_sorted:
+            st = str(o.get("status", "open")).lower()
+            badge = _STATUS_BADGE.get(st, (st.capitalize() or "—"))
+            claims = o.get("claims", []) or []
+            if claims:
+                who = ", ".join(
+                    f"{(c.get('user_tag') or ('<@%s>' % c.get('user_id')))} ({int(c.get('qty', 0) or 0)})"
+                    for c in claims[:3]
+                )
+                if len(claims) > 3:
+                    who += f" +{len(claims) - 3}"
+                who = " · " + who
+            else:
+                who = ""
+            rem = remaining_to_assign(o)
+            rem_txt = f" · rem {fmt_qty(o, rem)}" if rem > 0 else ""
+            all_lines.append(f"• **#{o['id']}** {o.get('item','')} · {badge}{rem_txt}{who}")
 
-    view = OrdersBrowser(all_active_for_view, viewer_id=int(interaction.user.id))
+        # Stay within Discord's 4096-char embed description limit.
+        desc, shown = "", 0
+        for ln in all_lines:
+            if len(desc) + len(ln) + 1 > 3900:
+                break
+            desc += (("\n" if desc else "") + ln)
+            shown += 1
+        if not desc:
+            desc = "📭 No orders yet."
+
+        embed = Embed(
+            title=f"📦 All Orders ({len(all_sorted)})",
+            description=desc,
+            color=discord.Color.gold()
+        )
+        if shown < len(all_lines):
+            embed.set_footer(
+                text=f"Showing {shown} of {len(all_lines)} — use /manager_panel → View Orders for full paging/detail."
+            )
+
+        view = OrdersBrowser(all_active_for_view, viewer_id=int(interaction.user.id))
+    else:
+        open_for_embed = [
+            o for o in all_active_for_view
+            if remaining_to_assign(o) > 0
+        ]
+
+        open_for_embed.sort(key=lambda o: int(o.get("id", 0) or 0), reverse=True)
+        show_embed = open_for_embed[:25]
+
+        if show_embed:
+            lines = [
+                f"• **#{o['id']}** {o.get('item','')} · rem {fmt_qty(o, remaining_to_assign(o))}"
+                for o in show_embed
+            ]
+            desc = "\n".join(lines)
+            footer_note = None
+        else:
+            desc = (
+                "📭 No open orders right now.\n\n"
+                "✅ If you already claimed something, pick it from the dropdown below (it will show your claimed orders too)."
+            )
+            footer_note = None
+
+        embed = Embed(
+            title="📦 Open Production Requests",
+            description=desc,
+            color=discord.Color.orange()
+        )
+        if footer_note:
+            embed.set_footer(text=footer_note)
+
+        view = OrdersBrowser(all_active_for_view, viewer_id=int(interaction.user.id))
 
     try:
         await interaction.followup.send(
