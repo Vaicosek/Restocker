@@ -766,6 +766,25 @@ class OrderView(View):
 
         return await interaction.response.send_modal(ClaimPartModal(self.order_id))
 
+    @discord.ui.button(label="↩️ Release claim", style=discord.ButtonStyle.secondary, custom_id="order_release_claim")
+    async def release_claim(self, interaction: discord.Interaction, button: Button):
+        data = load_orders()
+        order = next((o for o in data["orders"] if o["id"] == self.order_id), None)
+        if not order:
+            dummy = discord.Embed(title="⚠️ Order not found", description="This order no longer exists.")
+            return await _close_ui_in_place(
+                interaction, embed=dummy,
+                view=_disable_view_children(OrderView(self.order_id)), note=None
+            )
+        # only someone who actually holds a claim can release it
+        me = next((c for c in (order.get("claims") or []) if c.get("user_id") == interaction.user.id), None)
+        if not me:
+            return await interaction.response.send_message(
+                "⚠️ You don't have a claim on this order to release.",
+                **ephemeral_kwargs(interaction)
+            )
+        return await interaction.response.send_modal(ReleaseClaimModal(self.order_id))
+
     @discord.ui.button(
         label="🧪 Request recipe/materials",
         style=discord.ButtonStyle.primary,

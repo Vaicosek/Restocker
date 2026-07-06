@@ -82,6 +82,28 @@ def _resolve_gear(text: str):
     ench.sort()
     return f"Diamond {tool} - {', '.join(ench)}"
 
+
+_NONSTACK_KEYWORDS = ("pickaxe", "axe", "shovel", "sword", "hoe", "helmet", "chestplate",
+                      "leggings", "boots", "set", "bow", "trident", "shield", "elytra", "fishing rod")
+
+def _item_stackable(name: str, info: dict):
+    """Auto-detect stackability (managers never set it): use the catalog flag if present,
+    else infer from the name — tools/weapons/armor and bundled 'sets' don't stack; everything
+    else defaults to stackable. Returns (stackable: bool, stack_size: int)."""
+    info = info or {}
+    sv = info.get("stackable")
+    if sv is None:
+        n = (name or "").lower()
+        stackable = not any(k in n for k in _NONSTACK_KEYWORDS)
+    else:
+        stackable = bool(sv)
+    try:
+        stack_size = int(info.get("stack_size") or (64 if stackable else 1))
+    except Exception:
+        stack_size = 64 if stackable else 1
+    return stackable, stack_size
+
+
 class OrdersCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -125,8 +147,7 @@ class OrdersCog(commands.Cog):
         item_key="Pick an existing catalog item (type to search)",
         amount="How many (in the unit you choose)",
         unit_type="Choose pieces, stacks, or barrels",
-        worker="Optional: assign directly to ONE worker (DMs only them, no mass ping). Blank = ask all workers.",
-        stackable="Optional — auto-detected from the catalog per item; only set to override"
+        worker="Optional: assign directly to ONE worker (DMs only them, no mass ping). Blank = ask all workers."
     )
     @app_commands.choices(unit_type=[
         app_commands.Choice(name="Pieces", value="pieces"),
@@ -140,7 +161,6 @@ class OrdersCog(commands.Cog):
         amount: int,
         unit_type: str,
         worker: Optional[discord.Member] = None,
-        stackable: Optional[bool] = None,
     ):
         if not is_manager(interaction):
             return await interaction.response.send_message(
@@ -199,20 +219,9 @@ class OrdersCog(commands.Cog):
                 **ephemeral_kwargs(interaction)
             )
 
-        # Auto-detect stackability from the catalog when the manager didn't pick it,
-        # so gear (stackable=False, size 1) vs blocks/items (stackable=True, real stack
-        # size) is handled per-item without the manager having to know each one.
-        cat_stackable = bool(info.get("stackable", True))
-        try:
-            cat_stack_size = int(info.get("stack_size") or (64 if cat_stackable else 1))
-        except Exception:
-            cat_stack_size = 64 if cat_stackable else 1
-        if stackable is None:
-            stackable = cat_stackable
-            stack_size = cat_stack_size
-        else:
-            stackable = bool(stackable)
-            stack_size = 64 if stackable else 1
+        # Stackability is auto-detected per item — managers never set it. Uses the catalog
+        # flag if present, else infers from the name (tools/armor/sets don't stack).
+        stackable, stack_size = _item_stackable(item, info)
 
         unit = str(unit_type).lower().strip()
         if unit not in ("pieces", "stacks", "barrels"):
@@ -347,11 +356,7 @@ class OrdersCog(commands.Cog):
                     price = int(info.get("coin", 0) or 0)
                 except Exception:
                     price = 0
-                stackable = bool(info.get("stackable", True))
-                try:
-                    stack_size = int(info.get("stack_size") or (64 if stackable else 1))
-                except Exception:
-                    stack_size = 64 if stackable else 1
+                stackable, stack_size = _item_stackable(name, info)
             else:
                 price, stackable, stack_size = 0, False, 1   # lenient: unknown item still posts (price 0)
                 unpriced.append(name)
