@@ -104,46 +104,95 @@ def _item_stackable(name: str, info: dict):
     return stackable, stack_size
 
 
+# ---------------------------------------------------------------------------
+# Shared order-store helpers used by /orders, /cancel_order, and manager panel
+# ---------------------------------------------------------------------------
+
+def _get_live_order(order_id: int):
+    """Load the shared order store and return (data, order) for the given ID.
+    Always reads from disk so all three surfaces see the same state.
+    Returns (data, None) when the order does not exist."""
+    data = load_orders()
+    order = next((o for o in data.get("orders", []) if o.get("id") == order_id), None)
+    return data, order
+
+
+def _live_open_orders():
+    """Return only orders that are currently open/claimed (not fulfilled or cancelled).
+    Used by both /orders and the manager panel so they always show the same set."""
+    data = load_orders()
+    return [
+        o for o in data.get("orders", [])
+        if o.get("status") not in ("fulfilled", "cancelled")
+    ]
+
+
 class OrdersCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
     @app_commands.command(name="orders", description="Show open production requests")
     async def orders(self, interaction: discord.Interaction):
+        # orders_cmd already calls load_orders() internally; delegate directly so
+        # /orders always reads the authoritative on-disk store.
         return await orders_cmd(interaction)
 
     @app_commands.command(name="cancel_order", description="(Managers) Cancel an existing restock order by ID")
-
-
     @app_commands.describe(order_id="The ID of the order to cancel")
-
-
     @app_commands.autocomplete(order_id=order_id_autocomplete)
     async def cancel_order(self, interaction: discord.Interaction, order_id: int):
         if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ You need the @Managers role to cancel orders.", **ephemeral_kwargs(interaction))
+            return await interaction.response.send_message(
+                "⛔ You need the @Managers role to cancel orders.",
+                **ephemeral_kwargs(interaction)
+            )
 
         # Defer up front: update_order_messages() makes several Discord API calls
-        # (edit/delete order cards) that can exceed the 3-second interaction window,
-        # which caused "404 Not Found (10062): Unknown interaction" when we replied
-        # afterwards. Deferring gives us up to 15 min; all replies use followup.
+        # (edit/delete order cards) that can exceed the 3-second interaction window.
         await interaction.response.defer(**ephemeral_kwargs(interaction), thinking=True)
 
-        data = load_orders()
-        order = next((o for o in data["orders"] if o["id"] == order_id), None)
-        if not order:
-            return await interaction.followup.send(f"❌ Order #{order_id} not found.", **ephemeral_kwargs(interaction))
+        # Always reload from the shared store after deferring so we never act on
+        # a stale snapshot (prevents phantom orders and hung cancellations).
+        data, order = _get_live_order(order_id)
+
+        if order is None:
+            return await interaction.followup.send(
+                f"❌ Order #{order_id} not found in the live order board.",
+                **ephemeral_kwargs(interaction)
+            )
         if order["status"] == "fulfilled":
             return await interaction.followup.send(
-                f"⚠️ Order #{order_id} is already fulfilled and cannot be cancelled.", **ephemeral_kwargs(interaction)
+                f"⚠️ Order #{order_id} is already fulfilled and cannot be cancelled.",
+                **ephemeral_kwargs(interaction)
             )
         if order["status"] == "cancelled":
-            return await interaction.followup.send(f"⚠️ Order #{order_id} is already cancelled.", **ephemeral_kwargs(interaction))
+            return await interaction.followup.send(
+                f"⚠️ Order #{order_id} is already cancelled.",
+                **ephemeral_kwargs(interaction)
+            )
 
+        # Mutate the shared store and persist immediately so /orders and the
+        # manager panel both reflect the cancellation without any delay.
         order["status"] = "cancelled"
         save_orders(data)
-        await update_order_messages(interaction.client, order)
-        await interaction.followup.send(f"❌ Order #{order_id} has been cancelled.", **ephemeral_kwargs(interaction))
+
+        # Update Discord message cards (worker channel card + any DMs).
+        try:
+            await update_order_messages(interaction.client, order)
+        except Exception as e:
+            # Don't block the confirmation — the store is already updated.
+            await interaction.followup.send(
+                f"❌ Order #{order_id} cancelled in the order store, but updating Discord "
+                f"messages failed: `{type(e).__name__}: {e}`\n"
+                f"The order **is** cancelled — the card may need a manual delete.",
+                **ephemeral_kwargs(interaction)
+            )
+            return
+
+        await interaction.followup.send(
+            f"❌ Order #{order_id} has been cancelled and removed from the live board.",
+            **ephemeral_kwargs(interaction)
+        )
 
     @app_commands.command(
         name="order",
@@ -193,12 +242,11 @@ class OrdersCog(commands.Cog):
 
         await interaction.response.defer(**ephemeral_kwargs(interaction), thinking=True)
 
-
         try:
             shops = _load_items()
         except Exception:
             return await interaction.followup.send(
-                "❌ items file couldn’t be read.",
+                "❌ items file couldn't be read.",
                 **ephemeral_kwargs(interaction)
             )
 
@@ -225,8 +273,7 @@ class OrdersCog(commands.Cog):
                 **ephemeral_kwargs(interaction)
             )
 
-        # Stackability is auto-detected per item — managers never set it. Uses the catalog
-        # flag if present, else infers from the name (tools/armor/sets don't stack).
+        # Stackability is auto-detected per item — managers never set it.
         stackable, stack_size = _item_stackable(item, info)
 
         unit = str(unit_type).lower().strip()
@@ -235,14 +282,12 @@ class OrdersCog(commands.Cog):
 
         requested_pieces = unit_to_pieces(int(amount), unit, stackable=stackable)
 
+        # Always load fresh from the shared store before appending a new order.
         data_orders = load_orders()
         new_id = (max([o.get("id", 0) for o in data_orders.get("orders", [])] or [0]) + 1)
         now_utc = datetime.now(timezone.utc)
 
         if worker is not None:
-            # Direct order: pre-assign the whole thing to this one worker and mark it
-            # announced, so the worker-channel batch/ping loops never broadcast it — it
-            # only ever hits the assigned worker's DM, via the normal fulfil→approve→pay path.
             order = {
                 "id": new_id, "shop": "", "item": item,
                 "requested": requested_pieces, "produced": 0,
@@ -257,7 +302,6 @@ class OrdersCog(commands.Cog):
                 "priority_until": None,
             }
         else:
-            # Broadcast: goes on the worker board and pings the pool after the batch delay.
             announce_at = next_batch_slot(ANNOUNCE_DELAY_MINUTES)
             order = {
                 "id": new_id, "shop": "", "item": item,
@@ -284,15 +328,15 @@ class OrdersCog(commands.Cog):
             try:
                 await _ensure_order_dm_panel(interaction.client, order, worker)
                 await worker.send(
-                    f"📦 You’ve been **directly assigned Order #{new_id}** — "
+                    f"📦 You've been **directly assigned Order #{new_id}** — "
                     f"**{amount} {unit}** of **{item}**.\n"
                     f"Produce it, then hit **📎 Fulfilled (submit proof)** on the order card above. "
-                    f"You’ll be paid and earn loyalty points once a manager approves it."
+                    f"You'll be paid and earn loyalty points once a manager approves it."
                 )
             except Exception:
                 dmed = False
             tail = ("📩 Sent straight to their DMs (no mass ping)." if dmed
-                    else "⚠️ Couldn’t DM them (DMs closed) — they can still open it from `/orders` (it shows under their claims).")
+                    else "⚠️ Couldn't DM them (DMs closed) — they can still open it from `/orders` (it shows under their claims).")
             await interaction.followup.send(
                 f"✅ Direct order #{new_id} assigned to {worker.mention}: **{amount} {unit}** of **{item}**.\n"
                 f"💰 Estimated payout: ≈ **{total} coins** (+loyalty) on approval.\n{tail}",
@@ -339,7 +383,6 @@ class OrdersCog(commands.Cog):
         announce_at = next_batch_slot(ANNOUNCE_DELAY_MINUTES)
         created, unpriced, failed = [], [], []
         for line in lines:
-            # Prefer "name | qty" (safe — item names contain commas); fall back to "name x qty" / "name qty".
             name = qty = None
             if "|" in line:
                 a, b = line.rsplit("|", 1)
@@ -354,7 +397,7 @@ class OrdersCog(commands.Cog):
                 failed.append(line[:60]); continue
             info = items.get(name)
             if not isinstance(info, dict):
-                _rg = _resolve_gear(name)        # plain-text? "eff 5 unbreak 3 axe fort 3" -> canonical
+                _rg = _resolve_gear(name)
                 if _rg and isinstance(items.get(_rg), dict):
                     name, info = _rg, items.get(_rg)
             if isinstance(info, dict):
@@ -364,7 +407,7 @@ class OrdersCog(commands.Cog):
                     price = 0
                 stackable, stack_size = _item_stackable(name, info)
             else:
-                price, stackable, stack_size = 0, False, 1   # lenient: unknown item still posts (price 0)
+                price, stackable, stack_size = 0, False, 1
                 unpriced.append(name)
             requested_pieces = unit_to_pieces(int(qty), unit, stackable=stackable)
             base_id += 1
@@ -396,8 +439,6 @@ class OrdersCog(commands.Cog):
         await interaction.followup.send(msg[:1950], **ephemeral_kwargs(interaction))
 
     @app_commands.command(name="ping_unclaimed", description="(Managers) Ping the Workers about unclaimed orders.")
-
-
     @app_commands.describe(limit="Ping only the N oldest unclaimed orders (0 = all)")
     @app_commands.default_permissions(manage_guild=True)
     async def ping_unclaimed(self, interaction: discord.Interaction, limit: int = 0):
@@ -407,12 +448,9 @@ class OrdersCog(commands.Cog):
         data = load_orders()
         unclaimed = [
             o for o in data.get("orders", [])
-
             if not _order_is_claimed_closed(o)
             and not o.get("claims")
         ]
-
-
         unclaimed = [o for o in unclaimed if not _priority_active(o)]
 
         if not unclaimed:
@@ -450,8 +488,6 @@ class OrdersCog(commands.Cog):
             return await interaction.response.send_message("⛔ Managers only.", **ephemeral_kwargs(interaction))
         await interaction.response.defer(**ephemeral_kwargs(interaction), thinking=True)
 
-        # Post the cards DIRECTLY, bypassing the background announce loop (which is
-        # silently swallowing its post errors). Also surfaces the real error if any.
         channel = interaction.client.get_channel(WORKER_CHANNEL_ID)
         if channel is None:
             return await interaction.followup.send(
@@ -470,9 +506,6 @@ class OrdersCog(commands.Cog):
 
         posted, errors = 0, []
         for o in open_orders:
-            # Post the CARD directly now (worker side done -> loop won't double-post it),
-            # but leave the employee-DM side OPEN and due now, so the (now-fixed) employee
-            # batch-DM loop sends the DM digest to every @Employee.
             o["worker_announced"] = True
             o["employee_announced"] = False
             o["employee_announce_at"] = utcnow_iso()
@@ -497,11 +530,16 @@ class OrdersCog(commands.Cog):
         if not is_manager(interaction):
             return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
 
+        # Always build the panel from the live order store so the button list
+        # matches exactly what /orders shows — no phantom or stale entries.
+        live_orders = _live_open_orders()
+
         embed = discord.Embed(
             title="🛠️ Manager Panel",
             description=(
                 "Use the buttons below:\n"
-                "• **View Orders** → private list\n"
+                "• **View Orders** → private list (live board, "
+                + str(len(live_orders)) + " open)\n"
                 "• **Prune Fulfilled/Cancelled** → removes closed orders\n"
                 "• **Hive pickup status / clear** → hive pickup cleanup\n"
                 "• **Set coin price** → edit item coin prices (**PER PIECE**)\n"
@@ -509,17 +547,15 @@ class OrdersCog(commands.Cog):
             ),
             color=discord.Color.gold()
         )
+        # ManagerPanelView's order-related buttons call load_orders() themselves
+        # at interaction time, so they always operate on the live store.
         await interaction.response.send_message(embed=embed, view=ManagerPanelView(), ephemeral=True)
 
     @app_commands.command(
         name="orders_clear_all",
         description="(Managers) DELETE ALL orders (testing only)."
     )
-
-
-    @app_commands.describe(
-        confirm="Type YES to confirm (required)"
-    )
+    @app_commands.describe(confirm="Type YES to confirm (required)")
     @app_commands.default_permissions(manage_guild=True)
     async def orders_clear_all(self, interaction: discord.Interaction, confirm: str):
         if not is_manager(interaction):
@@ -536,6 +572,7 @@ class OrdersCog(commands.Cog):
 
         await interaction.response.defer(**ephemeral_kwargs(interaction), thinking=True)
 
+        # Load fresh from the shared store.
         data = load_orders()
         orders = list(data.get("orders", []))
         total = len(orders)
@@ -543,9 +580,7 @@ class OrdersCog(commands.Cog):
         deleted_msgs = 0
         deleted_channels = 0
 
-
         for o in orders:
-
             try:
                 msg_meta = o.get("messages") or {}
                 ch_id = msg_meta.get("channel_id")
@@ -559,7 +594,6 @@ class OrdersCog(commands.Cog):
             except Exception:
                 pass
 
-
             try:
                 vid = o.get("verification_ticket_id")
                 if vid:
@@ -569,7 +603,6 @@ class OrdersCog(commands.Cog):
                         deleted_channels += 1
             except Exception:
                 pass
-
 
         data["orders"] = []
         save_orders(data)
