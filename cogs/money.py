@@ -224,15 +224,20 @@ class MoneyCog(commands.Cog):
         if not base or not base.guild:
             return await interaction.response.send_message("⚠️ Bot is not attached to the worker guild.", **ephemeral_kwargs(interaction))
 
+        # Defer before opening the ticket: _open_payout_ticket() creates a Discord
+        # channel (a slow API call), which can exceed the 3s interaction window and
+        # cause "Unknown interaction" (10062) when we reply afterwards.
+        await interaction.response.defer(**ephemeral_kwargs(interaction), thinking=True)
+
         member = base.guild.get_member(interaction.user.id) or await base.guild.fetch_member(interaction.user.id)
 
         chan_id = await _open_payout_ticket(interaction, member, int(amount), (note or "").strip() or None)
 
         if not chan_id:
-            return await interaction.response.send_message("❌ Could not open a payout ticket. Tell a manager.", **ephemeral_kwargs(interaction))
+            return await interaction.followup.send("❌ Could not open a payout ticket. Tell a manager.", **ephemeral_kwargs(interaction))
 
         link = f"https://discord.com/channels/{base.guild.id}/{chan_id}"
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"📬 Opened your **coins withdrawal** ticket for **{amount}**.\n"
             f"Managers will review and mark it paid here: {link}",
             **ephemeral_kwargs(interaction)

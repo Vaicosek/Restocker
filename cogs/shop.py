@@ -58,6 +58,11 @@ class ShopCog(commands.Cog):
             return await interaction.response.send_message(f"❌ Failed to update items.yml: {e}", **ephemeral_kwargs(interaction))
 
 
+        # Defer before touching orders: each matching open order triggers
+        # update_order_messages() (several Discord API calls), so a rename that hits a
+        # few orders can blow the 3s interaction window → "Unknown interaction" (10062).
+        await interaction.response.defer(**ephemeral_kwargs(interaction), thinking=True)
+
         updated_orders = 0
         try:
             data = load_orders()
@@ -81,12 +86,12 @@ class ShopCog(commands.Cog):
                         pass
 
         except Exception as e:
-            return await interaction.response.send_message(
+            return await interaction.followup.send(
                 f"✅ Renamed in **items.yml**.\n⚠️ But updating orders failed: {e}",
                 **ephemeral_kwargs(interaction)
             )
 
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"✅ Renamed **{old_name}** → **{new_name}**.\n"
             f"🔁 Updated **{updated_orders}** open order(s).",
             **ephemeral_kwargs(interaction)

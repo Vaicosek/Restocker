@@ -22,6 +22,7 @@ _detect_stack_size = core._detect_stack_size
 _parse_stock_csv = core._parse_stock_csv
 _record_stock_report = core._record_stock_report
 _extract_market_info = core._extract_market_info
+_market_id_by_code = core._market_id_by_code
 _find_latest_csv = core._find_latest_csv
 _generate_charts = core._generate_charts
 _get_market = core._get_market
@@ -250,11 +251,18 @@ class ReportsCog(commands.Cog):
                 return await interaction.followup.send(f"❌ No stock rows found in `{source_label}`.")
             mid = market_id
             try:
-                csv_mid, _csv_code = _extract_market_info(csv_text)
+                csv_mid, csv_code = _extract_market_info(csv_text)
             except Exception:
-                csv_mid = None
+                csv_mid, csv_code = None, None
             if csv_mid and mid == DEFAULT_MARKET_ID and _get_market(csv_mid):
                 mid = csv_mid
+            elif mid == DEFAULT_MARKET_ID and csv_code:
+                # market_id didn't match a registered market (e.g. a typo like
+                # 'viridianmarke') — fall back to the verification code, which uniquely
+                # identifies the market, instead of dumping into the default market.
+                _by_code = _market_id_by_code(csv_code)
+                if _by_code:
+                    mid = _by_code
             await _record_stock_report(rows, mid, interaction.channel, source_label)
             return await interaction.followup.send(
                 f"✅ Live stock snapshot recorded for `{mid}` — **{len(rows)}** item(s).\n"
@@ -297,6 +305,31 @@ class ReportsCog(commands.Cog):
         if market_id == DEFAULT_MARKET_ID:
             _record_to_history(month_key, month_label, source_label, income, spent, items)
 
+        # Resolve which market these items belong to: explicit param wins, else the
+        # CSV's own "# MARKET,<id>,<code>" header (same routing the stock import uses),
+        # else the default. The monthly/export path used to always tag items to the
+        # command's market_id and IGNORE existing rows, so per-market dashboards showed
+        # nothing for a market whose items were first imported elsewhere.
+        eff_mid = market_id
+        try:
+            _csv_mid, _csv_code = _extract_market_info(csv_text)
+        except Exception:
+            _csv_mid, _csv_code = None, None
+        if _csv_mid and market_id == DEFAULT_MARKET_ID and _get_market(_csv_mid):
+            eff_mid = _csv_mid
+        elif market_id == DEFAULT_MARKET_ID and _csv_code:
+            # id didn't match a registered market (e.g. typo) — fall back to the
+            # verification code, which uniquely identifies the market.
+            _by_code = _market_id_by_code(_csv_code)
+            if _by_code:
+                eff_mid = _by_code
+        # Re-attribute items only when an explicit, real (non-default) market is
+        # targeted. The catalog is keyed by name, so INSERT OR IGNORE left items stuck
+        # under whichever market imported them first; re-importing under the right
+        # market now moves them. Default imports stay non-clobbering so a stray default
+        # import never yanks items out of their market.
+        _reattribute = eff_mid != DEFAULT_MARKET_ID
+        _set_market_sql = ", market_id=excluded.market_id" if _reattribute else ""
         try:
             import Restocker_db as _db_csn
             with _db_csn.db() as _conn:
@@ -314,16 +347,14 @@ class ReportsCog(commands.Cog):
                     _stack_sz = _detect_stack_size(item_name)
                     _stackable = 1 if _stack_sz > 1 else 0
                     _conn.execute(
-                        "INSERT OR IGNORE INTO items "
+                        "INSERT INTO items "
                         "(name, coin, stock, unit_type, stackable, stack_size, barrel_slots, market_id) "
-                        "VALUES (?, ?, 0, 'pieces', ?, ?, 54, ?)",
-                        (item_name, estimated_coin, _stackable, _stack_sz, market_id)
+                        "VALUES (?, ?, 0, 'pieces', ?, ?, 54, ?) "
+                        "ON CONFLICT(name) DO UPDATE SET "
+                        "  coin = CASE WHEN items.coin=0 THEN excluded.coin ELSE items.coin END"
+                        + _set_market_sql,
+                        (item_name, estimated_coin, _stackable, _stack_sz, eff_mid)
                     )
-                    if estimated_coin > 0:
-                        _conn.execute(
-                            "UPDATE items SET coin=? WHERE name=? AND coin=0",
-                            (estimated_coin, item_name)
-                        )
         except Exception as _e:
             log.warning("[csn] auto-register items failed: %s", _e)
 

@@ -298,7 +298,7 @@ class FuturesOrderView(discord.ui.View):
                 customer = await bot.fetch_user(int(order["user_id"]))
                 dm_embed = discord.Embed(
                     title="✅ Futures Order Approved",
-                    description=f"Your order has been reviewed and sent to the workers!",
+                    description="Your order has been reviewed and sent to the workers!",
                     color=discord.Color.green(),
                     timestamp=datetime.now(_tz.utc),
                 )

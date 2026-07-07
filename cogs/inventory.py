@@ -104,6 +104,31 @@ class InventoryCog(commands.Cog):
             + f"\nTop shortfalls: {top}", ephemeral=True)
 
 
+    @inventory.command(name="clear_stock",
+                    description="(Manager) Delete a market's live stock rows (flush stale / mis-routed scans)")
+    @app_commands.describe(
+        market_id="Market to clear",
+        confirm="Type the market_id again to confirm the deletion",
+        since_minutes="Only delete rows updated within the last N minutes (0 = ALL rows for the market)")
+    @app_commands.autocomplete(market_id=_market_autocomplete)
+    async def clear_stock(self, interaction: discord.Interaction, market_id: str, confirm: str,
+                          since_minutes: int = 0):
+        if not is_manager(interaction):
+            return await interaction.response.send_message("Managers only.", ephemeral=True)
+        if confirm.strip() != market_id.strip():
+            return await interaction.response.send_message(
+                f"⚠️ Confirmation failed. Re-run with `confirm:{market_id}` (exact) to delete its live stock.",
+                ephemeral=True)
+        from datetime import datetime, timezone, timedelta
+        since_iso = None
+        if since_minutes and since_minutes > 0:
+            since_iso = (datetime.now(timezone.utc) - timedelta(minutes=int(since_minutes))).isoformat()
+        import Restocker_db as _db
+        n = _db.clear_market_stock(market_id, since_iso)
+        window = f"updated in the last {since_minutes} min" if since_iso else "ALL rows"
+        await interaction.response.send_message(
+            f"🧹 Cleared **{n}** live-stock row(s) from `{market_id}` ({window}).", ephemeral=True)
+
     @inventory.command(name="set_alarm",
                     description="(Owner/Manager) Alarm that pings you + preps a restock when an item runs low")
     @app_commands.describe(market_id="Market", item="Exact item name, or '*' for a market-wide default",

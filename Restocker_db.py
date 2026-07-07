@@ -528,6 +528,48 @@ def set_balance(user_id: str, coins: float, principal: float = None, lp: float =
         """, (str(user_id), coins, p, l))
 
 
+def adjust_balance(user_id: str, delta: int, *, counts_as_principal: bool = True,
+                   reduce_principal: bool = True) -> tuple[int, int, int]:
+    """Atomically apply an integer coin delta in a single transaction (no
+    read-modify-write race between concurrent coin operations).
+
+    delta > 0 adds coins (and grows principal iff counts_as_principal).
+    delta < 0 deducts, clamped at 0 (and reduces principal by the amount actually
+    removed iff reduce_principal).
+
+    Returns (coins_after, principal_after, applied_delta) where applied_delta is the
+    real change to coins (may be smaller in magnitude than `delta` when clamped)."""
+    uid = str(user_id)
+    d = int(delta or 0)
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO balances (user_id, coins, principal, lp) VALUES (?, 0, 0, 0) "
+            "ON CONFLICT(user_id) DO NOTHING", (uid,))
+        before = conn.execute("SELECT coins FROM balances WHERE user_id=?", (uid,)).fetchone()
+        old_coins = int(before["coins"]) if before else 0
+        if d > 0:
+            conn.execute(
+                "UPDATE balances SET coins = coins + ?, principal = principal + ?, "
+                "updated_at = datetime('now') WHERE user_id = ?",
+                (d, d if counts_as_principal else 0, uid))
+        elif d < 0:
+            amt = -d
+            # RHS expressions are evaluated against the pre-update row, so `coins`
+            # here is the balance before deduction -> MIN(amt, coins) is the amount
+            # actually removed, matching the old read-modify-write semantics exactly.
+            conn.execute(
+                "UPDATE balances SET "
+                "principal = CASE WHEN ? THEN MAX(0, principal - MIN(principal, MIN(?, coins))) "
+                "ELSE principal END, "
+                "coins = MAX(0, coins - ?), "
+                "updated_at = datetime('now') WHERE user_id = ?",
+                (1 if reduce_principal else 0, amt, amt, uid))
+        row = conn.execute("SELECT coins, principal FROM balances WHERE user_id=?", (uid,)).fetchone()
+        coins = int(row["coins"])
+        principal = int(row["principal"])
+    return coins, principal, coins - old_coins
+
+
 def get_all_balances() -> dict:
     """Return {user_id: coins} dict for backward compatibility."""
     with db() as conn:
@@ -1181,6 +1223,51 @@ def get_market_stock(market_id: str) -> dict:
 def get_all_market_stock() -> list:
     with db() as conn:
         return [dict(r) for r in conn.execute("SELECT * FROM market_stock ORDER BY market_id, item").fetchall()]
+
+
+def migrate_market_stock(from_market: str, to_market: str, since_iso: str | None = None) -> int:
+    """Move live stock rows from one market to another — used to rescue scans that got
+    mis-routed to the default market (e.g. a typo'd Market ID). If since_iso is given,
+    only rows updated at/after it move (so you can limit it to the last hour). On a
+    (market_id, item) collision the moved source row wins. Returns rows moved."""
+    src = from_market or "main"
+    dst = to_market or "main"
+    if src == dst:
+        return 0
+    where = "market_id = ?"
+    params = [src]
+    if since_iso:
+        where += " AND updated_at >= ?"
+        params.append(since_iso)
+    with db() as conn:
+        n = conn.execute(f"SELECT COUNT(*) AS c FROM market_stock WHERE {where}", params).fetchone()["c"]
+        if not n:
+            return 0
+        # source wins on PK conflict: drop any clashing dest rows first, then move.
+        conn.execute(
+            f"DELETE FROM market_stock WHERE market_id = ? AND item IN "
+            f"(SELECT item FROM market_stock WHERE {where})",
+            [dst] + params)
+        conn.execute(f"UPDATE market_stock SET market_id = ? WHERE {where}", [dst] + params)
+        return int(n)
+
+
+def clear_market_stock(market_id: str, since_iso: str | None = None) -> int:
+    """Delete live-stock rows for a market (optionally only rows updated at/after
+    since_iso). Used to flush stale/mis-routed scans out of a market. Returns the
+    number of rows deleted."""
+    mid = market_id or "main"
+    where = "market_id = ?"
+    params = [mid]
+    if since_iso:
+        where += " AND updated_at >= ?"
+        params.append(since_iso)
+    with db() as conn:
+        n = conn.execute(f"SELECT COUNT(*) AS c FROM market_stock WHERE {where}", params).fetchone()["c"]
+        if not n:
+            return 0
+        conn.execute(f"DELETE FROM market_stock WHERE {where}", params)
+        return int(n)
 
 
 def set_stock_capacity(market_id: str, item: str, capacity: int) -> None:

@@ -94,6 +94,23 @@ def _order_id_from_message(interaction) -> int | None:
     return None
 
 
+def _claim_of(order: dict, user_id) -> dict | None:
+    """Return the caller's claim on this order, or None. Compares by INT id because
+    claims persisted to SQLite come back with a string user_id, and a raw
+    ("123" == 123) would silently fail. Use this everywhere claim ownership matters."""
+    try:
+        uid = int(user_id)
+    except (TypeError, ValueError):
+        return None
+    for c in (order.get("claims") or []):
+        try:
+            if int(c.get("user_id")) == uid:
+                return c
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
 class CloseTicketView(View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -318,7 +335,7 @@ class ReleaseClaimModal(discord.ui.Modal, title="Release claimed amount"):
                 out["err"] = "⚠️ This order is closed or missing."
                 return False
             claims = order.get("claims", [])
-            me = next((c for c in claims if c.get("user_id") == interaction.user.id), None)
+            me = _claim_of(order, interaction.user.id)
             if not me:
                 out["err"] = "⚠️ You don't have a claim on this order."
                 return False
@@ -860,7 +877,7 @@ class OrderView(View):
                 view=_disable_view_children(OrderView(oid)), note=None
             )
         # only someone who actually holds a claim can release it
-        me = next((c for c in (order.get("claims") or []) if c.get("user_id") == interaction.user.id), None)
+        me = _claim_of(order, interaction.user.id)
         if not me:
             return await interaction.response.send_message(
                 "⚠️ You don't have a claim on this order to release.",
@@ -1050,7 +1067,7 @@ class OrderView(View):
             return await _close_ui_in_place(interaction, embed=embed, view=view, note=None)
 
         if not is_manager(interaction):
-            has_claim = any(c.get("user_id") == interaction.user.id for c in order.get("claims", []))
+            has_claim = _claim_of(order, interaction.user.id) is not None
             if not has_claim:
                 return await interaction.response.send_message(
                     "⚠️ You must have a claim on this order to add produced.",
@@ -1092,7 +1109,7 @@ class OrderView(View):
             link = _channel_link(interaction.guild.id, cid) if interaction.guild else f"<#{cid}>"
             return await reply(f"🧵 Verification already open: {link}", ephemeral=True)
         if not is_manager(interaction):
-            has_claim = any(c.get("user_id") == interaction.user.id for c in order.get("claims", []))
+            has_claim = _claim_of(order, interaction.user.id) is not None
             if not has_claim:
                 return await reply("⚠️ You must have a claim on this order to submit proof.", ephemeral=True)
 
@@ -1121,6 +1138,16 @@ class OrderView(View):
                     f"🧵 Verification already open: {_channel_link(interaction.guild.id, int(existing))}",
                     ephemeral=True)
             return await reply("⚠️ This order is already being verified or is closed.", ephemeral=True)
+
+        # Creating the verification channel is a slow Discord API call. Defer now so the
+        # final reply is a followup (15-min window) instead of racing the 3s interaction
+        # limit and 10062-ing — which reply() would swallow, leaving the worker with
+        # nothing. Fast rejections above already answered via interaction.response.
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.defer(**ephemeral_kwargs(interaction), thinking=True)
+        except Exception:
+            pass
 
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(view_channel=False),

@@ -134,11 +134,24 @@ def _session_user(request):
     tok = request.cookies.get("vtm_sess")
     if not tok:
         return None
-    if tok in _SESSIONS:
-        return _SESSIONS[tok]
-    sess = _load_sessions().get(tok)
-    if sess:
-        _SESSIONS[tok] = sess
+    sess = _SESSIONS.get(tok) or _load_sessions().get(tok)
+    if not sess:
+        return None
+    # Enforce server-side expiry so a leaked/stale token can't live forever.
+    # Sessions created before this field existed are treated as still valid
+    # (grandfathered) rather than logging everyone out.
+    exp = sess.get("expires")
+    if exp is not None:
+        try:
+            if float(exp) <= _t.time():
+                _SESSIONS.pop(tok, None)
+                stored = _load_sessions()
+                if stored.pop(tok, None) is not None:
+                    _save_sessions(stored)
+                return None
+        except (TypeError, ValueError):
+            pass
+    _SESSIONS[tok] = sess
     return sess
 
 
@@ -2097,7 +2110,9 @@ async def _handle_api_link(request):
     _save_data_yaml("web_login_codes.yml", codes)
     import secrets as _secrets
     token = _secrets.token_urlsafe(24)
-    sess = {"user_id": str(entry.get("user_id")), "name": entry.get("name", ""), "csrf": _secrets.token_urlsafe(24)}
+    sess = {"user_id": str(entry.get("user_id")), "name": entry.get("name", ""),
+            "csrf": _secrets.token_urlsafe(24),
+            "expires": _t.time() + 30 * 24 * 3600}
     _SESSIONS[token] = sess
     sessions = _load_sessions()
     sessions[token] = sess
@@ -2377,7 +2392,7 @@ async def start_webserver(port: int = 8080):
     except Exception:
         pass
     print(f"🌐  Web server running on http://0.0.0.0:{port}")
-    print(f"     Endpoints: /  /api/items  /api/markets  /api/earnings  /api/prices  /api/stocks  /health")
+    print("     Endpoints: /  /api/items  /api/markets  /api/earnings  /api/prices  /api/stocks  /health")
 
     try:
         while True:

@@ -12,6 +12,7 @@ DEFAULT_MARKET_ID = core.DEFAULT_MARKET_ID
 EMPLOYEE_ROLE_NAME = core.EMPLOYEE_ROLE_NAME
 WORKER_CHANNEL_ID = core.WORKER_CHANNEL_ID
 _is_market_manager = core._is_market_manager
+_get_market = core._get_market
 _load_csn_for_market = core._load_csn_for_market
 _load_markets = core._load_markets
 _market_autocomplete = core._market_autocomplete
@@ -231,6 +232,37 @@ class AdminCog(commands.Cog):
                 f"Employees: **{users_ok}** ok, **{users_failed}** failed.", ephemeral=True)
 
         return await interaction.response.send_message("❌ Unknown target.", ephemeral=True)
+
+
+    @admin.command(
+        name="migrate_stock",
+        description="(Managers) Move recent live stock from one market to another (fix mis-routed scans)")
+    @app_commands.describe(
+        from_market="Source market the scans landed in (usually the default, e.g. main)",
+        to_market="Destination market id (e.g. viridianmarket)",
+        since_minutes="Only move rows updated within the last N minutes (0 = move ALL rows)",
+    )
+    @app_commands.autocomplete(from_market=_market_autocomplete, to_market=_market_autocomplete)
+    async def migrate_stock(self, interaction: discord.Interaction,
+                            from_market: str, to_market: str, since_minutes: int = 60):
+        if not is_manager(interaction):
+            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
+        if not _get_market(to_market):
+            return await interaction.response.send_message(
+                f"❌ Destination market `{to_market}` isn't registered. Create it with "
+                f"`/market add market_id:{to_market}` first.", ephemeral=True)
+        from datetime import datetime, timezone, timedelta
+        since_iso = None
+        if since_minutes and since_minutes > 0:
+            since_iso = (datetime.now(timezone.utc) - timedelta(minutes=int(since_minutes))).isoformat()
+        import Restocker_db as _db
+        moved = _db.migrate_market_stock(from_market, to_market, since_iso)
+        window = f"updated in the last {since_minutes} min" if since_iso else "ALL rows"
+        await interaction.response.send_message(
+            f"✅ Moved **{moved}** stock item(s) from `{from_market}` → `{to_market}` ({window}).\n"
+            f"Check `/inventory stock market_id:{to_market}`"
+            + (" or the website's STOCK column." if moved else " (nothing matched — widen `since_minutes`?)."),
+            ephemeral=True)
 
 
 async def setup(bot):

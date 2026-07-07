@@ -123,21 +123,27 @@ class OrdersCog(commands.Cog):
         if not is_manager(interaction):
             return await interaction.response.send_message("⛔ You need the @Managers role to cancel orders.", **ephemeral_kwargs(interaction))
 
+        # Defer up front: update_order_messages() makes several Discord API calls
+        # (edit/delete order cards) that can exceed the 3-second interaction window,
+        # which caused "404 Not Found (10062): Unknown interaction" when we replied
+        # afterwards. Deferring gives us up to 15 min; all replies use followup.
+        await interaction.response.defer(**ephemeral_kwargs(interaction), thinking=True)
+
         data = load_orders()
         order = next((o for o in data["orders"] if o["id"] == order_id), None)
         if not order:
-            return await interaction.response.send_message(f"❌ Order #{order_id} not found.", **ephemeral_kwargs(interaction))
+            return await interaction.followup.send(f"❌ Order #{order_id} not found.", **ephemeral_kwargs(interaction))
         if order["status"] == "fulfilled":
-            return await interaction.response.send_message(
+            return await interaction.followup.send(
                 f"⚠️ Order #{order_id} is already fulfilled and cannot be cancelled.", **ephemeral_kwargs(interaction)
             )
         if order["status"] == "cancelled":
-            return await interaction.response.send_message(f"⚠️ Order #{order_id} is already cancelled.", **ephemeral_kwargs(interaction))
+            return await interaction.followup.send(f"⚠️ Order #{order_id} is already cancelled.", **ephemeral_kwargs(interaction))
 
         order["status"] = "cancelled"
         save_orders(data)
         await update_order_messages(interaction.client, order)
-        await interaction.response.send_message(f"❌ Order #{order_id} has been cancelled.", **ephemeral_kwargs(interaction))
+        await interaction.followup.send(f"❌ Order #{order_id} has been cancelled.", **ephemeral_kwargs(interaction))
 
     @app_commands.command(
         name="order",

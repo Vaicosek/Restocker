@@ -21,6 +21,15 @@ from dotenv import load_dotenv
 load_dotenv()
 from discord.ext import commands, tasks
 from discord.ui import View, Button, Select
+
+# main.py launches this file as "__main__" (via runpy). Register it under its real
+# name too, so `import Restocker_main` elsewhere (Restocker_web, api handlers) returns
+# THIS already-running module instead of importing a *second copy*. A second copy
+# re-executed the whole file — duplicate "Database initialised", a stray
+# asyncio.run(_main()) at the bottom ("coroutine '_main' was never awaited"), and a
+# split set of globals/bot state. setdefault makes both names point at one module.
+sys.modules.setdefault("Restocker_main", sys.modules[__name__])
+
 try:
     import anthropic as _anthropic
     _ANTHROPIC_AVAILABLE = True
@@ -1239,6 +1248,17 @@ def load_orders():
             o.setdefault("claims", [])
             if not isinstance(o.get("claims"), list):
                 o["claims"] = []
+            # order_claims.user_id is stored as TEXT, so it comes back as a string.
+            # Ownership checks compare it to interaction.user.id (an int), and
+            # "123" == 123 is False — which silently blocks the claimant from
+            # fulfilling / adding produced / releasing their own claim. Coerce to int
+            # once here so every downstream comparison works uniformly.
+            for _c in o["claims"]:
+                if isinstance(_c, dict) and _c.get("user_id") is not None:
+                    try:
+                        _c["user_id"] = int(_c["user_id"])
+                    except (TypeError, ValueError):
+                        pass
             o.setdefault("priority_until", None)
             o.setdefault("employee_announce_at", None)
             o.setdefault("assist_ticket_ids", {})
@@ -1531,17 +1551,13 @@ def add_coins(uid: int, amount: int, *, counts_as_principal: bool = True, reason
     amt = int(amount or 0)
     try:
         import Restocker_db as _db
-        cur = _db.get_balance(str(uid))
-        coins = int(cur.get("coins") or 0)
-        principal = int(cur.get("principal") or 0)
-        lp = float(cur.get("lp") or 0)
         if amt == 0:
-            return coins, principal
-        coins = max(0, coins + amt)
-        if counts_as_principal and amt > 0:
-            principal = max(0, principal + amt)
-        _db.set_balance(str(uid), coins=coins, principal=principal, lp=lp)
-        _db.record_coin_ledger(str(uid), amt, coins, reason)
+            cur = _db.get_balance(str(uid))
+            return int(cur.get("coins") or 0), int(cur.get("principal") or 0)
+        # Atomic single-transaction delta — no read-modify-write race.
+        coins, principal, applied = _db.adjust_balance(
+            uid, amt, counts_as_principal=counts_as_principal)
+        _db.record_coin_ledger(str(uid), applied, coins, reason)
         return coins, principal
     except Exception as e:
         log.warning("[add_coins] single-row path failed, using whole-table: %s", e)
@@ -1560,18 +1576,14 @@ def deduct_coins(uid: int, amount: int, *, reduce_principal: bool = True, reason
     amt = int(amount or 0)
     try:
         import Restocker_db as _db
-        cur = _db.get_balance(str(uid))
-        coins = int(cur.get("coins") or 0)
-        principal = int(cur.get("principal") or 0)
-        lp = float(cur.get("lp") or 0)
         if amt <= 0:
-            return coins, principal
-        amt = min(amt, coins)
-        coins -= amt
-        if reduce_principal:
-            principal = max(0, principal - min(principal, amt))
-        _db.set_balance(str(uid), coins=coins, principal=principal, lp=lp)
-        _db.record_coin_ledger(str(uid), -amt, coins, reason)
+            cur = _db.get_balance(str(uid))
+            return int(cur.get("coins") or 0), int(cur.get("principal") or 0)
+        # Atomic single-transaction deduction (clamped at 0) — no race.
+        coins, principal, applied = _db.adjust_balance(
+            uid, -amt, reduce_principal=reduce_principal)
+        # `applied` is the real (negative) coin delta actually removed.
+        _db.record_coin_ledger(str(uid), applied, coins, reason)
         return coins, principal
     except Exception as e:
         log.warning("[deduct_coins] single-row path failed, using whole-table: %s", e)
@@ -4238,6 +4250,22 @@ def _verify_market_code(market_id: str, market_code: str) -> bool:
     return bool(stored) and stored.upper() == (market_code or "").strip().upper()
 
 
+def _market_id_by_code(market_code: str) -> str | None:
+    """Find a market by its verification code alone (case-insensitive). Returns the
+    market_id iff EXACTLY one registered market carries that leader_code, else None.
+    This lets a CSN/stock upload land in the right market even when the CSV's market_id
+    is mistyped (e.g. 'viridianmarke' instead of 'viridianmarket'), because the code
+    uniquely identifies the market."""
+    code = (market_code or "").strip().upper()
+    if not code:
+        return None
+    matches = [
+        mid for mid, m in (_load_markets().get("markets", {}) or {}).items()
+        if (m.get("leader_code") or "").strip().upper() == code
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
 def _load_csn_history() -> dict:
     try:
         import Restocker_db as _db
@@ -4741,11 +4769,36 @@ def _build_csn_embed(
             )
         embed.add_field(name="🏆 Top Earners", value="\n".join(lines), inline=False)
 
-    restock = sorted(
-        [(item, v["sold_qty"] // CSN_BARREL)
-         for item, v in items.items() if v["sold_qty"] // CSN_BARREL > 0],
-        key=lambda x: -x[1],
-    )[:8]
+    # "Restock Needed" used to be purely sold_qty // barrel — it ignored what's
+    # actually on the shelves, so it kept flagging barrels you'd already refilled
+    # (the reported bug). Use the LIVE stock from csn_stock scans: when we know an
+    # item's capacity, recommend the real shortfall (capacity − current stock, summed
+    # across markets), exactly like /inventory restock_deficit. Items whose barrels
+    # are full drop off. Fall back to the sold-based estimate only for items we've
+    # never scanned (no regression where there's no stock data).
+    live_stock: dict = {}
+    try:
+        import Restocker_db as _db_ms
+        for _row in _db_ms.get_all_market_stock():
+            _it = (_row.get("item") or "").strip()
+            if not _it:
+                continue
+            _s, _c = live_stock.get(_it, (0, 0))
+            live_stock[_it] = (_s + int(_row.get("stock") or 0), _c + int(_row.get("capacity") or 0))
+    except Exception:
+        live_stock = {}
+
+    _restock_rows = []
+    for item, v in items.items():
+        sold = int(v.get("sold_qty") or 0)
+        have = live_stock.get(item)
+        if have is not None and have[1] > 0:          # known capacity → real shortfall
+            barrels = max(0, have[1] - have[0]) // CSN_BARREL
+        else:                                          # never scanned → sold-based estimate
+            barrels = sold // CSN_BARREL
+        if barrels > 0:
+            _restock_rows.append((item, barrels))
+    restock = sorted(_restock_rows, key=lambda x: -x[1])[:8]
     if restock:
         rlines = [
             f"🛢️ **{item}** — `{b}` barrel{'s' if b != 1 else ''}"
@@ -7904,6 +7957,23 @@ def _get_anthropic_client():
 _AI_COOLDOWN = {}
 
 
+async def _safe_reply(message: discord.Message, content: str, **kwargs):
+    """Reply to `message`; if the original was deleted (Discord 50035 'Unknown
+    message' on the reply reference), fall back to a plain channel send so the bot
+    still answers instead of erroring out. Genuine HTTP errors still propagate."""
+    try:
+        return await message.reply(content, **kwargs)
+    except discord.Forbidden:
+        pass
+    except discord.HTTPException as e:
+        if getattr(e, "code", None) != 50035 and "message_reference" not in str(e).lower():
+            raise
+    try:
+        return await message.channel.send(content, **kwargs)
+    except Exception:
+        return None
+
+
 async def handle_ai_mention(message: discord.Message):
     """Handle a message where the bot is @mentioned — routes to Claude."""
     client = _get_anthropic_client()
@@ -8011,7 +8081,7 @@ Current context:
                         if len(reply) > 1990:
                             reply = reply[:1987] + "…"
                         try:
-                            await message.reply(reply, allowed_mentions=_NO_MASS_MENTIONS)
+                            await _safe_reply(message, reply, allowed_mentions=_NO_MASS_MENTIONS)
                         except discord.Forbidden:
                             pass
                         history = _AI_CONVERSATION_HISTORY.get(channel.id, [])
@@ -8023,7 +8093,7 @@ Current context:
     except Exception as e:
         log.error("handle_ai_mention error: %s", e)
         try:
-            await message.reply(f"⚠️ Error: {e}", allowed_mentions=_NO_MASS_MENTIONS)
+            await _safe_reply(message, f"⚠️ Error: {e}", allowed_mentions=_NO_MASS_MENTIONS)
         except Exception:
             pass
 
