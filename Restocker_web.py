@@ -142,6 +142,7 @@ def _session_user(request):
     # (grandfathered) rather than logging everyone out.
     exp = sess.get("expires")
     if exp is not None:
+        import time as _t
         try:
             if float(exp) <= _t.time():
                 _SESSIONS.pop(tok, None)
