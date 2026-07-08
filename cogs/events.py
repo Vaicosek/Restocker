@@ -152,9 +152,27 @@ class EventsCog(commands.Cog):
                 log.info("[ign] Registered IGN '%s' for user %s", ign, message.author.id)
                 return
 
-        if not message.webhook_id:
+        # CSN reports arrive from an automated poster: either a Discord WEBHOOK
+        # (message.webhook_id set) or a BOT APPLICATION posting with a bot token
+        # (webhook_id is None but message.author.bot is True). Accept BOTH — the CSN
+        # relay may run as either. Never process our own uploads (loop guard) or plain
+        # human messages.
+        _self_id = bot.user.id if bot.user else None
+        _is_webhook = message.webhook_id is not None
+        _is_bot_app = bool(getattr(message.author, "bot", False)) and message.author.id != _self_id
+        if not (_is_webhook or _is_bot_app):
             return
-        if _CSN_ALLOWED_WEBHOOK_IDS and message.webhook_id not in _CSN_ALLOWED_WEBHOOK_IDS:
+        # Optional allowlist (CSN_WEBHOOK_IDS): match either the webhook id or the bot
+        # author id. Empty allowlist = accept any webhook/bot. When a CSN-named CSV is
+        # dropped by the allowlist, log it so the skip isn't silent.
+        _poster_id = message.webhook_id if _is_webhook else message.author.id
+        if _CSN_ALLOWED_WEBHOOK_IDS and _poster_id not in _CSN_ALLOWED_WEBHOOK_IDS:
+            for _a in message.attachments:
+                _n = _a.filename.lower()
+                if _n.endswith(".csv") and ("csn_monthly" in _n or "csn_export" in _n or "csn_stock" in _n):
+                    log.warning("[csn] ignored CSN report from poster %s — not in CSN_WEBHOOK_IDS "
+                                "allowlist (add its id, or clear the allowlist to accept all).", _poster_id)
+                    break
             return
         for att in message.attachments:
             name = att.filename.lower()

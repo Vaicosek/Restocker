@@ -460,6 +460,12 @@ def _migrate(conn: sqlite3.Connection) -> None:
         "ALTER TABLE market_shares ADD COLUMN treasury_coins REAL NOT NULL DEFAULT 0",
         "ALTER TABLE market_shares ADD COLUMN dividend_pct REAL",
         "ALTER TABLE market_shares ADD COLUMN last_dividend_month TEXT",
+        # The shop-scan listing quantity ("Sell <qty> for <price>"). Stored so buy_price/
+        # sell_price can be kept per-unit (= price / qty). A NULL here marks a legacy row
+        # scanned before per-unit normalization existed (its price is still per-bulk and
+        # not trusted for display); it self-heals on the next stock scan.
+        "ALTER TABLE market_stock ADD COLUMN buy_qty  INTEGER",
+        "ALTER TABLE market_stock ADD COLUMN sell_qty INTEGER",
     ]
     for sql in migrations:
         try:
@@ -1191,10 +1197,15 @@ def adjust_etf_units(user_id: str, delta_units: float, delta_cost: float) -> flo
 
 def upsert_market_stock(market_id: str, item: str, owner: str = None, stock: int = 0,
                         buy_price: float = None, sell_price: float = None,
-                        capacity: int = None) -> None:
+                        capacity: int = None, buy_qty: int = None,
+                        sell_qty: int = None) -> None:
     """Record a live shop-stock snapshot for one item. When `capacity` is given
     (computed as barrels × slots × stack size) it is stored as-is; otherwise
-    capacity falls back to the legacy high-water mark (max stock ever seen)."""
+    capacity falls back to the legacy high-water mark (max stock ever seen).
+
+    buy_price/sell_price are stored PER UNIT. buy_qty/sell_qty are the shop's listed
+    bulk quantity ("Sell <qty> for <price>") — kept so we can tell a per-unit row from a
+    legacy per-bulk one (NULL qty = legacy, not trusted for display)."""
     now = datetime.now(timezone.utc).isoformat()
     mid = market_id or "main"
     with db() as conn:
@@ -1203,14 +1214,16 @@ def upsert_market_stock(market_id: str, item: str, owner: str = None, stock: int
         cur_cap = int(row["capacity"]) if row else 0
         cap = int(capacity) if capacity is not None else max(cur_cap, int(stock or 0))
         conn.execute(
-            "INSERT INTO market_stock (market_id, item, owner, stock, capacity, buy_price, sell_price, updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?) "
+            "INSERT INTO market_stock (market_id, item, owner, stock, capacity, buy_price, sell_price, buy_qty, sell_qty, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?) "
             "ON CONFLICT(market_id, item) DO UPDATE SET owner=excluded.owner, stock=excluded.stock, "
             "capacity=excluded.capacity, buy_price=excluded.buy_price, sell_price=excluded.sell_price, "
-            "updated_at=excluded.updated_at",
+            "buy_qty=excluded.buy_qty, sell_qty=excluded.sell_qty, updated_at=excluded.updated_at",
             (mid, item, owner, int(stock or 0), cap,
              (float(buy_price) if buy_price is not None else None),
-             (float(sell_price) if sell_price is not None else None), now))
+             (float(sell_price) if sell_price is not None else None),
+             (int(buy_qty) if buy_qty is not None else None),
+             (int(sell_qty) if sell_qty is not None else None), now))
 
 
 def get_market_stock(market_id: str) -> dict:

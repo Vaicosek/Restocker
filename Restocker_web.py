@@ -172,15 +172,43 @@ def _load_items() -> dict:
         import Restocker_db as db
         rows = db.get_items()
         # Live barrel stock (from csn_stock scans) wins over the catalog's
-        # order-fulfillment counter, so the website shows real shop fullness.
+        # order-fulfillment counter, so the website shows real shop fullness. We also
+        # keep the scanned per-unit price so items with no curated catalog price still
+        # show the shop's real listed price instead of 0. Catalog items are keyed by
+        # name (market "main"), while scans are per-market, so we also index price by
+        # bare item name as a fallback.
         live = {}
+        live_price = {}
+        name_price = {}
         try:
             for _r in db.get_all_market_stock() or []:
-                live[(_r.get("market_id"), _r.get("item"))] = int(_r.get("stock") or 0)
+                _k = (_r.get("market_id"), _r.get("item"))
+                live[_k] = int(_r.get("stock") or 0)
+                # Only per-unit rows (carrying a listing qty) are trusted for price;
+                # legacy NULL-qty rows are per-bulk and skipped until re-scanned.
+                _has_qty = (_r.get("sell_qty") is not None) or (_r.get("buy_qty") is not None)
+                if not _has_qty:
+                    continue
+                _sp = _r.get("sell_price")
+                if _sp is None or float(_sp) <= 0:
+                    _sp = _r.get("buy_price")
+                if _sp is not None and float(_sp) > 0:
+                    live_price[_k] = float(_sp)
+                    name_price.setdefault(_r.get("item"), float(_sp))
         except Exception:
             live = {}
+            live_price = {}
+            name_price = {}
+
+        def _coin_for(name, info):
+            c = info.get("coin", 0) or 0
+            if c and float(c) > 0:
+                return c
+            mid = info.get("market_id", "main")
+            return round((live_price.get((mid, name)) or name_price.get(name) or 0), 2)
+
         return {name: {
-            "coin":      info.get("coin", 0),
+            "coin":      _coin_for(name, info),
             "stock":     live.get((info.get("market_id", "main"), name), info.get("stock", 0)),
             "unit_type": info.get("unit_type", "pieces"),
             "market_id": info.get("market_id", "main"),
@@ -359,13 +387,29 @@ def _load_market_prices() -> dict:
         pass
 
     # Live barrel stock per (market, item) from csn_stock scans — lets derived
-    # (non-curated) rows show real fullness instead of a hardcoded 0.
+    # (non-curated) rows show real fullness instead of a hardcoded 0. We also grab
+    # the scanned per-unit sell/buy price: it's the shop's actual listed price and is
+    # cleaner than the |net|/sold estimate, which reads 0 whenever a month's coins net
+    # out. Only rows carrying a listing qty (buy_qty/sell_qty) are trusted for price —
+    # those were scanned after per-unit normalization; a NULL qty means a legacy
+    # per-bulk row, which we skip so it can't show 64x-high. Re-scan heals it.
     live = {}
+    live_price = {}
     try:
         for _r in db.get_all_market_stock() or []:
-            live[(_r.get("market_id"), _r.get("item"))] = int(_r.get("stock") or 0)
+            _k = (_r.get("market_id"), _r.get("item"))
+            live[_k] = int(_r.get("stock") or 0)
+            _has_qty = (_r.get("sell_qty") is not None) or (_r.get("buy_qty") is not None)
+            if not _has_qty:
+                continue
+            _sp = _r.get("sell_price")
+            if _sp is None or float(_sp) <= 0:
+                _sp = _r.get("buy_price")
+            if _sp is not None and float(_sp) > 0:
+                live_price[_k] = float(_sp)
     except Exception:
         live = {}
+        live_price = {}
 
     result: dict = {}
     for mid in market_ids:
@@ -389,7 +433,10 @@ def _load_market_prices() -> dict:
         priced: dict = {}
         for iname, e in agg.items():
             sold = e["sold"]
-            if sold > 0:
+            scanned = live_price.get((mid, iname))
+            if scanned:                          # real listed price beats the estimate
+                coin = round(scanned, 2)         # 2dp: cheap bulk goods are <1/unit
+            elif sold > 0:
                 coin = max(1, round(abs(e["net"]) / sold))
             elif e["bought"] > 0:
                 coin = max(1, round(abs(e["net"]) / e["bought"]))
@@ -397,6 +444,12 @@ def _load_market_prices() -> dict:
                 coin = 0
             priced[iname] = {"coin": coin, "sold": sold, "bought": e["bought"],
                              "stock": live.get((mid, iname), 0)}
+        # Items that were scanned but have no CSN sales history yet still deserve a
+        # row (with their listed price + live stock) instead of vanishing.
+        for (_mid, _item), _px in live_price.items():
+            if _mid == mid and _item not in priced:
+                priced[_item] = {"coin": round(_px, 2), "sold": 0, "bought": 0,
+                                 "stock": live.get((mid, _item), 0)}
         if priced:
             result[mid] = priced
 
@@ -876,6 +929,7 @@ _PAGE = """<!DOCTYPE html>
       </div>
       <div class="market-tabs" id="market-tabs"></div>
     </div>
+    <div id="prices-owner-hint" style="display:none;margin:0 0 12px;padding:9px 14px;border:1px solid var(--accent);border-radius:8px;background:rgba(34,255,122,.07);color:var(--accent);font-size:13px"></div>
     <div class="chart-card" id="prices-chart-card" style="display:none">
       <div class="chart-title" id="prices-chart-title">Top items by sales volume</div>
       <div class="chart-box"><canvas id="prices-chart"></canvas></div>
@@ -995,7 +1049,8 @@ _PAGE = """<!DOCTYPE html>
       </div>
     </div>
     <div id="holders-section" style="margin-top:28px;display:none">
-      <div class="chart-title" style="margin-bottom:12px">Top holders · <span id="holders-market-name"></span></div>
+      <div class="chart-title" style="margin-bottom:12px">Top holders · <span id="holders-market-name"></span>
+        <a id="captable-link" href="#" target="_blank" style="float:right;font-size:13px;color:var(--accent);text-decoration:none">📊 Full cap table →</a></div>
       <div class="table-wrap">
         <table>
           <thead><tr><th>#</th><th>Holder</th><th>Shares</th><th>Value</th></tr></thead>
@@ -1067,6 +1122,27 @@ const ALL_EARNINGS  = __ALL_EARNINGS_JSON__;
 const MARKET_PRICES = __MARKET_PRICES_JSON__;
 const STOCKS        = __STOCKS_JSON__;
 const TEAMS         = __TEAMS_JSON__;
+
+// ── Owner edit state (shared): which markets you own + CSRF, fetched once. Powers
+// inline price/stock editing on the main table and the "you own this market" hint.
+window.OWNER = { owned: [], csrf: "", ready: false };
+window.ownsMarket = (mid) => window.OWNER.owned.includes(String(mid));
+window.ownerSave = async (mid, item, patch) => {
+  try {
+    const r = await fetch("/api/owner/set_item", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-CSRF-Token": window.OWNER.csrf },
+      body: JSON.stringify(Object.assign({ market_id: mid, item: item }, patch)),
+    });
+    return await r.json();
+  } catch (e) { return { ok: false, error: "network" }; }
+};
+window.OWNER_READY = fetch("/api/me").then(r => r.json()).then(me => {
+  window.OWNER.owned = ((me && me.owned) || []).map(o => String(o.mid));
+  window.OWNER.csrf  = (me && me.csrf) || "";
+  window.OWNER.ready = true;
+  return window.OWNER;
+}).catch(() => window.OWNER);
 const INVENTORY     = __INVENTORY_JSON__;
 const UPDATED       = "__UPDATED__";
 
@@ -1254,19 +1330,60 @@ document.querySelectorAll(".nav-tab").forEach(tab => {
     });
     tbody.innerHTML = "";
     emptyEl.style.display = rows.length ? "none" : "";
+    // Owner hint + inline editing when the logged-in user owns the active market.
+    const ownActive = (activeMarket !== "all") && window.ownsMarket && window.ownsMarket(activeMarket);
+    const hintEl = document.getElementById("prices-owner-hint");
+    if (hintEl) {
+      hintEl.style.display = ownActive ? "" : "none";
+      if (ownActive) hintEl.textContent = "✏️ You own this market — edit price or stock right here and press Enter to save (set stock to 0 to zero it, or use My Market to remove an item).";
+    }
     rows.forEach(r => {
       const tr = document.createElement("tr");
       const estTag = r.est ? `<span class="est-tag" title="Estimated from CSN sales">est</span>` : "";
+      const own = !!(window.ownsMarket && window.ownsMarket(r.market));
       tr.innerHTML = `
         <td class="item-name">${esc(r.name)}${estTag}</td>
-        <td><span class="badge coin-badge">${num(r.coin)} ¢</span></td>
-        <td>${stockCell(r)}</td>
+        <td class="c-price"></td>
+        <td class="c-stock"></td>
         <td><span class="badge" style="color:var(--muted)">${num(r.sold)}</span></td>
         <td><span class="badge market-tag">${mktDot(r.market)}${esc(mktName(r.market))}</span></td>`;
+      const cp = tr.querySelector(".c-price"), cs = tr.querySelector(".c-stock");
+      if (own) {
+        try { cp.appendChild(ownerCell(r, "coin", Math.round((r.coin || 0) * 100) / 100)); }
+        catch (e) { cp.innerHTML = `<span class="badge coin-badge">${num(r.coin)} ¢</span>`; }
+        try { cs.appendChild(ownerCell(r, "stock", Math.round(r.stock || 0))); }
+        catch (e) { cs.innerHTML = stockCell(r); }
+      } else {
+        cp.innerHTML = `<span class="badge coin-badge">${num(r.coin)} ¢</span>`;
+        cs.innerHTML = stockCell(r);
+      }
       tbody.appendChild(tr);
     });
     renderChart(rows);
   }
+
+  function ownerCell(r, field, val) {
+    const inp = document.createElement("input");
+    inp.type = "number"; if (field === "coin") inp.step = "any"; inp.value = val; inp.style.width = "78px";
+    inp.style.background = "var(--panel2)"; inp.style.border = "1px solid var(--border-strong)";
+    inp.style.color = "var(--text)"; inp.style.borderRadius = "6px"; inp.style.padding = "3px 6px";
+    inp.title = "You own this market — edit and press Enter to save";
+    const save = async () => {
+      inp.style.opacity = ".5";
+      const patch = {}; patch[field] = Number(inp.value);
+      const res = await window.ownerSave(r.market, r.name, patch);
+      inp.style.opacity = "1";
+      inp.style.borderColor = (res && res.ok) ? "var(--accent)" : "#f85149";
+      setTimeout(() => { inp.style.borderColor = "var(--border-strong)"; }, 1000);
+      if (res && res.ok) { r[field] = Number(inp.value); }
+    };
+    inp.addEventListener("change", save);
+    inp.addEventListener("keydown", e => { if (e.key === "Enter") inp.blur(); });
+    return inp;
+  }
+
+  // Once we know which markets the user owns, re-render so edit fields appear.
+  if (window.OWNER_READY) window.OWNER_READY.then(function () { try { render(); } catch (e) {} });
 
   document.querySelectorAll("#page-prices th[data-sort]").forEach(th => {
     th.addEventListener("click", () => {
@@ -1644,6 +1761,8 @@ document.querySelectorAll(".nav-tab").forEach(tab => {
     const sec = document.getElementById("holders-section");
     const htb = document.getElementById("holders-tbody");
     document.getElementById("holders-market-name").textContent = m.name;
+    const _ctl = document.getElementById("captable-link");
+    if (_ctl) _ctl.href = "/shares/" + encodeURIComponent(m.mid);
     htb.innerHTML = "";
     if (m.top_holders && m.top_holders.length) {
       sec.style.display = "";
@@ -1798,9 +1917,11 @@ document.querySelectorAll(".nav-tab").forEach(tab => {
       const opt = document.createElement("option"); opt.value = it.item; dl.appendChild(opt);
       const tr = document.createElement("tr");
       const tdName = document.createElement("td"); tdName.className = "item-name"; tdName.textContent = it.item;
-      const tdStock = document.createElement("td"); tdStock.textContent = num(it.stock);
+      const tdStock = document.createElement("td");
+      const stockIn = document.createElement("input"); stockIn.className = "own-price"; stockIn.type = "number"; stockIn.value = Math.round(it.stock); stockIn.style.width = "80px"; stockIn.title = "Editable stock — set the real amount (or 0), then Save";
+      tdStock.appendChild(stockIn);
       const tdPrice = document.createElement("td");
-      const price = document.createElement("input"); price.className = "own-price"; price.type = "number"; price.value = Math.round(it.coin); price.style.width = "92px";
+      const price = document.createElement("input"); price.className = "own-price"; price.type = "number"; price.step = "any"; price.value = Math.round((it.coin || 0) * 100) / 100; price.style.width = "92px";
       tdPrice.appendChild(price);
       const tdSold = document.createElement("td"); tdSold.textContent = num(it.sold);
       const tdOpt = document.createElement("td");
@@ -1812,7 +1933,7 @@ document.querySelectorAll(".nav-tab").forEach(tab => {
       const saveBtn = document.createElement("button"); saveBtn.className = "mini-btn"; saveBtn.textContent = "Save";
       saveBtn.onclick = async () => {
         saveBtn.textContent = "…";
-        const res = await post("/api/owner/set_item", { market_id: mid, item: it.item, coin: Number(price.value) });
+        const res = await post("/api/owner/set_item", { market_id: mid, item: it.item, coin: Number(price.value), stock: Number(stockIn.value) });
         saveBtn.textContent = (res && res.ok) ? "Saved" : "Err";
         setTimeout(() => { saveBtn.textContent = "Save"; }, 1200);
       };
@@ -2198,6 +2319,93 @@ async def _handle_api_logout(request):
     return resp
 
 
+async def _handle_shares(request):
+    """Live cap-table / shareholder page for a market's stock: /shares/<market>[?uid=<id>].
+    Shows outstanding, mktcap, ownership concentration, and the ranked holder table."""
+    import Restocker_db as db
+    import Restocker_main as m
+    mid = (request.match_info.get("market", "") or "").strip()
+    you = (request.query.get("uid") or "").strip() or None
+    sh = db.get_market_shares(mid)
+    if not sh:
+        return web.Response(text=f"No stock listed for market '{mid}'.", status=404, content_type="text/plain")
+    try:
+        markets = (m._load_markets().get("markets", {}) or {})
+    except Exception:
+        markets = {}
+    name = (markets.get(mid) or {}).get("name", mid)
+    try:
+        ticker = _market_ticker(mid)
+    except Exception:
+        ticker = mid.upper()
+    holders = []
+    try:
+        for h in db.get_holders(mid):
+            uid = str(h.get("user_id"))
+            try:
+                nm = db.get_ign(uid) or uid
+            except Exception:
+                nm = uid
+            holders.append({"uid": uid, "name": nm, "shares": float(h.get("shares") or 0)})
+    except Exception:
+        holders = []
+    lowest_ask = highest_bid = None
+    try:
+        orders = db.get_open_limit_orders(mid)
+        asks = [float(o["limit_price"]) for o in orders if str(o.get("side")).lower() == "sell"]
+        bids = [float(o["limit_price"]) for o in orders if str(o.get("side")).lower() == "buy"]
+        lowest_ask = min(asks) if asks else None
+        highest_bid = max(bids) if bids else None
+    except Exception:
+        pass
+    mark = lowest_ask if lowest_ask else float(sh.get("share_price") or 0)
+    try:
+        html = m._render_cap_table_html(name, ticker, float(sh.get("shares_outstanding") or 0),
+                                        mark, lowest_ask, highest_bid, holders, you_uid=you)
+    except Exception as e:
+        return web.Response(text=f"Could not render cap table: {e}", status=500, content_type="text/plain")
+    return web.Response(text=html, content_type="text/html")
+
+
+async def _handle_report(request):
+    """Full monthly report page: /report/<market>[/<month>]. Renders the complete,
+    sortable P&L (every item, income vs expense) so anyone can open and read the whole
+    month. Defaults to the latest month when none is given."""
+    import Restocker_db as db
+    import Restocker_main as m
+    mid = request.match_info.get("market", "main")
+    month = request.match_info.get("month", "") or ""
+    try:
+        markets = (m._load_markets().get("markets", {}) or {})
+    except Exception:
+        markets = {}
+    mname = (markets.get(mid) or {}).get("name", mid)
+    try:
+        months = (db.csn_get_market(mid) or {}).get("months", {}) or {}
+    except Exception:
+        months = {}
+    if not months:
+        return web.Response(text=f"No report data for market '{mid}'.", status=404,
+                            content_type="text/plain")
+    if not month or month not in months:
+        month = max(months.keys())
+    mo = months.get(month) or {}
+    items = mo.get("items", {}) or {}
+    try:
+        from datetime import date as _date
+        month_label = _date(int(month[:4]), int(month[5:7]), 1).strftime("%B %Y")
+    except Exception:
+        month_label = month
+    try:
+        html = m._render_full_report_html(
+            f"Monthly Report — {mname}", mname, month_label,
+            items, float(mo.get("income", 0) or 0), float(mo.get("spent", 0) or 0))
+    except Exception as e:
+        return web.Response(text=f"Could not render report: {e}", status=500,
+                            content_type="text/plain")
+    return web.Response(text=html, content_type="text/html")
+
+
 async def _handle_health(request):
     return web.Response(text="ok")
 
@@ -2374,6 +2582,9 @@ async def start_webserver(port: int = 8080):
     app.router.add_post("/api/owner/remove_item", _handle_owner_remove_item)
     app.router.add_post("/api/owner/log_restock", _handle_owner_log_restock)
     app.router.add_post("/api/owner/set_item",    _handle_owner_set_item)
+    app.router.add_get("/report/{market}/{month}", _handle_report)
+    app.router.add_get("/report/{market}",         _handle_report)
+    app.router.add_get("/shares/{market}",         _handle_shares)
     app.router.add_get("/health",        _handle_health)
 
     try:

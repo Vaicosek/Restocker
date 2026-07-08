@@ -16,6 +16,12 @@ deduct_investor_coins = core.deduct_investor_coins
 is_manager = core.is_manager
 _log_team_event = core._log_team_event
 _team_live = core._team_live
+load_orders = core.load_orders
+save_orders = core.save_orders
+update_order_messages = core.update_order_messages
+utcnow_iso = core.utcnow_iso
+_load_items = core._load_items
+PRIORITY_HOURS = core.PRIORITY_HOURS
 
 class WebOrderView(discord.ui.View):
     """Persistent view posted to the orders channel when a web order comes in."""
@@ -193,7 +199,7 @@ class FuturesOrderView(discord.ui.View):
 
     async def _do_approve(self, interaction: discord.Interaction, *, ping_workers: bool):
         import Restocker_db as _db
-        from datetime import datetime, timezone as _tz
+        from datetime import datetime, timezone as _tz, timedelta
 
         try:
             order = _db.get_futures_order(self.order_id)
@@ -203,6 +209,15 @@ class FuturesOrderView(discord.ui.View):
 
         if not order:
             await interaction.response.send_message("⚠️ Order not found.", ephemeral=True)
+            return
+
+        # Block self-approval: an internal review has to be done by a DIFFERENT manager,
+        # even if the customer happens to hold the manager role (that's how #10 got
+        # self-approved). Decline is unaffected.
+        if str(order.get("user_id") or "") == str(interaction.user.id):
+            await interaction.response.send_message(
+                "⚠️ You can't approve your **own** futures order — another manager has to review it.",
+                ephemeral=True)
             return
 
         try:
@@ -234,63 +249,88 @@ class FuturesOrderView(discord.ui.View):
         except Exception:
             pass
 
-        # Build the order-card embed to post to the worker channel
         item       = order.get("item", "?")
-        qty        = order.get("quantity", "?")
+        qty        = int(order.get("quantity") or 0)
         username   = order.get("username", "?")
         enchants   = order.get("enchants") or ""
         notes      = order.get("notes") or ""
 
-        card_embed = discord.Embed(
-            title=f"🔮 Futures Order #{self.order_id}",
-            color=discord.Color.gold(),
-            timestamp=datetime.now(_tz.utc),
-        )
-        card_embed.add_field(name="Customer", value=f"<@{order['user_id']}>" if order.get("user_id") else username, inline=True)
-        card_embed.add_field(name="Item", value=f"{qty}x {item}", inline=True)
-        if enchants:
-            card_embed.add_field(name="Enchants / Quality", value=enchants, inline=False)
-        if notes:
-            card_embed.add_field(name="Notes", value=notes, inline=False)
-        card_embed.set_footer(text=f"Approved by {interaction.user.display_name}")
-
-        # Post order card to the worker channel
-        worker_channel = bot.get_channel(WORKER_CHANNEL_ID) if WORKER_CHANNEL_ID else None
-        worker_mention = ""
-        if interaction.guild:
-            worker_role = discord.utils.get(interaction.guild.roles, name=EMPLOYEE_ROLE_NAME)
-            if worker_role and ping_workers:
-                worker_mention = worker_role.mention
-
-        if worker_channel:
+        # Turn the approved futures order into a REAL claimable work order (orders table
+        # + OrderView), posted to the worker channel through the normal flow — so workers
+        # can claim / partial-claim / fulfill → verify → get paid exactly like any order,
+        # instead of a static embed they can't interact with. THIS is the worker UI that
+        # ships only after a manager approves.
+        posted_ok = False
+        _new_order_id = None
+        try:
+            info = (_load_items().get("items") or {}).get(item) or {}
+            _sv = info.get("stackable")
+            if _sv is None:                       # infer: tools/armor/sets don't stack
+                _nl = str(item).lower()
+                _nonstack = ("pickaxe", "axe", "shovel", "sword", "hoe", "helmet", "chestplate",
+                             "leggings", "boots", "set", "bow", "trident", "shield", "elytra",
+                             "fishing rod")
+                stackable = not any(k in _nl for k in _nonstack)
+            else:
+                stackable = bool(_sv)
             try:
-                ping_content = (
-                    f"{worker_mention} — futures order approved! **#{self.order_id}: {qty}x {item}** for **{username}**. Coordinate fulfilment here."
-                    if ping_workers and worker_mention
-                    else f"📦 Futures order approved! **#{self.order_id}: {qty}x {item}** for **{username}**."
-                )
-                await worker_channel.send(
-                    content=ping_content,
-                    embed=card_embed,
-                    allowed_mentions=discord.AllowedMentions(roles=True),
-                )
-            except Exception as e:
-                print(f"⚠️ Could not post futures order card to worker channel: {e}")
-        else:
-            # Fallback: post in the current channel if worker channel not configured
-            try:
-                ping_content = (
-                    f"{worker_mention} — futures order approved! **#{self.order_id}: {qty}x {item}** for **{username}**."
-                    if ping_workers and worker_mention
-                    else f"📦 Futures order **#{self.order_id}** approved."
-                )
-                await interaction.channel.send(
-                    content=ping_content,
-                    embed=card_embed,
-                    allowed_mentions=discord.AllowedMentions(roles=True),
-                )
+                stack_size = int(info.get("stack_size") or (64 if stackable else 1))
             except Exception:
-                pass
+                stack_size = 64 if stackable else 1
+
+            _now = datetime.now(_tz.utc)
+            data_orders = load_orders()
+            _new_order_id = max([o.get("id", 0) for o in (data_orders.get("orders") or [])], default=0) + 1
+            work_order = {
+                "id": _new_order_id, "shop": "", "item": item,
+                "requested": qty, "produced": 0,
+                "status": "open", "claimed_by": None, "claims": [],
+                "created_at": utcnow_iso(),
+                "messages": {"channel_id": None, "message_id": None, "dms": {}},
+                "unit_type": "pieces", "amount": qty,
+                "stackable": bool(stackable), "stack_size": stack_size, "barrel_slots": 54,
+                # Card is posted directly below, and we handle the @Employee ping
+                # ourselves, so mark both announce sides done to keep the background
+                # loop from re-posting or double-notifying.
+                "worker_announced": True,
+                "employee_announced": True,
+                "employee_announce_at": None,
+                "priority_until": (_now + timedelta(hours=PRIORITY_HOURS)).isoformat(),
+                "priority_role": EMPLOYEE_ROLE_NAME,
+                # traceability back to the futures request
+                "source": "futures", "futures_id": int(self.order_id),
+                "customer_id": str(order.get("user_id") or ""),
+            }
+            data_orders.setdefault("orders", []).append(work_order)
+            save_orders(data_orders)
+            await update_order_messages(bot, work_order, allow_post=True)
+            posted_ok = True
+        except Exception as e:
+            print(f"⚠️ Could not create claimable work order from futures #{self.order_id}: {e}")
+
+        # Post a short context line under the card (customer + required enchants/notes,
+        # which the standard order card doesn't show) and @Employee ping only on
+        # "Approve & Ping".
+        if posted_ok:
+            _target = bot.get_channel(WORKER_CHANNEL_ID) if WORKER_CHANNEL_ID else None
+            _target = _target or interaction.channel
+            if _target is not None:
+                bits = [f"🔮 Order **#{_new_order_id}** is a **futures** job for **{username}** — {qty}x {item}."]
+                if enchants:
+                    bits.append(f"**Required:** {enchants}")
+                if notes:
+                    bits.append(f"**Notes:** {notes}")
+                prefix = ""
+                allowed = discord.AllowedMentions.none()
+                if ping_workers and interaction.guild:
+                    _role = discord.utils.get(interaction.guild.roles, name=EMPLOYEE_ROLE_NAME)
+                    if _role:
+                        prefix = _role.mention + " "
+                        allowed = discord.AllowedMentions(roles=[_role])
+                try:
+                    await _target.send(prefix + "  ·  ".join(bits), allowed_mentions=allowed)
+                except Exception:
+                    pass
 
         # DM the customer a proper embed
         try:
@@ -314,8 +354,12 @@ class FuturesOrderView(discord.ui.View):
             pass
 
         await interaction.response.send_message(
-            f"✅ Futures order #{self.order_id} approved — card posted to worker channel"
-            + (f", {worker_mention} pinged." if worker_mention else "."),
+            (f"✅ Futures #{self.order_id} approved → posted as claimable order **#{_new_order_id}** "
+             f"in the worker channel"
+             if posted_ok else
+             f"⚠️ Futures #{self.order_id} marked approved, but I couldn't post the worker order — "
+             f"check WORKER_CHANNEL_ID")
+            + (f" · {EMPLOYEE_ROLE_NAME} pinged." if (ping_workers and posted_ok) else "."),
             ephemeral=True,
         )
 

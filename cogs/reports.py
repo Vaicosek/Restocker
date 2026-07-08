@@ -13,6 +13,7 @@ core = sys.modules.get("Restocker_main") or sys.modules["__main__"]
 DEFAULT_MARKET_ID = core.DEFAULT_MARKET_ID
 _MATPLOTLIB_OK = core._MATPLOTLIB_OK
 _build_csn_embed = core._build_csn_embed
+_render_full_report_html = core._render_full_report_html
 _build_restock_plan = core._build_restock_plan
 _claims_iter = core._claims_iter
 _coins_for_pieces = core._coins_for_pieces
@@ -399,6 +400,29 @@ class ReportsCog(commands.Cog):
                 files = [discord.File(io.BytesIO(c), filename=f"csn_chart_{i+1}.png") for i, c in enumerate(chart_data)]
                 if files:
                     embed.set_image(url="attachment://csn_chart_1.png")
+
+        # Link to the full web report (same data, sortable, nothing to download) —
+        # people can open and go through the entire month there.
+        try:
+            embed.add_field(
+                name="📊 Full report",
+                value=(f"[Open the complete sortable report]"
+                       f"(https://dashboard.vaicosmarket.com/report/{market_id}/{month_key})"
+                       f"  ·  or open the attached `.html`"),
+                inline=False)
+        except Exception:
+            pass
+
+        # Attach the COMPLETE report as a self-contained, sortable HTML file so people
+        # can open and go through the whole month (the embed only shows the top rows).
+        try:
+            _mkt_name = (_get_market(market_id) or {}).get("name", market_id)
+            _report_html = _render_full_report_html(title, _mkt_name, month_label, items, income, spent)
+            files.append(discord.File(
+                io.BytesIO(_report_html.encode("utf-8")),
+                filename=f"report_{market_id}_{month_key}.html"))
+        except Exception as _e:
+            log.warning("[csn] full-report html failed: %s", _e)
 
         await interaction.followup.send(embed=embed, files=files)
 

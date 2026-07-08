@@ -13,6 +13,7 @@ FuturesOrderView = core.FuturesOrderView
 MANAGER_ROLE_ALT = core.MANAGER_ROLE_ALT
 MANAGER_ROLE_NAME = core.MANAGER_ROLE_NAME
 WEB_ORDERS_CHANNEL_ID = core.WEB_ORDERS_CHANNEL_ID
+FUTURES_CHANNEL_ID = core.FUTURES_CHANNEL_ID
 WORKER_CHANNEL_ID = core.WORKER_CHANNEL_ID
 _get_user_bal = core._get_user_bal
 _load_balances = core._load_balances
@@ -98,8 +99,12 @@ class MoneyCog(commands.Cog):
         except Exception as e:
             return await interaction.followup.send(f"⚠️ DB error: {e}", **ephemeral_kwargs(interaction))
 
+        # Futures approvals go to their own #futures channel; fall back to the
+        # web-orders channel, then the funds channel, if it isn't configured.
         channel = None
-        if WEB_ORDERS_CHANNEL_ID:
+        if FUTURES_CHANNEL_ID:
+            channel = bot.get_channel(FUTURES_CHANNEL_ID)
+        if channel is None and WEB_ORDERS_CHANNEL_ID:
             channel = bot.get_channel(WEB_ORDERS_CHANNEL_ID)
         if channel is None:
             channel = bot.get_channel(FUNDS_REPORT_CHANNEL_ID)

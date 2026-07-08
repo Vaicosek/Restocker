@@ -24,6 +24,7 @@ _CHANNEL_KEYS = [
     ("Tickets category",          "TICKETS_CATEGORY_ID"),
     ("Funds-report channel",      "FUNDS_REPORT_CHANNEL_ID"),
     ("Web-orders channel",        "WEB_ORDERS_CHANNEL_ID"),
+    ("Futures approval channel",  "FUTURES_CHANNEL_ID"),
     ("CSN-report channel",        "CSN_REPORT_CHANNEL_ID"),
 ]
 _GUILD_KEY = ("Funds-report guild", "FUNDS_REPORT_GUILD_ID")

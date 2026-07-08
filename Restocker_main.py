@@ -124,6 +124,7 @@ FUNDS_REPORT_CHANNEL_ID = _env_int("FUNDS_REPORT_CHANNEL_ID", 145185604851099654
 WORKER_CHANNEL_ID = _env_int("WORKER_CHANNEL_ID", 1500543204720902185)
 WELCOME_CHANNEL_ID = _env_int("WELCOME_CHANNEL_ID", 1500543301319917648)
 WEB_ORDERS_CHANNEL_ID = _env_int("WEB_ORDERS_CHANNEL_ID", 0)
+FUTURES_CHANNEL_ID = _env_int("FUTURES_CHANNEL_ID", 1524155131455737967)  # dedicated #futures approval channel
 TICKETS_CATEGORY_ID = _env_int("TICKETS_CATEGORY_ID", 1500543271783501884)
 
 HIVE_ACCESS_DM_TARGET_ID = _env_int("HIVE_ACCESS_DM_TARGET_ID", 1203738126850461738)
@@ -891,14 +892,19 @@ def build_order_embed(order: dict, items_data: dict) -> discord.Embed:
     assigned = sum(int(c.get("qty", 0) or 0) for c in (order.get("claims") or []))
     remaining = max(0, requested - assigned)
 
+    _is_futures = str(order.get("source", "")) == "futures"
     embed = discord.Embed(
-        title=f"📦 Order #{order.get('id','?')}",
-        color=discord.Color.orange()
+        title=f"{'🔮 ' if _is_futures else ''}📦 Order #{order.get('id','?')}",
+        color=(discord.Color.gold() if _is_futures else discord.Color.orange())
     )
     embed.add_field(name="Item", value=f"**{order.get('item','')}**", inline=False)
     embed.add_field(name="Requested", value=fmt_qty(order, requested, prefer_original_amount=True), inline=True)
     embed.add_field(name="Remaining", value=fmt_qty(order, remaining), inline=True)
     embed.add_field(name="Status", value=str(order.get("status", "open")).capitalize(), inline=True)
+    if _is_futures:
+        _cust = order.get("customer_id")
+        embed.add_field(name="🔮 Futures",
+                        value=(f"Customer <@{_cust}>" if _cust else "Customer order"), inline=True)
 
     claims = order.get("claims") or []
     if claims:
@@ -2220,7 +2226,9 @@ def _loyalty_payout_bonus_pct(user_id: int) -> int:
 
 def _parse_stock_csv(csv_text: str) -> list:
     """Parse a csn_stock snapshot: rows of owner,item,stock,buy_qty,buy_price,
-    sell_qty,sell_price,timestamp_iso. Returns [{owner,item,stock,buy_price,sell_price}]."""
+    sell_qty,sell_price,timestamp_iso. buy_price/sell_price are returned PER UNIT
+    (raw listing price / listing qty); buy_qty/sell_qty are the listing quantities.
+    Returns [{owner,item,stock,barrels,buy_price,sell_price,buy_qty,sell_qty}]."""
     lines = [l for l in csv_text.splitlines() if l.strip() and not l.strip().startswith("#")]
     if not lines:
         return []
@@ -2242,13 +2250,29 @@ def _parse_stock_csv(csv_text: str) -> list:
                 return float(v) if v else None
             except ValueError:
                 return None
+        def _qty(key):
+            q = _num(key)
+            return int(q) if (q and q > 0) else None
+        def _unit_price(price_key, qty_key):
+            # The mod records each shop's listing exactly as the chest is configured:
+            # "<verb> <qty> for <price>", where <qty> is whatever the owner set for that
+            # shop (4, 16, 64, ...) — NOT always a full stack. <price> is the TOTAL for
+            # that qty, so per-unit = price / qty. Normalizing here keeps market_stock on
+            # the same per-unit basis as every other price on the site (catalog coin, the
+            # CSN net/sold estimate, and the stock*price backing valuations).
+            p = _num(price_key)
+            if p is None:
+                return None
+            return p / (_qty(qty_key) or 1)
         try:
             barrels = max(1, int(float((row.get("barrels") or "1").replace(",", ""))))
         except Exception:
             barrels = 1
         out.append({"owner": (row.get("owner") or "").strip(), "item": item, "stock": stock,
                     "barrels": barrels,
-                    "buy_price": _num("buy_price"), "sell_price": _num("sell_price")})
+                    "buy_price": _unit_price("buy_price", "buy_qty"),
+                    "sell_price": _unit_price("sell_price", "sell_qty"),
+                    "buy_qty": _qty("buy_qty"), "sell_qty": _qty("sell_qty")})
     return out
 
 
@@ -2526,7 +2550,8 @@ async def _record_stock_report(rows: list, market_id: str, report_channel, filen
             capacity = max(barrels * BARREL_PIECES * stack, int(r.get("stock") or 0))
             _db.upsert_market_stock(market_id, item, owner=r.get("owner"), stock=r["stock"],
                                     capacity=capacity,
-                                    buy_price=r.get("buy_price"), sell_price=r.get("sell_price"))
+                                    buy_price=r.get("buy_price"), sell_price=r.get("sell_price"),
+                                    buy_qty=r.get("buy_qty"), sell_qty=r.get("sell_qty"))
         except Exception as e:
             log.warning("[stock] upsert failed for %s: %s", r.get("item"), e)
     st = _db.get_market_stock(market_id)
@@ -2815,7 +2840,23 @@ async def _process_csn_attachment(attachment: discord.Attachment, report_channel
         except Exception as e:
             log.warning("CSN chart generation failed: %s", e)
 
-    await report_channel.send(content="📥 **CSN report received:**", embed=embed, files=files)
+    # Deliver the finished report to the market it belongs to: prefer THAT market's
+    # own bound channel, so per-market reports land in per-market channels instead of
+    # all piling into the central CSN_REPORT_CHANNEL_ID. Falls back to the channel this
+    # was posted in / the central channel when a market has no bound channel of its own.
+    dest_channel = report_channel
+    try:
+        if effective_market_id and effective_market_id != DEFAULT_MARKET_ID:
+            _mrow = _get_market(effective_market_id)
+            _rc = (_mrow or {}).get("report_channel_id")
+            if _rc:
+                dest_channel = (bot.get_channel(int(_rc))
+                                or await bot.fetch_channel(int(_rc))
+                                or report_channel)
+    except Exception as _e:
+        log.debug("[csn] market-channel routing fell back to default: %s", _e)
+
+    await dest_channel.send(content="📥 **CSN report received:**", embed=embed, files=files)
     if _mgr_sales and _mgr_sales.get("owner"):
         try:
             await _team_live(
@@ -2832,7 +2873,7 @@ async def _process_csn_attachment(attachment: discord.Attachment, report_channel
         if _bits:
             _ovstr = " & ".join(_bits)
             try:
-                await report_channel.send(
+                await dest_channel.send(
                     f"💼 Team override: manager <@{_mgr_sales['mgr']}> {_ovstr} on this report's net.")
             except Exception:
                 pass
@@ -2844,7 +2885,7 @@ async def _process_csn_attachment(attachment: discord.Attachment, report_channel
             except Exception:
                 pass
     if overflow:
-        await report_channel.send(f"**📋 All Items (continued):**\n{chr(10).join(overflow[:30])[:1900]}")
+        await dest_channel.send(f"**📋 All Items (continued):**\n{chr(10).join(overflow[:30])[:1900]}")
     if market_warning:
         await report_channel.send(market_warning)
     if _csn_anom:
@@ -3640,14 +3681,19 @@ async def update_order_messages(client: discord.Client, order: dict, *, allow_po
         assigned = sum(int(c.get("qty", 0) or 0) for c in (order.get("claims") or []))
         remaining = max(0, requested - assigned)
 
+        _is_futures = str(order.get("source", "")) == "futures"
         embed = discord.Embed(
-            title=f"📦 Order #{order['id']}",
-            color=discord.Color.orange()
+            title=f"{'🔮 ' if _is_futures else ''}📦 Order #{order['id']}",
+            color=(discord.Color.gold() if _is_futures else discord.Color.orange())
         )
         embed.add_field(name="Item", value=f"**{order.get('item','')}**", inline=False)
         embed.add_field(name="Requested", value=fmt_qty(order, requested, prefer_original_amount=True), inline=True)
         embed.add_field(name="Remaining", value=fmt_qty(order, remaining), inline=True)
         embed.add_field(name="Status", value=str(order.get("status", "open")).capitalize(), inline=True)
+        if _is_futures:
+            _cust = order.get("customer_id")
+            embed.add_field(name="🔮 Futures",
+                            value=(f"Customer <@{_cust}>" if _cust else "Customer order"), inline=True)
 
         claims = order.get("claims") or []
         if claims:
@@ -4813,6 +4859,248 @@ def _build_csn_embed(
 
     embed.set_footer(text=f"Auto-report from CSN mod  •  {source}")
     return embed, []
+
+
+def _render_full_report_html(title: str, market_label: str, month_label: str,
+                             items: dict, income: float, spent: float) -> str:
+    """Render the COMPLETE monthly report as a self-contained, sortable HTML page —
+    every item (not just the embed's top-10), split into income vs expense with a live
+    search and click-to-sort table. Used both as a downloadable attachment and served
+    by the /report web route, so people can open and read the whole month."""
+    import html as _html
+    import json as _json
+
+    rows = []
+    for name, v in (items or {}).items():
+        try:
+            sold = int(v.get("sold_qty") or 0)
+            bought = int(v.get("bought_qty") or 0)
+            net = float(v.get("net_coins") or 0)
+        except Exception:
+            sold, bought, net = 0, 0, 0.0
+        # strip Minecraft § colour codes for readability
+        clean = re.sub(r"§.", "", str(name)).strip() or str(name)
+        rows.append({"item": clean, "sold": sold, "bought": bought, "net": net})
+
+    net_total = float(income) - float(spent)
+    income_ct = sum(1 for r in rows if r["net"] > 0)
+    expense_ct = sum(1 for r in rows if r["net"] < 0)
+    data_json = _json.dumps(rows)
+
+    # Server-render the rows too (sorted by net desc) so the report shows its content
+    # even in a viewer that doesn't run JavaScript — the JS below only *enhances* it
+    # with live search / sort / filter. No JS = still a full, readable table.
+    def _rowhtml(r):
+        cls = "pos" if r["net"] > 0 else ("neg" if r["net"] < 0 else "mut")
+        sign = "+" if r["net"] > 0 else ""
+        return (f'<tr><td>{_html.escape(r["item"])}</td>'
+                f'<td>{r["sold"]:,}</td><td>{r["bought"]:,}</td>'
+                f'<td class="{cls}">{sign}{int(round(r["net"])):,}</td></tr>')
+    rows_html = "".join(_rowhtml(r) for r in sorted(rows, key=lambda r: r["net"], reverse=True)) \
+        or '<tr><td colspan="4" class="mut">No items.</td></tr>'
+
+    def _c(n):
+        return f"{int(round(n)):,}"
+
+    return """<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>__TITLE__</title>
+<style>
+:root{--bg:#0d1117;--card:#161b22;--line:#21262d;--fg:#e6edf3;--muted:#8b949e;--green:#3fb950;--red:#f85149;--blue:#58a6ff;--gold:#d29922}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}
+.wrap{max-width:1000px;margin:0 auto;padding:24px}
+h1{font-size:20px;margin:0 0 4px}.sub{color:var(--muted);margin-bottom:20px}
+.cards{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:20px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 18px;min-width:150px}
+.card .k{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.05em}
+.card .v{font-size:22px;font-weight:600;margin-top:4px}
+.pos{color:var(--green)}.neg{color:var(--red)}.mut{color:var(--muted)}
+.controls{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px}
+input,select{background:var(--card);border:1px solid var(--line);color:var(--fg);border-radius:8px;padding:8px 10px;font:inherit}
+input{flex:1;min-width:200px}
+table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+th,td{padding:9px 12px;text-align:right;border-bottom:1px solid var(--line)}
+th:first-child,td:first-child{text-align:left}
+th{cursor:pointer;user-select:none;color:var(--muted);font-weight:600;position:sticky;top:0;background:var(--card)}
+th:hover{color:var(--fg)}tr:last-child td{border-bottom:none}
+tbody tr:hover{background:#1c2129}
+.foot{color:var(--muted);font-size:12px;margin-top:16px}
+</style></head><body><div class="wrap">
+<h1>__TITLE__</h1>
+<div class="sub">__MARKET__ &middot; __MONTH__ &middot; __NROWS__ items (__INCOME_CT__ income, __EXPENSE_CT__ expense)</div>
+<div class="cards">
+  <div class="card"><div class="k">Income</div><div class="v pos">__INCOME__ &cent;</div></div>
+  <div class="card"><div class="k">Spent</div><div class="v neg">__SPENT__ &cent;</div></div>
+  <div class="card"><div class="k">Net Profit</div><div class="v __NETCLASS__">__NETSIGN____NET__ &cent;</div></div>
+</div>
+<div class="controls">
+  <input id="q" placeholder="Search items…" oninput="render()">
+  <select id="f" onchange="render()">
+    <option value="all">All items</option>
+    <option value="income">Income only (net &gt; 0)</option>
+    <option value="expense">Expense only (net &lt; 0)</option>
+  </select>
+</div>
+<table><thead><tr>
+  <th onclick="sortBy('item')">Item</th>
+  <th onclick="sortBy('sold')">Sold</th>
+  <th onclick="sortBy('bought')">Bought</th>
+  <th onclick="sortBy('net')">Net &cent;</th>
+</tr></thead><tbody id="tb">__ROWS__</tbody></table>
+<div class="foot">Full monthly report &middot; generated by CSN mod pipeline. Click a column to sort.</div>
+</div>
+<script>
+const DATA=__DATA__;let sortK='net',sortDir=1;
+function fmt(n){return Math.round(n).toLocaleString();}
+function sortBy(k){if(sortK===k)sortDir=-sortDir;else{sortK=k;sortDir=(k==='item')?1:-1;}render();}
+function render(){
+  const q=document.getElementById('q').value.toLowerCase();
+  const f=document.getElementById('f').value;
+  let rows=DATA.filter(r=>r.item.toLowerCase().includes(q));
+  if(f==='income')rows=rows.filter(r=>r.net>0);
+  if(f==='expense')rows=rows.filter(r=>r.net<0);
+  rows.sort((a,b)=>{let x=a[sortK],y=b[sortK];if(typeof x==='string')return x.localeCompare(y)*sortDir;return (x-y)*sortDir;});
+  document.getElementById('tb').innerHTML=rows.map(r=>{
+    const cls=r.net>0?'pos':(r.net<0?'neg':'mut');
+    const sign=r.net>0?'+':'';
+    return `<tr><td>${r.item.replace(/</g,'&lt;')}</td><td>${fmt(r.sold)}</td><td>${fmt(r.bought)}</td><td class="${cls}">${sign}${fmt(r.net)}</td></tr>`;
+  }).join('')||'<tr><td colspan="4" class="mut">No items match.</td></tr>';
+}
+render();
+</script></body></html>""" \
+        .replace("__TITLE__", _html.escape(title)) \
+        .replace("__MARKET__", _html.escape(market_label or "")) \
+        .replace("__MONTH__", _html.escape(month_label or "")) \
+        .replace("__NROWS__", str(len(rows))) \
+        .replace("__INCOME_CT__", str(income_ct)) \
+        .replace("__EXPENSE_CT__", str(expense_ct)) \
+        .replace("__INCOME__", _c(income)) \
+        .replace("__SPENT__", _c(spent)) \
+        .replace("__NETCLASS__", "pos" if net_total >= 0 else "neg") \
+        .replace("__NETSIGN__", "+" if net_total >= 0 else "") \
+        .replace("__NET__", _c(net_total)) \
+        .replace("__ROWS__", rows_html) \
+        .replace("__DATA__", data_json)
+
+
+def _render_cap_table_html(name: str, ticker: str, outstanding: float, mark: float,
+                           lowest_ask, highest_bid, holders: list, you_uid=None) -> str:
+    """Live cap-table / shareholder page for a market's stock (the GEX-tracker layout):
+    outstanding, mktcap, ownership concentration, and a ranked holder table. `holders`
+    is [{'uid','name','shares'}]. Rows are server-rendered (works with no JS) and JS
+    adds search + click-sort."""
+    import html as _h, json as _j
+    mark = float(mark or 0)
+    outstanding = float(outstanding or 0)
+    hs = sorted(holders or [], key=lambda x: -float(x.get("shares") or 0))
+    held = sum(float(h.get("shares") or 0) for h in hs)
+
+    def pct(s):
+        return (100.0 * s / outstanding) if outstanding > 0 else 0.0
+
+    rows = []
+    for h in hs:
+        s = float(h.get("shares") or 0)
+        rows.append({"name": str(h.get("name") or h.get("uid") or "?"),
+                     "shares": s, "pct": round(pct(s), 2), "value": round(s * mark),
+                     "you": (you_uid is not None and str(h.get("uid")) == str(you_uid))})
+    mktcap = round(outstanding * mark)
+    top1 = round(pct(hs[0]["shares"]), 1) if hs else 0.0
+    top5 = round(sum(pct(float(h["shares"])) for h in hs[:5]), 1)
+    free_float = outstanding - (float(hs[0]["shares"]) if hs else 0)
+    you = next((r for r in rows if r["you"]), None)
+    spread = (float(lowest_ask) - float(highest_bid)) if (lowest_ask and highest_bid) else None
+
+    def _c(n):
+        try: return f"{int(round(n)):,}"
+        except Exception: return str(n)
+
+    def _rowhtml(i, r):
+        cls = ' class="you"' if r["you"] else ''
+        return (f'<tr{cls}><td>{i}</td><td>{_h.escape(r["name"])}'
+                f'{" <span class=badge>you</span>" if r["you"] else ""}</td>'
+                f'<td>{_c(r["shares"])}</td><td>{r["pct"]:.2f}%</td><td>{_c(r["value"])} &cent;</td></tr>')
+    rows_html = "".join(_rowhtml(i + 1, r) for i, r in enumerate(rows)) \
+        or '<tr><td colspan="5" class="mut">No holders yet.</td></tr>'
+
+    # concentration bar segments (top 5 + others)
+    seg = []
+    palette = ["#f85149", "#db6d28", "#d29922", "#3fb950", "#58a6ff"]
+    for i, r in enumerate(rows[:5]):
+        seg.append(f'<span style="width:{r["pct"]:.2f}%;background:{palette[i]}" title="{_h.escape(r["name"])} {r["pct"]:.1f}%"></span>')
+    others = round(sum(r["pct"] for r in rows[5:]), 2)
+    if others > 0:
+        seg.append(f'<span style="width:{others:.2f}%;background:#484f58" title="Others {others:.1f}%"></span>')
+    bar_html = "".join(seg)
+    legend = "  ".join(
+        f'<span class="dot" style="background:{palette[i]}"></span>{_h.escape(r["name"])} {r["pct"]:.1f}%'
+        for i, r in enumerate(rows[:5])) + (f'  <span class="dot" style="background:#484f58"></span>Others {others:.1f}%' if others > 0 else "")
+
+    you_card = (f'<div class="card hi"><div class="k">Your stake</div><div class="v">{_c(you["shares"])}</div>'
+                f'<div class="sub2">{you["pct"]:.1f}% · {_c(you["value"])} &cent;</div></div>') if you else ""
+
+    return """<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>__NAME__ Cap Table</title>
+<style>
+:root{--bg:#0d1117;--card:#161b22;--line:#21262d;--fg:#e6edf3;--muted:#8b949e;--green:#3fb950;--red:#f85149;--gold:#d29922}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 ui-monospace,Menlo,monospace}
+.wrap{max-width:1040px;margin:0 auto;padding:24px}h1{font-size:20px;margin:0 0 4px}.sub{color:var(--muted);margin-bottom:18px}
+.quote{display:flex;gap:26px;flex-wrap:wrap;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 18px;margin-bottom:16px}
+.quote div span{display:block}.quote .lbl{color:var(--muted);font-size:11px;text-transform:uppercase}.quote .num{font-size:17px;font-weight:600}
+.cards{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:18px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:13px 17px;min-width:150px}
+.card.hi{border-color:var(--gold);background:rgba(210,153,34,.06)}
+.card .k{color:var(--muted);font-size:11px;text-transform:uppercase}.card .v{font-size:21px;font-weight:600;margin-top:3px}.card .sub2{color:var(--muted);font-size:12px}
+.conc{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 18px;margin-bottom:18px}
+.bar{display:flex;height:16px;border-radius:5px;overflow:hidden;background:#30363d;margin:8px 0}.bar span{display:block}
+.legend{color:var(--muted);font-size:12px}.dot{display:inline-block;width:9px;height:9px;border-radius:2px;margin:0 4px 0 10px;vertical-align:middle}
+input{width:100%;background:var(--card);border:1px solid var(--line);color:var(--fg);border-radius:8px;padding:8px 10px;font:inherit;margin-bottom:10px}
+table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+th,td{padding:9px 12px;text-align:right;border-bottom:1px solid var(--line)}th:nth-child(2),td:nth-child(2){text-align:left}th:first-child,td:first-child{text-align:right;color:var(--muted);width:40px}
+th{cursor:pointer;color:var(--muted);font-weight:600}th:hover{color:var(--fg)}tr:last-child td{border-bottom:none}
+tr.you{background:rgba(210,153,34,.08)}.badge{background:var(--gold);color:#0d1117;border-radius:4px;padding:0 5px;font-size:11px}
+.pos{color:var(--green)}.red{color:var(--red)}.mut{color:var(--muted)}
+</style></head><body><div class="wrap">
+<h1>__NAME__ Cap Table</h1>
+<div class="sub">__TICKER__ &middot; __OUTSTANDING__ shares outstanding &middot; __NHOLDERS__ holders</div>
+<div class="quote">
+  <div><span class="lbl">Lowest ask</span><span class="num red">__ASK__</span></div>
+  <div><span class="lbl">Highest bid</span><span class="num pos">__BID__</span></div>
+  <div><span class="lbl">Spread</span><span class="num">__SPREAD__</span></div>
+  <div><span class="lbl">Mark</span><span class="num">__MARK__ &cent;</span></div>
+</div>
+<div class="cards">
+  <div class="card"><div class="k">Outstanding</div><div class="v">__OUTSTANDING__</div><div class="sub2">shares</div></div>
+  __YOU_CARD__
+  <div class="card"><div class="k">Total mktcap</div><div class="v">__MKTCAP__ &cent;</div><div class="sub2">notional</div></div>
+  <div class="card"><div class="k">Holders</div><div class="v">__NHOLDERS__</div><div class="sub2">positions</div></div>
+  <div class="card"><div class="k">Free float</div><div class="v">__FREEFLOAT__</div><div class="sub2">ex-top holder</div></div>
+</div>
+<div class="conc"><div class="legend">Ownership concentration &middot; top holder __TOP1__% &middot; top 5 __TOP5__%</div>
+  <div class="bar">__BAR__</div><div class="legend">__LEGEND__</div></div>
+<input id="q" placeholder="Search holders…" oninput="filt()">
+<table><thead><tr><th onclick="srt('i')">#</th><th onclick="srt('name')">Holder</th><th onclick="srt('shares')">Shares</th><th onclick="srt('pct')">%</th><th onclick="srt('value')">Value</th></tr></thead>
+<tbody id="tb">__ROWS__</tbody></table>
+</div>
+<script>
+const DATA=__DATA__;let sc='shares',sd=-1;
+function fmt(n){return Math.round(n).toLocaleString();}
+function srt(k){if(sc===k)sd=-sd;else{sc=k;sd=(k==='name')?1:-1;}draw();}
+function filt(){draw();}
+function draw(){const q=document.getElementById('q').value.toLowerCase();
+let r=DATA.map((x,i)=>Object.assign({i:i+1},x)).filter(x=>x.name.toLowerCase().includes(q));
+r.sort((a,b)=>{let x=a[sc],y=b[sc];if(typeof x==='string')return x.localeCompare(y)*sd;return (x-y)*sd;});
+document.getElementById('tb').innerHTML=r.map((x,j)=>`<tr class="${x.you?'you':''}"><td>${j+1}</td><td>${x.name.replace(/</g,'&lt;')}${x.you?' <span class=badge>you</span>':''}</td><td>${fmt(x.shares)}</td><td>${x.pct.toFixed(2)}%</td><td>${fmt(x.value)} ¢</td></tr>`).join('')||'<tr><td colspan=5 class=mut>No holders.</td></tr>';}
+</script></body></html>""" \
+        .replace("__NAME__", _h.escape(name)).replace("__TICKER__", _h.escape(ticker)) \
+        .replace("__OUTSTANDING__", _c(outstanding)).replace("__NHOLDERS__", str(len(rows))) \
+        .replace("__ASK__", (_c(lowest_ask) + " ¢") if lowest_ask else "no asks") \
+        .replace("__BID__", (_c(highest_bid) + " ¢") if highest_bid else "no bids") \
+        .replace("__SPREAD__", (_c(spread) + " ¢") if spread is not None else "—") \
+        .replace("__MARK__", _c(mark)).replace("__MKTCAP__", _c(mktcap)) \
+        .replace("__FREEFLOAT__", _c(free_float)).replace("__TOP1__", f"{top1:g}").replace("__TOP5__", f"{top5:g}") \
+        .replace("__YOU_CARD__", you_card).replace("__BAR__", bar_html).replace("__LEGEND__", legend) \
+        .replace("__ROWS__", rows_html).replace("__DATA__", _j.dumps(rows))
 
 
 def _build_restock_plan(items: dict, min_sold: int = 1) -> tuple:
@@ -8169,6 +8457,7 @@ CONFIGURABLE_CHANNELS = {
     "FUNDS_REPORT_CHANNEL_ID": "Funds-report channel",
     "FUNDS_REPORT_GUILD_ID":   "Funds-report guild",
     "WEB_ORDERS_CHANNEL_ID":   "Web-orders channel",
+    "FUTURES_CHANNEL_ID":      "Futures approval channel",
     "CSN_REPORT_CHANNEL_ID":   "CSN-report channel",
 }
 
@@ -8179,6 +8468,7 @@ def _apply_config_overrides() -> None:
     Runs at startup before cogs load, so bound copies pick up the override."""
     global WORKER_CHANNEL_ID, WELCOME_CHANNEL_ID, TICKETS_CATEGORY_ID
     global FUNDS_REPORT_CHANNEL_ID, FUNDS_REPORT_GUILD_ID, WEB_ORDERS_CHANNEL_ID, CSN_REPORT_CHANNEL_ID
+    global FUTURES_CHANNEL_ID
     try:
         import Restocker_db as _db
     except Exception:
@@ -8195,6 +8485,7 @@ def _apply_config_overrides() -> None:
     FUNDS_REPORT_CHANNEL_ID = _ov("FUNDS_REPORT_CHANNEL_ID", FUNDS_REPORT_CHANNEL_ID)
     FUNDS_REPORT_GUILD_ID   = _ov("FUNDS_REPORT_GUILD_ID", FUNDS_REPORT_GUILD_ID)
     WEB_ORDERS_CHANNEL_ID   = _ov("WEB_ORDERS_CHANNEL_ID", WEB_ORDERS_CHANNEL_ID)
+    FUTURES_CHANNEL_ID      = _ov("FUTURES_CHANNEL_ID", FUTURES_CHANNEL_ID)
     CSN_REPORT_CHANNEL_ID   = _ov("CSN_REPORT_CHANNEL_ID", CSN_REPORT_CHANNEL_ID)
     try:
         log.info("[config] overrides applied: worker=%s tickets_cat=%s funds=%s web_orders=%s csn=%s",
