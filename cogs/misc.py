@@ -21,6 +21,21 @@ load_yaml = core.load_yaml
 save_yaml = core.save_yaml
 utcnow_iso = core.utcnow_iso
 
+# Owner ID — exempt from AI chat cooldowns
+OWNER_ID = 1203738126850461738
+
+
+def is_owner(user: discord.abc.User) -> bool:
+    """Return True if the user is the bot owner (Vaicos)."""
+    return user.id == OWNER_ID
+
+
+def ai_cooldown_key(interaction: discord.Interaction):
+    """Per-user cooldown key; returns None for the owner so they are never rate-limited."""
+    if is_owner(interaction.user):
+        return None  # no bucket → no cooldown
+    return interaction.user.id
+
 
 async def _my_market_autocomplete(interaction: discord.Interaction, current: str):
     """For /market_code: Managers see every market; anyone else sees only the
