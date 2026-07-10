@@ -2133,7 +2133,8 @@ def _load_teams_data(days: int = 7) -> dict:
             tname = ""
         captain = tname or cap_ign or ((workers[0]["ign"] + "'s team") if workers else "Unnamed team")
         total = t["order_coins"] + t["sales_coins"]
-        out.append({"captain": captain, "members": len(t["workers"]) + 1,  # +1 = the manager/captain
+        out.append({"captain": captain,
+                    "members": len([w for w in t["workers"] if w != m]) + 1,  # workers + the manager, counted once
                     "orders": t["orders"], "order_coins": round(t["order_coins"]),
                     "sales_coins": round(t["sales_coins"]), "futures": t["futures_qty"],
                     "total": round(total), "top_workers": workers[:5]})

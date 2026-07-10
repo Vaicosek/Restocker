@@ -2065,13 +2065,20 @@ def _refund_project(project_id, new_status="cancelled"):
 
 
 def _log_team_event(worker_id, kind, coins=0.0, points=0.0, qty=0, detail=""):
-    """Record one performance event for a worker under their manager. No-op if the
-    worker has no manager. Returns the manager_id (str) or None."""
+    """Record one performance event for a worker under their manager. If the worker has
+    no manager but is themselves a team manager (owns a team), the event is credited to
+    their OWN team — so a manager who fulfills their own orders still shows on their team's
+    leaderboard. No-op only when the worker is on no team at all. Returns manager_id or None."""
     try:
         import Restocker_db as _db
         mgr = _db.get_manager_of(str(worker_id))
         if not mgr:
-            return None
+            # A manager working their own orders has nobody above them; attribute the
+            # event to their own team (they own it) instead of dropping it silently.
+            if _db.get_team(str(worker_id)):
+                mgr = str(worker_id)
+            else:
+                return None
         _db.record_team_perf(str(mgr), str(worker_id), kind,
                              float(coins or 0), float(points or 0), int(qty or 0), detail or "")
         return str(mgr)
