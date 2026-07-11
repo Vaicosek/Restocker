@@ -265,5 +265,86 @@ class AdminCog(commands.Cog):
             ephemeral=True)
 
 
+    @admin.command(
+        name="backfill_team_perf",
+        description="(Managers) Credit a manager's OWN past fulfillments to their team ledger")
+    @app_commands.describe(
+        apply="false = dry-run preview (default); true = actually write the ledger rows")
+    async def backfill_team_perf(self, interaction: discord.Interaction, apply: bool = False):
+        # Recovers team-ledger rows the old bug dropped when a MANAGER fulfilled their own
+        # order (they had no manager above them, so _log_team_event no-op'd). Idempotent
+        # (skips orders already logged) and only touches that exact dropped case.
+        if not is_manager(interaction):
+            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        import Restocker_db as _db
+        try:
+            items_data = core._load_items()
+            orders = _db.load_orders()
+        except Exception as e:
+            return await interaction.followup.send(f"⚠️ Couldn't load orders: {e}", ephemeral=True)
+        plan, to_write = {}, []
+        for o in orders:
+            req  = int(o.get("requested", 0) or 0)
+            prod = int(o.get("produced", 0) or 0)
+            status = str(o.get("status", "")).lower()
+            fulfilled = ("fulfil" in status or status in ("complete", "done", "closed")
+                         or (req > 0 and prod >= req))
+            if not fulfilled:
+                continue
+            claims = o.get("claims") or []
+            if claims:
+                pairs = [(str(c.get("user_id") or ""), int(c.get("qty") or 0)) for c in claims]
+            elif o.get("claimed_by"):
+                pairs = [(str(o.get("claimed_by")), prod or req)]   # no per-user rows: whole order
+            else:
+                pairs = []
+            for wid, qty in pairs:
+                if not wid or qty <= 0:
+                    continue
+                # Only the dropped case: claimer owns a team AND has no manager above them.
+                # Workers-under-a-manager were logged fine, so skip (no double-count).
+                if _db.get_manager_of(wid) or not _db.get_team(wid):
+                    continue
+                detail = f"order#{o.get('id')}"
+                if _db.team_perf_exists(wid, detail, "order"):
+                    continue
+                try:
+                    coins = int(core._coins_for_pieces(o, qty, items_data))
+                except Exception:
+                    coins = 0
+                if coins <= 0:
+                    continue
+                to_write.append((wid, qty, coins, detail))
+                p = plan.setdefault(wid, {"orders": 0, "coins": 0})
+                p["orders"] += 1; p["coins"] += coins
+        if not to_write:
+            return await interaction.followup.send(
+                "✅ Nothing to backfill — no manager self-fulfillments are missing from the ledger.",
+                ephemeral=True)
+        lines = []
+        for mid, p in sorted(plan.items(), key=lambda kv: -kv[1]["coins"]):
+            try:
+                ign = _db.get_ign(mid) or mid
+            except Exception:
+                ign = mid
+            lines.append(f"• **{ign}** — {p['orders']} order(s) → +{p['coins']:,} coins")
+        summary = "\n".join(lines)
+        if not apply:
+            return await interaction.followup.send(
+                f"**Dry run** — {len(to_write)} ledger row(s) would be written:\n{summary}\n\n"
+                f"Review the amounts, then re-run with `apply:true` to commit.", ephemeral=True)
+        n = 0
+        for wid, qty, coins, detail in to_write:
+            try:
+                _db.record_team_perf(wid, wid, "order", coins=float(coins), qty=qty, detail=detail)
+                n += 1
+            except Exception as e:
+                log.warning("[backfill] write failed for %s %s: %s", wid, detail, e)
+        await interaction.followup.send(
+            f"✅ Backfilled **{n}** ledger row(s):\n{summary}\n\n"
+            f"They now show on the team leaderboard (7-day window).", ephemeral=True)
+
+
 async def setup(bot):
     await bot.add_cog(AdminCog(bot))

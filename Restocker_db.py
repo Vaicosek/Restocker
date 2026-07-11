@@ -1127,6 +1127,15 @@ def record_team_perf(manager_id: str, worker_id: str, kind: str,
              float(coins or 0), float(points or 0), int(qty or 0), detail or ""))
 
 
+def team_perf_exists(manager_id: str, detail: str, kind: str = "order") -> bool:
+    """True if a perf-ledger row already exists for this manager+detail+kind.
+    Used by the backfill to stay idempotent (never double-credit an order)."""
+    with db() as conn:
+        return conn.execute(
+            "SELECT 1 FROM team_perf_log WHERE manager_id=? AND detail=? AND kind=? LIMIT 1",
+            (str(manager_id), str(detail), str(kind))).fetchone() is not None
+
+
 def get_team_perf(manager_id: str, since_iso: str = None) -> list:
     with db() as conn:
         if since_iso:

@@ -161,11 +161,13 @@ LOYALTY_DECAY_PCT_WEEKLY = _env_int("LOYALTY_DECAY_PCT_WEEKLY", 20)
 LOYALTY_IGN_DEADLINE_DAYS = _env_int("LOYALTY_IGN_DEADLINE_DAYS", 3)
 
 LOYALTY_TIERS = [
+    # Thresholds raised ~2.5–3× (Jul 2026): old values let a heavy worker hit Veteran in a
+    # week (~100k coins of orders). New: Worker 1k, Veteran 5k, Expert 15k, Elite 40k.
     {"tier": 1, "name": "Recruit", "min_pts": 0,      "interest_weekly_pct": 0.05, "payout_bonus_pct": 0},
-    {"tier": 2, "name": "Worker",  "min_pts": 500,     "interest_weekly_pct": 0.10, "payout_bonus_pct": 2},
-    {"tier": 3, "name": "Veteran", "min_pts": 2000,    "interest_weekly_pct": 0.20, "payout_bonus_pct": 5},
-    {"tier": 4, "name": "Expert",  "min_pts": 7000,    "interest_weekly_pct": 0.35, "payout_bonus_pct": 8},
-    {"tier": 5, "name": "Elite",   "min_pts": 20000,   "interest_weekly_pct": 0.50, "payout_bonus_pct": 12},
+    {"tier": 2, "name": "Worker",  "min_pts": 1000,    "interest_weekly_pct": 0.10, "payout_bonus_pct": 2},
+    {"tier": 3, "name": "Veteran", "min_pts": 5000,    "interest_weekly_pct": 0.20, "payout_bonus_pct": 5},
+    {"tier": 4, "name": "Expert",  "min_pts": 15000,   "interest_weekly_pct": 0.35, "payout_bonus_pct": 8},
+    {"tier": 5, "name": "Elite",   "min_pts": 40000,   "interest_weekly_pct": 0.50, "payout_bonus_pct": 12},
 ]
 
 LOYALTY_EMPLOYEE_ROLES = {
