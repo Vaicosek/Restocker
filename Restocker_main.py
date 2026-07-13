@@ -86,6 +86,17 @@ MARKETS_FILE = "markets.yml"
 PLATFORM_BALANCE_FILE = "platform_balance.yml"
 
 DEFAULT_MARKET_ID = _env_str("DEFAULT_MARKET_ID", "main")
+# Market that UNATTRIBUTED / failed CSN uploads fall into. A stray or mis-configured
+# export (no channel binding, no/invalid market code) used to dump straight into the
+# real default market (Greyhames), polluting its history. Route those into a throwaway
+# "test" market instead. Override with FALLBACK_MARKET_ID in .env.
+FALLBACK_MARKET_ID = _env_str("FALLBACK_MARKET_ID", "test")
+FALLBACK_MARKET_NAME = _env_str("FALLBACK_MARKET_NAME", "TEST")
+# How long (seconds) to suppress a byte-identical AUTO CSN report from being
+# re-posted, so a mod/webhook that drops the same file several times — or multiple
+# bot instances receiving the same gateway event — only yields ONE report. The
+# marker lives in the shared DB so it de-dupes across instances too. 0 disables.
+CSN_AUTOREPORT_DEDUP_SECONDS = _env_int("CSN_AUTOREPORT_DEDUP_SECONDS", 900)
 PLATFORM_FEE_PCT = _env_float("PLATFORM_FEE_PCT", 3.0)
 
 MIN_SHARE_PRICE = _env_float("MIN_SHARE_PRICE", 1.0)
@@ -2608,6 +2619,29 @@ async def _process_csn_attachment(attachment: discord.Attachment, report_channel
         log.warning("CSN attachment read failed: %s", e)
         return
 
+    # ── Duplicate-report guard ───────────────────────────────────────────────
+    # A mod/webhook that re-posts the same file (or several bot instances all
+    # receiving the same gateway event) used to emit ONE report per delivery, so
+    # the channel filled with 2-3 byte-identical reports minutes apart. Suppress a
+    # repost of the exact same file within CSN_AUTOREPORT_DEDUP_SECONDS. The marker
+    # is stored in the shared DB, so it also de-dupes across bot instances.
+    if CSN_AUTOREPORT_DEDUP_SECONDS > 0:
+        try:
+            import Restocker_db as _db_dedup
+            _sig = hashlib.sha1(
+                (filename or "").encode("utf-8", "ignore") + b"\n"
+                + csv_text.encode("utf-8", "ignore")).hexdigest()
+            _dedup_key = f"csn_autoreport_seen:{_sig}"
+            _prev = _db_dedup.get_config(_dedup_key)
+            _now_epoch = int(time.time())
+            if _prev and (_now_epoch - int(_prev)) < CSN_AUTOREPORT_DEDUP_SECONDS:
+                log.info("[csn] duplicate auto-report suppressed (%s, seen %ss ago)",
+                         filename, _now_epoch - int(_prev))
+                return
+            _db_dedup.set_config(_dedup_key, _now_epoch)
+        except Exception as _e:
+            log.debug("[csn] dedup guard skipped: %s", _e)
+
     csv_type = _detect_csv_type(csv_text, filename)
     period_from = period_to = None
     title_suffix = ""
@@ -2616,7 +2650,7 @@ async def _process_csn_attachment(attachment: discord.Attachment, report_channel
         rows = _parse_stock_csv(csv_text)
         if not rows:
             return
-        mid = DEFAULT_MARKET_ID
+        mid = _ensure_fallback_market()   # unattributed stock lands in TEST, not Greyhames
         csv_mid, csv_code = _extract_market_info(csv_text)
         try:
             import Restocker_db as _dbst
@@ -2639,7 +2673,8 @@ async def _process_csn_attachment(attachment: discord.Attachment, report_channel
             if not declared:
                 try:
                     await report_channel.send(
-                        f"⚠️ Stock CSV declared unknown market `{csv_mid}` — recording to the default market. "
+                        f"⚠️ Stock CSV declared unknown market `{csv_mid}` — recording to the `{mid}` "
+                        f"(fallback) market instead of a real one. "
                         f"Create it first with `/market add market_id:{csv_mid}`, or check for typos."
                     )
                 except Exception:
@@ -2702,7 +2737,9 @@ async def _process_csn_attachment(attachment: discord.Attachment, report_channel
         return
 
     csv_market_id, csv_market_code = _extract_market_info(csv_text)
-    effective_market_id = DEFAULT_MARKET_ID
+    # Unattributed uploads fall into the TEST market, never the real Greyhames one,
+    # so a failed/mis-configured export can't pollute live market history.
+    effective_market_id = _ensure_fallback_market()
     market_warning = ""
 
     bound_market = None
@@ -2748,7 +2785,7 @@ async def _process_csn_attachment(attachment: discord.Attachment, report_channel
         else:
             market_warning = (
                 f"⚠️ CSV declared unknown market `{csv_market_id}` — no such market in the database. "
-                f"Recorded to default market instead. "
+                f"Recorded to the `{effective_market_id}` (fallback) market instead of a real one. "
                 f"Create it first with `/market add market_id:{csv_market_id}`, or check for typos."
             )
 
@@ -5372,6 +5409,29 @@ def _get_market(market_id: str) -> dict | None:
     return data.get("markets", {}).get(market_id)
 
 
+def _ensure_fallback_market() -> str:
+    """Make sure the FALLBACK_MARKET_ID market exists (create it once if missing) so
+    unattributed CSN uploads have a real, visible, manageable market to land in
+    instead of silently polluting the default market. Returns the fallback id."""
+    try:
+        if not _get_market(FALLBACK_MARKET_ID):
+            import Restocker_db as _db_fb
+            _db_fb.upsert_market(
+                market_id=FALLBACK_MARKET_ID,
+                name=FALLBACK_MARKET_NAME,
+                owner_id=None,
+                manager_ids=[],
+                platform_fee_pct=PLATFORM_FEE_PCT,
+                csn_history_file=None,
+                active=True,
+            )
+            log.info("[csn] created fallback market '%s' (%s) for unattributed uploads",
+                     FALLBACK_MARKET_ID, FALLBACK_MARKET_NAME)
+    except Exception as _e:
+        log.warning("[csn] could not ensure fallback market '%s': %s", FALLBACK_MARKET_ID, _e)
+    return FALLBACK_MARKET_ID
+
+
 def _csn_file_for_market(market_id: str) -> str:
     m = _get_market(market_id)
     if m and m.get("csn_history_file"):
@@ -7395,6 +7455,18 @@ _AI_TOOLS = [
         "input_schema": {"type": "object", "properties": {}, "required": []}
     },
     {
+        "name": "get_market_code",
+        "description": "Look up an EXISTING market's Market ID and CSN verification Code (the leader_code the CSN mod needs) and, optionally, DM them to a user. Use when someone asks you to 'send him the code and id', 're-send a market owner their code', 'what's the code for <market>', or a user says their config cleared and they need their code again. This RETRIEVES the existing code and does not change it; only if the market has no code yet does it generate and save one. Manager only.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "market_id": {"type": "string", "description": "Market ID or display name to look up, e.g. 'goldmart' or 'Toolshop'. Optional if the server has exactly one market."},
+                "dm_user": {"type": "string", "description": "Optional Discord user ID, @mention, username, or display name to DM the ID + code to. Omit to just report them back in this channel."}
+            },
+            "required": []
+        }
+    },
+    {
         "name": "propose_code_change",
         "description": "Draft a change to the bot's OWN source code and open a GitHub Pull Request for review. OWNER ONLY — only Vaicos (ID 1203738126850461738) may use this; refuse for anyone else. Use when the owner asks to add, change, or fix a command or behavior in the bot's code (e.g. 'let MarketOwners use /market_code', 'add a /ping2 command'). Name the ONE file to edit (commands live in cogs/, e.g. cogs/market.py, cogs/misc.py) and describe the change. This NEVER deploys — it only opens a PR the owner must review, merge, and restart to apply.",
         "input_schema": {
@@ -7983,8 +8055,13 @@ async def _ai_tool_setup_market_owner(guild, channel, user, args):
             f"2️⃣ Open the mod settings (Mod Menu → CSN Export → Settings)\n"
             f"3️⃣ Set **Market ID** to: `{market_id}`\n"
             f"4️⃣ Set **Market Code** to: `{leader_code}`\n"
-            f"5️⃣ Paste your Discord **Webhook URL** (create one in your market channel → Edit Channel → Integrations → Webhooks)\n\n"
-            f"Once configured, your CSN exports will post automatically to Discord and appear on the dashboard at https://dashboard.vaicosmarket.com"
+            f"5️⃣ Paste your Discord **Webhook URL** (create one in your market channel → Edit Channel → Integrations → Webhooks)\n"
+            f"6️⃣ **Bind the export key** — the mod does nothing until you assign one: "
+            f"**Options → Controls → Key Binds**, find the **CSN Export** category and bind "
+            f"**\"Export CSN History\"** to a key. Press that key in-game to run an export.\n\n"
+            f"───────────────────\n"
+            f"Once configured, press your export key on the server — your CSN exports post "
+            f"automatically to Discord and appear on the dashboard at https://dashboard.vaicosmarket.com"
         )
         try:
             await member.send(setup_msg)
@@ -8104,6 +8181,92 @@ async def _ai_tool_list_aliases(guild, channel, user, args):
     lines = [f"`{c}` → {n}" for c, n in sorted(aliases.items(), key=lambda kv: str(kv[1]).lower())]
     suffix = f"\n…and {len(lines) - 40} more" if len(lines) > 40 else ""
     return "\n".join(lines[:40]) + suffix
+
+
+async def _ai_tool_get_market_code(guild, channel, user, args):
+    """Retrieve an existing market's ID + CSN code and optionally DM it to someone.
+    Non-destructive: returns the stored leader_code; only mints one if none exists yet."""
+    if not _ai_is_manager(user):
+        return "❌ Only Managers can look up a market's CSN code."
+
+    want = str(args.get("market_id", "") or "").strip()
+    data = _load_markets()
+    mkts = data.get("markets", {}) or {}
+    if not mkts:
+        return "❌ No markets are registered yet."
+
+    # Resolve the target market: exact id → case-insensitive id/name → partial name.
+    mid = None
+    if want:
+        wl = want.lower()
+        if want in mkts:
+            mid = want
+        else:
+            for k, v in mkts.items():
+                if k.lower() == wl or str(v.get("name", "")).lower() == wl:
+                    mid = k
+                    break
+            if mid is None:
+                hits = [k for k, v in mkts.items()
+                        if wl in k.lower() or wl in str(v.get("name", "")).lower()]
+                if len(hits) == 1:
+                    mid = hits[0]
+                elif len(hits) > 1:
+                    return ("❓ That matches several markets: "
+                            + ", ".join(f"`{h}`" for h in hits) + ". Which one?")
+    else:
+        real = [k for k in mkts if k != FALLBACK_MARKET_ID]
+        if len(real) == 1:
+            mid = real[0]
+        else:
+            return ("❓ Which market? I know: "
+                    + ", ".join(f"`{k}`" for k in mkts) + ".")
+
+    if mid is None:
+        return (f"❌ No market matching `{want}`. Known markets: "
+                + ", ".join(f"`{k}`" for k in mkts) + ".")
+
+    market = mkts[mid]
+    name = market.get("name", mid)
+    code = (market.get("leader_code") or "").strip()
+    if not code:
+        # None on record yet — mint one and persist it (same format as /market_code).
+        import secrets as _secrets
+        code = _secrets.token_hex(4).upper()
+        market["leader_code"] = code
+        try:
+            _save_markets(data)
+        except Exception as _e:
+            log.warning("[ai get_market_code] save failed for %s: %s", mid, _e)
+
+    dm_raw = str(args.get("dm_user", "") or "").strip()
+    if dm_raw:
+        member = _resolve_member(guild, dm_raw) if guild else None
+        if not member:
+            return (f"⚠️ Found the market (**{name}**, ID `{mid}`) but couldn't find a user "
+                    f"matching `{dm_raw}` to DM. Their Market Code is `{code}`.")
+        dm_msg = (
+            f"👋 Here are your **{name}** market details for the CSN Export mod:\n\n"
+            f"• **Market ID:** `{mid}`\n"
+            f"• **Market Code:** `{code}`\n\n"
+            f"In the mod: **Mod Menu → CSN Export → config**, paste these into **Market ID** "
+            f"and **Market Code**, add your Discord **Webhook URL**, then **Save**.\n"
+            f"───────────────────\n"
+            f"⌨️ Don't forget to **bind the export key**: **Options → Controls → Key Binds → "
+            f"CSN Export**, bind **\"Export CSN History\"** to a key — the mod won't export until "
+            f"you do. Press it in-game to run an export.\n"
+            f"Keep the code private — it's what proves reports are really yours."
+        )
+        try:
+            await member.send(dm_msg)
+            return (f"✅ DM'd {member.display_name} their **{name}** Market ID (`{mid}`) and Code. "
+                    f"(Kept the code out of this channel.)")
+        except discord.Forbidden:
+            return (f"⚠️ {member.display_name} has DMs closed. Send them manually — "
+                    f"Market ID `{mid}`, Market Code `{code}`.")
+
+    return (f"**{name}** (`{mid}`)\n• Market ID: `{mid}`\n• Market Code: `{code}`\n"
+            f"They go in the CSN mod's **Market ID** / **Market Code** fields.")
 
 
 async def _ai_tool_propose_code_change(guild, channel, user, args):
@@ -8233,6 +8396,7 @@ _AI_TOOL_MAP = {
     "set_alias":            _ai_tool_set_alias,
     "remove_alias":         _ai_tool_remove_alias,
     "list_aliases":         _ai_tool_list_aliases,
+    "get_market_code":      _ai_tool_get_market_code,
     "propose_code_change":  _ai_tool_propose_code_change,
 }
 
@@ -8286,8 +8450,15 @@ async def handle_ai_mention(message: discord.Message):
 
     import time as _aitime
     _now = _aitime.time()
+    # The owner and managers bypass the per-user cooldown entirely \u2014 they drive the
+    # bot rapidly (rapid-fire notes, "push repo", etc.) and shouldn't be throttled.
+    _member_for_cd = message.guild.get_member(message.author.id) if message.guild else None
+    _cooldown_exempt = (
+        int(getattr(message.author, "id", 0)) in MANAGER_DM_IDS
+        or (_member_for_cd is not None and _ai_is_manager(_member_for_cd))
+    )
     _last = _AI_COOLDOWN.get(message.author.id, 0)
-    if AI_COOLDOWN_SEC > 0 and (_now - _last) < AI_COOLDOWN_SEC:
+    if (not _cooldown_exempt) and AI_COOLDOWN_SEC > 0 and (_now - _last) < AI_COOLDOWN_SEC:
         try:
             await message.reply(
                 f"\u23F3 One moment - wait {AI_COOLDOWN_SEC - int(_now - _last)}s before asking again.",
