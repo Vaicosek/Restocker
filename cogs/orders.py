@@ -24,6 +24,10 @@ any_item_autocomplete = core.any_item_autocomplete
 ephemeral_kwargs = core.ephemeral_kwargs
 fmt_qty = core.fmt_qty
 is_manager = core.is_manager
+_markets_owned_by = core._markets_owned_by
+_get_market = core._get_market
+normal_item_autocomplete = core.normal_item_autocomplete
+_is_future_item = core._is_future_item
 load_orders = core.load_orders
 next_batch_slot = core.next_batch_slot
 order_id_autocomplete = core.order_id_autocomplete
@@ -104,6 +108,70 @@ def _item_stackable(name: str, info: dict):
     return stackable, stack_size
 
 
+# Single source of truth for the stock-refill plan (also used by the web ⚡ button and
+# skips Future variants). Kept under the old name so the command/view below don't change.
+_build_stock_refill_plan = core._stock_refill_plan
+
+
+class _StockRefillConfirmView(discord.ui.View):
+    """Confirm/Cancel gate before creating the drafted stock-refill orders."""
+    def __init__(self, to_order, market_id, invoker_id, target_pct):
+        super().__init__(timeout=120)
+        self._to_order = to_order
+        self._market_id = market_id
+        self._invoker_id = invoker_id
+        self._target_pct = target_pct
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self._invoker_id:
+            await interaction.response.send_message("This preview isn't yours.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="✅ Create orders", style=discord.ButtonStyle.green)
+    async def _confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        now_utc = datetime.now(timezone.utc)
+        announce_at = next_batch_slot(ANNOUNCE_DELAY_MINUTES)
+        data_orders = load_orders()
+        base_id = max([o.get("id", 0) for o in data_orders.get("orders", [])] or [0])
+        created = 0
+        for item, need, info in self._to_order:
+            stackable, stack_size = _item_stackable(item, info)
+            base_id += 1
+            data_orders.setdefault("orders", []).append({
+                "id": base_id, "shop": "", "item": item,
+                "requested": int(need), "produced": 0,
+                "status": "open", "claimed_by": None, "claims": [],
+                "created_at": utcnow_iso(),
+                "messages": {"channel_id": None, "message_id": None, "dms": {}},
+                "unit_type": "pieces", "amount": int(need),
+                "stackable": bool(stackable), "stack_size": stack_size, "barrel_slots": 54,
+                "employee_announce_at": announce_at.isoformat(),
+                "employee_announced": False, "worker_announced": False,
+                "priority_until": (now_utc + timedelta(hours=PRIORITY_HOURS)).isoformat(),
+                "priority_role": EMPLOYEE_ROLE_NAME,
+                "market_id": self._market_id,
+            })
+            created += 1
+        if created:
+            save_orders(data_orders)
+        for c in self.children:
+            c.disabled = True
+        await interaction.response.edit_message(
+            content=f"✅ Created **{created}** restock order(s) for `{self._market_id}` "
+                    f"(refill to {self._target_pct:g}%). Cards post to the worker channel "
+                    f"in ~{ANNOUNCE_DELAY_MINUTES} min.",
+            view=self)
+        self.stop()
+
+    @discord.ui.button(label="✖ Cancel", style=discord.ButtonStyle.grey)
+    async def _cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for c in self.children:
+            c.disabled = True
+        await interaction.response.edit_message(content="✖ Cancelled — no orders created.", view=self)
+        self.stop()
+
+
 class OrdersCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -147,7 +215,7 @@ class OrdersCog(commands.Cog):
 
     @app_commands.command(
         name="order",
-        description="(Managers) Order an item from workers — everyone, or DM one specific worker"
+        description="(Managers / market owners) Order an item from workers — everyone, or DM one specific worker"
     )
     @app_commands.describe(
         item_key="Pick an existing catalog item (type to search)",
@@ -160,7 +228,7 @@ class OrdersCog(commands.Cog):
         app_commands.Choice(name="Stacks", value="stacks"),
         app_commands.Choice(name="Barrels", value="barrels"),
     ])
-    @app_commands.autocomplete(item_key=any_item_autocomplete)
+    @app_commands.autocomplete(item_key=normal_item_autocomplete)
     async def order(self,
         interaction: discord.Interaction,
         item_key: str,
@@ -168,9 +236,15 @@ class OrdersCog(commands.Cog):
         unit_type: str,
         worker: Optional[discord.Member] = None,
     ):
-        if not is_manager(interaction):
+        # Managers can order anything; a market owner/leader can order for their own
+        # market(s) too (no more manager bottleneck). We know the final permission only
+        # after resolving the item's market below — here we just reject users who are
+        # neither a manager nor any market's owner.
+        _is_mgr = is_manager(interaction)
+        _owned_markets = _markets_owned_by(interaction.user.id)
+        if not _is_mgr and not _owned_markets:
             return await interaction.response.send_message(
-                "⛔ You need the @Managers role to create orders.",
+                "⛔ You need the @Managers role, or to be a market owner, to create orders.",
                 **ephemeral_kwargs(interaction)
             )
         if worker is not None and worker.bot:
@@ -188,6 +262,12 @@ class OrdersCog(commands.Cog):
         if not item:
             return await interaction.response.send_message(
                 "❌ Invalid item selection.",
+                **ephemeral_kwargs(interaction)
+            )
+        if _is_future_item(item):
+            return await interaction.response.send_message(
+                f"❌ **{item}** is a futures item — use `/futures_order` for that. "
+                f"`/order` is for normal (in-stock) items.",
                 **ephemeral_kwargs(interaction)
             )
 
@@ -212,6 +292,18 @@ class OrdersCog(commands.Cog):
         info = items.get(item) or {}
         if not isinstance(info, dict):
             info = {}
+
+        # Market scope: a non-manager market owner may only order items in a market they
+        # own. Managers may order anything. Tag the order with the item's market so
+        # per-market loyalty rewards can key off it.
+        item_mid = str(info.get("market_id", "main") or "main")
+        if not _is_mgr and item_mid not in _owned_markets:
+            _own_str = ", ".join(f"`{m}`" for m in sorted(_owned_markets)) or "—"
+            return await interaction.followup.send(
+                f"⛔ **{item}** belongs to market `{item_mid}`, which you don't own. "
+                f"You can only order items in your market(s): {_own_str}.",
+                **ephemeral_kwargs(interaction)
+            )
 
         try:
             price_piece = int(info.get("coin", 0) or 0)
@@ -255,6 +347,7 @@ class OrdersCog(commands.Cog):
                 "stackable": bool(stackable), "stack_size": stack_size, "barrel_slots": 54,
                 "employee_announce_at": None, "employee_announced": True, "worker_announced": True,
                 "priority_until": None,
+                "market_id": item_mid,
             }
         else:
             # Broadcast: goes on the worker board and pings the pool after the batch delay.
@@ -271,6 +364,7 @@ class OrdersCog(commands.Cog):
                 "employee_announced": False, "worker_announced": False,
                 "priority_until": (now_utc + timedelta(hours=PRIORITY_HOURS)).isoformat(),
                 "priority_role": EMPLOYEE_ROLE_NAME,
+                "market_id": item_mid,
             }
 
         data_orders.setdefault("orders", []).append(order)
@@ -311,7 +405,7 @@ class OrdersCog(commands.Cog):
             )
 
     @app_commands.command(name="order_bulk",
-        description="(Managers) Create many orders at once from a pasted list")
+        description="(Managers / market owners) Create many orders at once from a pasted list")
     @app_commands.describe(
         orders="One per line: `Item name | quantity`  (e.g. Diamond Shovel - Fortune III, Unbreaking III, Efficiency V | 500)",
         unit_type="Unit for every line (default pieces)",
@@ -322,9 +416,12 @@ class OrdersCog(commands.Cog):
         app_commands.Choice(name="Barrels", value="barrels"),
     ])
     async def order_bulk(self, interaction: discord.Interaction, orders: str, unit_type: str = "pieces"):
-        if not is_manager(interaction):
+        _is_mgr = is_manager(interaction)
+        _owned_markets = _markets_owned_by(interaction.user.id)
+        if not _is_mgr and not _owned_markets:
             return await interaction.response.send_message(
-                "⛔ You need the @Managers role to create orders.", **ephemeral_kwargs(interaction))
+                "⛔ You need the @Managers role, or to be a market owner, to create orders.",
+                **ephemeral_kwargs(interaction))
         await interaction.response.defer(**ephemeral_kwargs(interaction), thinking=True)
         import re as _re
         unit = str(unit_type).lower().strip()
@@ -337,7 +434,7 @@ class OrdersCog(commands.Cog):
         base_id = max([o.get("id", 0) for o in data_orders.get("orders", [])] or [0])
         now_utc = datetime.now(timezone.utc)
         announce_at = next_batch_slot(ANNOUNCE_DELAY_MINUTES)
-        created, unpriced, failed = [], [], []
+        created, unpriced, failed, skipped_market = [], [], [], []
         for line in lines:
             # Prefer "name | qty" (safe — item names contain commas); fall back to "name x qty" / "name qty".
             name = qty = None
@@ -352,6 +449,9 @@ class OrdersCog(commands.Cog):
                     name = m.group(1).strip(); qty = int(m.group(2).replace(",", ""))
             if not name or not qty or qty <= 0:
                 failed.append(line[:60]); continue
+            if _is_future_item(name):
+                failed.append(f"{name[:48]} → use /futures_order")
+                continue
             info = items.get(name)
             if not isinstance(info, dict):
                 _rg = _resolve_gear(name)        # plain-text? "eff 5 unbreak 3 axe fort 3" -> canonical
@@ -363,9 +463,15 @@ class OrdersCog(commands.Cog):
                 except Exception:
                     price = 0
                 stackable, stack_size = _item_stackable(name, info)
+                item_mid = str(info.get("market_id", "main") or "main")
             else:
                 price, stackable, stack_size = 0, False, 1   # lenient: unknown item still posts (price 0)
+                item_mid = "main"
                 unpriced.append(name)
+            # A non-manager market owner can only bulk-order items in a market they own.
+            if not _is_mgr and item_mid not in _owned_markets:
+                skipped_market.append(f"{name} (`{item_mid}`)")
+                continue
             requested_pieces = unit_to_pieces(int(qty), unit, stackable=stackable)
             base_id += 1
             data_orders.setdefault("orders", []).append({
@@ -380,6 +486,7 @@ class OrdersCog(commands.Cog):
                 "employee_announced": False, "worker_announced": False,
                 "priority_until": (now_utc + timedelta(hours=PRIORITY_HOURS)).isoformat(),
                 "priority_role": EMPLOYEE_ROLE_NAME,
+                "market_id": item_mid,
             })
             created.append(f"#{base_id} {name} × {qty} {unit}" + (" ⚠️unpriced" if price <= 0 else ""))
         if created:
@@ -392,8 +499,57 @@ class OrdersCog(commands.Cog):
                     f"(set a price before approving): " + ", ".join(f"`{u}`" for u in unpriced[:8]))
         if failed:
             msg += f"\n\n❌ Couldn't parse {len(failed)} line(s): " + " · ".join(f"`{f}`" for f in failed[:6])
+        if skipped_market:
+            msg += (f"\n\n⛔ Skipped {len(skipped_market)} item(s) not in your market(s): "
+                    + ", ".join(skipped_market[:8]))
         msg += f"\n\n⏱️ Cards post to the worker channel in ~{ANNOUNCE_DELAY_MINUTES} min."
         await interaction.followup.send(msg[:1950], **ephemeral_kwargs(interaction))
+
+    @app_commands.command(
+        name="order_from_stock",
+        description="(Managers / market owners) Draft restock orders from the latest stock scan — refill low items")
+    @app_commands.describe(
+        market_id="Which market's stock to restock from",
+        target_percent="Refill each item up to this % of capacity (default 80).",
+    )
+    @app_commands.autocomplete(market_id=core._market_autocomplete)
+    async def order_from_stock(self, interaction: discord.Interaction,
+                               market_id: str, target_percent: int = 80):
+        _is_mgr = is_manager(interaction)
+        _owned = _markets_owned_by(interaction.user.id)
+        if not _is_mgr and market_id not in _owned:
+            return await interaction.response.send_message(
+                "⛔ You need the @Managers role, or to own this market, to restock it.",
+                **ephemeral_kwargs(interaction))
+        if not _get_market(market_id):
+            return await interaction.response.send_message(
+                f"❌ Market `{market_id}` not found. See `/market list`.", **ephemeral_kwargs(interaction))
+        if target_percent <= 0 or target_percent > 100:
+            return await interaction.response.send_message(
+                "❌ target_percent must be between 1 and 100.", **ephemeral_kwargs(interaction))
+        await interaction.response.defer(**ephemeral_kwargs(interaction), thinking=True)
+
+        to_order, skipped_active, at_target = _build_stock_refill_plan(market_id, float(target_percent))
+        if not to_order:
+            return await interaction.followup.send(
+                f"✅ Nothing to restock for `{market_id}` at {target_percent}% — "
+                f"{at_target} item(s) already at/above target"
+                + (f", {skipped_active} already have an active order." if skipped_active else "."),
+                **ephemeral_kwargs(interaction))
+
+        total_pieces = sum(n for _, n, _ in to_order)
+        preview = "\n".join(f"🔸 **{it}** × `{need:,}` pcs" for it, need, _ in to_order[:20])
+        if len(to_order) > 20:
+            preview += f"\n…and **{len(to_order) - 20}** more"
+        mname = (_get_market(market_id) or {}).get("name", market_id)
+        body = (
+            f"📋 **Restock plan — {mname}** (refill to {target_percent}%)\n"
+            f"{len(to_order)} item(s) · ≈ **{total_pieces:,}** pieces total"
+            + (f" · {skipped_active} skipped (active order)" if skipped_active else "")
+            + f"\n\n{preview}\n\nCreate these orders?"
+        )
+        view = _StockRefillConfirmView(to_order, market_id, interaction.user.id, float(target_percent))
+        await interaction.followup.send(body[:1950], view=view, **ephemeral_kwargs(interaction))
 
     @app_commands.command(name="ping_unclaimed", description="(Managers) Ping the Workers about unclaimed orders.")
 

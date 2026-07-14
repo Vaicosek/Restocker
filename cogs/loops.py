@@ -9,8 +9,21 @@ from datetime import timedelta
 from datetime import timezone
 import asyncio
 import time
+import os as _os
+import socket as _socket
+import secrets as _secrets
 
 core = sys.modules.get("Restocker_main") or sys.modules["__main__"]
+
+# ── Multi-instance guard ──────────────────────────────────────────────────────
+# Two bot processes on the same token cause duplicate reports/payouts (the original
+# "it sends the same thing" bug). Each instance writes a heartbeat to the shared DB;
+# if another instance's heartbeat is fresh AND advancing between our checks (i.e.
+# genuinely live, not a just-restarted stale key), we DM the owners once. Warning
+# only — never a hard refuse, so a legit restart can never lock the bot out.
+_INSTANCE_ID = f"{_socket.gethostname()}:{_os.getpid()}:{_secrets.token_hex(3)}"
+_INSTANCE_SEEN: dict = {}
+_INSTANCE_WARNED = {"done": False}
 EMPLOYEE_BATCH_LOOP_SECONDS = core.EMPLOYEE_BATCH_LOOP_SECONDS
 EMPLOYEE_ROLE_NAME = core.EMPLOYEE_ROLE_NAME
 LOYALTY_DECAY_IDLE_DAYS = core.LOYALTY_DECAY_IDLE_DAYS
@@ -34,6 +47,7 @@ _send_funds_report = core._send_funds_report
 _track_batch_dm_message = core._track_batch_dm_message
 apply_weekly_interest = core.apply_weekly_interest
 bot = core.bot
+MANAGER_DM_IDS = getattr(core, "MANAGER_DM_IDS", set())
 cleanup_claimed_order_dms_scan = core.cleanup_claimed_order_dms_scan
 fmt_coin = core.fmt_coin
 fmt_qty = core.fmt_qty
@@ -549,11 +563,67 @@ class LoopsCog(commands.Cog):
     async def _wait_ready_db_backup(self, ):
         await bot.wait_until_ready()
 
+    @tasks.loop(seconds=30)
+    async def instance_heartbeat_loop(self, ):
+        """Detect a second bot process on the same token (root cause of duplicate
+        reports/payouts). Each instance writes instance_hb:<id>=<epoch>; we warn the
+        owners ONCE if another id's heartbeat is fresh AND advanced since our last look
+        (proves it's live, not a just-restarted stale key). Warning only, never a refuse."""
+        try:
+            import Restocker_db as _db, time as _t
+            now = int(_t.time())
+            try:
+                allcfg = _db.get_all_config() or {}
+            except Exception:
+                allcfg = {}
+            live_others = []
+            for k, v in allcfg.items():
+                if not str(k).startswith("instance_hb:"):
+                    continue
+                oid = str(k)[len("instance_hb:"):]
+                if oid == _INSTANCE_ID:
+                    continue
+                try:
+                    ots = int(v)
+                except (TypeError, ValueError):
+                    continue
+                if now - ots > 86400:          # prune week-dead keys occasionally
+                    try: _db.delete_config(k)
+                    except Exception: pass
+                    continue
+                if now - ots < 75:
+                    prev = _INSTANCE_SEEN.get(oid)
+                    if prev is not None and ots > prev:   # actively updating -> genuinely live
+                        live_others.append(oid)
+                    _INSTANCE_SEEN[oid] = ots
+            if live_others and not _INSTANCE_WARNED["done"]:
+                _INSTANCE_WARNED["done"] = True
+                msg = ("⚠️ **Another bot instance appears to be running** on this token "
+                       f"(`{live_others[0]}`). This one is `{_INSTANCE_ID}`. Two instances cause "
+                       "duplicate reports and double payouts — shut one down (check Wispbyte + any local run).")
+                log.warning("[instance] %s", msg.replace("**", ""))
+                for _mid in MANAGER_DM_IDS:
+                    try:
+                        u = await bot.fetch_user(int(_mid))
+                        await u.send(msg)
+                    except Exception:
+                        pass
+            try:
+                _db.set_config(f"instance_hb:{_INSTANCE_ID}", str(now))
+            except Exception:
+                pass
+        except Exception as e:
+            log.debug("[instance] heartbeat failed: %s", e)
+
+    @instance_heartbeat_loop.before_loop
+    async def _wait_ready_instance_hb(self, ):
+        await bot.wait_until_ready()
+
     def _all_loops(self):
         return (self.worker_announce_loop, self.claimed_dm_cleanup_loop, self.employee_batch_dispatch_loop,
                 self.weekly_interest_loop, self.weekly_funds_report_loop, self.loyalty_decay_loop,
                 self.ign_deadline_loop, self.stock_reversion_loop, self.stock_dashboard_loop,
-                self.team_digest_loop, self.db_backup_loop)
+                self.team_digest_loop, self.db_backup_loop, self.instance_heartbeat_loop)
 
     def _start_loops(self):
         for _lp in self._all_loops():

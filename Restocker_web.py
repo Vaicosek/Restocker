@@ -309,9 +309,10 @@ def _load_all_earnings() -> dict:
             for iname, iv in (md.get("items") or {}).items():
                 if not isinstance(iv, dict):
                     continue
-                e = items_agg.setdefault(iname, {"sold": 0, "bought": 0})
+                e = items_agg.setdefault(iname, {"sold": 0, "bought": 0, "net": 0})
                 e["sold"]   += int(iv.get("sold_qty", 0))
                 e["bought"] += int(iv.get("bought_qty", 0))
+                e["net"]    += int(round(float(iv.get("net_coins", 0) or 0)))
             out.append({
                 "month":  mk,
                 "label":  md.get("label", mk),
@@ -493,6 +494,51 @@ def _load_earnings() -> list:
         except Exception:
             pass
     return []
+
+
+def _load_earnings_full() -> dict:
+    """Per-market earnings WITH per-item breakdown, for the redesigned Earnings tab.
+    Shape: {"markets":[{"id","name","months":[{month,label,income,spent,net,
+    items:[{item,sold,bought,net}]}]}]}. Months sorted oldest→newest.
+    Additive: the legacy /api/earnings endpoint is unchanged."""
+    out = []
+    try:
+        import Restocker_db as db
+        names = {}
+        try:
+            for mid, info in (_load_markets() or {}).items():
+                names[mid] = (info.get("name") if isinstance(info, dict) else None) or mid
+        except Exception:
+            names = {}
+        for mid in (db.csn_all_market_ids() or []):
+            months = (db.csn_get_market(mid) or {}).get("months", {}) or {}
+            mlist = []
+            for mk in sorted(months.keys()):
+                md = months[mk] or {}
+                items = []
+                for item, iv in (md.get("items") or {}).items():
+                    if not isinstance(iv, dict):
+                        continue
+                    items.append({
+                        "item":   item,
+                        "sold":   int(iv.get("sold_qty", 0) or 0),
+                        "bought": int(iv.get("bought_qty", 0) or 0),
+                        "net":    int(round(float(iv.get("net_coins", 0) or 0))),
+                    })
+                mlist.append({
+                    "month":  mk,
+                    "label":  md.get("label", mk),
+                    "income": int(round(float(md.get("income", 0) or 0))),
+                    "spent":  int(round(float(md.get("spent", 0) or 0))),
+                    "net":    int(round(float(md.get("net", 0) or 0))),
+                    "items":  items,
+                })
+            if mlist:
+                out.append({"id": mid, "name": names.get(mid, mid), "months": mlist})
+    except Exception as e:
+        print(f"[earnings_full] {e}")
+    out.sort(key=lambda m: str(m["name"]).lower())
+    return {"markets": out}
 
 
 def _load_stock_data() -> dict:
@@ -901,14 +947,20 @@ _PAGE = """<!DOCTYPE html>
 </header>
 
 <nav>
-  <div class="nav-tab active" data-page="prices">
+  <div class="nav-tab active" data-page="inventory">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h18v4H3zM3 10h18v4H3zM3 17h18v4H3z"/></svg>Inventory
+  </div>
+  <div class="nav-tab" data-page="prices">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>Prices
   </div>
   <div class="nav-tab" data-page="earnings">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M7 16v-5M12 16V8M17 16v-9"/></svg>Earnings
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M7 16v-5M12 16V8M17 16v-9"/></svg>Ledger
   </div>
   <div class="nav-tab" data-page="stocks">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17l6-6 4 4 8-8"/><path d="M17 7h4v4"/></svg>Stocks
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17l6-6 4 4 8-8"/><path d="M17 7h4v4"/></svg>Exchange
+  </div>
+  <div class="nav-tab" data-page="orders">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>Orders
   </div>
   <div class="nav-tab" data-page="teams">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>Teams
@@ -920,8 +972,44 @@ _PAGE = """<!DOCTYPE html>
 
 <main>
 
+  <!-- ══════════════════════════ INVENTORY PAGE ══════════════════════════ -->
+  <style>
+  #page-inventory .iv-bar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:0 0 16px}
+  #page-inventory .iv-tabs{display:flex;gap:6px;flex-wrap:wrap}
+  #page-inventory .iv-tab{padding:6px 12px;border:1px solid var(--border);color:var(--muted);font-size:12px;cursor:pointer;font-family:var(--font-data)}
+  #page-inventory .iv-tab:hover{color:var(--text)}
+  #page-inventory .iv-tab.active{border-color:var(--accent);color:var(--accent)}
+  #page-inventory .iv-search{background:var(--panel2);border:1px solid var(--border);color:var(--text);padding:8px 11px;font-size:12px;font-family:var(--font-data);flex:1;min-width:200px}
+  #page-inventory .iv-fill{height:8px;background:var(--panel2);position:relative;width:150px;display:inline-block;vertical-align:middle;overflow:hidden}
+  #page-inventory .iv-fill>span{position:absolute;left:0;top:0;bottom:0}
+  #page-inventory .iv-pos{color:var(--green)}#page-inventory .iv-amb{color:var(--amber)}#page-inventory .iv-neg{color:var(--red)}
+  </style>
+  <div class="page active" id="page-inventory">
+    <div class="stats" id="stats-inventory"></div>
+    <div class="iv-bar">
+      <div class="iv-tabs" id="iv-markets"></div>
+    </div>
+    <div class="iv-bar">
+      <input class="iv-search" id="iv-search" placeholder="Search items…" autocomplete="off">
+      <button class="auth-btn" id="iv-genorders" style="display:none">⚡ Generate restock orders (→80%)</button>
+      <span id="iv-genmsg" style="font-size:12px;color:var(--muted)"></span>
+    </div>
+    <div class="table-wrap">
+      <table><thead><tr>
+        <th data-ivsort="item">Item <span class="sort-arrow">↕</span></th>
+        <th data-ivsort="pct" class="sorted">Fullness <span class="sort-arrow">↑</span></th>
+        <th data-ivsort="stock">In stock <span class="sort-arrow">↕</span></th>
+        <th data-ivsort="capacity">Capacity <span class="sort-arrow">↕</span></th>
+        <th data-ivsort="price">Price ¢ <span class="sort-arrow">↕</span></th>
+      </tr></thead><tbody id="iv-tbody"></tbody></table>
+      <div class="empty" id="iv-empty" style="display:none">
+        <div class="big"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h18v4H3zM3 10h18v4H3zM3 17h18v4H3z"/></svg></div>No barrel scan yet — press the stock-scan key in-game and click your shops.
+      </div>
+    </div>
+  </div>
+
   <!-- ══════════════════════════ PRICES PAGE ══════════════════════════ -->
-  <div class="page active" id="page-prices">
+  <div class="page" id="page-prices">
     <div class="stats" id="stats-prices"></div>
     <div class="filters">
       <div class="search-wrap">
@@ -955,53 +1043,107 @@ _PAGE = """<!DOCTYPE html>
   </div>
 
   <!-- ══════════════════════════ EARNINGS PAGE ══════════════════════════ -->
+  <style>
+  /* ── Ledger tab (v3 redesign) — lg- prefixed so nothing clashes ── */
+  #page-earnings .lg-bar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:0 0 16px}
+  #page-earnings .lg-market-tabs{display:flex;gap:6px;flex-wrap:wrap}
+  #page-earnings .lg-mtab{padding:6px 12px;border:1px solid var(--border);color:var(--muted);font-size:12px;cursor:pointer;font-family:var(--font-data)}
+  #page-earnings .lg-mtab:hover{color:var(--text)}
+  #page-earnings .lg-mtab.active{border-color:var(--accent);color:var(--accent)}
+  #page-earnings .lg-select,#page-earnings .lg-search{background:var(--panel2);border:1px solid var(--border);color:var(--text);padding:8px 11px;font-size:12px;font-family:var(--font-data)}
+  #page-earnings .lg-search{flex:1;min-width:200px}
+  #page-earnings .lg-bento{display:grid;grid-template-columns:repeat(12,1fr);gap:14px;margin-bottom:6px}
+  #page-earnings .lg-tile{background:var(--surface);border:1px solid var(--border);padding:18px 20px;overflow:hidden}
+  #page-earnings .lg-hero{grid-column:span 7}#page-earnings .lg-side{grid-column:span 5}
+  #page-earnings .lg-sellers{grid-column:span 7}#page-earnings .lg-kpis{grid-column:span 5}
+  @media(max-width:860px){#page-earnings .lg-hero,#page-earnings .lg-side,#page-earnings .lg-sellers,#page-earnings .lg-kpis{grid-column:span 12}}
+  #page-earnings .lg-th{font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin-bottom:14px;display:flex;align-items:center;justify-content:space-between}
+  #page-earnings .lg-mut{color:var(--muted);font-size:10px}
+  #page-earnings .lg-hero-net{display:flex;align-items:baseline;gap:14px}
+  #page-earnings .lg-big{font-family:var(--font-data);font-size:42px;font-weight:600;letter-spacing:-.02em;line-height:1}
+  #page-earnings .lg-trend{font-family:var(--font-data);font-size:13px;padding:3px 9px}
+  #page-earnings .lg-trend.up{color:var(--green);background:rgba(34,255,122,.1)}
+  #page-earnings .lg-trend.down{color:var(--red);background:rgba(255,68,68,.1)}
+  #page-earnings .lg-hero-sub{color:var(--muted);font-size:12px;margin:6px 0 12px}
+  #page-earnings .lg-chartbox{position:relative;height:150px}
+  #page-earnings .lg-donutbox{height:150px}
+  #page-earnings .lg-donut-center{position:absolute;top:42%;left:0;right:0;text-align:center;pointer-events:none}
+  #page-earnings .lg-dn{font-family:var(--font-data);font-size:22px;font-weight:600}
+  #page-earnings .lg-dl{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em}
+  #page-earnings .lg-legend{display:flex;flex-direction:column;gap:8px;margin-top:14px}
+  #page-earnings .lg-lg{display:flex;align-items:center;justify-content:space-between;font-size:12px;color:var(--text-body);font-family:var(--font-data)}
+  #page-earnings .lg-dot{width:9px;height:9px;border-radius:2px;display:inline-block;margin-right:8px}
+  #page-earnings .lg-lead{display:flex;flex-direction:column;gap:1px}
+  #page-earnings .lg-lrow{display:grid;grid-template-columns:20px 1fr 96px;align-items:center;gap:12px;padding:8px 2px;border-bottom:1px solid var(--border-dim,#181818)}
+  #page-earnings .lg-lrow:last-child{border-bottom:none}
+  #page-earnings .lg-lrank{font-family:var(--font-data);color:var(--faint);font-size:12px;text-align:center}
+  #page-earnings .lg-lrow:first-child .lg-lrank{color:var(--amber)}
+  #page-earnings .lg-lname{font-family:var(--font-data);font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  #page-earnings .lg-lbar{height:6px;background:var(--panel2);margin-top:6px;position:relative;overflow:hidden}
+  #page-earnings .lg-lbar>span{position:absolute;left:0;top:0;bottom:0;background:linear-gradient(90deg,var(--green),#17b558)}
+  #page-earnings .lg-lbar.r>span{background:linear-gradient(90deg,#b53a3a,var(--red))}
+  #page-earnings .lg-lmeta{text-align:right}
+  #page-earnings .lg-lrev{font-family:var(--font-data);font-size:13px;font-weight:600}
+  #page-earnings .lg-lqty{font-family:var(--font-data);font-size:10.5px;color:var(--muted)}
+  #page-earnings .lg-kgrid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  #page-earnings .lg-kpi{background:var(--panel2);border:1px solid var(--border);padding:13px 14px}
+  #page-earnings .lg-k{color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.08em}
+  #page-earnings .lg-v{font-family:var(--font-data);font-size:20px;font-weight:600;margin-top:5px}
+  #page-earnings .lg-kt{font-size:10px;color:var(--muted);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  #page-earnings .lg-pos{color:var(--green)}#page-earnings .lg-neg{color:var(--red)}#page-earnings .lg-amb{color:var(--amber)}#page-earnings .lg-muted{color:var(--muted)}
+  #page-earnings .lg-section-h{font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin:26px 0 12px;display:flex;align-items:center;gap:10px}
+  #page-earnings .lg-section-h::after{content:"";flex:1;height:1px;background:var(--border)}
+  </style>
   <div class="page" id="page-earnings">
-    <div class="filters">
-      <div class="market-tabs" id="earnings-market-tabs"></div>
+    <div class="lg-bar">
+      <div class="lg-market-tabs" id="lg-markets"></div>
+      <select class="lg-select" id="lg-month"></select>
     </div>
-    <div class="stats" id="stats-earnings"></div>
-    <div class="chart-grid">
-      <div class="chart-card">
-        <div class="chart-title">Income · Spent · Net by month</div>
-        <div class="chart-box"><canvas id="earnings-chart"></canvas></div>
+    <div class="lg-bento">
+      <div class="lg-tile lg-hero">
+        <div class="lg-th"><span id="lg-heroLbl">Net profit</span><span class="lg-mut">trend</span></div>
+        <div class="lg-hero-net"><span class="lg-big lg-pos" id="lg-heroNet">—</span><span class="lg-trend up" id="lg-heroTrend" style="display:none"></span></div>
+        <div class="lg-hero-sub" id="lg-heroSub"></div>
+        <div class="lg-chartbox"><canvas id="lg-lineChart"></canvas></div>
       </div>
-      <div class="chart-card">
-        <div class="chart-title">Top 10 items by units sold</div>
-        <div class="chart-box"><canvas id="earnings-items-chart"></canvas></div>
+      <div class="lg-tile lg-side">
+        <div class="lg-th"><span>Income vs spent</span></div>
+        <div class="lg-chartbox lg-donutbox"><canvas id="lg-donutChart"></canvas>
+          <div class="lg-donut-center"><div class="lg-dn lg-pos" id="lg-donutNet">—</div><div class="lg-dl">net margin <span id="lg-donutPct"></span></div></div>
+        </div>
+        <div class="lg-legend">
+          <div class="lg-lg"><span><span class="lg-dot" style="background:var(--green)"></span>Income</span><span id="lg-lgInc">—</span></div>
+          <div class="lg-lg"><span><span class="lg-dot" style="background:var(--red)"></span>Spent</span><span id="lg-lgExp">—</span></div>
+        </div>
       </div>
+      <div class="lg-tile lg-sellers">
+        <div class="lg-th"><span id="lg-leadLbl">What's selling</span><span class="lg-mut">by revenue</span></div>
+        <div class="lg-lead" id="lg-lead"></div>
+      </div>
+      <div class="lg-tile lg-kpis">
+        <div class="lg-th"><span>At a glance</span></div>
+        <div class="lg-kgrid">
+          <div class="lg-kpi"><div class="lg-k">Items sold</div><div class="lg-v" id="lg-kSold">—</div><div class="lg-kt">units</div></div>
+          <div class="lg-kpi"><div class="lg-k">Unique items</div><div class="lg-v" id="lg-kUniq">—</div><div class="lg-kt">distinct SKUs</div></div>
+          <div class="lg-kpi"><div class="lg-k">Top earner</div><div class="lg-v lg-pos" id="lg-kTop">—</div><div class="lg-kt" id="lg-kTopN">—</div></div>
+          <div class="lg-kpi"><div class="lg-k">Biggest cost</div><div class="lg-v lg-neg" id="lg-kCost">—</div><div class="lg-kt" id="lg-kCostN">none</div></div>
+        </div>
+      </div>
+    </div>
+    <div class="lg-section-h">Full ledger</div>
+    <div class="lg-bar">
+      <input class="lg-search" id="lg-q" placeholder="Search items…" autocomplete="off">
+      <select class="lg-select" id="lg-flt"><option value="all">All items</option><option value="income">Income only</option><option value="expense">Expense only</option></select>
     </div>
     <div class="table-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>Month</th>
-            <th>Income</th>
-            <th>Spent</th>
-            <th>Net</th>
-          </tr>
-        </thead>
-        <tbody id="earnings-tbody"></tbody>
-      </table>
-      <div class="empty" id="earnings-empty" style="display:none">
+      <table><thead><tr>
+        <th data-lgsort="item">Item <span class="sort-arrow">↕</span></th>
+        <th data-lgsort="sold">Sold <span class="sort-arrow">↕</span></th>
+        <th data-lgsort="bought">Bought <span class="sort-arrow">↕</span></th>
+        <th data-lgsort="net" class="sorted">Net ¢ <span class="sort-arrow">↓</span></th>
+      </tr></thead><tbody id="lg-tbody"></tbody></table>
+      <div class="empty" id="lg-empty" style="display:none">
         <div class="big"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M7 16v-5M12 16V8M17 16v-9"/></svg></div>No earnings recorded yet — run <code>/csn</code> in Discord to log a month.
-      </div>
-    </div>
-
-    <!-- Item breakdown -->
-    <div id="item-stats-section" style="margin-top:28px;display:none">
-      <div class="chart-title" style="margin-bottom:12px">Item breakdown · all time</div>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th data-sort-items="name">Item</th>
-              <th data-sort-items="sold">Sold to Customers</th>
-              <th data-sort-items="bought">Restocked</th>
-              <th data-sort-items="missing">Missing / Surplus</th>
-            </tr>
-          </thead>
-          <tbody id="items-breakdown-tbody"></tbody>
-        </table>
       </div>
     </div>
   </div>
@@ -1071,6 +1213,33 @@ _PAGE = """<!DOCTYPE html>
     </div>
   </div>
 
+  <!-- ══════════════════════════ ORDERS PAGE ══════════════════════════ -->
+  <style>
+  #page-orders .or-bar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:0 0 16px}
+  #page-orders .or-tabs{display:flex;gap:6px;flex-wrap:wrap}
+  #page-orders .or-tab{padding:6px 12px;border:1px solid var(--border);color:var(--muted);font-size:12px;cursor:pointer;font-family:var(--font-data)}
+  #page-orders .or-tab:hover{color:var(--text)}
+  #page-orders .or-tab.active{border-color:var(--accent);color:var(--accent)}
+  #page-orders .or-fill{height:7px;background:var(--panel2);position:relative;width:140px;display:inline-block;vertical-align:middle;overflow:hidden}
+  #page-orders .or-fill>span{position:absolute;left:0;top:0;bottom:0;background:linear-gradient(90deg,var(--green),#17b558)}
+  #page-orders .or-tag{padding:2px 8px;font-size:11px;font-family:var(--font-data);border:1px solid var(--border)}
+  #page-orders .or-open{color:var(--green);border-color:rgba(34,255,122,.3)}
+  #page-orders .or-partial{color:var(--amber);border-color:rgba(245,166,35,.3)}
+  #page-orders .or-claimed{color:var(--muted)}
+  </style>
+  <div class="page" id="page-orders">
+    <div class="stats" id="stats-orders"></div>
+    <div class="or-bar"><div class="or-tabs" id="or-markets"></div></div>
+    <div class="table-wrap">
+      <table><thead><tr>
+        <th>#</th><th>Item</th><th>Requested</th><th>Claimed</th><th>Progress</th><th>Status</th>
+      </tr></thead><tbody id="or-tbody"></tbody></table>
+      <div class="empty" id="or-empty" style="display:none">
+        <div class="big"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg></div>No open orders — all caught up, or none created yet.
+      </div>
+    </div>
+  </div>
+
   <!-- ══════════════════════════ TEAMS PAGE ══════════════════════════ -->
   <div class="page" id="page-teams">
     <div class="stats" id="stats-teams"></div>
@@ -1090,6 +1259,16 @@ _PAGE = """<!DOCTYPE html>
   <div class="page" id="page-mymarket">
     <div class="filters"><div class="market-tabs" id="owner-market-tabs"></div></div>
     <div class="stats" id="owner-stats"></div>
+    <div class="chart-card">
+      <div class="chart-title">Restock rewards <span style="color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0">— extra pay for workers who fill THIS market's orders</span></div>
+      <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end">
+        <div><div class="lblmini">Loyalty × (points)</div><input id="loy-mult" class="ownin" type="number" step="0.1" min="0.1" placeholder="1.5" style="width:110px"></div>
+        <div><div class="lblmini">Coin bonus / order</div><input id="loy-bonus" class="ownin" type="number" min="0" placeholder="500" style="width:130px"></div>
+        <button class="auth-btn" id="loy-save">Save rewards</button>
+        <span id="loy-msg" style="font-size:12px;color:var(--muted)"></span>
+      </div>
+      <div style="font-size:11.5px;color:var(--faint);margin-top:8px">Applies when a manager approves an order tagged to this market. 1× = normal, no bonus. Same setting as <code>/market loyalty</code> in Discord — each market is independent.</div>
+    </div>
     <div class="chart-card">
       <div class="chart-title">Log manual restock <span style="color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0">— stock you added by hand (bought via /pay)</span></div>
       <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end">
@@ -1145,6 +1324,7 @@ window.OWNER_READY = fetch("/api/me").then(r => r.json()).then(me => {
   return window.OWNER;
 }).catch(() => window.OWNER);
 const INVENTORY     = __INVENTORY_JSON__;
+const ORDERS        = __ORDERS_JSON__;
 const UPDATED       = "__UPDATED__";
 
 document.getElementById("updated-ts").textContent = "Updated: " + UPDATED;
@@ -1406,6 +1586,7 @@ document.querySelectorAll(".nav-tab").forEach(tab => {
 
 // ══════════════════════════ EARNINGS ════════════════════════════════════════
 (function initEarnings() {
+  return;  // ── legacy Earnings renderer replaced by initLedger() below (v3 redesign) ──
   // Build market tab list from ALL_EARNINGS keys that have data
   const marketIds = Object.keys(ALL_EARNINGS).filter(mid => ALL_EARNINGS[mid] && ALL_EARNINGS[mid].length > 0);
   let activeMarket = marketIds.includes("main") ? "main" : (marketIds[0] || "main");
@@ -1600,6 +1781,303 @@ document.querySelectorAll(".nav-tab").forEach(tab => {
   }
 
   render(activeMarket);
+})();
+
+// ══════════════════════════ LEDGER (v3 redesign) ═════════════════════════════
+(function initLedger(){
+  const DATA = (typeof ALL_EARNINGS !== "undefined" && ALL_EARNINGS) || {};
+  const marketIds = Object.keys(DATA).filter(mid => DATA[mid] && DATA[mid].length > 0);
+  const marketsEl = document.getElementById("lg-markets");
+  const monthSel  = document.getElementById("lg-month");
+  const q   = document.getElementById("lg-q");
+  const flt = document.getElementById("lg-flt");
+  const tbody = document.getElementById("lg-tbody");
+  const emptyEl = document.getElementById("lg-empty");
+  if (!marketsEl) return;
+  let activeMarket = marketIds.includes("main") ? "main" : (marketIds[0] || null);
+  let activeMonth = "all";
+  let sortK = "net", sortDir = -1;
+  let lineChart = null, donutChart = null;
+
+  function mLabel(mid){ const m = (typeof MARKETS !== "undefined" && MARKETS[mid]); return m ? (m.name || mid) : (mid === "main" ? "Main" : mid); }
+  function fmt(n){ n = Math.round(n || 0); return (n < 0 ? "-" : "") + Math.abs(n).toLocaleString(); }
+  function shortK(n){ const a = Math.abs(n), s = n < 0 ? "-" : "+"; return a >= 1000 ? s + (a/1000).toFixed(a >= 100000 ? 0 : 1) + "k" : s + Math.round(a); }
+  function esc2(s){ return (typeof esc === "function") ? esc(s) : String(s).replace(/</g,"&lt;"); }
+
+  if (!marketIds.length) { if (emptyEl) emptyEl.style.display = ""; return; }
+
+  if (marketIds.length > 1) {
+    marketIds.forEach(mid => {
+      const b = document.createElement("div");
+      b.className = "lg-mtab" + (mid === activeMarket ? " active" : "");
+      b.textContent = mLabel(mid);
+      b.onclick = () => { activeMarket = mid; activeMonth = "all";
+        marketsEl.querySelectorAll(".lg-mtab").forEach(t => t.classList.remove("active")); b.classList.add("active");
+        buildMonths(); renderAll(); };
+      marketsEl.appendChild(b);
+    });
+  } else if (activeMarket) {
+    const b = document.createElement("div"); b.className = "lg-mtab active"; b.textContent = mLabel(activeMarket); marketsEl.appendChild(b);
+  }
+
+  function months(){ return DATA[activeMarket] || []; }
+  function buildMonths(){
+    const ms = months();
+    monthSel.innerHTML = '<option value="all">All months (summary)</option>' +
+      ms.slice().reverse().map(m => `<option value="${m.month}">${esc2(m.label)}</option>`).join("");
+    monthSel.value = activeMonth;
+  }
+  function aggItems(ms){
+    const a = {};
+    ms.forEach(m => Object.entries(m.items || {}).forEach(([n, iv]) => {
+      const e = a[n] || (a[n] = { item: n, sold: 0, bought: 0, net: 0 });
+      e.sold += iv.sold || 0; e.bought += iv.bought || 0; e.net += iv.net || 0;
+    }));
+    return Object.values(a);
+  }
+  function currentItems(){
+    const ms = months();
+    if (activeMonth === "all") return aggItems(ms);
+    const mo = ms.find(m => m.month === activeMonth);
+    return mo ? aggItems([mo]) : [];
+  }
+  function sumSold(ms){ return ms.reduce((s, m) => s + Object.values(m.items || {}).reduce((x, iv) => x + (iv.sold || 0), 0), 0); }
+  function totals(){
+    const ms = months();
+    if (activeMonth === "all") {
+      return { inc: ms.reduce((s,m)=>s+m.income,0), sp: ms.reduce((s,m)=>s+m.spent,0),
+               net: ms.reduce((s,m)=>s+m.net,0), label: "all months", prev: null, sold: sumSold(ms) };
+    }
+    const i = ms.findIndex(m => m.month === activeMonth), mo = ms[i];
+    return { inc: mo.income, sp: mo.spent, net: mo.net, label: mo.label,
+             prev: i > 0 ? ms[i-1].net : null, sold: sumSold([mo]) };
+  }
+
+  function renderAll(){
+    const t = totals();
+    document.getElementById("lg-heroLbl").textContent = "Net profit · " + t.label;
+    const hn = document.getElementById("lg-heroNet");
+    hn.textContent = (t.net >= 0 ? "+" : "") + fmt(t.net); hn.className = "lg-big " + (t.net >= 0 ? "lg-pos" : "lg-neg");
+    const tr = document.getElementById("lg-heroTrend"), sub = document.getElementById("lg-heroSub");
+    if (t.prev !== null && t.prev !== 0) {
+      const pct = Math.round((t.net - t.prev) / Math.abs(t.prev) * 100);
+      tr.style.display = ""; tr.textContent = (pct >= 0 ? "▲ " : "▼ ") + Math.abs(pct) + "%";
+      tr.className = "lg-trend " + (pct >= 0 ? "up" : "down");
+      sub.textContent = "vs " + (t.prev >= 0 ? "+" : "") + fmt(t.prev) + " prev month · ¢ coins";
+    } else {
+      tr.style.display = "none";
+      sub.textContent = (activeMonth === "all" ? months().length + " month(s) tracked" : "first tracked month") + " · ¢ coins";
+    }
+    const marg = t.inc ? Math.round(t.net / t.inc * 100) : 0;
+    const dn = document.getElementById("lg-donutNet"); dn.textContent = shortK(t.net); dn.className = "lg-dn " + (t.net >= 0 ? "lg-pos" : "lg-neg");
+    document.getElementById("lg-donutPct").textContent = marg + "%";
+    document.getElementById("lg-lgInc").textContent = fmt(t.inc);
+    document.getElementById("lg-lgExp").textContent = fmt(t.sp);
+    const items = currentItems();
+    document.getElementById("lg-kSold").textContent = fmt(t.sold);
+    document.getElementById("lg-kUniq").textContent = items.length;
+    const sells = items.filter(i => i.net > 0).sort((a,b)=>b.net-a.net);
+    const buys  = items.filter(i => i.net < 0).sort((a,b)=>a.net-b.net);
+    const kTop = document.getElementById("lg-kTop"), kTopN = document.getElementById("lg-kTopN");
+    if (sells[0]) { kTop.textContent = "+" + fmt(sells[0].net); kTopN.textContent = sells[0].item; } else { kTop.textContent = "—"; kTopN.textContent = "—"; }
+    const kCost = document.getElementById("lg-kCost"), kCostN = document.getElementById("lg-kCostN");
+    if (buys[0]) { kCost.textContent = fmt(buys[0].net); kCostN.textContent = buys[0].item; } else { kCost.textContent = "—"; kCostN.textContent = "none"; }
+    const top = sells.slice(0, 7), maxS = Math.max.apply(null, top.map(s => s.net).concat([1]));
+    document.getElementById("lg-leadLbl").textContent = "What's selling · " + t.label;
+    document.getElementById("lg-lead").innerHTML = top.length
+      ? top.map((s,i)=>`<div class="lg-lrow"><div class="lg-lrank">${i+1}</div><div><div class="lg-lname">${esc2(s.item)}</div><div class="lg-lbar"><span style="width:${Math.max(4, s.net/maxS*100)}%"></span></div></div><div class="lg-lmeta"><div class="lg-lrev lg-pos">+${fmt(s.net)}</div><div class="lg-lqty">${fmt(s.sold)} sold</div></div></div>`).join("")
+      : '<div class="lg-lqty" style="padding:8px 2px">No sales this period.</div>';
+    drawCharts(t);
+    renderTable();
+  }
+
+  function drawCharts(t){
+    const recent = months().slice(-12);
+    if (lineChart) { lineChart.destroy(); lineChart = null; }
+    lineChart = new Chart(document.getElementById("lg-lineChart"), { type: "line",
+      data: { labels: recent.map(m => (m.label || "").slice(0, 3)),
+        datasets: [{ data: recent.map(m => m.net), borderColor: "#22FF7A", borderWidth: 2, tension: .35, fill: true,
+          backgroundColor: c => { const g = c.chart.ctx.createLinearGradient(0,0,0,150); g.addColorStop(0,"rgba(34,255,122,.28)"); g.addColorStop(1,"rgba(34,255,122,0)"); return g; },
+          pointBackgroundColor: "#22FF7A", pointRadius: 3, pointHoverRadius: 6 }] },
+      options: { responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false }, tooltip: { callbacks: { label: c => " net " + fmt(c.parsed.y) + " ¢" } } },
+        scales: { x: { grid: { color: "rgba(255,255,255,.05)" }, ticks: { color: "#666", font: { family: "IBM Plex Mono" } } },
+                  y: { grid: { color: "rgba(255,255,255,.05)" }, ticks: { color: "#666", font: { family: "IBM Plex Mono" }, callback: v => shortK(v) }, border: { display: false } } } } });
+    if (donutChart) { donutChart.destroy(); donutChart = null; }
+    donutChart = new Chart(document.getElementById("lg-donutChart"), { type: "doughnut",
+      data: { labels: ["Income","Spent"], datasets: [{ data: [t.inc, t.sp], backgroundColor: ["#22FF7A","#FF4444"], borderColor: "#111", borderWidth: 3, cutout: "72%" }] },
+      options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false }, tooltip: { callbacks: { label: c => " " + c.label + " " + fmt(c.parsed) + " ¢" } } } } });
+  }
+
+  function renderTable(){
+    let rows = currentItems();
+    const term = (q.value || "").toLowerCase(), f = flt.value;
+    rows = rows.filter(r => r.item.toLowerCase().includes(term));
+    if (f === "income") rows = rows.filter(r => r.net > 0);
+    if (f === "expense") rows = rows.filter(r => r.net < 0);
+    rows.sort((a,b) => { let x = a[sortK], y = b[sortK]; if (typeof x === "string") return x.localeCompare(y) * sortDir; return (x - y) * sortDir; });
+    if (!rows.length) { tbody.innerHTML = '<tr><td colspan="4" style="color:var(--muted)">No items match.</td></tr>'; return; }
+    tbody.innerHTML = rows.map(r => { const c = r.net > 0 ? "lg-pos" : (r.net < 0 ? "lg-neg" : "lg-muted"), sg = r.net > 0 ? "+" : "";
+      return `<tr><td class="item-name">${esc2(r.item)}</td><td>${fmt(r.sold)}</td><td>${fmt(r.bought)}</td><td class="${c}">${sg}${fmt(r.net)}</td></tr>`; }).join("");
+  }
+
+  q.addEventListener("input", renderTable);
+  flt.addEventListener("change", renderTable);
+  monthSel.addEventListener("change", () => { activeMonth = monthSel.value; renderAll(); });
+  document.querySelectorAll('#page-earnings th[data-lgsort]').forEach(th => th.addEventListener("click", () => {
+    const k = th.getAttribute("data-lgsort");
+    if (sortK === k) sortDir = -sortDir; else { sortK = k; sortDir = (k === "item") ? 1 : -1; }
+    renderTable();
+  }));
+
+  if (activeMarket) { buildMonths(); renderAll(); }
+})();
+
+// ══════════════════════════ INVENTORY (barrel fullness) ══════════════════════
+(function initInventory(){
+  const DATA = (typeof INVENTORY !== "undefined" && INVENTORY && INVENTORY.markets) || [];
+  const tabsEl = document.getElementById("iv-markets");
+  const search = document.getElementById("iv-search");
+  const tbody  = document.getElementById("iv-tbody");
+  const emptyEl= document.getElementById("iv-empty");
+  const statsEl= document.getElementById("stats-inventory");
+  if (!tbody) return;
+  let active = 0, sortK = "pct", sortDir = 1;
+  const fmt = n => Math.round(n || 0).toLocaleString();
+  const esc2 = s => (typeof esc === "function") ? esc(s) : String(s).replace(/</g,"&lt;");
+  const price = p => p > 0 ? (p < 1 ? p.toFixed(2) : fmt(p)) : "—";
+  const fillColor = pct => pct <= 20 ? "var(--red)" : (pct < 60 ? "var(--amber)" : "var(--green)");
+  const pctCls = pct => pct <= 20 ? "iv-neg" : (pct < 60 ? "iv-amb" : "iv-pos");
+  if (!DATA.length) { if (emptyEl) emptyEl.style.display = ""; return; }
+
+  DATA.forEach((m, i) => {
+    const b = document.createElement("div");
+    b.className = "iv-tab" + (i === active ? " active" : "");
+    b.textContent = (m.name || m.market_id) + " · " + m.count;
+    b.onclick = () => { active = i; tabsEl.querySelectorAll(".iv-tab").forEach(t => t.classList.remove("active")); b.classList.add("active"); render(); };
+    tabsEl.appendChild(b);
+  });
+
+  function render(){
+    const mk = DATA[active] || {};
+    const items = mk.items || [];
+    // Show the generate-orders button only for a market this viewer owns.
+    const genBtn = document.getElementById("iv-genorders");
+    if (genBtn) {
+      const owns = window.OWNER && Array.isArray(window.OWNER.owned) && window.OWNER.owned.includes(String(mk.market_id));
+      genBtn.style.display = owns ? "" : "none";
+      genBtn.dataset.mid = mk.market_id || "";
+    }
+    const low = items.filter(x => x.capacity > 0 && x.pct <= 20).length;
+    const totCap = items.reduce((s, x) => s + (x.capacity || 0), 0);
+    const totStock = items.reduce((s, x) => s + (x.stock || 0), 0);
+    const avg = totCap ? Math.round(100 * totStock / totCap) : 0;
+    statsEl.innerHTML = "";
+    [[items.length, "Items"], [String(low), "Low (≤20%)"], [avg + "%", "Avg fullness"]].forEach(([v, l], i) => {
+      const d = document.createElement("div"); d.className = "stat-card";
+      const col = (i === 1 && low > 0) ? "var(--red)" : (i === 2 ? (avg <= 20 ? "var(--red)" : (avg < 60 ? "var(--amber)" : "var(--green)")) : "var(--blue)");
+      d.innerHTML = `<div class="val" style="color:${col}">${v}</div><div class="lbl">${l}</div>`;
+      statsEl.appendChild(d);
+    });
+    const term = (search.value || "").toLowerCase();
+    let rows = items.filter(x => (x.item || "").toLowerCase().includes(term));
+    rows.sort((a, b) => { let x = a[sortK], y = b[sortK]; if (typeof x === "string") return x.localeCompare(y) * sortDir; return ((x || 0) - (y || 0)) * sortDir; });
+    if (!rows.length) { tbody.innerHTML = items.length ? '<tr><td colspan="5" style="color:var(--muted)">No items match.</td></tr>' : ""; if (!items.length) emptyEl.style.display = ""; return; }
+    emptyEl.style.display = "none";
+    tbody.innerHTML = rows.map(x => {
+      const pct = Math.min(100, Math.max(0, x.pct || 0));
+      return `<tr><td class="item-name">${esc2(x.item)}</td>` +
+        `<td><span class="iv-fill"><span style="width:${Math.max(2, pct)}%;background:${fillColor(x.pct)}"></span></span> <span class="${pctCls(x.pct)}">${Math.round(x.pct)}%</span></td>` +
+        `<td>${fmt(x.stock)}</td><td>${fmt(x.capacity)}</td><td>${price(x.price)}</td></tr>`;
+    }).join("");
+  }
+
+  search.addEventListener("input", render);
+  const genBtn = document.getElementById("iv-genorders");
+  const genMsg = document.getElementById("iv-genmsg");
+  if (genBtn) genBtn.addEventListener("click", async () => {
+    const mid = genBtn.dataset.mid;
+    if (!mid || !window.OWNER || !window.OWNER.owned.includes(String(mid))) {
+      if (genMsg) genMsg.textContent = "You can only generate orders for a market you own."; return;
+    }
+    const hdr = { "Content-Type": "application/json", "X-CSRF-Token": (window.OWNER.csrf || "") };
+    genBtn.disabled = true; if (genMsg) genMsg.textContent = "Checking stock…";
+    let prev;
+    try {
+      prev = await fetch("/api/owner/generate_orders", { method: "POST", headers: hdr,
+        body: JSON.stringify({ market_id: mid, target_percent: 80, apply: false }) }).then(r => r.json());
+    } catch (e) { prev = { ok: false, error: "network" }; }
+    if (!prev || !prev.ok) { genBtn.disabled = false; if (genMsg) genMsg.textContent = (prev && prev.error) || "Failed."; return; }
+    if (!prev.count) { genBtn.disabled = false; if (genMsg) genMsg.textContent = "Nothing to restock — all items at/above 80%."; return; }
+    if (!confirm(`Create ${prev.count} restock order(s) to refill this market to 80%?`)) {
+      genBtn.disabled = false; if (genMsg) genMsg.textContent = ""; return;
+    }
+    if (genMsg) genMsg.textContent = "Creating…";
+    let res;
+    try {
+      res = await fetch("/api/owner/generate_orders", { method: "POST", headers: hdr,
+        body: JSON.stringify({ market_id: mid, target_percent: 80, apply: true }) }).then(r => r.json());
+    } catch (e) { res = { ok: false, error: "network" }; }
+    genBtn.disabled = false;
+    if (genMsg) genMsg.textContent = (res && res.ok) ? `✅ Created ${res.created} order(s) — see the Orders tab.` : ((res && res.error) || "Failed.");
+  });
+  document.querySelectorAll('#page-inventory th[data-ivsort]').forEach(th => th.addEventListener("click", () => {
+    const k = th.getAttribute("data-ivsort");
+    if (sortK === k) sortDir = -sortDir; else { sortK = k; sortDir = (k === "item" || k === "pct") ? 1 : -1; }
+    render();
+  }));
+  render();
+})();
+
+// ══════════════════════════ ORDERS (restock board) ══════════════════════════
+(function initOrders(){
+  const DATA = (typeof ORDERS !== "undefined" && ORDERS && ORDERS.markets) || [];
+  const tabsEl = document.getElementById("or-markets");
+  const tbody  = document.getElementById("or-tbody");
+  const emptyEl= document.getElementById("or-empty");
+  const statsEl= document.getElementById("stats-orders");
+  if (!tbody) return;
+  let active = 0;
+  const fmt = n => Math.round(n || 0).toLocaleString();
+  const esc2 = s => (typeof esc === "function") ? esc(s) : String(s).replace(/</g,"&lt;");
+  if (!DATA.length) { if (emptyEl) emptyEl.style.display = ""; return; }
+
+  DATA.forEach((m, i) => {
+    const b = document.createElement("div");
+    b.className = "or-tab" + (i === active ? " active" : "");
+    b.textContent = (m.name || m.market_id) + " · " + m.count;
+    b.onclick = () => { active = i; tabsEl.querySelectorAll(".or-tab").forEach(t => t.classList.remove("active")); b.classList.add("active"); render(); };
+    tabsEl.appendChild(b);
+  });
+
+  function statusTag(st, claimed, req){
+    if (st === "open" && claimed > 0 && claimed < req) st = "partial";
+    const cls = st === "open" ? "or-open" : (st === "partial" ? "or-partial" : "or-claimed");
+    return `<span class="or-tag ${cls}">${st}</span>`;
+  }
+
+  function render(){
+    const orders = (DATA[active] || {}).orders || [];
+    const totalReq = orders.reduce((s, o) => s + (o.requested || 0), 0);
+    const openN = orders.filter(o => (o.claimed || 0) < (o.requested || 0)).length;
+    statsEl.innerHTML = "";
+    [[orders.length, "Open orders"], [fmt(totalReq), "Pieces requested"], [String(openN), "Still need workers"]].forEach(([v, l], i) => {
+      const d = document.createElement("div"); d.className = "stat-card";
+      const col = i === 2 && openN > 0 ? "var(--amber)" : "var(--blue)";
+      d.innerHTML = `<div class="val" style="color:${col}">${v}</div><div class="lbl">${l}</div>`;
+      statsEl.appendChild(d);
+    });
+    if (!orders.length) { tbody.innerHTML = ""; emptyEl.style.display = ""; return; }
+    emptyEl.style.display = "none";
+    tbody.innerHTML = orders.map(o => {
+      const req = o.requested || 0, cl = Math.min(o.claimed || 0, req), pct = req ? Math.round(100 * cl / req) : 0;
+      return `<tr><td>#${o.id}</td><td class="item-name">${esc2(o.item)}</td>` +
+        `<td>${fmt(req)}</td><td>${fmt(o.claimed || 0)}</td>` +
+        `<td><span class="or-fill"><span style="width:${pct}%"></span></span> ${pct}%</td>` +
+        `<td>${statusTag(o.status, o.claimed || 0, req)}</td></tr>`;
+    }).join("");
+  }
+  render();
 })();
 
 // ══════════════════════════ STOCKS ═══════════════════════════════════════════
@@ -1897,8 +2375,17 @@ document.querySelectorAll(".nav-tab").forEach(tab => {
     d.innerHTML = `<div class="val" style="font-size:18px">${val}</div><div class="lbl">${lbl}</div>`;
     return d;
   }
+  async function loadLoyalty(mid) {
+    const mult = document.getElementById("loy-mult"), bonus = document.getElementById("loy-bonus");
+    if (!mult || !bonus) return;
+    try {
+      const r = await fetch("/api/owner/loyalty?market_id=" + encodeURIComponent(mid)).then(x => x.json());
+      if (r && r.ok) { mult.value = r.pts_mult; bonus.value = r.coin_bonus; }
+    } catch (e) {}
+  }
   async function loadInv(mid) {
     curMid = mid;
+    loadLoyalty(mid);
     [...document.getElementById("owner-market-tabs").children].forEach(b => b.classList.toggle("active", b.dataset.mid === mid));
     const tb = document.getElementById("owner-tbody");
     const dl = document.getElementById("owner-itemlist");
@@ -1949,6 +2436,17 @@ document.querySelectorAll(".nav-tab").forEach(tab => {
       tb.appendChild(tr);
     });
   }
+  const loySave = document.getElementById("loy-save");
+  if (loySave) loySave.onclick = async () => {
+    const msg = document.getElementById("loy-msg");
+    const pm = Number(document.getElementById("loy-mult").value);
+    const cb = Number(document.getElementById("loy-bonus").value);
+    if (!(pm > 0)) { msg.textContent = "Multiplier must be > 0."; return; }
+    if (cb < 0) { msg.textContent = "Bonus can't be negative."; return; }
+    msg.textContent = "Saving…";
+    const res = await post("/api/owner/set_loyalty", { market_id: curMid, pts_mult: pm, coin_bonus: cb });
+    msg.textContent = (res && res.ok) ? "Saved ✓" : ((res && res.error) || "Failed.");
+  };
   const addBtn = document.getElementById("rs-add");
   if (addBtn) addBtn.onclick = async () => {
     const item = document.getElementById("rs-item").value.trim();
@@ -2064,9 +2562,18 @@ def _load_inventory_data() -> dict:
         cap = int(r.get("capacity") or 0)
         cur = int(r.get("stock") or 0)
         pct = (100.0 * cur / cap) if cap > 0 else 100.0
+        # The barrel scan also carries the shop's listed price — surface it so the
+        # Inventory view shows price alongside fullness (sell first, else buy).
+        _sp = r.get("sell_price")
+        if _sp is None or float(_sp or 0) <= 0:
+            _sp = r.get("buy_price")
+        try:
+            price = round(float(_sp), 2) if _sp not in (None, "") and float(_sp) > 0 else 0
+        except Exception:
+            price = 0
         by_market.setdefault(mid, []).append({
             "item": r.get("item"), "stock": cur, "capacity": cap or cur,
-            "pct": round(pct, 1), "owner": r.get("owner") or ""})
+            "pct": round(pct, 1), "owner": r.get("owner") or "", "price": price})
     out = []
     for mid, items in by_market.items():
         items.sort(key=lambda x: x["pct"])
@@ -2074,6 +2581,44 @@ def _load_inventory_data() -> dict:
         out.append({"market_id": mid, "name": names.get(mid, mid),
                     "items": items, "count": len(items), "low": low})
     out.sort(key=lambda m: m["low"], reverse=True)
+    return {"markets": out}
+
+
+def _load_orders_data() -> dict:
+    """Open/active restock orders grouped by market, for the website Orders board (read-only).
+    Shape: {"markets":[{market_id,name,count,orders:[{id,item,requested,claimed,status}]}]}."""
+    try:
+        import Restocker_db as db
+        rows = db.load_orders()
+    except Exception as e:
+        print(f"[orders] DB unavailable: {e}")
+        return {"markets": []}
+    names = {}
+    try:
+        for mid, info in (_load_markets() or {}).items():
+            names[mid] = (info.get("name") if isinstance(info, dict) else None) or mid
+    except Exception:
+        pass
+    by_market = {}
+    for o in rows:
+        st = str(o.get("status", "") or "").lower()
+        if st in ("fulfilled", "cancelled"):
+            continue
+        mid = o.get("market_id") or "main"
+        claimed = sum(int(c.get("qty") or 0) for c in (o.get("claims") or []))
+        by_market.setdefault(mid, []).append({
+            "id": int(o.get("id") or 0),
+            "item": o.get("item") or "",
+            "requested": int(o.get("requested") or 0),
+            "claimed": claimed,
+            "status": st or "open",
+        })
+    out = []
+    for mid, orders in by_market.items():
+        orders.sort(key=lambda x: x["id"], reverse=True)
+        out.append({"market_id": mid, "name": names.get(mid, mid),
+                    "orders": orders, "count": len(orders)})
+    out.sort(key=lambda m: m["count"], reverse=True)
     return {"markets": out}
 
 
@@ -2154,6 +2699,7 @@ async def _handle_index(request):
     stock_data    = _cached("stock_data",    _load_stock_data)
     teams_data    = _cached("teams_data",    _load_teams_data)
     inventory     = _cached("inventory",     _load_inventory_data)
+    orders_board  = _cached("orders_board",  _load_orders_data)
     updated       = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     html = (_PAGE
             .replace("__ITEMS_JSON__",    _jscript(items))
@@ -2164,6 +2710,7 @@ async def _handle_index(request):
             .replace("__STOCKS_JSON__",   _jscript(stock_data))
             .replace("__TEAMS_JSON__",   _jscript(teams_data))
             .replace("__INVENTORY_JSON__", _jscript(inventory))
+            .replace("__ORDERS_JSON__",   _jscript(orders_board))
             .replace("__UPDATED__",       updated))
     return web.Response(text=html, content_type="text/html")
 
@@ -2185,6 +2732,14 @@ async def _handle_api_markets(request):
 async def _handle_api_earnings(request):
     return web.Response(
         text=json.dumps(_cached("earnings", _load_earnings), ensure_ascii=False),
+        content_type="application/json",
+    )
+
+
+async def _handle_api_earnings_full(request):
+    """Per-market earnings + per-item breakdown for the redesigned Earnings tab."""
+    return web.Response(
+        text=json.dumps(_cached("earnings_full", _load_earnings_full), ensure_ascii=False),
         content_type="application/json",
     )
 
@@ -2522,6 +3077,88 @@ async def _handle_owner_set_item(request):
     return web.json_response({"ok": True, **r})
 
 
+async def _handle_owner_get_loyalty(request):
+    """Read this market's restock-reward config (points multiplier + coin bonus)."""
+    mid = (request.query.get("market_id") or "").strip()
+    if not mid or not _require_owner(request, mid):
+        return web.json_response({"ok": False, "error": "Not authorized for this market."}, status=403)
+    import json as _json, Restocker_db as db
+    pm, cb = 1.0, 0
+    try:
+        raw = db.get_config(f"market_loyalty:{mid}")
+        if raw:
+            d = _json.loads(raw)
+            pm = float(d.get("pts_mult", 1.0) or 1.0)
+            cb = int(d.get("coin_bonus", 0) or 0)
+    except Exception:
+        pass
+    return web.json_response({"ok": True, "market_id": mid, "pts_mult": pm, "coin_bonus": cb})
+
+
+async def _handle_owner_set_loyalty(request):
+    """Set this market's restock-reward config. Same store as the Discord /market loyalty
+    command (bot_config key market_loyalty:<mid>), so both stay in sync."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    mid = str(body.get("market_id") or "").strip()
+    if not _csrf_ok(request):
+        return web.json_response({"ok": False, "error": "Bad or missing CSRF token."}, status=403)
+    if not _require_owner(request, mid):
+        return web.json_response({"ok": False, "error": "Not authorized."}, status=403)
+    try:
+        pm = float(body.get("pts_mult", 1.0))
+        cb = int(round(float(body.get("coin_bonus", 0))))
+    except (TypeError, ValueError):
+        return web.json_response({"ok": False, "error": "Values must be numbers."}, status=400)
+    if pm <= 0 or cb < 0:
+        return web.json_response({"ok": False, "error": "Multiplier must be > 0 and bonus must be ≥ 0."}, status=400)
+    import json as _json, Restocker_db as db
+    try:
+        db.set_config(f"market_loyalty:{mid}", _json.dumps({"pts_mult": pm, "coin_bonus": cb}))
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=500)
+    _CACHE.clear()
+    return web.json_response({"ok": True, "pts_mult": pm, "coin_bonus": cb})
+
+
+async def _handle_owner_generate_orders(request):
+    """Draft (and optionally create) restock orders for a market from its stock scan —
+    refill every under-target item back up to target_percent. apply=false returns a preview."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    mid = str(body.get("market_id") or "").strip()
+    if not _csrf_ok(request):
+        return web.json_response({"ok": False, "error": "Bad or missing CSRF token."}, status=403)
+    if not _require_owner(request, mid):
+        return web.json_response({"ok": False, "error": "Not authorized."}, status=403)
+    try:
+        target = float(body.get("target_percent", 80))
+    except (TypeError, ValueError):
+        target = 80.0
+    if target <= 0 or target > 100:
+        target = 80.0
+    import Restocker_main as m
+    try:
+        to_order, skipped_active, at_target = m._stock_refill_plan(mid, target)
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=500)
+    preview = [{"item": it, "qty": int(q)} for it, q, _ in to_order[:50]]
+    if not bool(body.get("apply", False)):
+        return web.json_response({"ok": True, "preview": True, "count": len(to_order),
+                                  "skipped_active": skipped_active, "at_target": at_target,
+                                  "items": preview})
+    try:
+        created = await m.run_on_bot_loop(m._create_restock_orders, to_order, mid)
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=500)
+    _CACHE.clear()
+    return web.json_response({"ok": True, "created": int(created), "items": preview})
+
+
 
 def start_webserver_thread(port: int = 8080):
     """Run the aiohttp server in its OWN OS thread + event loop so dashboard
@@ -2574,6 +3211,7 @@ async def start_webserver(port: int = 8080):
     app.router.add_get("/api/items",     _handle_api_items)
     app.router.add_get("/api/markets",   _handle_api_markets)
     app.router.add_get("/api/earnings",  _handle_api_earnings)
+    app.router.add_get("/api/earnings_full", _handle_api_earnings_full)
     app.router.add_get("/api/prices",    _handle_api_prices)
     app.router.add_get("/api/stocks",    _handle_api_stocks)
     app.router.add_post("/api/link",     _handle_api_link)
@@ -2584,6 +3222,9 @@ async def start_webserver(port: int = 8080):
     app.router.add_post("/api/owner/remove_item", _handle_owner_remove_item)
     app.router.add_post("/api/owner/log_restock", _handle_owner_log_restock)
     app.router.add_post("/api/owner/set_item",    _handle_owner_set_item)
+    app.router.add_get("/api/owner/loyalty",       _handle_owner_get_loyalty)
+    app.router.add_post("/api/owner/set_loyalty",  _handle_owner_set_loyalty)
+    app.router.add_post("/api/owner/generate_orders", _handle_owner_generate_orders)
     app.router.add_get("/report/{market}/{month}", _handle_report)
     app.router.add_get("/report/{market}",         _handle_report)
     app.router.add_get("/shares/{market}",         _handle_shares)

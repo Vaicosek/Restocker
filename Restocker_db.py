@@ -89,6 +89,7 @@ CREATE TABLE IF NOT EXISTS orders (
     id                      INTEGER PRIMARY KEY,
     shop                    TEXT NOT NULL DEFAULT '',
     item                    TEXT NOT NULL,
+    market_id               TEXT,
     requested               INTEGER NOT NULL DEFAULT 0,
     produced                INTEGER NOT NULL DEFAULT 0,
     status                  TEXT NOT NULL DEFAULT 'open',
@@ -466,6 +467,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
         # not trusted for display); it self-heals on the next stock scan.
         "ALTER TABLE market_stock ADD COLUMN buy_qty  INTEGER",
         "ALTER TABLE market_stock ADD COLUMN sell_qty INTEGER",
+        # Which market an order belongs to — drives per-market reward payouts and the
+        # website Orders board. Older orders (pre-column) stay NULL and read as 'main'.
+        "ALTER TABLE orders ADD COLUMN market_id TEXT",
     ]
     for sql in migrations:
         try:
@@ -807,7 +811,7 @@ def save_order(order: dict):
     with db() as conn:
         conn.execute("""
             INSERT INTO orders (
-                id, shop, item, requested, produced, status, claimed_by,
+                id, shop, item, market_id, requested, produced, status, claimed_by,
                 unit_type, amount, stackable, stack_size, barrel_slots,
                 coin_per_piece, priority_role, priority_until,
                 employee_announce_at, employee_announced, worker_announced,
@@ -815,7 +819,7 @@ def save_order(order: dict):
                 blocked_claimers, messages, assist_ticket_ids,
                 created_at, updated_at
             ) VALUES (
-                :id, :shop, :item, :requested, :produced, :status, :claimed_by,
+                :id, :shop, :item, :market_id, :requested, :produced, :status, :claimed_by,
                 :unit_type, :amount, :stackable, :stack_size, :barrel_slots,
                 :coin_per_piece, :priority_role, :priority_until,
                 :employee_announce_at, :employee_announced, :worker_announced,
@@ -824,7 +828,7 @@ def save_order(order: dict):
                 :created_at, :updated_at
             )
             ON CONFLICT(id) DO UPDATE SET
-                shop=excluded.shop, item=excluded.item,
+                shop=excluded.shop, item=excluded.item, market_id=excluded.market_id,
                 requested=excluded.requested, produced=excluded.produced,
                 status=excluded.status, claimed_by=excluded.claimed_by,
                 unit_type=excluded.unit_type, amount=excluded.amount,
@@ -846,6 +850,7 @@ def save_order(order: dict):
             "id": order.get("id"),
             "shop": order.get("shop", ""),
             "item": order.get("item", ""),
+            "market_id": order.get("market_id"),
             "requested": order.get("requested", 0),
             "produced": order.get("produced", 0),
             "status": order.get("status", "open"),

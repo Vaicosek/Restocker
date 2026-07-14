@@ -98,6 +98,9 @@ FALLBACK_MARKET_NAME = _env_str("FALLBACK_MARKET_NAME", "TEST")
 # marker lives in the shared DB so it de-dupes across instances too. 0 disables.
 CSN_AUTOREPORT_DEDUP_SECONDS = _env_int("CSN_AUTOREPORT_DEDUP_SECONDS", 900)
 PLATFORM_FEE_PCT = _env_float("PLATFORM_FEE_PCT", 3.0)
+# Platform fees aren't actually charged yet, so the "Est. Platform Fee" line is hidden by
+# default to avoid showing a number no one pays. Set PLATFORM_FEE_ACTIVE=1 once fees go live.
+PLATFORM_FEE_ACTIVE = _env_str("PLATFORM_FEE_ACTIVE", "false").strip().lower() in ("1", "true", "yes", "on")
 
 MIN_SHARE_PRICE = _env_float("MIN_SHARE_PRICE", 1.0)
 DEFAULT_SHARES_OUTSTANDING = _env_float("DEFAULT_SHARES_OUTSTANDING", 1000.0)
@@ -126,6 +129,10 @@ STOCK_PRICE_TRAILING_MONTHS = _env_int("STOCK_PRICE_TRAILING_MONTHS", 3)
 STOCK_MAX_REANCHOR_MOVE = _env_float("STOCK_MAX_REANCHOR_MOVE", 0.40)
 STOCK_OUTLIER_CAP_FACTOR = _env_float("STOCK_OUTLIER_CAP_FACTOR", 0.0)  # >0: cap each month's net at N x median before averaging (winsorize outliers); 0=off
 STOCK_LOW_PCT = _env_float("STOCK_LOW_PCT", 20.0)  # live-stock alert: warn when an item is at/under this % of capacity
+# Zero-config low-stock DM: if a market owner hasn't set any explicit /stock alarms,
+# still DM them when items drop to/under this % of capacity on a scan. Set 0 to only
+# alert on explicitly-configured alarms (the old behavior).
+STOCK_ALARM_DEFAULT_PCT = _env_float("STOCK_ALARM_DEFAULT_PCT", 20.0)
 STOCK_REVERT_DAILY = _env_float("STOCK_REVERT_DAILY", 0.05)
 STOCK_DIVIDEND_PCT = _env_float("STOCK_DIVIDEND_PCT", 0.0)
 STOCK_LIMIT_ORDERS_ENABLED = _env_bool("STOCK_LIMIT_ORDERS_ENABLED", True)
@@ -1812,24 +1819,32 @@ async def safe_dm(user: discord.abc.User, content: str, view: discord.ui.View | 
 
 _NON_STACKABLE_KEYWORDS = {
     "pickaxe", "axe", "shovel", "hoe", "fishing rod", "flint and steel", "shears", "spyglass",
-    "sword", "bow", "crossbow", "trident",
-    "helmet", "chestplate", "leggings", "boots", "elytra", "shield", "horse armor",
-    "shulker box", "saddle", "totem", "goat horn",
+    "sword", "bow", "crossbow", "trident", "mace", "brush",
+    "helmet", "chestplate", "leggings", "boots", "elytra", "shield", "horse armor", "wolf armor",
+    "shulker box", "saddle", "totem", "goat horn", "jetpack", "armor set",
     "potion of", "splash potion", "lingering potion",
+    # Vanilla non-stackables the keyword rules missed. Boats & minecarts are stack-1 in
+    # Minecraft (they were previously — wrongly — treated as 16).
+    "boat", "minecart", "music disc", "carrot on a stick", "warped fungus on a stick",
+    "enchanted book", "knowledge book", "bundle", "banner pattern",
+    # Filled buckets (empty bucket is 16, handled below), beds, cakes, stews/soups, books
+    "water bucket", "lava bucket", "milk bucket", "powder snow bucket", "bucket of",
+    "cake", "mushroom stew", "beetroot soup", "rabbit stew", "suspicious stew",
+    "writable book", "book and quill",
 }
 
 _BREW_EFFECT_WORDS = {
     "haste", "speed", "strength", "weakness", "slowness", "blindness", "poison",
     "regeneration", "regen", "absorption", "fire resistance", "fres", "night vision",
     "invisibility", "invis", "luck", "unluck", "levitation", "levi", "jump boost",
-    "mining fatigue", "nausea", "wither", "turtle master", "slow falling", "resistance",
+    "mining fatigue", "nausea", "wither", "turtle master", "turtlemaster", "turtle", "slow falling", "resistance",
     "instant health", "instant damage", "saturation", "hp boost", "hp2", "hp1",
     "extended", "splash", "drinkable", "splashable",
 }
 
 _STACK_16_KEYWORDS = {
-    "ender pearl", "snowball", "egg", "empty bucket", "sign", "banner",
-    "honey bottle", "boat", "minecart",
+    "ender pearl", "snowball", "egg", "empty bucket", "bucket", "sign", "banner",
+    "honey bottle", "armor stand", "written book",
 }
 
 
@@ -1884,6 +1899,33 @@ def _loyalty_points_for_order(order: dict, items_data: dict) -> int:
         return max(1, int(order_value // LOYALTY_POINTS_DIVISOR))
     except Exception:
         return 1
+
+
+def _market_loyalty_cfg(market_id) -> tuple[float, int]:
+    """Per-market reward config: (points_multiplier, flat_coin_bonus) granted on each
+    fulfilled order for that market. Lets an owner incentivise restockers on their shop
+    (e.g. ViridianMarket = 1.5x points, +500c/order). Defaults to (1.0, 0)."""
+    if not market_id:
+        return 1.0, 0
+    try:
+        import json as _json, Restocker_db as _db
+        raw = _db.get_config(f"market_loyalty:{market_id}")
+        if not raw:
+            return 1.0, 0
+        d = _json.loads(raw)
+        mult = float(d.get("pts_mult", 1.0) or 1.0)
+        bonus = int(d.get("coin_bonus", 0) or 0)
+        return (mult if mult > 0 else 1.0), max(0, bonus)
+    except Exception:
+        return 1.0, 0
+
+
+def _set_market_loyalty(market_id, pts_mult: float, coin_bonus: int) -> None:
+    """Persist a market's loyalty reward config (points multiplier + flat coin bonus)."""
+    import json as _json, Restocker_db as _db
+    _db.set_config(
+        f"market_loyalty:{market_id}",
+        _json.dumps({"pts_mult": float(pts_mult), "coin_bonus": int(coin_bonus)}))
 
 
 def _award_loyalty_points(user_id: int, points: int, reason: str = "") -> tuple[float, dict, dict]:
@@ -2255,10 +2297,11 @@ def _parse_stock_csv(csv_text: str) -> list:
     out = []
     reader = csv.DictReader(iter(lines))
     for row in reader:
-        item = (row.get("item") or "").strip()
-        item = re.sub(r"#[0-9a-fA-F]{1,6}$", "", item).strip()
+        raw_item = (row.get("item") or "").strip()          # keep the raw name (with #code)
+        item = re.sub(r"#[0-9a-fA-F]{1,6}$", "", raw_item).strip()
         if not item:
             continue
+        lore = [p.strip() for p in (row.get("lore") or "").split("|") if p.strip()]
         try:
             stock = int(float((row.get("stock") or "0").replace(",", "")))
         except Exception:
@@ -2289,11 +2332,39 @@ def _parse_stock_csv(csv_text: str) -> list:
         except Exception:
             barrels = 1
         out.append({"owner": (row.get("owner") or "").strip(), "item": item, "stock": stock,
+                    "raw_item": raw_item, "lore": lore,
                     "barrels": barrels,
                     "buy_price": _unit_price("buy_price", "buy_qty"),
                     "sell_price": _unit_price("sell_price", "sell_qty"),
                     "buy_qty": _qty("buy_qty"), "sell_qty": _qty("sell_qty")})
     return out
+
+
+def _learn_brew_aliases_from_stock(rows: list) -> int:
+    """Learn readable brew names from lore captured in a stock scan (the csn_stock CSV's
+    'lore' column), keyed by the raw '#code' item name. Complements the profiles-JSON path
+    so brew linking works from the stock scan alone. Never overwrites an existing alias."""
+    try:
+        aliases = _load_brew_aliases()
+    except Exception:
+        return 0
+    learned = 0
+    for r in (rows or []):
+        raw = str(r.get("raw_item") or "").strip()
+        if not raw or "#" not in raw or raw in aliases:
+            continue
+        eff = _parse_brew_effects(r.get("lore") or [])
+        if not eff:
+            continue
+        base = re.sub(r"#\w{1,8}$", "", raw).strip() or "Potion"
+        aliases[raw] = f"{base} - {eff}"
+        learned += 1
+    if learned:
+        try:
+            _save_brew_aliases(aliases)
+        except Exception:
+            return 0
+    return learned
 
 
 def _fullness_bar(pct: float, width: int = 10) -> str:
@@ -2322,8 +2393,14 @@ def _alarm_triggered_items(market_id: str) -> list:
     import Restocker_db as _db
     st = _db.get_market_stock(market_id)
     alarms = _db.get_stock_alarms(market_id)
-    if not st or not alarms:
+    if not st:
         return []
+    if not alarms:
+        # Zero-config default: no explicit alarms set, so alert on anything at/under the
+        # default low-stock threshold. Lets owners get restock DMs out of the box.
+        if STOCK_ALARM_DEFAULT_PCT <= 0:
+            return []
+        alarms = {"*": {"threshold": float(STOCK_ALARM_DEFAULT_PCT), "mode": "pct"}}
     known = (_load_items().get("items") or {})
     out = []
     for item, x in st.items():
@@ -2542,9 +2619,33 @@ async def _pay_honey_from_export(csv_text: str, market_id: str, report_channel):
     return paid_lines
 
 
+def _stock_rows_to_csv(rows: list) -> bytes:
+    """Render stock rows (dicts with item/owner/stock/capacity/prices) to CSV bytes,
+    lowest-fullness first. Uses the csv module so item names containing commas
+    (e.g. enchant lists) are quoted correctly. Returns UTF-8 bytes for a discord.File."""
+    import csv as _csv
+    buf = io.StringIO()
+    w = _csv.writer(buf)
+    w.writerow(["item", "owner", "stock", "capacity", "percent", "buy_price", "sell_price"])
+    for x in rows:
+        cap = int(x.get("capacity") or 0)
+        cur = int(x.get("stock") or 0)
+        pct = (100.0 * cur / cap) if cap > 0 else 100.0
+        w.writerow([
+            x.get("item", ""), x.get("owner", "") or "", cur, cap, f"{pct:.1f}",
+            "" if x.get("buy_price") is None else x.get("buy_price"),
+            "" if x.get("sell_price") is None else x.get("sell_price"),
+        ])
+    return buf.getvalue().encode("utf-8")
+
+
 async def _record_stock_report(rows: list, market_id: str, report_channel, filename: str):
     """Store a live shop-stock snapshot, post a fullness summary, and alert on low stock."""
     import Restocker_db as _db
+    try:
+        _learn_brew_aliases_from_stock(rows)   # readable brew names from captured lore
+    except Exception:
+        pass
     try:
         _items_cat = (_load_items().get("items") or {})
     except Exception:
@@ -2556,16 +2657,16 @@ async def _record_stock_report(rows: list, market_id: str, report_channel, filen
             # Stack size from the items catalog when known (stackable flag +
             # stack_size), else name-based detection (64 / 16 / 1). Never below
             # the current stock, so fullness stays ≤ 100%.
-            info = _items_cat.get(item)
+            # Name-based detection models the REAL Minecraft stack size (1 / 16 / 64)
+            # and is the source of truth for capacity. The catalog's stack_size is often
+            # an auto-registered default (64) or a drifted value, so the old
+            # max(catalog, detected) only ever INFLATED capacity: a stack-1 tool with a
+            # catalog-64 read 64× too large, so its barrel looked permanently ~0% full
+            # (the "barrel count is wrong" bug). Detection already returns 64 for genuine
+            # 64-stackers, so trust it; fall back to the catalog only if detection is
+            # somehow unavailable.
             detected = _detect_stack_size(item)
-            cat_stack = 0
-            if isinstance(info, dict) and ("stackable" in info or "stack_size" in info):
-                cat_stack = 1 if not info.get("stackable", True) else int(info.get("stack_size", 64) or 64)
-            # The catalog has a history of auto-registered items being saved as
-            # stackable=0/stack_size=1 (the drift fix_stack_sizes.py once repaired).
-            # Use the LARGER of catalog vs name-detection — genuine non-stackables
-            # (tools/armor/brews) are caught by the detection keywords anyway.
-            stack = max(cat_stack, detected) or 64
+            stack = detected if detected and detected > 0 else 64
             barrels = max(1, int(r.get("barrels") or 1))
             capacity = max(barrels * BARREL_PIECES * stack, int(r.get("stock") or 0))
             _db.upsert_market_stock(market_id, item, owner=r.get("owner"), stock=r["stock"],
@@ -2590,9 +2691,23 @@ async def _record_stock_report(rows: list, market_id: str, report_channel, filen
         lines.append(f"`{_fullness_bar(pct)}` **{x['item']}** — {cur:,}/{cap:,} ({pct:.0f}%)")
     embed = discord.Embed(title=f"\U0001F4E6 Shop stock — {mname}",
                           description="\n".join(lines) or "No items.", color=0x22FF7A)
-    embed.set_footer(text=f"{len(st)} item(s) tracked · lowest first · {filename}")
+    _shown = min(len(ordered), 20)
+    _foot = f"{len(st)} item(s) tracked · lowest first · {filename}"
+    if len(st) > _shown:
+        _foot += f" · showing {_shown}, full list attached ⬇️"
+    embed.set_footer(text=_foot)
+    # Discord only shows the lowest ~20 here, but a shop can have hundreds of items.
+    # Attach the COMPLETE snapshot as a downloadable CSV so nothing is truncated.
+    _snap_files = []
     try:
-        await report_channel.send(content="\U0001F4E6 **Shop stock snapshot received:**", embed=embed)
+        _snap_files.append(discord.File(
+            io.BytesIO(_stock_rows_to_csv(ordered)),
+            filename=f"stock_{market_id}_full.csv"))
+    except Exception as _e:
+        log.warning("[stock] full-snapshot csv failed: %s", _e)
+    try:
+        await report_channel.send(content="\U0001F4E6 **Shop stock snapshot received:**",
+                                  embed=embed, files=_snap_files)
     except Exception as e:
         log.warning("[stock] report send failed: %s", e)
     low = [x for x in st.values() if int(x.get("capacity") or 0) > 0 and _pct(x) <= STOCK_LOW_PCT]
@@ -2601,8 +2716,18 @@ async def _record_stock_report(rows: list, market_id: str, report_channel, filen
         ll = "\n".join(
             f"\U0001F53B **{x['item']}** at {_pct(x):.0f}% ({int(x['stock']):,}/{int(x['capacity']):,})"
             for x in low[:15])
+        _low_note = f"**Low stock — {len(low)} item(s) at/under {STOCK_LOW_PCT:g}%:**\n{ll}"
+        _low_files = []
+        if len(low) > 15:
+            _low_note += f"\n… +{len(low) - 15} more — full list attached ⬇️"
+            try:
+                _low_files.append(discord.File(
+                    io.BytesIO(_stock_rows_to_csv(low)),
+                    filename=f"restock_needed_{market_id}.csv"))
+            except Exception as _e:
+                log.warning("[stock] low-stock csv failed: %s", _e)
         try:
-            await report_channel.send(f"**Low stock — {len(low)} item(s) at/under {STOCK_LOW_PCT:g}%:**\n{ll}")
+            await report_channel.send(_low_note, files=_low_files)
         except Exception:
             pass
     try:
@@ -3217,6 +3342,23 @@ async def any_item_autocomplete(interaction: discord.Interaction, current: str):
         if len(out) >= 25:
             break
     return out
+
+
+def _is_future_item(name) -> bool:
+    """Futures variants are named with a leading 'Future ' (e.g. 'Future Turtlemaster')."""
+    return str(name or "").strip().lower().startswith("future ")
+
+
+async def normal_item_autocomplete(interaction: discord.Interaction, current: str):
+    """Item autocomplete EXCLUDING 'Future …' futures variants — for restock /order etc."""
+    res = await any_item_autocomplete(interaction, current)
+    return [c for c in res if not _is_future_item(c.value)][:25]
+
+
+async def future_item_autocomplete(interaction: discord.Interaction, current: str):
+    """Item autocomplete limited to 'Future …' futures variants — for /futures_order."""
+    res = await any_item_autocomplete(interaction, current)
+    return [c for c in res if _is_future_item(c.value)][:25]
 
 
 async def order_id_autocomplete(interaction: discord.Interaction, current: str):
@@ -4284,14 +4426,11 @@ async def _send_funds_report(client: discord.Client) -> bool:
 
 import glob as _glob
 
-try:
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    import matplotlib.ticker as mticker
-    _MATPLOTLIB_OK = True
-except ImportError:
-    _MATPLOTLIB_OK = False
+# Server-side charts are intentionally disabled: all visualisation now lives on the
+# web dashboard (browser-side Chart.js), which is richer, interactive, and needs no
+# system dependency. This also removes the noisy "pip install matplotlib" warning on
+# hosts without it (e.g. Wispbyte). Chart helpers below short-circuit on this flag.
+_MATPLOTLIB_OK = False
 
 CSN_HISTORY_FILE  = "csn_history.yml"
 BREW_ALIASES_FILE = "brew_aliases.yml"
@@ -4318,6 +4457,85 @@ def _apply_brew_aliases(items: dict) -> dict:
         else:
             out[display] = dict(v)
     return out
+
+
+# ── Brew → effects: turn captured potion lore into readable names ─────────────
+_POTION_EFFECTS = {
+    "strength", "speed", "swiftness", "haste", "regeneration", "fire resistance", "poison",
+    "weakness", "slowness", "night vision", "invisibility", "jump boost", "leaping",
+    "water breathing", "slow falling", "absorption", "resistance", "luck", "bad luck",
+    "instant health", "healing", "instant damage", "harming", "turtle master", "levitation",
+    "wither", "nausea", "blindness", "mining fatigue", "saturation", "hunger", "glowing",
+    "conduit power", "dolphin's grace", "dolphins grace", "bad omen", "hero of the village",
+    "decay", "health boost", "slow fall",
+}
+
+
+def _parse_brew_effects(lore) -> str:
+    """Extract readable potion-effect lines (e.g. 'Strength II', 'Speed II', 'Slow Falling')
+    from a brew's captured lore, dropping the '(3:00)' duration tails. Returns them joined,
+    or '' if nothing in the lore looks like a potion effect."""
+    out, seen = [], set()
+    for raw in (lore or []):
+        s = re.split(r"[(\[]", str(raw))[0].strip()   # drop duration/amplifier parens
+        low = s.lower()
+        if s and any(eff in low for eff in _POTION_EFFECTS):
+            if low not in seen:
+                seen.add(low)
+                out.append(s)
+    return ", ".join(out)
+
+
+def _learn_brew_aliases_from_profiles(profiles: dict) -> int:
+    """From the CSN mod's captured item profiles, parse each brew's lore into potion effects
+    and map every known raw '#code' hash → '<base> - <effects>' in brew_aliases, so sales
+    reports show 'Potion - Strength II, Speed II' instead of a raw code. Respects any alias
+    already set (never overwrites). Returns how many new aliases were learned."""
+    if not isinstance(profiles, dict):
+        return 0
+    aliases = _load_brew_aliases()
+    learned = 0
+    for key, prof in profiles.items():
+        if not isinstance(prof, dict):
+            continue
+        effects = _parse_brew_effects(prof.get("lore") or [])
+        if not effects:
+            continue
+        base = str(key).split("@", 1)[0].strip() or "Potion"
+        dn = (prof.get("display_name") or "").strip()
+        name = dn if dn else f"{base} - {effects}"
+        for h in (prof.get("known_hashes") or []):
+            h = str(h).strip()
+            if not h or h in aliases:      # don't clobber existing / manual aliases
+                continue
+            aliases[h] = name
+            learned += 1
+    if learned:
+        _save_brew_aliases(aliases)
+    return learned
+
+
+async def _process_csn_profiles(attachment, report_channel):
+    """Ingest a csn_profiles.json posted by the mod and auto-learn brew names from its lore."""
+    try:
+        import json as _json
+        raw = (await attachment.read()).decode("utf-8", errors="replace")
+        profiles = _json.loads(raw)
+    except Exception as e:
+        log.warning("[profiles] read/parse failed: %s", e)
+        return
+    try:
+        n = _learn_brew_aliases_from_profiles(profiles)
+    except Exception as e:
+        log.warning("[profiles] learn failed: %s", e)
+        return
+    if n and report_channel is not None:
+        try:
+            await report_channel.send(
+                f"🧪 Learned **{n}** brew name(s) from captured lore — future reports show the "
+                f"effects (e.g. *Potion - Strength II, Speed II*) instead of raw codes.")
+        except Exception:
+            pass
 
 
 def _extract_market_info(csv_text: str) -> tuple[str, str]:
@@ -5172,11 +5390,13 @@ def _build_restock_plan(items: dict, min_sold: int = 1) -> tuple:
     return to_order, skipped_active, skipped_unknown
 
 
-def _create_restock_orders(to_order: list) -> int:
+def _create_restock_orders(to_order: list, market_id=None) -> int:
     data_orders = load_orders()
     now_utc = datetime.now(timezone.utc)
     created = 0
     for item, restock_qty, info in to_order:
+        if _is_future_item(item):      # Future variants are ordered via /futures_order, not restock
+            continue
         new_id      = max([o.get("id", 0) for o in (data_orders.get("orders") or [])], default=0) + 1
         announce_at = next_batch_slot(ANNOUNCE_DELAY_MINUTES)
         stackable   = bool(info.get("stackable", True))
@@ -5186,7 +5406,7 @@ def _create_restock_orders(to_order: list) -> int:
             "claimed_by": None, "claims": [], "created_at": utcnow_iso(),
             "messages": {"channel_id": None, "message_id": None, "dms": {}},
             "unit_type": "pieces", "amount": restock_qty,
-            "stackable": stackable, "stack_size": 64 if stackable else 1,
+            "stackable": stackable, "stack_size": int(info.get("stack_size", 64) if stackable else 1),
             "barrel_slots": BARREL_PIECES,
             "employee_announce_at": announce_at.isoformat(),
             "employee_announced": False, "worker_announced": False,
@@ -5194,11 +5414,50 @@ def _create_restock_orders(to_order: list) -> int:
             "priority_role": "TESTER",
             "verification_ticket_id": None, "assist_ticket_id": None,
             "assist_ticket_ids": {}, "blocked_claimers": [],
+            "market_id": info.get("market_id") or market_id,
         }
         data_orders.setdefault("orders", []).append(order)
         created += 1
     save_orders(data_orders)
     return created
+
+
+def _stock_refill_plan(market_id: str, target_pct: float = 80.0):
+    """Draft restock orders that top every under-target item in a market's stock back up
+    to target_pct of capacity. Returns (to_order, skipped_active, at_target) where to_order
+    is [(item, need_pieces, info)]. Skips Future variants and items with an active order,
+    so it never double-orders. Shared by the /order_from_stock command and the web button."""
+    import math as _math
+    import Restocker_db as _db
+    known = (_load_items().get("items") or {})
+    data_orders = load_orders()
+    active = {
+        str(o.get("item") or "").strip()
+        for o in (data_orders.get("orders") or [])
+        if str(o.get("status", "")).lower() not in ("fulfilled", "cancelled")
+    }
+    st = _db.get_market_stock(market_id) or {}
+    to_order, skipped_active, at_target = [], 0, 0
+    for row in st.values():
+        item = str(row.get("item") or "").strip()
+        if not item or _is_future_item(item):
+            continue
+        cap = int(row.get("capacity") or 0)
+        cur = int(row.get("stock") or 0)
+        if cap <= 0:
+            continue
+        need = int(_math.ceil(cap * float(target_pct) / 100.0)) - cur
+        if need <= 0:
+            at_target += 1
+            continue
+        if item not in known:
+            continue
+        if item in active:
+            skipped_active += 1
+            continue
+        to_order.append((item, need, known[item]))
+    to_order.sort(key=lambda t: -t[1])
+    return to_order, skipped_active, at_target
 
 
 async def _market_autocomplete(interaction: discord.Interaction, current: str):
@@ -5407,6 +5666,25 @@ def _save_markets(data: dict) -> bool:
 def _get_market(market_id: str) -> dict | None:
     data = _load_markets()
     return data.get("markets", {}).get(market_id)
+
+
+def _markets_owned_by(user_id) -> set:
+    """Market IDs this user owns or leads (owner_id or leader_discord_id match).
+    Used to let a market owner create restock orders for their OWN market without
+    needing the global @Managers role."""
+    try:
+        uid = str(int(user_id))
+    except Exception:
+        return set()
+    out = set()
+    for mid, m in (_load_markets().get("markets", {}) or {}).items():
+        if not isinstance(m, dict):
+            continue
+        owner  = m.get("owner_id")
+        leader = m.get("leader_discord_id")
+        if (owner is not None and str(owner) == uid) or (leader is not None and str(leader) == uid):
+            out.add(mid)
+    return out
 
 
 def _ensure_fallback_market() -> str:
@@ -6018,6 +6296,40 @@ def _suggest_item_price(market_id: str, item: str) -> dict:
     }
 
 
+def _twin_name(item: str):
+    """The paired variant name: a normal item ↔ its 'Future <name>'. None if blank."""
+    item = (item or "").strip()
+    if not item:
+        return None
+    return item[7:].strip() if _is_future_item(item) else ("Future " + item)
+
+
+def _sync_twin_price(item: str, coin_per_piece) -> str | None:
+    """Keep a normal item and its 'Future' twin at the same price. If the twin already
+    exists in the catalog and its price differs, update it to match. Returns the twin's
+    name if it was updated, else None. Never creates the twin (that's /pair_items)."""
+    twin = _twin_name(item)
+    if not twin:
+        return None
+    try:
+        import Restocker_db as _db
+        existing = _db.get_item(twin)
+        if not existing:
+            return None
+        if abs(float(existing.get("coin", 0) or 0) - float(coin_per_piece)) < 1e-9:
+            return None
+        _db.upsert_item(twin, float(coin_per_piece), int(existing.get("stock", 0) or 0),
+                        market_id=existing.get("market_id", "main"),
+                        unit_type=existing.get("unit_type", "pieces"),
+                        stackable=existing.get("stackable", 1),
+                        stack_size=existing.get("stack_size", 64),
+                        barrel_slots=existing.get("barrel_slots", 54))
+        return twin
+    except Exception as e:
+        log.debug("[twin-sync] %s: %s", item, e)
+        return None
+
+
 def _set_market_item(market_id: str, item: str, coin=None, stock=None) -> dict:
     """Create/update a catalog item's price and/or stock for a market."""
     import Restocker_db as _db
@@ -6029,7 +6341,8 @@ def _set_market_item(market_id: str, item: str, coin=None, stock=None) -> dict:
                     stackable=it.get("stackable", 1),
                     stack_size=it.get("stack_size", 64),
                     barrel_slots=it.get("barrel_slots", 54))
-    return {"item": item, "coin": new_coin, "stock": new_stock, "market_id": market_id}
+    twin = _sync_twin_price(item, new_coin) if coin is not None else None
+    return {"item": item, "coin": new_coin, "stock": new_stock, "market_id": market_id, "twin_synced": twin}
 
 
 def _market_inventory(market_id: str) -> list:
@@ -8400,6 +8713,45 @@ _AI_TOOL_MAP = {
     "propose_code_change":  _ai_tool_propose_code_change,
 }
 
+# Tools whose effects are destructive/moderation-level — flagged in the audit log.
+_AI_SENSITIVE_TOOLS = {
+    "assign_role", "remove_role", "kick_user", "ban_user", "timeout_user",
+    "delete_messages", "create_role", "setup_market_owner", "send_dm", "dm_role",
+    "send_channel_message", "ping_user", "propose_code_change", "set_item_price",
+    "add_item", "get_market_code",
+}
+
+
+def _ai_audit_record(user, tool_name, args, result):
+    """Append every AI mention-handler tool invocation to a capped audit log in bot_config
+    (the AI can kick/ban/timeout/DM, so who-did-what must be traceable). Also logs to the
+    app log. Best-effort — never breaks the AI flow."""
+    try:
+        import json as _json, Restocker_db as _db, time as _t
+        entry = {
+            "ts":     int(_t.time()),
+            "uid":    str(getattr(user, "id", "")),
+            "user":   str(user)[:64],
+            "tool":   str(tool_name),
+            "sens":   str(tool_name) in _AI_SENSITIVE_TOOLS,
+            "args":   _json.dumps(args, default=str)[:300],
+            "result": str(result)[:200],
+        }
+        raw = _db.get_config("ai_audit_log")
+        arr = _json.loads(raw) if raw else []
+        if not isinstance(arr, list):
+            arr = []
+        arr.append(entry)
+        _db.set_config("ai_audit_log", _json.dumps(arr[-500:]))
+    except Exception as _e:
+        log.debug("[ai-audit] record failed: %s", _e)
+    try:
+        log.info("[ai-audit] user=%s tool=%s args=%s -> %s",
+                 getattr(user, "id", "?"), tool_name, str(args)[:200], str(result)[:120])
+    except Exception:
+        pass
+
+
 _anthropic_client = None
 
 
@@ -8534,6 +8886,7 @@ Current context:
                                 result = f"Tool error: {e}"
                         else:
                             result = f"Unknown tool: {block.name}"
+                        _ai_audit_record(member, block.name, block.input, result)
                         tool_results.append({
                             "type": "tool_result",
                             "tool_use_id": block.id,

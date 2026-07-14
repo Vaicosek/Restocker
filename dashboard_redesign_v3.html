@@ -1,0 +1,374 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Abexilas Hub — redesign v3</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Space+Grotesk:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+:root{
+  --font-data:'IBM Plex Mono',ui-monospace,Menlo,monospace;
+  --font-ui:'Space Grotesk',system-ui,sans-serif;
+  --bg:#080808;--surface:#0f0f0f;--panel2:#151515;--border:#1E1E1E;--border-strong:#2A2A2A;
+  --text:#F4F4F4;--text-body:#B4B4B4;--muted:#6a6a6a;--faint:#3f3f3f;
+  --green:#22FF7A;--green-dim:#0f7a3a;--accent:#22FF7A;--red:#FF4D4D;--amber:#F5A623;--blue:#4A9EFF;--purple:#B47FFF;--nether:#FF6B35;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{color-scheme:dark}
+body{background:var(--bg);background-image:radial-gradient(#151515 .5px,transparent .5px);background-size:24px 24px;color:var(--text);font-family:var(--font-ui);font-size:13px;line-height:1.5;-webkit-font-smoothing:antialiased;min-height:100vh}
+.mono,td,.num,input,select,.pill,.tag{font-family:var(--font-data);font-variant-numeric:tabular-nums slashed-zero}
+header{position:sticky;top:0;z-index:90;height:54px;background:rgba(15,15,15,.9);backdrop-filter:blur(10px);border-bottom:1px solid var(--border);padding:0 24px;display:flex;align-items:center;justify-content:space-between}
+.logo{display:flex;align-items:center;gap:12px;text-decoration:none}
+.logo-icon{width:30px;height:30px;background:var(--accent);display:flex;align-items:center;justify-content:center;color:#000;font-weight:700;font-size:16px;box-shadow:0 0 24px rgba(34,255,122,.4)}
+.logo-text{font-size:14px;font-weight:600}
+.logo-sub{font-family:var(--font-data);font-size:8.5px;color:var(--muted);margin-top:2px;text-transform:uppercase;letter-spacing:.18em}
+.header-right{display:flex;align-items:center;gap:12px}
+.mkt-select{background:var(--panel2);border:1px solid var(--border);color:var(--text);padding:7px 11px;font-size:12px}
+.auth-name{font-family:var(--font-data);color:var(--accent);font-weight:500;font-size:12px}
+nav{display:flex;gap:2px;background:var(--surface);border-bottom:1px solid var(--border);padding:0 16px;overflow-x:auto}
+.nav-tab{display:flex;align-items:center;gap:7px;padding:13px 16px;font-size:12px;font-weight:500;color:var(--muted);cursor:pointer;border-bottom:2px solid transparent;white-space:nowrap;user-select:none}
+.nav-tab svg{width:14px;height:14px;opacity:.7}.nav-tab:hover{color:var(--text)}
+.nav-tab.active{color:var(--accent);border-bottom-color:var(--accent)}.nav-tab.active svg{opacity:1}
+.wrap{max-width:1180px;margin:0 auto;padding:24px 24px 80px}
+.page{display:none}.page.active{display:block;animation:f .25s ease}
+@keyframes f{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+.mkt-head{display:flex;align-items:center;gap:11px;margin-bottom:3px}
+.mkt-dot{width:10px;height:10px;border-radius:50%;background:var(--nether);box-shadow:0 0 12px var(--nether)}
+h1{font-size:21px;font-weight:600;letter-spacing:-.01em}
+.sub{color:var(--muted);font-size:12.5px;margin-bottom:20px}
+.callout{display:inline-block;background:rgba(34,255,122,.08);border:1px solid rgba(34,255,122,.25);color:var(--green);padding:3px 9px;font-size:10px;text-transform:uppercase;letter-spacing:.09em}
+.toolbar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:0 0 16px}
+.toolbar select,.toolbar input{background:var(--panel2);border:1px solid var(--border);color:var(--text);padding:8px 11px;font-size:12px}
+.toolbar input{flex:1;min-width:200px}
+.pos{color:var(--green)}.neg{color:var(--red)}.mut{color:var(--muted)}.amb{color:var(--amber)}
+/* bento */
+.bento{display:grid;grid-template-columns:repeat(12,1fr);gap:14px;margin-bottom:16px}
+.tile{background:var(--surface);border:1px solid var(--border);padding:18px 20px;position:relative;overflow:hidden}
+.tile.hero{grid-column:span 7}
+.tile.donut{grid-column:span 5}
+.tile.sellers{grid-column:span 7}
+.tile.kpis{grid-column:span 5}
+@media(max-width:860px){.tile.hero,.tile.donut,.tile.sellers,.tile.kpis{grid-column:span 12}}
+.tile-h{font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin-bottom:14px;display:flex;align-items:center;justify-content:space-between}
+.hero-net{display:flex;align-items:baseline;gap:14px}
+.hero-net .big{font-family:var(--font-data);font-size:46px;font-weight:600;letter-spacing:-.02em;line-height:1}
+.trend{font-family:var(--font-data);font-size:13px;padding:3px 9px}
+.trend.up{color:var(--green);background:rgba(34,255,122,.1)}.trend.down{color:var(--red);background:rgba(255,77,77,.1)}
+.hero-sub{color:var(--muted);font-size:12px;margin:6px 0 12px}
+.chartbox{position:relative;height:150px}
+.chartbox.sm{height:172px}
+.donut-center{position:absolute;top:44%;left:0;right:0;text-align:center;pointer-events:none}
+.donut-center .dn{font-family:var(--font-data);font-size:22px;font-weight:600}
+.donut-center .dl{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em}
+.legend{display:flex;flex-direction:column;gap:8px;margin-top:14px}
+.lg{display:flex;align-items:center;justify-content:space-between;font-size:12px}
+.lg .lgl{display:flex;align-items:center;gap:8px;color:var(--text-body)}
+.dot{width:9px;height:9px;border-radius:2px;display:inline-block}
+.lg .num{font-weight:600}
+/* sellers list */
+.lead{display:flex;flex-direction:column;gap:1px}
+.lrow{display:grid;grid-template-columns:20px 1fr 92px;align-items:center;gap:12px;padding:8px 2px;border-bottom:1px solid #161616}
+.lrow:last-child{border-bottom:none}
+.lrank{font-family:var(--font-data);color:var(--faint);font-size:12px;text-align:center}
+.lrow:nth-child(1) .lrank{color:var(--amber)}
+.lname{font-family:var(--font-data);font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lbar{height:6px;background:var(--panel2);margin-top:6px;position:relative;overflow:hidden}
+.lbar>span{position:absolute;left:0;top:0;bottom:0;background:linear-gradient(90deg,var(--green),#17b558)}
+.lmeta{text-align:right}.lrev{font-family:var(--font-data);font-size:13px;font-weight:600}.lqty{font-family:var(--font-data);font-size:10.5px;color:var(--muted)}
+/* kpi */
+.kgrid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.kpi{background:var(--panel2);border:1px solid var(--border);padding:13px 14px}
+.kpi .k{color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.08em}
+.kpi .v{font-family:var(--font-data);font-size:20px;font-weight:600;margin-top:5px}
+.kpi .kt{font-size:10px;color:var(--muted);margin-top:3px}
+/* table */
+.section-h{font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin:24px 0 12px;display:flex;align-items:center;gap:10px}
+.section-h::after{content:"";flex:1;height:1px;background:var(--border)}
+table{width:100%;border-collapse:collapse;background:var(--surface);border:1px solid var(--border)}
+th,td{padding:9px 13px;text-align:right;border-bottom:1px solid var(--border);font-size:12.5px}
+th:first-child,td:first-child{text-align:left}
+th{cursor:pointer;user-select:none;color:var(--muted);font-weight:600;font-family:var(--font-ui);font-size:11px;text-transform:uppercase;letter-spacing:.05em}
+th:hover{color:var(--text)}tbody tr:hover{background:var(--panel2)}tr:last-child td{border-bottom:none}
+.foot{color:var(--faint);font-size:11px;margin-top:14px}
+.pill{display:inline-block;padding:2px 8px;font-size:11px;border:1px solid var(--border);color:var(--text-body)}
+.pill.g{border-color:rgba(34,255,122,.3);color:var(--green)}
+.btn{background:var(--accent);color:#000;border:none;padding:8px 14px;font-family:var(--font-ui);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;cursor:pointer}
+.btn.ghost{background:transparent;border:1px solid var(--border);color:var(--text-body)}
+.stockbar{height:7px;background:var(--panel2);position:relative;width:130px;display:inline-block;vertical-align:middle}
+.stockbar>span{position:absolute;left:0;top:0;bottom:0;background:var(--red)}
+.mcards{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:14px}
+.mcard{background:var(--surface);border:1px solid var(--border);border-top:2px solid var(--nether);padding:16px;cursor:pointer}
+.mcard:hover{border-color:var(--border-strong)}
+.mcard .mn{font-size:13px;font-weight:600;margin-bottom:10px;display:flex;align-items:center;gap:7px}
+.mcard .mnet{font-family:var(--font-data);font-size:22px;font-weight:600}
+.mcard .mr{display:flex;justify-content:space-between;font-family:var(--font-data);font-size:11px;color:var(--muted);margin-top:8px}
+</style>
+</head>
+<body>
+<header>
+  <a class="logo" href="#"><div class="logo-icon">A</div>
+    <div><div class="logo-text">Abexilas Economy Hub</div><div class="logo-sub">Vaicos Market</div></div></a>
+  <div class="header-right">
+    <select class="mkt-select"><option>◍ Nether market</option><option>◍ BNL market</option><option>◍ End market</option></select>
+    <span class="auth-name">@Vaicos</span>
+  </div>
+</header>
+<nav>
+  <div class="nav-tab" data-p="stock"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 3h18v4H3zM3 10h18v4H3zM3 17h18v4H3z"/></svg>Inventory</div>
+  <div class="nav-tab" data-p="prices"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>Prices</div>
+  <div class="nav-tab active" data-p="earnings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 3v18h18"/><path d="M7 16v-5M12 16V8M17 16v-9"/></svg>Ledger</div>
+  <div class="nav-tab" data-p="exchange"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 17l6-6 4 4 8-8"/><path d="M17 7h4v4"/></svg>Exchange</div>
+  <div class="nav-tab" data-p="orders"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>Orders</div>
+  <div class="nav-tab" data-p="teams"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/></svg>Teams</div>
+  <div class="nav-tab" data-p="mymarket"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M9 22V12h6v10"/></svg>My Market</div>
+</nav>
+<div class="wrap">
+  <div class="page active" id="p-earnings">
+    <div class="mkt-head"><span class="mkt-dot"></span><h1>Ledger — Nether market</h1><span class="callout">one place</span></div>
+    <div class="sub">Everything about this market's money in one screen — earnings, what's selling, and the full ledger.</div>
+    <div class="toolbar">
+      <select id="month" onchange="renderEarn()"><option value="all">All months (summary)</option><option value="2026-07" selected>July 2026</option><option value="2026-06">June 2026</option></select>
+      <span class="pill g" id="mtag">latest month</span>
+    </div>
+
+    <div class="bento">
+      <div class="tile hero">
+        <div class="tile-h"><span id="heroLbl">Net profit · July 2026</span><span class="mut" style="font-size:10px">trend</span></div>
+        <div class="hero-net"><span class="big pos" id="heroNet">+89,226</span><span class="trend up" id="heroTrend">▲ 81%</span></div>
+        <div class="hero-sub" id="heroSubtitle">vs +49,269 last month · ¢ coins</div>
+        <div class="chartbox"><canvas id="lineChart"></canvas></div>
+      </div>
+      <div class="tile donut">
+        <div class="tile-h"><span>Income vs spent</span></div>
+        <div class="chartbox" style="height:150px"><canvas id="donutChart"></canvas>
+          <div class="donut-center"><div class="dn pos" id="donutNet">+89k</div><div class="dl">net margin <span id="donutPct">83%</span></div></div>
+        </div>
+        <div class="legend">
+          <div class="lg"><span class="lgl"><span class="dot" style="background:var(--green)"></span>Income</span><span class="num pos" id="lgInc">107,902</span></div>
+          <div class="lg"><span class="lgl"><span class="dot" style="background:var(--red)"></span>Spent</span><span class="num neg" id="lgExp">18,675</span></div>
+        </div>
+      </div>
+      <div class="tile sellers">
+        <div class="tile-h"><span id="leadLbl">What's selling · July 2026</span><span class="mut" style="font-size:10px">by revenue</span></div>
+        <div class="lead" id="lead"></div>
+      </div>
+      <div class="tile kpis">
+        <div class="tile-h"><span>At a glance</span></div>
+        <div class="kgrid">
+          <div class="kpi"><div class="k">Items sold</div><div class="v" id="kSold">889</div><div class="kt">units this month</div></div>
+          <div class="kpi"><div class="k">Unique items</div><div class="v" id="kUniq">79</div><div class="kt">distinct SKUs</div></div>
+          <div class="kpi"><div class="k">Top earner</div><div class="v pos" id="kTop">+28,500</div><div class="kt" id="kTopN">Diamond Leggings</div></div>
+          <div class="kpi"><div class="k">Biggest cost</div><div class="v neg" id="kCost">—</div><div class="kt" id="kCostN">none</div></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="section-h">Full ledger</div>
+    <div class="toolbar">
+      <input id="q" placeholder="Search items…" oninput="renderTable()">
+      <select id="flt" onchange="renderTable()"><option value="all">All items</option><option value="income">Income only</option><option value="expense">Expense only</option></select>
+    </div>
+    <table><thead><tr><th onclick="sortBy('item')">Item</th><th onclick="sortBy('sold')">Sold</th><th onclick="sortBy('bought')">Bought</th><th onclick="sortBy('net')">Net ¢</th></tr></thead><tbody id="etb"></tbody></table>
+    <div class="foot">Replaces the standalone report page and both /market earnings embeds. Charts are browser-side (Chart.js) — no server matplotlib needed.</div>
+  </div>
+
+  <div class="page" id="p-prices">
+    <h1 style="margin-bottom:3px">Prices</h1><div class="sub">Live item catalog across all markets — restyled, same data as today.</div>
+    <div class="bento" style="grid-template-columns:repeat(4,1fr)">
+      <div class="tile" style="grid-column:span 1"><div class="k" style="color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.08em">Total items</div><div style="font-family:var(--font-data);font-size:30px;font-weight:600;margin-top:4px">998</div></div>
+      <div class="tile" style="grid-column:span 1"><div class="k" style="color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.08em">In stock</div><div style="font-family:var(--font-data);font-size:30px;font-weight:600;margin-top:4px">445</div></div>
+      <div class="tile" style="grid-column:span 1"><div class="k" style="color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.08em">Avg price</div><div style="font-family:var(--font-data);font-size:30px;font-weight:600;margin-top:4px">2,771 <span class="amb" style="font-size:16px">¢</span></div></div>
+      <div class="tile" style="grid-column:span 1"><div class="k" style="color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.08em">Markets</div><div style="font-family:var(--font-data);font-size:30px;font-weight:600;margin-top:4px">8</div></div>
+    </div>
+    <div class="toolbar"><input placeholder="Search items…">
+      <span class="pill" style="border-color:var(--accent);color:var(--accent)">All</span><span class="pill">Nether</span><span class="pill">BNL</span><span class="pill">Amazonia</span><span class="pill">Viridian</span></div>
+    <div class="tile" style="margin-bottom:16px"><div class="tile-h">Top items by sales volume</div>
+      <div class="lead">
+        <div class="lrow"><div class="lrank">1</div><div><div class="lname">Experience Bottle</div><div class="lbar"><span style="width:100%"></span></div></div><div class="lmeta"><div class="lrev">21,480</div><div class="lqty">sold</div></div></div>
+        <div class="lrow"><div class="lrank">2</div><div><div class="lname">Dirt</div><div class="lbar"><span style="width:66%"></span></div></div><div class="lmeta"><div class="lrev">14,200</div><div class="lqty">sold</div></div></div>
+        <div class="lrow"><div class="lrank">3</div><div><div class="lname">Cobblestone</div><div class="lbar"><span style="width:58%"></span></div></div><div class="lmeta"><div class="lrev">12,460</div><div class="lqty">sold</div></div></div>
+        <div class="lrow"><div class="lrank">4</div><div><div class="lname">Stone</div><div class="lbar"><span style="width:57%"></span></div></div><div class="lmeta"><div class="lrev">12,180</div><div class="lqty">sold</div></div></div>
+        <div class="lrow"><div class="lrank">5</div><div><div class="lname">Sand</div><div class="lbar"><span style="width:50%"></span></div></div><div class="lmeta"><div class="lrev">10,700</div><div class="lqty">sold</div></div></div>
+      </div>
+    </div>
+    <table><thead><tr><th>Item</th><th>Market</th><th>Price ¢</th><th>Stock</th></tr></thead><tbody>
+      <tr><td>Netherite Axe</td><td class="mut">Nether</td><td class="amb">est</td><td>0</td></tr>
+      <tr><td>Diamond Sword#9NF</td><td class="mut">Nether</td><td>1,500</td><td>54</td></tr>
+      <tr><td>Beacon</td><td class="mut">Nether</td><td class="amb">est 24,000</td><td>2</td></tr>
+    </tbody></table>
+  </div>
+
+  <div class="page" id="p-stock">
+    <div class="mkt-head"><span class="mkt-dot"></span><h1>Inventory — Nether market</h1></div>
+    <div class="sub">How full each shop actually is (current ÷ capacity) · lowest first. ⚡ drafts restock orders to refill to 80%. <span class="mut">Not the share Exchange.</span></div>
+    <div class="toolbar"><input placeholder="Search items…"><button class="btn ghost">⬇ Download CSV</button><button class="btn">⚡ Generate restock orders</button></div>
+    <table><thead><tr><th>Item</th><th>Fullness</th><th>In stock</th><th>Capacity</th><th>Full %</th></tr></thead><tbody>
+      <tr><td>Sand</td><td><span class="stockbar"><span style="width:2%"></span></span></td><td>0</td><td>4,752</td><td class="neg">0%</td></tr>
+      <tr><td>Stone</td><td><span class="stockbar"><span style="width:2%"></span></span></td><td>0</td><td>4,644</td><td class="neg">0%</td></tr>
+      <tr><td>Andesite</td><td><span class="stockbar"><span style="width:20%;background:var(--amber)"></span></span></td><td>560</td><td>2,862</td><td class="amb">20%</td></tr>
+      <tr><td>Glass</td><td><span class="stockbar"><span style="width:88%;background:var(--green)"></span></span></td><td>4,181</td><td>4,752</td><td class="pos">88%</td></tr>
+    </tbody></table>
+    <div class="foot">219 items tracked · full list downloadable. "Full %" is how stocked the barrels are, not a share price.</div>
+  </div>
+
+  <div class="page" id="p-exchange">
+    <div class="mkt-head"><span class="mkt-dot"></span><h1>Exchange — Nether market</h1></div>
+    <div class="sub">The share market: trade shares in a market's profits. <span class="mut">This is what "stocks" means — separate from Inventory fullness.</span></div>
+    <div class="bento">
+      <div class="tile hero">
+        <div class="tile-h"><span>Share price</span><span class="mut" style="font-size:10px">30-day</span></div>
+        <div class="hero-net"><span class="big amb">142.50 ¢</span><span class="trend up">▲ 4.2%</span></div>
+        <div class="hero-sub">fundamental 131.20 ¢ · 1,000 shares outstanding</div>
+        <div class="chartbox"><canvas id="exChart"></canvas></div>
+      </div>
+      <div class="tile donut">
+        <div class="tile-h"><span>Trade</span></div>
+        <div class="kgrid">
+          <div class="kpi"><div class="k">Your shares</div><div class="v">120</div><div class="kt">≈ 17,100 ¢</div></div>
+          <div class="kpi"><div class="k">Market cap</div><div class="v">142,500</div><div class="kt">price × shares</div></div>
+        </div>
+        <div class="toolbar" style="margin-top:14px"><button class="btn">Buy</button><button class="btn ghost">Sell</button></div>
+        <div class="foot">Existing exchange logic — just restyled to match, and clearly named so it never gets confused with Inventory.</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="page" id="p-orders">
+    <div class="mkt-head"><span class="mkt-dot"></span><h1>Orders — Nether market</h1></div>
+    <div class="sub">Owners manage their own board. Rewards: <span class="pill g">1.5× loyalty</span> <span class="pill g">+500¢ / order</span></div>
+    <table><thead><tr><th>#</th><th>Item</th><th>Requested</th><th>Claimed</th><th>Status</th></tr></thead><tbody>
+      <tr><td>#412</td><td>Sand</td><td>4,752</td><td>2,400</td><td class="amb">partial</td></tr>
+      <tr><td>#411</td><td>Stone</td><td>4,644</td><td>0</td><td class="pos">open</td></tr>
+    </tbody></table>
+  </div>
+
+  <div class="page" id="p-teams">
+    <h1 style="margin-bottom:3px">Teams</h1><div class="sub">Team performance — orders fulfilled, sales, and totals. (Kept, restyled.)</div>
+    <table><thead><tr><th>#</th><th>Team</th><th>Members</th><th>Orders</th><th>Sales ¢</th><th>Total</th></tr></thead><tbody>
+      <tr><td>1</td><td>URAK</td><td>4</td><td>128</td><td class="pos">+84,200</td><td class="pos">+92,410</td></tr>
+      <tr><td>2</td><td>Greyhame Co.</td><td>3</td><td>96</td><td class="pos">+61,050</td><td class="pos">+63,900</td></tr>
+      <tr><td>3</td><td>Nether Ltd</td><td>2</td><td>54</td><td class="pos">+38,700</td><td class="pos">+40,120</td></tr>
+    </tbody></table>
+  </div>
+
+  <div class="page" id="p-mymarket">
+    <div class="mkt-head"><span class="mkt-dot"></span><h1>My Market — Nether market</h1></div>
+    <div class="sub">Owner settings for your market. This is where per-market rewards live — each market sets its own.</div>
+    <div class="bento">
+      <div class="tile" style="grid-column:span 6">
+        <div class="tile-h"><span>Restock rewards</span><span class="pill g">owner-editable</span></div>
+        <div class="kgrid">
+          <div class="kpi"><div class="k">Loyalty multiplier</div><div class="v pos">1.5×</div><div class="kt">points per fulfilled order</div></div>
+          <div class="kpi"><div class="k">Coin bonus</div><div class="v amb">+500 ¢</div><div class="kt">per fulfilled order</div></div>
+        </div>
+        <div class="toolbar" style="margin-top:14px"><input placeholder="1.5" style="max-width:90px"><input placeholder="500" style="max-width:90px"><button class="btn">Save rewards</button></div>
+        <div class="foot">Mirrors <code>/market loyalty</code>. Each market is independent — Nether can pay 1.5× while another pays 1×.</div>
+      </div>
+      <div class="tile" style="grid-column:span 6">
+        <div class="tile-h"><span>Mod connection</span></div>
+        <div class="kgrid">
+          <div class="kpi"><div class="k">Market ID</div><div class="v" style="font-size:15px">nether_market</div></div>
+          <div class="kpi"><div class="k">Market code</div><div class="v" style="font-size:15px">A3F19C22</div></div>
+        </div>
+        <div class="foot">Report channel bound ✓ · CSN auto-reports route to this market.</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const MONTHS={
+  '2026-07':{income:107902,spent:18675,net:89226,sold:889,uniq:79,label:'July 2026',prevNet:49269,items:[
+    {item:'Diamond Leggings',sold:19,bought:0,net:28500},{item:'Diamond Chestplate',sold:17,bought:0,net:25500},
+    {item:'Diamond Boots',sold:10,bought:0,net:15000},{item:'Diamond Helmet',sold:10,bought:0,net:15000},
+    {item:'Blaze Rod',sold:64,bought:0,net:3180},{item:'Diamond Pickaxe',sold:1,bought:0,net:3000},{item:'Warped Stem',sold:768,bought:0,net:2580}]},
+  '2026-06':{income:96272,spent:47003,net:49269,sold:19050,uniq:79,label:'June 2026',prevNet:0,items:[
+    {item:'Glass',sold:3584,bought:0,net:15800},{item:'Gilded Blackstone',sold:68,bought:0,net:13600},{item:'Gunpowder',sold:104,bought:0,net:10079},
+    {item:'Blue Wool',sold:1152,bought:0,net:7830},{item:'Red Wool',sold:646,bought:0,net:4895},{item:'Iron Ingot',sold:160,bought:0,net:4400},{item:'Diamond',sold:70,bought:0,net:3570},
+    {item:'Beacon',sold:1,bought:2,net:-24000},{item:'Dirt',sold:0,bought:3456,net:-9396},{item:'Ender Pearl',sold:0,bought:41,net:-4920},
+    {item:'Terracotta',sold:256,bought:1355,net:-3071},{item:'Spider Eye',sold:0,bought:148,net:-2442},{item:'Ancient Debris',sold:0,bought:1,net:-1650},{item:'Tuff',sold:192,bought:256,net:-30}]},
+};
+const SUM={income:204174,spent:65678,net:138495,sold:19939,uniq:79};
+const ORDER=['2026-06','2026-07'];
+let sortK='net',sortDir=-1,lineChart,donutChart;
+function fmt(n){const s=n<0?'-':'';return s+Math.abs(Math.round(n)).toLocaleString();}
+function short(n){const a=Math.abs(n);const s=n<0?'-':'+';return a>=1000?s+(a/1000).toFixed(a>=100000?0:1)+'k':s+Math.round(a);}
+function pickMonth(m){document.getElementById('month').value=m;renderEarn();}
+function sortBy(k){if(sortK===k)sortDir=-sortDir;else{sortK=k;sortDir=(k==='item')?1:-1;}renderTable();}
+function curData(){const m=document.getElementById('month').value;return m==='all'?null:MONTHS[m];}
+function aggItems(){const a={};Object.values(MONTHS).forEach(mo=>mo.items.forEach(it=>{const x=a[it.item]||(a[it.item]={item:it.item,sold:0,bought:0,net:0});x.sold+=it.sold;x.bought+=it.bought;x.net+=it.net;}));return Object.values(a);}
+
+const GRID='#1c1c1c',TICK='#6a6a6a';
+function buildLine(){
+  const ctx=document.getElementById('lineChart');
+  lineChart=new Chart(ctx,{type:'line',
+    data:{labels:ORDER.map(k=>MONTHS[k].label.split(' ')[0]),
+      datasets:[{data:ORDER.map(k=>MONTHS[k].net),borderColor:'#22FF7A',borderWidth:2,tension:.35,fill:true,
+        backgroundColor:(c)=>{const g=c.chart.ctx.createLinearGradient(0,0,0,150);g.addColorStop(0,'rgba(34,255,122,.28)');g.addColorStop(1,'rgba(34,255,122,0)');return g;},
+        pointBackgroundColor:'#22FF7A',pointRadius:4,pointHoverRadius:6}]},
+    options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},
+        tooltip:{callbacks:{label:c=>' net '+fmt(c.parsed.y)+' ¢'}}},
+      scales:{x:{grid:{color:GRID},ticks:{color:TICK,font:{family:'IBM Plex Mono'}}},
+              y:{grid:{color:GRID},ticks:{color:TICK,font:{family:'IBM Plex Mono'},callback:v=>short(v)}}}}});
+}
+function buildDonut(inc,sp){
+  const ctx=document.getElementById('donutChart');
+  donutChart=new Chart(ctx,{type:'doughnut',
+    data:{labels:['Income','Spent'],datasets:[{data:[inc,sp],backgroundColor:['#22FF7A','#FF4D4D'],borderColor:'#0f0f0f',borderWidth:3,cutout:'72%'}]},
+    options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>' '+c.label+' '+fmt(c.parsed)+' ¢'}}}}});
+}
+function renderEarn(){
+  const m=document.getElementById('month').value,d=curData();
+  const inc=d?d.income:SUM.income,sp=d?d.spent:SUM.spent,net=d?d.net:SUM.net;
+  document.getElementById('mtag').textContent=d?(m==='2026-07'?'latest month':'past month'):'2 months';
+  document.getElementById('heroLbl').textContent='Net profit · '+(d?d.label:'all months');
+  const hn=document.getElementById('heroNet');hn.textContent=(net>=0?'+':'')+fmt(net);hn.className='big '+(net>=0?'pos':'neg');
+  const prev=d?d.prevNet:null,t=document.getElementById('heroTrend');
+  if(prev){const pct=Math.round((net-prev)/Math.abs(prev)*100);t.style.display='';t.textContent=(pct>=0?'▲ ':'▼ ')+Math.abs(pct)+'%';t.className='trend '+(pct>=0?'up':'down');document.getElementById('heroSubtitle').textContent='vs +'+fmt(prev)+' last month · ¢ coins';}
+  else{t.style.display='none';document.getElementById('heroSubtitle').textContent=(d?'first tracked month':'2 months · avg +69,247/mo')+' · ¢ coins';}
+  // donut
+  const marg=Math.round(net/(inc||1)*100);
+  document.getElementById('donutNet').textContent=short(net);document.getElementById('donutNet').className='dn '+(net>=0?'pos':'neg');
+  document.getElementById('donutPct').textContent=marg+'%';
+  document.getElementById('lgInc').textContent=fmt(inc);document.getElementById('lgExp').textContent=fmt(sp);
+  donutChart.data.datasets[0].data=[inc,sp];donutChart.update();
+  // kpis
+  document.getElementById('kSold').textContent=fmt(d?d.sold:SUM.sold);
+  document.getElementById('kUniq').textContent=d?d.uniq:SUM.uniq;
+  const items=d?d.items.slice():aggItems();
+  const sells=items.filter(i=>i.net>0).sort((a,b)=>b.net-a.net);
+  const buys=items.filter(i=>i.net<0).sort((a,b)=>a.net-b.net);
+  if(sells[0]){document.getElementById('kTop').textContent='+'+fmt(sells[0].net);document.getElementById('kTopN').textContent=sells[0].item;}
+  if(buys[0]){document.getElementById('kCost').textContent=fmt(buys[0].net);document.getElementById('kCostN').textContent=buys[0].item;}
+  else{document.getElementById('kCost').textContent='—';document.getElementById('kCostN').textContent='none';}
+  // leaderboard
+  const top=sells.slice(0,7),maxS=Math.max(...top.map(s=>s.net),1);
+  document.getElementById('leadLbl').textContent="What's selling · "+(d?d.label:'all months');
+  document.getElementById('lead').innerHTML=top.map((s,i)=>`<div class="lrow"><div class="lrank">${i+1}</div><div><div class="lname">${s.item}</div><div class="lbar"><span style="width:${Math.max(4,s.net/maxS*100)}%"></span></div></div><div class="lmeta"><div class="lrev pos">+${fmt(s.net)}</div><div class="lqty">${fmt(s.sold)} sold</div></div></div>`).join('');
+  renderTable();
+}
+function renderTable(){
+  const d=curData();let rows=d?d.items.slice():aggItems();
+  const q=document.getElementById('q').value.toLowerCase(),f=document.getElementById('flt').value;
+  rows=rows.filter(r=>r.item.toLowerCase().includes(q));
+  if(f==='income')rows=rows.filter(r=>r.net>0);if(f==='expense')rows=rows.filter(r=>r.net<0);
+  rows.sort((a,b)=>{let x=a[sortK],y=b[sortK];if(typeof x==='string')return x.localeCompare(y)*sortDir;return (x-y)*sortDir;});
+  document.getElementById('etb').innerHTML=rows.map(r=>{const c=r.net>0?'pos':(r.net<0?'neg':'mut'),sg=r.net>0?'+':'';return `<tr><td>${r.item}</td><td>${fmt(r.sold)}</td><td>${fmt(r.bought)}</td><td class="${c}">${sg}${fmt(r.net)}</td></tr>`;}).join('')||'<tr><td colspan="4" class="mut">No items match.</td></tr>';
+}
+document.querySelectorAll('.nav-tab').forEach(t=>t.onclick=()=>{document.querySelectorAll('.nav-tab').forEach(x=>x.classList.remove('active'));document.querySelectorAll('.page').forEach(x=>x.classList.remove('active'));t.classList.add('active');document.getElementById('p-'+t.dataset.p).classList.add('active');});
+function buildExchange(){
+  const el=document.getElementById('exChart');if(!el)return;
+  const pts=[128,131,129,134,138,136,140,139,142.5];
+  new Chart(el,{type:'line',data:{labels:pts.map((_,i)=>'d'+(i+1)),
+    datasets:[{data:pts,borderColor:'#F5A623',borderWidth:2,tension:.35,fill:true,pointRadius:0,
+      backgroundColor:c=>{const g=c.chart.ctx.createLinearGradient(0,0,0,150);g.addColorStop(0,'rgba(245,166,35,.25)');g.addColorStop(1,'rgba(245,166,35,0)');return g;}}]},
+    options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>' '+c.parsed.y.toFixed(2)+' ¢'}}},
+      scales:{x:{grid:{color:GRID},ticks:{color:TICK,font:{family:'IBM Plex Mono'}}},y:{grid:{color:GRID},ticks:{color:TICK,font:{family:'IBM Plex Mono'}}}}}});
+}
+window.addEventListener('load',()=>{buildLine();buildDonut(107902,18675);buildExchange();renderEarn();});
+</script>
+</body>
+</html>

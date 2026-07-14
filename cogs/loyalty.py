@@ -19,6 +19,31 @@ _loyalty_tier          = core._loyalty_tier
 LOYALTY_TIERS          = core.LOYALTY_TIERS
 _award_loyalty_points  = core._award_loyalty_points
 LOYALTY_EMPLOYEE_ROLES = core.LOYALTY_EMPLOYEE_ROLES
+MANAGER_DM_IDS         = getattr(core, "MANAGER_DM_IDS", set())
+log                    = getattr(core, "log", None)
+
+
+# ── Loyalty reward redemptions (points → real reward) ─────────────────────────
+# State lives in bot_config as JSON so it survives restarts. A worker opens a
+# redemption; a manager/owner pays out-of-band, then approves it here, which
+# deducts the points. Kept intentionally simple (no button views to persist).
+def _load_redemptions() -> dict:
+    import json as _json, Restocker_db as _db
+    try:
+        raw = _db.get_config("loyalty_redemptions")
+        return _json.loads(raw) if raw else {}
+    except Exception:
+        return {}
+
+
+def _save_redemptions(d: dict) -> None:
+    import json as _json, Restocker_db as _db
+    _db.set_config("loyalty_redemptions", _json.dumps(d))
+
+
+def _next_redemption_id(d: dict) -> int:
+    ids = [int(k) for k in d.keys() if str(k).isdigit()]
+    return (max(ids) + 1) if ids else 1
 
 TIER_EMOJIS = {1: "🪨", 2: "🔨", 3: "⚔️", 4: "💎", 5: "👑"}
 
@@ -212,6 +237,125 @@ class LoyaltyCog(commands.Cog):
         await interaction.response.send_message(
             f"✅ Added **{points:,.0f}** pts to {user.mention} → `{new_total:,.0f}` total{tier_up}"
         )
+
+
+    @loyalty.command(name="redeem", description="Redeem your loyalty points for a reward (a manager pays it out)")
+    @app_commands.describe(points="How many points to redeem", reward="What you want (e.g. '5000 coins', 'a diamond block')")
+    async def loyalty_redeem(self, interaction: discord.Interaction, points: int, reward: str):
+        import Restocker_db as _db
+        from datetime import datetime, timezone
+        if points <= 0:
+            return await interaction.response.send_message("❌ Redeem a positive number of points.", ephemeral=True)
+        reward = (reward or "").strip()
+        if not reward:
+            return await interaction.response.send_message("❌ Say what you'd like to redeem for.", ephemeral=True)
+        have = float(_db.get_loyalty(str(interaction.user.id)).get("points", 0) or 0)
+        if have < points:
+            return await interaction.response.send_message(
+                f"❌ You only have **{have:,.0f}** points — can't redeem **{points:,}**.", ephemeral=True)
+        # Guard against stacking pending requests beyond your balance.
+        reds = _load_redemptions()
+        pending_pts = sum(int(r.get("points", 0)) for r in reds.values()
+                          if str(r.get("user_id")) == str(interaction.user.id) and r.get("status") == "pending")
+        if pending_pts + points > have:
+            return await interaction.response.send_message(
+                f"❌ You already have **{pending_pts:,}** points in pending redemptions. "
+                f"That plus **{points:,}** exceeds your **{have:,.0f}**.", ephemeral=True)
+        rid = _next_redemption_id(reds)
+        reds[str(rid)] = {
+            "id": rid, "user_id": str(interaction.user.id), "user_tag": str(interaction.user),
+            "points": int(points), "reward": reward, "status": "pending",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        _save_redemptions(reds)
+        await interaction.response.send_message(
+            f"🎟️ **Redemption #{rid}** submitted — **{points:,}** pts for *{reward}*.\n"
+            f"A manager will pay it out and approve it here; your points are deducted on approval.",
+            ephemeral=True)
+        # Notify managers so someone actions it.
+        note = (f"🎟️ **New loyalty redemption #{rid}**\n"
+                f"{interaction.user.mention} wants **{points:,}** pts → *{reward}*\n"
+                f"Pay them, then run `/loyalty approve id:{rid}` (or `/loyalty deny id:{rid}`).")
+        for mid in MANAGER_DM_IDS:
+            try:
+                u = await interaction.client.fetch_user(int(mid))
+                await u.send(note)
+            except Exception:
+                pass
+        try:
+            if interaction.channel:
+                await interaction.channel.send(note, delete_after=1800)
+        except Exception:
+            pass
+
+    @loyalty.command(name="redemptions", description="(Manager) List pending loyalty redemptions")
+    async def loyalty_redemptions(self, interaction: discord.Interaction):
+        if not is_manager(interaction):
+            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
+        reds = _load_redemptions()
+        pending = [r for r in reds.values() if r.get("status") == "pending"]
+        pending.sort(key=lambda r: int(r.get("id", 0)))
+        if not pending:
+            return await interaction.response.send_message("✅ No pending redemptions.", ephemeral=True)
+        lines = [f"**#{r['id']}** — <@{r['user_id']}> · **{int(r['points']):,}** pts → *{r['reward']}*"
+                 for r in pending[:25]]
+        await interaction.response.send_message(
+            "🎟️ **Pending redemptions**\n" + "\n".join(lines) +
+            "\n\nApprove with `/loyalty approve id:<#>` (deducts points) or `/loyalty deny id:<#>`.",
+            ephemeral=True)
+
+    @loyalty.command(name="approve", description="(Manager) Approve a redemption — deducts the points")
+    @app_commands.describe(id="Redemption ID from /loyalty redemptions")
+    async def loyalty_approve(self, interaction: discord.Interaction, id: int):
+        if not is_manager(interaction):
+            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
+        import Restocker_db as _db
+        reds = _load_redemptions()
+        r = reds.get(str(id))
+        if not r:
+            return await interaction.response.send_message(f"❌ No redemption #{id}.", ephemeral=True)
+        if r.get("status") != "pending":
+            return await interaction.response.send_message(
+                f"⚠️ Redemption #{id} is already **{r.get('status')}**.", ephemeral=True)
+        uid = str(r["user_id"]); pts = int(r["points"])
+        have = float(_db.get_loyalty(uid).get("points", 0) or 0)
+        if have < pts:
+            return await interaction.response.send_message(
+                f"❌ <@{uid}> now only has **{have:,.0f}** pts — can't deduct **{pts:,}**. "
+                f"Deny it or ask them to re-submit.", ephemeral=True)
+        new_total = _db.add_loyalty_points(uid, -pts, update_activity=False)
+        r["status"] = "approved"; r["approved_by"] = str(interaction.user.id)
+        _save_redemptions(reds)
+        await interaction.response.send_message(
+            f"✅ Approved **#{id}** — deducted **{pts:,}** pts from <@{uid}> (now `{new_total:,.0f}`).", ephemeral=True)
+        try:
+            u = await interaction.client.fetch_user(int(uid))
+            await u.send(f"✅ Your redemption **#{id}** (*{r['reward']}*) was approved — "
+                         f"**{pts:,}** points deducted. Enjoy your reward!")
+        except Exception:
+            pass
+
+    @loyalty.command(name="deny", description="(Manager) Deny a redemption (no points deducted)")
+    @app_commands.describe(id="Redemption ID", reason="Optional reason shown to the user")
+    async def loyalty_deny(self, interaction: discord.Interaction, id: int, reason: str = ""):
+        if not is_manager(interaction):
+            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
+        reds = _load_redemptions()
+        r = reds.get(str(id))
+        if not r:
+            return await interaction.response.send_message(f"❌ No redemption #{id}.", ephemeral=True)
+        if r.get("status") != "pending":
+            return await interaction.response.send_message(
+                f"⚠️ Redemption #{id} is already **{r.get('status')}**.", ephemeral=True)
+        r["status"] = "denied"; r["denied_by"] = str(interaction.user.id); r["deny_reason"] = reason.strip()
+        _save_redemptions(reds)
+        await interaction.response.send_message(f"❌ Denied redemption **#{id}**. No points deducted.", ephemeral=True)
+        try:
+            u = await interaction.client.fetch_user(int(r["user_id"]))
+            await u.send(f"❌ Your redemption **#{id}** (*{r['reward']}*) was denied."
+                         + (f"\nReason: {reason.strip()}" if reason.strip() else ""))
+        except Exception:
+            pass
 
 
 async def setup(bot: commands.Bot):

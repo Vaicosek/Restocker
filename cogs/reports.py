@@ -389,7 +389,7 @@ class ReportsCog(commands.Cog):
         files = []
         if charts:
             if not _MATPLOTLIB_OK:
-                embed.set_footer(text=(embed.footer.text or "") + "  •  ⚠️ pip install matplotlib for charts")
+                embed.set_footer(text=(embed.footer.text or "") + "  •  📊 charts on dashboard.vaicosmarket.com")
             else:
                 try:
                     _hist = _load_csn_for_market(market_id).get("months", {}) or {}
@@ -539,7 +539,7 @@ class ReportsCog(commands.Cog):
         files = []
         if charts and all_items:
             if not _MATPLOTLIB_OK:
-                embed.set_footer(text="⚠️ pip install matplotlib for charts")
+                embed.set_footer(text="📊 Interactive charts on the dashboard → dashboard.vaicosmarket.com")
             else:
                 chart_data = _generate_charts(all_items, " — All Time")
                 files = [discord.File(io.BytesIO(c), filename=f"history_chart_{i+1}.png") for i, c in enumerate(chart_data)]

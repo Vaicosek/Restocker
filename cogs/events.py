@@ -20,6 +20,7 @@ _is_ai_allowed = core._is_ai_allowed
 _CSN_ALLOWED_WEBHOOK_IDS = core._CSN_ALLOWED_WEBHOOK_IDS
 _assign_customer_role = core._assign_customer_role
 _process_csn_attachment = core._process_csn_attachment
+_process_csn_profiles = core._process_csn_profiles
 bot = core.bot
 handle_ai_mention = core.handle_ai_mention
 log = core.log
@@ -176,15 +177,23 @@ class EventsCog(commands.Cog):
             return
         for att in message.attachments:
             name = att.filename.lower()
-            if not name.endswith(".csv"):
-                continue
-            if "csn_monthly" not in name and "csn_export" not in name and "csn_stock" not in name:
-                continue
             report_channel = (
                 bot.get_channel(CSN_REPORT_CHANNEL_ID) if CSN_REPORT_CHANNEL_ID else message.channel
             )
             if report_channel is None:
                 report_channel = message.channel
+            # csn_profiles.json — the mod's captured item lore. Auto-learn readable brew
+            # names (potion effects) from it so reports stop showing raw #codes.
+            if name.endswith(".json") and "csn_profiles" in name:
+                try:
+                    await _process_csn_profiles(att, report_channel)
+                except Exception as e:
+                    log.error("CSN profiles processing failed: %s", e)
+                continue
+            if not name.endswith(".csv"):
+                continue
+            if "csn_monthly" not in name and "csn_export" not in name and "csn_stock" not in name:
+                continue
             try:
                 await _process_csn_attachment(att, report_channel, source_channel_id=message.channel.id)
             except Exception as e:

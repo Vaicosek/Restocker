@@ -14,6 +14,7 @@ CSN_HISTORY_FILE = core.CSN_HISTORY_FILE
 DEFAULT_MARKET_ID = core.DEFAULT_MARKET_ID
 MIN_SHARE_PRICE = core.MIN_SHARE_PRICE
 PLATFORM_FEE_PCT = core.PLATFORM_FEE_PCT
+PLATFORM_FEE_ACTIVE = getattr(core, "PLATFORM_FEE_ACTIVE", False)
 _MATPLOTLIB_OK = core._MATPLOTLIB_OK
 _generate_earnings_chart = core._generate_earnings_chart
 _get_market = core._get_market
@@ -24,6 +25,9 @@ _load_markets = core._load_markets
 _load_platform_balance = core._load_platform_balance
 _log_manual_restock = core._log_manual_restock
 _market_autocomplete = core._market_autocomplete
+_market_loyalty_cfg = core._market_loyalty_cfg
+_set_market_loyalty = core._set_market_loyalty
+_markets_owned_by = core._markets_owned_by
 _recompute_share_price = core._recompute_share_price
 _remove_market_item = core._remove_market_item
 _save_markets = core._save_markets
@@ -52,6 +56,40 @@ class MarketCog(commands.Cog):
         self.bot = bot
 
     market = app_commands.Group(name="market", description="Manage multiple markets — register, track earnings, and configure per-market settings")
+
+    @market.command(name="loyalty",
+                    description="(Owner/Manager) Set this market's restock rewards: loyalty points multiplier + coin bonus")
+    @app_commands.describe(
+        market_id="Which market to configure",
+        points_multiplier="Loyalty-point multiplier for orders fulfilled in this market (e.g. 1.5). 1 = normal.",
+        coin_bonus="Flat extra coins paid per fulfilled order in this market (e.g. 500). 0 = none.",
+    )
+    @app_commands.autocomplete(market_id=_market_autocomplete)
+    async def market_loyalty(self, interaction: discord.Interaction, market_id: str,
+                             points_multiplier: float = 1.0, coin_bonus: int = 0):
+        if not (is_manager(interaction) or market_id in _markets_owned_by(interaction.user.id)):
+            return await interaction.response.send_message(
+                "⛔ Only a manager or this market's owner can set its rewards.", ephemeral=True)
+        if not _get_market(market_id):
+            return await interaction.response.send_message(
+                f"❌ Market `{market_id}` not found. See `/market list`.", ephemeral=True)
+        if points_multiplier <= 0:
+            return await interaction.response.send_message(
+                "❌ points_multiplier must be greater than 0 (1 = normal, 1.5 = +50%).", ephemeral=True)
+        if coin_bonus < 0:
+            return await interaction.response.send_message(
+                "❌ coin_bonus can't be negative.", ephemeral=True)
+        _set_market_loyalty(market_id, points_multiplier, coin_bonus)
+        mname = (_get_market(market_id) or {}).get("name", market_id)
+        parts = []
+        if points_multiplier != 1.0:
+            parts.append(f"**{points_multiplier:g}×** loyalty points")
+        if coin_bonus > 0:
+            parts.append(f"**+{coin_bonus:,}** coins per fulfilled order")
+        reward = " and ".join(parts) if parts else "normal rewards (no bonus)"
+        await interaction.response.send_message(
+            f"✅ **{mname}** (`{market_id}`) now grants {reward} to restockers.\n"
+            f"Applies when a manager approves an order tagged to this market.", ephemeral=True)
 
     @market.command(name="add", description="(Manager) Register a new market")
     @app_commands.describe(
@@ -228,13 +266,14 @@ class MarketCog(commands.Cog):
             est_fee = int(math.floor(net * fee_pct / 100.0)) if net > 0 else 0
             color = 0x2ECC71 if net >= 0 else 0xE74C3C
             embed = discord.Embed(title=f"📊 {market_label} — {md.get('label', month)}", color=color)
+            _fee_line = f"\n**Est. Platform Fee ({fee_pct}%):** `{est_fee:,}` 🪙" if PLATFORM_FEE_ACTIVE else ""
             embed.add_field(
                 name="💰 Summary",
                 value=(
                     f"**Income:** `{income:,}` 🪙\n"
                     f"**Spent:**  `{spent:,}` 🪙\n"
-                    f"**Net:**    `{net:+,}` 🪙\n"
-                    f"**Est. Platform Fee ({fee_pct}%):** `{est_fee:,}` 🪙"
+                    f"**Net:**    `{net:+,}` 🪙"
+                    f"{_fee_line}"
                 ),
                 inline=False,
             )
@@ -255,7 +294,7 @@ class MarketCog(commands.Cog):
                     files = [discord.File(io.BytesIO(png), filename="earnings_chart.png")]
                     embed.set_image(url="attachment://earnings_chart.png")
             elif charts and not _MATPLOTLIB_OK:
-                embed.set_footer(text="⚠️ pip install matplotlib for the earnings chart")
+                embed.set_footer(text="📊 Interactive charts on the dashboard → dashboard.vaicosmarket.com")
 
             return await interaction.followup.send(embed=embed, files=files)
 
@@ -273,13 +312,14 @@ class MarketCog(commands.Cog):
             title=f"📊 {market_label} — Last {len(sorted_months)} Month{'s' if len(sorted_months) != 1 else ''}",
             color=color,
         )
+        _fee_line = f"\n**Est. Platform Fee ({fee_pct}%):** `{est_fee:,}` 🪙" if PLATFORM_FEE_ACTIVE else ""
         embed.add_field(
             name="💰 Total Summary",
             value=(
                 f"**Income:** `{int(total_income):,}` 🪙\n"
                 f"**Spent:**  `{int(total_spent):,}` 🪙\n"
-                f"**Net:**    `{int(total_net):+,}` 🪙\n"
-                f"**Est. Platform Fee ({fee_pct}%):** `{est_fee:,}` 🪙"
+                f"**Net:**    `{int(total_net):+,}` 🪙"
+                f"{_fee_line}"
             ),
             inline=True,
         )
@@ -322,7 +362,7 @@ class MarketCog(commands.Cog):
         files = []
         if charts:
             if not _MATPLOTLIB_OK:
-                embed.set_footer(text="⚠️ pip install matplotlib for the earnings chart")
+                embed.set_footer(text="📊 Interactive charts on the dashboard → dashboard.vaicosmarket.com")
             else:
                 chart_input = [(md.get("label", mk), md["income"], md["net"]) for mk, md in sorted_months]
                 png = _generate_earnings_chart(chart_input)

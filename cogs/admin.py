@@ -345,6 +345,38 @@ class AdminCog(commands.Cog):
             f"✅ Backfilled **{n}** ledger row(s):\n{summary}\n\n"
             f"They now show on the team leaderboard (7-day window).", ephemeral=True)
 
+    @admin.command(name="ai_audit", description="(Managers) Recent AI tool actions — who ran what")
+    @app_commands.describe(limit="How many recent entries (default 15)", sensitive_only="Only moderation/destructive actions")
+    async def ai_audit(self, interaction: discord.Interaction, limit: int = 15, sensitive_only: bool = False):
+        if not is_manager(interaction):
+            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
+        import json as _json, Restocker_db as _db
+        from datetime import datetime, timezone
+        try:
+            raw = _db.get_config("ai_audit_log")
+            arr = _json.loads(raw) if raw else []
+        except Exception:
+            arr = []
+        if sensitive_only:
+            arr = [e for e in arr if e.get("sens")]
+        if not arr:
+            return await interaction.response.send_message("📋 No AI tool actions logged yet.", ephemeral=True)
+        limit = max(1, min(int(limit or 15), 40))
+        recent = arr[-limit:][::-1]
+        lines = []
+        for e in recent:
+            try:
+                ts = datetime.fromtimestamp(int(e.get("ts", 0)), timezone.utc).strftime("%m-%d %H:%M")
+            except Exception:
+                ts = "?"
+            flag = "⚠️ " if e.get("sens") else ""
+            args = (e.get("args") or "").strip()
+            if len(args) > 80:
+                args = args[:79] + "…"
+            lines.append(f"{flag}`{ts}` <@{e.get('uid')}> → **{e.get('tool')}** `{args}`")
+        body = "🧾 **AI tool audit** (most recent first)\n" + "\n".join(lines)
+        await interaction.response.send_message(body[:1950], ephemeral=True)
+
 
 async def setup(bot):
     await bot.add_cog(AdminCog(bot))

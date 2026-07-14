@@ -24,6 +24,7 @@ _is_blocked_claimer = core._is_blocked_claimer
 _load_items = core._load_items
 _loyalty_payout_bonus_pct = core._loyalty_payout_bonus_pct
 _loyalty_points_for_order = core._loyalty_points_for_order
+_market_loyalty_cfg = core._market_loyalty_cfg
 _mutate_order = core._mutate_order
 _open_assist_ticket = core._open_assist_ticket
 _order_is_claimed_closed = core._order_is_claimed_closed
@@ -490,15 +491,22 @@ class ManagerReviewView(View):
             payout = _coins_for_pieces(order, qty, items_data)
             if payout <= 0:
                 continue
+            # Per-market reward: the owning market can grant a points multiplier and/or a
+            # flat coin bonus per fulfilled order to incentivise its restockers.
+            _mkt_mult, _mkt_bonus = _market_loyalty_cfg(order.get("market_id"))
             bonus_pct = _loyalty_payout_bonus_pct(uid)
             bonus_coins = int(payout * bonus_pct / 100) if bonus_pct > 0 else 0
-            total_payout = payout + bonus_coins
+            total_payout = payout + bonus_coins + _mkt_bonus
             new_bal, _principal = add_coins(uid, total_payout, counts_as_principal=True)
             total_paid += total_payout
             bonus_str = f" (+{bonus_coins} loyalty bonus)" if bonus_coins > 0 else ""
+            if _mkt_bonus > 0:
+                bonus_str += f" (+{_mkt_bonus} market bonus)"
             paid_lines.append(f"• <@{uid}> +**{total_payout}**{bonus_str} (new bal: {new_bal})")
             lp = _loyalty_points_for_order(order, items_data)
             lp_scaled = max(1, int(lp * qty / max(1, int(order.get("requested", 1) or 1))))
+            if _mkt_mult != 1.0:
+                lp_scaled = max(1, int(lp_scaled * _mkt_mult))
             new_pts, old_tier, new_tier = _award_loyalty_points(uid, lp_scaled, reason=f"order#{order['id']}")
             try:
                 _mgr_id, _ov = _pay_manager_override(uid, total_payout, f"order#{order['id']}")

@@ -1,0 +1,326 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Abexilas Hub — redesign v2</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Space+Grotesk:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  --font-data:'IBM Plex Mono',ui-monospace,Menlo,monospace;
+  --font-ui:'Space Grotesk',system-ui,sans-serif;
+  --bg:#0A0A0A;--surface:#111;--panel2:#161616;--overlay:#1C1C1C;
+  --border:#1E1E1E;--border-strong:#2A2A2A;
+  --text:#F0F0F0;--text-body:#BBB;--muted:#6a6a6a;--faint:#444;
+  --green:#22FF7A;--green-dim:#0f7a3a;--accent:#22FF7A;--red:#FF4444;--red-dim:#7a1f1f;--amber:#F5A623;--blue:#4A9EFF;--purple:#B47FFF;
+  --nether:#FF6B35;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{color-scheme:dark}
+body{background-color:var(--bg);background-image:radial-gradient(#181818 .5px,transparent .5px);background-size:26px 26px;color:var(--text);font-family:var(--font-ui);font-size:13px;line-height:1.5;-webkit-font-smoothing:antialiased;min-height:100vh}
+.mono,td,.val,.tag,input,select,.num,.pill{font-family:var(--font-data);font-variant-numeric:tabular-nums slashed-zero}
+/* header */
+header{position:sticky;top:0;z-index:90;height:52px;background:rgba(17,17,17,.92);backdrop-filter:blur(8px);border-bottom:1px solid var(--border);padding:0 22px;display:flex;align-items:center;justify-content:space-between}
+.logo{display:flex;align-items:center;gap:11px;text-decoration:none}
+.logo-icon{width:30px;height:30px;background:var(--accent);display:flex;align-items:center;justify-content:center;color:#000;font-weight:700;font-size:16px;box-shadow:0 0 22px rgba(34,255,122,.35)}
+.logo-text{font-size:14px;font-weight:600}
+.logo-sub{font-family:var(--font-data);font-size:8.5px;color:var(--muted);margin-top:2px;text-transform:uppercase;letter-spacing:.18em}
+.header-right{display:flex;align-items:center;gap:12px}
+.mkt-select{background:var(--panel2);border:1px solid var(--border);color:var(--text);padding:7px 11px;font-size:12px}
+.auth-name{font-family:var(--font-data);color:var(--accent);font-weight:500;font-size:12px}
+/* nav */
+nav{display:flex;gap:2px;background:var(--surface);border-bottom:1px solid var(--border);padding:0 14px;overflow-x:auto}
+.nav-tab{display:flex;align-items:center;gap:7px;padding:13px 16px;font-size:12px;font-weight:500;color:var(--muted);cursor:pointer;border-bottom:2px solid transparent;white-space:nowrap;user-select:none}
+.nav-tab svg{width:14px;height:14px;opacity:.7}
+.nav-tab:hover{color:var(--text)}
+.nav-tab.active{color:var(--accent);border-bottom-color:var(--accent)}
+.nav-tab.active svg{opacity:1}
+/* layout */
+.wrap{max-width:1120px;margin:0 auto;padding:24px 22px 70px}
+.page{display:none}.page.active{display:block;animation:f .25s ease}
+@keyframes f{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+.mkt-head{display:flex;align-items:center;gap:11px;margin-bottom:3px}
+.mkt-dot{width:10px;height:10px;border-radius:50%;background:var(--nether);box-shadow:0 0 12px var(--nether)}
+h1{font-size:21px;font-weight:600;letter-spacing:-.01em}
+.sub{color:var(--muted);font-size:12.5px;margin-bottom:20px}
+.callout{display:inline-block;background:rgba(34,255,122,.08);border:1px solid rgba(34,255,122,.25);color:var(--green);padding:3px 9px;font-size:10px;text-transform:uppercase;letter-spacing:.09em}
+.grid2{display:grid;grid-template-columns:1.35fr 1fr;gap:16px}
+@media(max-width:820px){.grid2{grid-template-columns:1fr}}
+.panel{background:var(--surface);border:1px solid var(--border);padding:18px 20px}
+.panel-h{font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin-bottom:16px;display:flex;align-items:center;justify-content:space-between}
+/* hero net */
+.hero{display:flex;align-items:baseline;gap:14px;margin-bottom:6px}
+.hero .big{font-family:var(--font-data);font-size:44px;font-weight:600;letter-spacing:-.02em;line-height:1}
+.trend{font-family:var(--font-data);font-size:13px;padding:3px 8px;border-radius:2px}
+.trend.up{color:var(--green);background:rgba(34,255,122,.1)}
+.trend.down{color:var(--red);background:rgba(255,68,68,.1)}
+.hero-sub{color:var(--muted);font-size:12px;margin-bottom:20px}
+/* split bar */
+.split{height:14px;display:flex;overflow:hidden;margin:6px 0 8px}
+.split .inc{background:linear-gradient(90deg,var(--green),#19c964)}
+.split .exp{background:linear-gradient(90deg,#c93636,var(--red))}
+.split-legend{display:flex;justify-content:space-between;font-family:var(--font-data);font-size:11.5px;color:var(--text-body)}
+.split-legend b{color:var(--text);font-weight:600}
+/* KPI row */
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;margin:16px 0 6px}
+.kpi{background:var(--panel2);border:1px solid var(--border);padding:12px 13px}
+.kpi .k{color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.08em}
+.kpi .v{font-family:var(--font-data);font-size:19px;font-weight:600;margin-top:5px}
+.pos{color:var(--green)}.neg{color:var(--red)}.mut{color:var(--muted)}.amb{color:var(--amber)}
+/* trend chart */
+.chart{display:flex;align-items:flex-end;gap:14px;height:130px;padding-top:8px}
+.chbar{flex:1;display:flex;flex-direction:column;align-items:center;gap:7px;justify-content:flex-end;height:100%}
+.chbar .col{width:70%;max-width:64px;background:linear-gradient(180deg,var(--green),var(--green-dim));position:relative}
+.chbar .col.dim{background:linear-gradient(180deg,#2a2a2a,#1a1a1a)}
+.chbar .cv{font-family:var(--font-data);font-size:11px;color:var(--text)}
+.chbar .cl{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
+/* top sellers leaderboard */
+.lead{display:flex;flex-direction:column;gap:2px}
+.lrow{display:grid;grid-template-columns:22px 1fr 84px;align-items:center;gap:12px;padding:9px 4px;border-bottom:1px solid var(--border-dim,#181818)}
+.lrow:last-child{border-bottom:none}
+.lrank{font-family:var(--font-data);color:var(--faint);font-size:12px;text-align:center}
+.lrow:nth-child(1) .lrank{color:var(--amber)}
+.lmid{min-width:0}
+.lname{font-family:var(--font-data);font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lbar{height:6px;background:var(--panel2);margin-top:6px;position:relative;overflow:hidden}
+.lbar>span{position:absolute;left:0;top:0;bottom:0;background:linear-gradient(90deg,var(--green),#17b558)}
+.lbar.r>span{background:linear-gradient(90deg,#b53a3a,var(--red))}
+.lmeta{text-align:right}
+.lrev{font-family:var(--font-data);font-size:13px;font-weight:600}
+.lqty{font-family:var(--font-data);font-size:10.5px;color:var(--muted)}
+/* toolbar + table */
+.toolbar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:24px 0 12px}
+.toolbar select,.toolbar input{background:var(--panel2);border:1px solid var(--border);color:var(--text);padding:8px 11px;font-size:12px}
+.toolbar input{flex:1;min-width:200px}
+table{width:100%;border-collapse:collapse;background:var(--surface);border:1px solid var(--border)}
+th,td{padding:9px 13px;text-align:right;border-bottom:1px solid var(--border);font-size:12.5px}
+th:first-child,td:first-child{text-align:left}
+th{cursor:pointer;user-select:none;color:var(--muted);font-weight:600;font-family:var(--font-ui);font-size:11px;text-transform:uppercase;letter-spacing:.05em}
+th:hover{color:var(--text)}
+tbody tr:hover{background:var(--panel2)}
+tr:last-child td{border-bottom:none}
+.foot{color:var(--faint);font-size:11px;margin-top:14px}
+.pill{display:inline-block;padding:2px 8px;font-size:11px;border:1px solid var(--border);color:var(--text-body)}
+.pill.g{border-color:rgba(34,255,122,.3);color:var(--green)}
+.section-h{font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin:26px 0 12px;display:flex;align-items:center;gap:10px}
+.section-h::after{content:"";flex:1;height:1px;background:var(--border)}
+.stockbar{height:7px;background:var(--panel2);position:relative;width:130px;display:inline-block;vertical-align:middle}
+.stockbar>span{position:absolute;left:0;top:0;bottom:0;background:var(--red)}
+.btn{background:var(--accent);color:#000;border:none;padding:8px 14px;font-family:var(--font-ui);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;cursor:pointer}
+.btn.ghost{background:transparent;border:1px solid var(--border);color:var(--text-body)}
+.mcards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
+.mcard{background:var(--surface);border:1px solid var(--border);border-top:2px solid var(--nether);padding:15px 16px;cursor:pointer}
+.mcard:hover{border-color:var(--border-strong)}
+.mcard .mn{font-size:13px;font-weight:600;margin-bottom:10px;display:flex;align-items:center;gap:7px}
+.mcard .mnet{font-family:var(--font-data);font-size:22px;font-weight:600}
+.mcard .mrow{display:flex;justify-content:space-between;font-family:var(--font-data);font-size:11px;color:var(--muted);margin-top:8px}
+</style>
+</head>
+<body>
+<header>
+  <a class="logo" href="#"><div class="logo-icon">A</div>
+    <div><div class="logo-text">Abexilas Economy Hub</div><div class="logo-sub">Vaicos Market</div></div></a>
+  <div class="header-right">
+    <select class="mkt-select"><option>◍ Nether market</option><option>◍ BNL market</option><option>◍ End market</option><option>◍ Viridian market</option></select>
+    <span class="auth-name">@Vaicos</span>
+  </div>
+</header>
+
+<nav>
+  <div class="nav-tab active" data-p="earnings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 3v18h18"/><path d="M7 16v-5M12 16V8M17 16v-9"/></svg>Earnings</div>
+  <div class="nav-tab" data-p="markets"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>All markets</div>
+  <div class="nav-tab" data-p="stock"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 17l6-6 4 4 8-8"/><path d="M17 7h4v4"/></svg>Stock</div>
+  <div class="nav-tab" data-p="orders"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>Orders</div>
+</nav>
+
+<div class="wrap">
+
+  <!-- EARNINGS -->
+  <div class="page active" id="p-earnings">
+    <div class="mkt-head"><span class="mkt-dot"></span><h1>Nether market</h1><span class="callout">one place · was 3 separate views</span></div>
+    <div class="sub">Earnings, what's selling, and the full ledger — merged. The month picker replaces the old standalone report page.</div>
+
+    <div class="toolbar">
+      <select id="month" onchange="renderEarn()">
+        <option value="all">All months (summary)</option>
+        <option value="2026-07" selected>July 2026</option>
+        <option value="2026-06">June 2026</option>
+      </select>
+      <span class="pill g" id="mtag">latest month</span>
+    </div>
+
+    <div class="grid2">
+      <!-- left: hero + split + chart -->
+      <div class="panel">
+        <div class="panel-h"><span id="heroLbl">Net profit · July 2026</span></div>
+        <div class="hero"><span class="big pos" id="heroNet">+89,226</span><span class="trend up" id="heroTrend">▲ 81%</span></div>
+        <div class="hero-sub" id="heroSubtitle">vs +49,269 last month · ¢ coins</div>
+        <div class="split"><div class="inc" id="splitInc" style="width:85%"></div><div class="exp" id="splitExp" style="width:15%"></div></div>
+        <div class="split-legend"><span>Income <b id="splitIncV">107,902</b></span><span>Spent <b id="splitExpV">18,675</b></span></div>
+        <div class="kpis">
+          <div class="kpi"><div class="k">Items sold</div><div class="v" id="kSold">889</div></div>
+          <div class="kpi"><div class="k">Unique items</div><div class="v" id="kUniq">79</div></div>
+          <div class="kpi"><div class="k">Platform fee 3%</div><div class="v amb" id="kFee">2,676</div></div>
+        </div>
+        <div class="section-h">Net profit by month</div>
+        <div class="chart">
+          <div class="chbar"><span class="cv pos">+49.3k</span><div class="col dim" style="height:55%"></div><span class="cl" onclick="pickMonth('2026-06')">Jun</span></div>
+          <div class="chbar"><span class="cv pos">+89.2k</span><div class="col" style="height:100%"></div><span class="cl" onclick="pickMonth('2026-07')">Jul</span></div>
+          <div class="chbar"><span class="cv mut">—</span><div class="col dim" style="height:12%"></div><span class="cl">Aug</span></div>
+        </div>
+      </div>
+
+      <!-- right: top sellers leaderboard -->
+      <div class="panel">
+        <div class="panel-h"><span id="leadLbl">What's selling · July 2026</span><span class="mut" style="font-size:10px">by revenue</span></div>
+        <div class="lead" id="lead"></div>
+        <div class="section-h" style="margin-top:20px">Biggest costs</div>
+        <div class="lead" id="costs"></div>
+      </div>
+    </div>
+
+    <div class="toolbar">
+      <input id="q" placeholder="Search the full ledger…" oninput="renderTable()">
+      <select id="flt" onchange="renderTable()"><option value="all">All items</option><option value="income">Income only</option><option value="expense">Expense only</option></select>
+    </div>
+    <table><thead><tr>
+      <th onclick="sortBy('item')">Item</th><th onclick="sortBy('sold')">Sold</th><th onclick="sortBy('bought')">Bought</th><th onclick="sortBy('net')">Net ¢</th>
+    </tr></thead><tbody id="etb"></tbody></table>
+    <div class="foot">The full sortable ledger from the old report page — now a section of the dashboard, not a separate URL.</div>
+  </div>
+
+  <!-- ALL MARKETS -->
+  <div class="page" id="p-markets">
+    <h1 style="margin-bottom:3px">All markets</h1>
+    <div class="sub">Portfolio at a glance — click a market to open its earnings.</div>
+    <div class="mcards">
+      <div class="mcard" style="border-top-color:#FF6B35"><div class="mn"><span class="mkt-dot" style="background:#FF6B35;box-shadow:none"></span>Nether</div><div class="mnet pos">+138,495</div><div class="mrow"><span>2 mo net</span><span class="pos">▲ 81%</span></div></div>
+      <div class="mcard" style="border-top-color:#4A9EFF"><div class="mn"><span class="mkt-dot" style="background:#4A9EFF;box-shadow:none"></span>BNL</div><div class="mnet pos">+62,110</div><div class="mrow"><span>2 mo net</span><span class="pos">▲ 12%</span></div></div>
+      <div class="mcard" style="border-top-color:#B47FFF"><div class="mn"><span class="mkt-dot" style="background:#B47FFF;box-shadow:none"></span>End</div><div class="mnet pos">+41,880</div><div class="mrow"><span>2 mo net</span><span class="neg">▼ 6%</span></div></div>
+      <div class="mcard" style="border-top-color:#22FF7A"><div class="mn"><span class="mkt-dot" style="background:#22FF7A;box-shadow:none"></span>Viridian</div><div class="mnet pos">+18,240</div><div class="mrow"><span>2 mo net</span><span class="pos">new</span></div></div>
+    </div>
+  </div>
+
+  <!-- STOCK -->
+  <div class="page" id="p-stock">
+    <div class="mkt-head"><span class="mkt-dot"></span><h1>Stock — Nether market</h1></div>
+    <div class="sub">Live shop scan · lowest first. The ⚡ button drafts restock orders to refill to 80%.</div>
+    <div class="toolbar"><input placeholder="Search items…"><button class="btn ghost">⬇ Download CSV</button><button class="btn">⚡ Generate restock orders</button></div>
+    <table><thead><tr><th>Item</th><th>Fullness</th><th>Stock</th><th>Capacity</th><th>%</th></tr></thead><tbody>
+      <tr><td>Sand</td><td><span class="stockbar"><span style="width:2%"></span></span></td><td>0</td><td>4,752</td><td class="neg">0%</td></tr>
+      <tr><td>Stone</td><td><span class="stockbar"><span style="width:2%"></span></span></td><td>0</td><td>4,644</td><td class="neg">0%</td></tr>
+      <tr><td>Cobblestone</td><td><span class="stockbar"><span style="width:2%"></span></span></td><td>0</td><td>3,672</td><td class="neg">0%</td></tr>
+      <tr><td>Andesite</td><td><span class="stockbar"><span style="width:20%"></span></span></td><td>560</td><td>2,862</td><td class="amb">20%</td></tr>
+    </tbody></table>
+    <div class="foot">219 items tracked · full list downloadable.</div>
+  </div>
+
+  <!-- ORDERS -->
+  <div class="page" id="p-orders">
+    <div class="mkt-head"><span class="mkt-dot"></span><h1>Orders — Nether market</h1></div>
+    <div class="sub">Owners manage their own board — no @Managers bottleneck. Rewards: <span class="pill g">1.5× loyalty</span> <span class="pill g">+500¢ / order</span></div>
+    <table><thead><tr><th>#</th><th>Item</th><th>Requested</th><th>Claimed</th><th>Status</th></tr></thead><tbody>
+      <tr><td>#412</td><td>Sand</td><td>4,752</td><td>2,400</td><td class="amb">partial</td></tr>
+      <tr><td>#411</td><td>Stone</td><td>4,644</td><td>0</td><td class="pos">open</td></tr>
+      <tr><td>#410</td><td>Cobblestone</td><td>3,672</td><td>3,672</td><td class="mut">claimed</td></tr>
+    </tbody></table>
+  </div>
+
+</div>
+
+<script>
+const MONTHS={
+  '2026-07':{income:107902,spent:18675,net:89226,sold:889,uniq:79,label:'July 2026',prevNet:49269,items:[
+    {item:'Diamond Leggings',sold:19,bought:0,net:28500},
+    {item:'Diamond Chestplate',sold:17,bought:0,net:25500},
+    {item:'Diamond Boots',sold:10,bought:0,net:15000},
+    {item:'Diamond Helmet',sold:10,bought:0,net:15000},
+    {item:'Blaze Rod',sold:64,bought:0,net:3180},
+    {item:'Diamond Pickaxe',sold:1,bought:0,net:3000},
+    {item:'Warped Stem',sold:768,bought:0,net:2580},
+  ]},
+  '2026-06':{income:96272,spent:47003,net:49269,sold:19050,uniq:79,label:'June 2026',prevNet:0,items:[
+    {item:'Glass',sold:3584,bought:0,net:15800},
+    {item:'Gilded Blackstone',sold:68,bought:0,net:13600},
+    {item:'Gunpowder',sold:104,bought:0,net:10079},
+    {item:'Blue Wool',sold:1152,bought:0,net:7830},
+    {item:'Red Wool',sold:646,bought:0,net:4895},
+    {item:'Iron Ingot',sold:160,bought:0,net:4400},
+    {item:'Diamond',sold:70,bought:0,net:3570},
+    {item:'Beacon',sold:1,bought:2,net:-24000},
+    {item:'Dirt',sold:0,bought:3456,net:-9396},
+    {item:'Ender Pearl',sold:0,bought:41,net:-4920},
+    {item:'Terracotta',sold:256,bought:1355,net:-3071},
+    {item:'Spider Eye',sold:0,bought:148,net:-2442},
+    {item:'Ancient Debris',sold:0,bought:1,net:-1650},
+    {item:'Tuff',sold:192,bought:256,net:-30},
+  ]},
+};
+const SUM={income:204174,spent:65678,net:138495,sold:19939,uniq:79,label:'All months',prevNet:null,fee:4154};
+let sortK='net',sortDir=-1;
+function fmt(n){const s=n<0?'-':'';return s+Math.abs(Math.round(n)).toLocaleString();}
+function short(n){const a=Math.abs(n);const s=n<0?'-':'+';if(a>=1000)return s+(a/1000).toFixed(1)+'k';return s+a;}
+function pickMonth(m){document.getElementById('month').value=m;renderEarn();}
+function sortBy(k){if(sortK===k)sortDir=-sortDir;else{sortK=k;sortDir=(k==='item')?1:-1;}renderTable();}
+
+function curData(){const m=document.getElementById('month').value;return m==='all'?null:MONTHS[m];}
+function aggItems(){const a={};Object.values(MONTHS).forEach(mo=>mo.items.forEach(it=>{const x=a[it.item]||(a[it.item]={item:it.item,sold:0,bought:0,net:0});x.sold+=it.sold;x.bought+=it.bought;x.net+=it.net;}));return Object.values(a);}
+
+function renderEarn(){
+  const m=document.getElementById('month').value;
+  const d=curData();
+  const inc=d?d.income:SUM.income, sp=d?d.spent:SUM.spent, net=d?d.net:SUM.net;
+  document.getElementById('mtag').textContent=d?(m==='2026-07'?'latest month':'past month'):'2 months';
+  document.getElementById('heroLbl').textContent='Net profit · '+(d?d.label:'All months');
+  document.getElementById('heroNet').textContent=(net>=0?'+':'')+fmt(net);
+  document.getElementById('heroNet').className='big '+(net>=0?'pos':'neg');
+  // trend
+  const prev=d?d.prevNet:null;const t=document.getElementById('heroTrend');
+  if(prev){const pct=Math.round((net-prev)/Math.abs(prev)*100);t.textContent=(pct>=0?'▲ ':'▼ ')+Math.abs(pct)+'%';t.className='trend '+(pct>=0?'up':'down');t.style.display='';document.getElementById('heroSubtitle').textContent='vs +'+fmt(prev)+' last month · ¢ coins';}
+  else{t.style.display='none';document.getElementById('heroSubtitle').textContent=(d?'first tracked month':'2 months tracked · avg +69,247/mo')+' · ¢ coins';}
+  // split
+  const tot=inc+sp||1;
+  document.getElementById('splitInc').style.width=(inc/tot*100)+'%';
+  document.getElementById('splitExp').style.width=(sp/tot*100)+'%';
+  document.getElementById('splitIncV').textContent=fmt(inc);
+  document.getElementById('splitExpV').textContent=fmt(sp);
+  document.getElementById('kSold').textContent=fmt(d?d.sold:SUM.sold);
+  document.getElementById('kUniq').textContent=d?d.uniq:SUM.uniq;
+  document.getElementById('kFee').textContent=fmt(inc*0.03);
+  // leaderboard
+  const items=d?d.items.slice():aggItems();
+  const sells=items.filter(i=>i.net>0).sort((a,b)=>b.net-a.net).slice(0,7);
+  const buys=items.filter(i=>i.net<0).sort((a,b)=>a.net-b.net).slice(0,4);
+  const maxS=Math.max(...sells.map(s=>s.net),1);
+  const maxB=Math.max(...buys.map(b=>Math.abs(b.net)),1);
+  document.getElementById('leadLbl').textContent="What's selling · "+(d?d.label:'all months');
+  document.getElementById('lead').innerHTML=sells.map((s,i)=>`
+    <div class="lrow"><div class="lrank">${i+1}</div>
+      <div class="lmid"><div class="lname">${s.item}</div><div class="lbar"><span style="width:${Math.max(4,s.net/maxS*100)}%"></span></div></div>
+      <div class="lmeta"><div class="lrev pos">+${fmt(s.net)}</div><div class="lqty">${fmt(s.sold)} sold</div></div></div>`).join('');
+  document.getElementById('costs').innerHTML=buys.length?buys.map(b=>`
+    <div class="lrow"><div class="lrank">·</div>
+      <div class="lmid"><div class="lname">${b.item}</div><div class="lbar r"><span style="width:${Math.max(4,Math.abs(b.net)/maxB*100)}%"></span></div></div>
+      <div class="lmeta"><div class="lrev neg">${fmt(b.net)}</div><div class="lqty">${fmt(b.bought)} bought</div></div></div>`).join(''):'<div class="foot">No costs this month.</div>';
+  renderTable();
+}
+function renderTable(){
+  const d=curData();let rows=d?d.items.slice():aggItems();
+  const q=document.getElementById('q').value.toLowerCase();const f=document.getElementById('flt').value;
+  rows=rows.filter(r=>r.item.toLowerCase().includes(q));
+  if(f==='income')rows=rows.filter(r=>r.net>0);if(f==='expense')rows=rows.filter(r=>r.net<0);
+  rows.sort((a,b)=>{let x=a[sortK],y=b[sortK];if(typeof x==='string')return x.localeCompare(y)*sortDir;return (x-y)*sortDir;});
+  document.getElementById('etb').innerHTML=rows.map(r=>{const cls=r.net>0?'pos':(r.net<0?'neg':'mut');const sg=r.net>0?'+':'';
+    return `<tr><td>${r.item}</td><td>${fmt(r.sold)}</td><td>${fmt(r.bought)}</td><td class="${cls}">${sg}${fmt(r.net)}</td></tr>`;}).join('')||'<tr><td colspan="4" class="mut">No items match.</td></tr>';
+}
+document.querySelectorAll('.nav-tab').forEach(t=>t.onclick=()=>{
+  document.querySelectorAll('.nav-tab').forEach(x=>x.classList.remove('active'));
+  document.querySelectorAll('.page').forEach(x=>x.classList.remove('active'));
+  t.classList.add('active');document.getElementById('p-'+t.dataset.p).classList.add('active');
+});
+renderEarn();
+</script>
+</body>
+</html>

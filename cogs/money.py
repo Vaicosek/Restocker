@@ -21,6 +21,8 @@ _open_payout_ticket = core._open_payout_ticket
 _owner_markets_for_user = core._owner_markets_for_user
 add_coins = core.add_coins
 any_item_autocomplete = core.any_item_autocomplete
+future_item_autocomplete = core.future_item_autocomplete
+_is_future_item = core._is_future_item
 bot = core.bot
 ephemeral_kwargs = core.ephemeral_kwargs
 is_manager = core.is_manager
@@ -61,8 +63,8 @@ class MoneyCog(commands.Cog):
         enchants="Required enchants/quality (e.g. 'Fortune III, Unbreaking' or 'Clean — no Silk Touch/Fortune, Unbreaking')",
         notes="Anything else workers/managers should know",
     )
-    @app_commands.autocomplete(item=any_item_autocomplete)
-    async def futures_order(self, 
+    @app_commands.autocomplete(item=future_item_autocomplete)
+    async def futures_order(self,
         interaction: discord.Interaction,
         item: str,
         quantity: int,
