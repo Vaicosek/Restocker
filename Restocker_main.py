@@ -725,6 +725,7 @@ def _auto_migrate_data_files() -> None:
             "items.yml", "markets.yml", "orders.yml", "balances.yml",
             "investors.yml", "hive_state.yml", "hive_pickups.yml",
             "platform_balance.yml", "Mconfig.yml", "brew_aliases.yml",
+            "brew_effects_manual.yml",
         ],
     }
     keep = {"restocker.db", "restocker.db-wal", "restocker.db-shm"}
@@ -4475,11 +4476,20 @@ def _save_brew_aliases(aliases: dict) -> bool:
 
 def _apply_brew_aliases(items: dict) -> dict:
     aliases = _load_brew_aliases()
-    if not aliases:
+    manual  = _load_manual_brew_effects()          # hand-curated, wins over everything
+    if not aliases and not manual:
         return items
     out: dict = {}
     for key, v in items.items():
-        display = aliases.get(key, key)
+        display = None
+        if manual:
+            eff = manual.get(_fold_brew_name(key))
+            if eff:
+                base = _strip_item_code(re.sub(r"[&§]#?[0-9a-fA-F]{6}", "", str(key))) or str(key)
+                # avoid "Nos - Haste 5 - Haste 5" if the name already states it
+                display = base if eff.lower() in base.lower() else f"{base} — {eff}"
+        if display is None:
+            display = aliases.get(key, key)
         if display in out:
             out[display]["sold_qty"]  += v.get("sold_qty", 0)
             out[display]["net_coins"] += v.get("net_coins", 0.0)
@@ -4515,6 +4525,63 @@ def _strip_item_code(name) -> str:
     shown. Also strips any leftover § colour codes."""
     n = _strip_mc_codes(name)
     return re.sub(r"\s*#[0-9A-Za-z]{1,8}$", "", n).strip()
+
+
+# ── Manual (hand-curated) brew → effect map ──────────────────────────────────
+# Filled from the "brews" #recipes forum. Entries here override the auto-parser
+# and are NEVER touched by learn/purge. File lives at data/state/ and is matched
+# fuzzily (codes, #hash, fancy unicode, case & punctuation all ignored).
+BREW_MANUAL_FILE = "brew_effects_manual.yml"
+
+# Latin small-capital letters used by fancy in-game names (e.g. "ꜱᴄʜɪᴢᴏ ᴊᴜɪᴄᴇ").
+# NFKD normalisation folds math-bold/italic/script styles but NOT these, so map
+# them by hand back to ASCII before matching.
+_BREW_SMALLCAPS = {
+    "ᴀ": "a", "ʙ": "b", "ᴄ": "c", "ᴅ": "d", "ᴇ": "e", "ꜰ": "f", "ɢ": "g",
+    "ʜ": "h", "ɪ": "i", "ᴊ": "j", "ᴋ": "k", "ʟ": "l", "ᴍ": "m", "ɴ": "n",
+    "ᴏ": "o", "ᴘ": "p", "ꞯ": "q", "ʀ": "r", "ꜱ": "s", "ᴛ": "t", "ᴜ": "u",
+    "ᴠ": "v", "ᴡ": "w", "ʏ": "y", "ᴢ": "z",
+}
+
+
+def _fold_brew_name(name) -> str:
+    """Normalise a brew's in-game name to a plain matching key: strip § / & colour
+    codes and the trailing #variant-hash, fold small-caps + math-styled unicode to
+    ASCII, lowercase, and squash punctuation/whitespace. So 'ꜱᴄʜɪᴢᴏ ᴊᴜɪᴄᴇ',
+    '§aSchizo Juice#3UI' and 'schizo juice' all fold to 'schizo juice'."""
+    import unicodedata
+    s = re.sub(r"[&§]#?[0-9a-fA-F]{6}", "", str(name or ""))    # &#RRGGBB / §RRGGBB hex colour
+    s = _strip_item_code(s)                                     # legacy § / & codes + trailing #hash
+    s = "".join(_BREW_SMALLCAPS.get(ch, ch) for ch in s)        # small-caps → ascii
+    s = unicodedata.normalize("NFKD", s)                        # math-bold/italic → ascii
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    s = re.sub(r"[^a-z0-9]+", " ", s.lower()).strip()           # drop punctuation
+    return s
+
+
+def _load_manual_brew_effects() -> dict:
+    """Load the hand-curated brew→effect map as {folded_name: 'effects'}. Accepts
+    either a top-level 'brews:' mapping or a flat name→effects mapping. Returns {}
+    if the file is missing/empty."""
+    raw = load_yaml(BREW_MANUAL_FILE, None)
+    if not isinstance(raw, dict):
+        return {}
+    src = raw.get("brews", raw)
+    if not isinstance(src, dict):
+        return {}
+    out: dict = {}
+    for k, v in src.items():
+        eff = str(v or "").strip()
+        fk = _fold_brew_name(k)
+        if fk and eff:
+            out[fk] = eff
+    return out
+
+
+def _manual_brew_effects_for(name) -> str:
+    """Return the curated effect string for a brew name, or '' if not mapped."""
+    mp = _load_manual_brew_effects()
+    return mp.get(_fold_brew_name(name), "") if mp else ""
 
 
 def _parse_brew_effects(lore) -> str:

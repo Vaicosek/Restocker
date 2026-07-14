@@ -2620,7 +2620,14 @@ def _load_inventory_data() -> dict:
                 disp = m._strip_item_code(it)
             except Exception:
                 disp = it
-            items.append({"item": disp or it, "stock": cur, "capacity": cap,
+            disp = disp or it
+            try:
+                _eff = m._manual_brew_effects_for(it)
+                if _eff and _eff.lower() not in disp.lower():
+                    disp = f"{disp} — {_eff}"
+            except Exception:
+                pass
+            items.append({"item": disp, "stock": cur, "capacity": cap,
                           "pct": round(pct, 1), "owner": r.get("owner") or "", "price": price})
         items.sort(key=lambda x: x["pct"])
         low = sum(1 for x in items if x["capacity"] > 0 and x["pct"] <= 20.0)
