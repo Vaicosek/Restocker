@@ -2547,12 +2547,15 @@ def _public_markets(markets: dict) -> dict:
 
 
 def _load_inventory_data() -> dict:
-    """Live shop-stock / barrel fullness per market, lowest fullness first (read-only)."""
+    """Per-market barrel fullness for the Inventory tab. Merges the live barrel scan
+    (stock + capacity + listed price) with the catalog, so EVERY market shows up — not just
+    the barrel-scanned ones — and DERIVES a 1-barrel capacity (54 × stack) whenever a scan
+    didn't store one, so fullness always renders like the markets that already work."""
     try:
         import Restocker_db as db
-        rows = db.get_all_market_stock()
+        import Restocker_main as m
     except Exception as e:
-        print(f"[inventory] DB unavailable: {e}")
+        print(f"[inventory] modules unavailable: {e}")
         return {"markets": []}
     names = {}
     try:
@@ -2560,31 +2563,65 @@ def _load_inventory_data() -> dict:
             names[mid] = (info.get("name") if isinstance(info, dict) else None) or mid
     except Exception:
         pass
-    by_market = {}
-    for r in rows:
-        mid = r.get("market_id") or "main"
-        cap = int(r.get("capacity") or 0)
-        cur = int(r.get("stock") or 0)
-        pct = (100.0 * cur / cap) if cap > 0 else 100.0
-        # The barrel scan also carries the shop's listed price — surface it so the
-        # Inventory view shows price alongside fullness (sell first, else buy).
-        _sp = r.get("sell_price")
-        if _sp is None or float(_sp or 0) <= 0:
-            _sp = r.get("buy_price")
+    # Catalog: every item per market, with its price + stack size (fallbacks below).
+    catalog = {}
+    try:
+        for name, info in (db.get_items() or {}).items():
+            mid = info.get("market_id") or "main"
+            catalog.setdefault(mid, {})[name] = {
+                "coin": float(info.get("coin", 0) or 0),
+                "stack": int(info.get("stack_size", 0) or 0) or None,
+            }
+    except Exception:
+        pass
+    # Scan: stock / capacity / listed price per (market, item).
+    scan = {}
+    try:
+        for r in (db.get_all_market_stock() or []):
+            scan.setdefault(r.get("market_id") or "main", {})[r.get("item")] = r
+    except Exception:
+        pass
+
+    def _cap_for(item, stack_hint):
         try:
-            price = round(float(_sp), 2) if _sp not in (None, "") and float(_sp) > 0 else 0
+            ss = m._detect_stack_size(item)
         except Exception:
-            price = 0
-        by_market.setdefault(mid, []).append({
-            "item": r.get("item"), "stock": cur, "capacity": cap or cur,
-            "pct": round(pct, 1), "owner": r.get("owner") or "", "price": price})
+            ss = 0
+        if not ss or ss <= 0:
+            ss = stack_hint or 64
+        return 54 * ss                       # one full barrel = 54 slots × stack size
+
     out = []
-    for mid, items in by_market.items():
+    for mid in (set(catalog) | set(scan)):
+        cat = catalog.get(mid, {})
+        sc = scan.get(mid, {})
+        items = []
+        for it in (set(cat) | set(sc)):
+            r = sc.get(it) or {}
+            cur = int(r.get("stock") or 0)
+            cap = int(r.get("capacity") or 0)
+            if cap <= 0:
+                cap = _cap_for(it, (cat.get(it) or {}).get("stack"))
+            cap = max(cap, cur)
+            pct = (100.0 * cur / cap) if cap > 0 else 0.0
+            _sp = r.get("sell_price")
+            if _sp is None or float(_sp or 0) <= 0:
+                _sp = r.get("buy_price")
+            try:
+                price = round(float(_sp), 2) if _sp not in (None, "") and float(_sp) > 0 else 0
+            except Exception:
+                price = 0
+            if not price:
+                price = round(float((cat.get(it) or {}).get("coin", 0) or 0), 2)
+            items.append({"item": it, "stock": cur, "capacity": cap,
+                          "pct": round(pct, 1), "owner": r.get("owner") or "", "price": price})
+        if not items:
+            continue
         items.sort(key=lambda x: x["pct"])
         low = sum(1 for x in items if x["capacity"] > 0 and x["pct"] <= 20.0)
         out.append({"market_id": mid, "name": names.get(mid, mid),
                     "items": items, "count": len(items), "low": low})
-    out.sort(key=lambda m: m["low"], reverse=True)
+    out.sort(key=lambda mm: mm["low"], reverse=True)
     return {"markets": out}
 
 

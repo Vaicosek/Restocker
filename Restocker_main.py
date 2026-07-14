@@ -2368,6 +2368,27 @@ def _learn_brew_aliases_from_stock(rows: list) -> int:
     return learned
 
 
+def _purge_garbage_brew_aliases() -> int:
+    """Delete brew aliases whose value still carries raw Minecraft § colour codes. Those are
+    garbage learned before the code-stripping fix (a hand-set alias never contains §), so the
+    brew falls back to its plain name until a clean scan or a manual /brew set. Returns count."""
+    try:
+        aliases = _load_brew_aliases()
+    except Exception:
+        return 0
+    bad = [k for k, v in (aliases or {}).items() if "§" in str(v)]
+    if not bad:
+        return 0
+    for k in bad:
+        aliases.pop(k, None)
+    try:
+        _save_brew_aliases(aliases)
+    except Exception:
+        return 0
+    log.info("[brew] purged %d garbage brew alias(es) with colour codes", len(bad))
+    return len(bad)
+
+
 def _fullness_bar(pct: float, width: int = 10) -> str:
     pct = max(0.0, min(100.0, float(pct)))
     filled = int(round(pct / 100.0 * width))
@@ -3087,6 +3108,13 @@ async def on_ready():
     _ready_once = True
 
     _auto_migrate_data_files()
+
+    try:
+        _pn = _purge_garbage_brew_aliases()
+        if _pn:
+            print(f"🧪 Purged {_pn} garbage brew alias(es) carrying raw colour codes.")
+    except Exception as _pe:
+        print(f"⚠️ brew alias purge failed: {_pe}")
 
     await bot.wait_until_ready()
     print(f"✅ Logged in as {bot.user}")
