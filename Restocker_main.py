@@ -2351,7 +2351,8 @@ def _learn_brew_aliases_from_stock(rows: list) -> int:
     learned = 0
     for r in (rows or []):
         raw = str(r.get("raw_item") or "").strip()
-        if not raw or "#" not in raw or raw in aliases:
+        # Skip existing aliases, except heal ones still carrying raw § colour codes.
+        if not raw or "#" not in raw or (raw in aliases and "§" not in str(aliases[raw])):
             continue
         eff = _parse_brew_effects(r.get("lore") or [])
         if not eff:
@@ -4467,22 +4468,40 @@ _POTION_EFFECTS = {
     "instant health", "healing", "instant damage", "harming", "turtle master", "levitation",
     "wither", "nausea", "blindness", "mining fatigue", "saturation", "hunger", "glowing",
     "conduit power", "dolphin's grace", "dolphins grace", "bad omen", "hero of the village",
-    "decay", "health boost", "slow fall",
+    "decay", "health boost", "slow fall", "unluck", "bad luck", "darkness", "wind charged",
+    "weaving", "oozing", "infested",
 }
 
 
+def _strip_mc_codes(s) -> str:
+    """Remove Minecraft formatting/colour codes — a section sign (§, U+00A7) or & followed
+    by a single character. Hex colours (§x§R§R§G§G§B§B) are just six of those pairs, so this
+    strips them too."""
+    return re.sub(r"[§&].", "", str(s or ""))
+
+
 def _parse_brew_effects(lore) -> str:
-    """Extract readable potion-effect lines (e.g. 'Strength II', 'Speed II', 'Slow Falling')
-    from a brew's captured lore, dropping the '(3:00)' duration tails. Returns them joined,
-    or '' if nothing in the lore looks like a potion effect."""
+    """Extract readable potion effects (e.g. 'Strength II', 'Luck 3', 'Mining Fatigue 1')
+    from a brew's captured lore. First strips Minecraft colour/format codes, then keeps only
+    comma-segments that look like a real effect — an effect NAME immediately followed by a
+    level (roman numeral or digit) — so flavour text ('a spectacular mix of vodka…') and the
+    duration tails ('65 Minutes', '30s') are ignored. Returns '' if none found."""
     out, seen = [], set()
     for raw in (lore or []):
-        s = re.split(r"[(\[]", str(raw))[0].strip()   # drop duration/amplifier parens
-        low = s.lower()
-        if s and any(eff in low for eff in _POTION_EFFECTS):
-            if low not in seen:
-                seen.add(low)
-                out.append(s)
+        s = _strip_mc_codes(raw)
+        for seg in s.split(","):
+            seg = re.split(r"[(\[]", seg)[0].strip()   # drop a "(3:00)" tail if present
+            if not seg:
+                continue
+            m = re.match(r"^([A-Za-z][A-Za-z' ]{1,24}?)\s+([IVXLC]{1,4}|\d{1,3})\b", seg)
+            if not m:
+                continue
+            name = m.group(1).strip().lower()
+            if name in _POTION_EFFECTS or any(e.startswith(name) or name.startswith(e) for e in _POTION_EFFECTS):
+                label = seg[:m.end()].strip()
+                if label.lower() not in seen:
+                    seen.add(label.lower())
+                    out.append(label)
     return ", ".join(out)
 
 
@@ -4506,7 +4525,9 @@ def _learn_brew_aliases_from_profiles(profiles: dict) -> int:
         name = dn if dn else f"{base} - {effects}"
         for h in (prof.get("known_hashes") or []):
             h = str(h).strip()
-            if not h or h in aliases:      # don't clobber existing / manual aliases
+            # Skip existing aliases, EXCEPT heal ones still carrying raw § colour codes
+            # (garbage learned before the code-stripping fix).
+            if not h or (h in aliases and "§" not in str(aliases[h])):
                 continue
             aliases[h] = name
             learned += 1

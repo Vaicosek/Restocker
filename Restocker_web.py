@@ -950,9 +950,6 @@ _PAGE = """<!DOCTYPE html>
   <div class="nav-tab active" data-page="inventory">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h18v4H3zM3 10h18v4H3zM3 17h18v4H3z"/></svg>Inventory
   </div>
-  <div class="nav-tab" data-page="prices">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>Prices
-  </div>
   <div class="nav-tab" data-page="earnings">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M7 16v-5M12 16V8M17 16v-9"/></svg>Ledger
   </div>
@@ -1067,8 +1064,8 @@ _PAGE = """<!DOCTYPE html>
   #page-earnings .lg-hero-sub{color:var(--muted);font-size:12px;margin:6px 0 12px}
   #page-earnings .lg-chartbox{position:relative;height:150px}
   #page-earnings .lg-donutbox{height:150px}
-  #page-earnings .lg-donut-center{position:absolute;top:42%;left:0;right:0;text-align:center;pointer-events:none}
-  #page-earnings .lg-dn{font-family:var(--font-data);font-size:22px;font-weight:600}
+  #page-earnings .lg-donut-center{position:absolute;top:38%;left:0;right:0;text-align:center;pointer-events:none;padding:0 6px}
+  #page-earnings .lg-dn{font-family:var(--font-data);font-size:17px;font-weight:600;line-height:1.15;white-space:nowrap}
   #page-earnings .lg-dl{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em}
   #page-earnings .lg-legend{display:flex;flex-direction:column;gap:8px;margin-top:14px}
   #page-earnings .lg-lg{display:flex;align-items:center;justify-content:space-between;font-size:12px;color:var(--text-body);font-family:var(--font-data)}
@@ -1801,7 +1798,10 @@ document.querySelectorAll(".nav-tab").forEach(tab => {
 
   function mLabel(mid){ const m = (typeof MARKETS !== "undefined" && MARKETS[mid]); return m ? (m.name || mid) : (mid === "main" ? "Main" : mid); }
   function fmt(n){ n = Math.round(n || 0); return (n < 0 ? "-" : "") + Math.abs(n).toLocaleString(); }
-  function shortK(n){ const a = Math.abs(n), s = n < 0 ? "-" : "+"; return a >= 1000 ? s + (a/1000).toFixed(a >= 100000 ? 0 : 1) + "k" : s + Math.round(a); }
+  function shortK(n){ const a = Math.abs(n), s = n < 0 ? "-" : "+";
+    if (a >= 1e6) return s + (a/1e6).toFixed(a >= 1e8 ? 0 : 1) + "M";
+    if (a >= 1000) return s + (a/1000).toFixed(a >= 1e5 ? 0 : 1) + "k";
+    return s + Math.round(a); }
   function esc2(s){ return (typeof esc === "function") ? esc(s) : String(s).replace(/</g,"&lt;"); }
 
   if (!marketIds.length) { if (emptyEl) emptyEl.style.display = ""; return; }
@@ -1984,11 +1984,15 @@ document.querySelectorAll(".nav-tab").forEach(tab => {
     rows.sort((a, b) => { let x = a[sortK], y = b[sortK]; if (typeof x === "string") return x.localeCompare(y) * sortDir; return ((x || 0) - (y || 0)) * sortDir; });
     if (!rows.length) { tbody.innerHTML = items.length ? '<tr><td colspan="5" style="color:var(--muted)">No items match.</td></tr>' : ""; if (!items.length) emptyEl.style.display = ""; return; }
     emptyEl.style.display = "none";
+    // Merge in the catalog/market price so Inventory doubles as the Prices view: use the
+    // scanned listing price, else fall back to this market's derived price.
+    const mp = (typeof MARKET_PRICES !== "undefined" && MARKET_PRICES[mk.market_id]) || {};
     tbody.innerHTML = rows.map(x => {
       const pct = Math.min(100, Math.max(0, x.pct || 0));
+      const px = (x.price > 0) ? x.price : ((mp[x.item] && mp[x.item].coin) || 0);
       return `<tr><td class="item-name">${esc2(x.item)}</td>` +
         `<td><span class="iv-fill"><span style="width:${Math.max(2, pct)}%;background:${fillColor(x.pct)}"></span></span> <span class="${pctCls(x.pct)}">${Math.round(x.pct)}%</span></td>` +
-        `<td>${fmt(x.stock)}</td><td>${fmt(x.capacity)}</td><td>${price(x.price)}</td></tr>`;
+        `<td>${fmt(x.stock)}</td><td>${fmt(x.capacity)}</td><td>${price(px)}</td></tr>`;
     }).join("");
   }
 

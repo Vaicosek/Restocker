@@ -267,13 +267,14 @@ class AdminCog(commands.Cog):
 
     @admin.command(
         name="backfill_team_perf",
-        description="(Managers) Credit a manager's OWN past fulfillments to their team ledger")
+        description="(Managers) Recover past fulfillments missing from the team ledger")
     @app_commands.describe(
         apply="false = dry-run preview (default); true = actually write the ledger rows")
     async def backfill_team_perf(self, interaction: discord.Interaction, apply: bool = False):
-        # Recovers team-ledger rows the old bug dropped when a MANAGER fulfilled their own
-        # order (they had no manager above them, so _log_team_event no-op'd). Idempotent
-        # (skips orders already logged) and only touches that exact dropped case.
+        # Recovers team-ledger rows that were dropped when an order was approved BEFORE the
+        # worker was linked to a team (or when a manager self-fulfilled). Attributes each to
+        # the worker's CURRENT team. Idempotent — skips any order already in the ledger, so
+        # it never double-counts.
         if not is_manager(interaction):
             return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
         await interaction.response.defer(ephemeral=True, thinking=True)
@@ -302,12 +303,19 @@ class AdminCog(commands.Cog):
             for wid, qty in pairs:
                 if not wid or qty <= 0:
                     continue
-                # Only the dropped case: claimer owns a team AND has no manager above them.
-                # Workers-under-a-manager were logged fine, so skip (no double-count).
-                if _db.get_manager_of(wid) or not _db.get_team(wid):
-                    continue
                 detail = f"order#{o.get('id')}"
+                # Idempotent: if this order is already in the ledger for this worker, skip
+                # (never double-count). Only genuinely-dropped rows get recovered.
                 if _db.team_perf_exists(wid, detail, "order"):
+                    continue
+                # Attribute to the worker's CURRENT team: their manager if they're a worker,
+                # else themselves if they own a team. No team affiliation → can't attribute.
+                mgr = _db.get_manager_of(wid)
+                if mgr:
+                    manager_id = str(mgr)
+                elif _db.get_team(wid):
+                    manager_id = wid
+                else:
                     continue
                 try:
                     coins = int(core._coins_for_pieces(o, qty, items_data))
@@ -315,7 +323,7 @@ class AdminCog(commands.Cog):
                     coins = 0
                 if coins <= 0:
                     continue
-                to_write.append((wid, qty, coins, detail))
+                to_write.append((manager_id, wid, qty, coins, detail))
                 p = plan.setdefault(wid, {"orders": 0, "coins": 0})
                 p["orders"] += 1; p["coins"] += coins
         if not to_write:
@@ -335,9 +343,9 @@ class AdminCog(commands.Cog):
                 f"**Dry run** — {len(to_write)} ledger row(s) would be written:\n{summary}\n\n"
                 f"Review the amounts, then re-run with `apply:true` to commit.", ephemeral=True)
         n = 0
-        for wid, qty, coins, detail in to_write:
+        for manager_id, wid, qty, coins, detail in to_write:
             try:
-                _db.record_team_perf(wid, wid, "order", coins=float(coins), qty=qty, detail=detail)
+                _db.record_team_perf(manager_id, wid, "order", coins=float(coins), qty=qty, detail=detail)
                 n += 1
             except Exception as e:
                 log.warning("[backfill] write failed for %s %s: %s", wid, detail, e)

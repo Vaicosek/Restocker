@@ -184,7 +184,7 @@ class MarketCog(commands.Cog):
             return await interaction.response.send_message(
                 "⛔ You need to be a manager, market owner, or market manager to view this.", ephemeral=True
             )
-        await interaction.response.defer(thinking=True)
+        await interaction.response.defer(thinking=True, ephemeral=True)  # shows the private code
 
         history = _load_csn_for_market(market_id)
         months = history.get("months") or {}
@@ -198,8 +198,24 @@ class MarketCog(commands.Cog):
             color=0x3498DB,
         )
         embed.add_field(name="Owner", value=f"<@{owner_id}>" if owner_id else "*Not set*", inline=True)
-        embed.add_field(name="Platform Fee", value=f"`{m.get('platform_fee_pct', PLATFORM_FEE_PCT)}%`", inline=True)
         embed.add_field(name="Status", value="🟢 Active" if m.get("active", True) else "🔴 Inactive", inline=True)
+
+        # Mod-connection + rewards (owner-relevant setup — this response is ephemeral).
+        code = (m.get("leader_code") or "").strip()
+        embed.add_field(name="Market ID", value=f"`{market_id}`", inline=True)
+        embed.add_field(name="Market Code", value=f"`{code}`" if code else "*Not set — /market_code*", inline=True)
+        rc = m.get("report_channel_id")
+        embed.add_field(name="Report Channel", value=(f"<#{rc}>" if rc else "*Not bound*"), inline=True)
+        try:
+            _pm, _cb = _market_loyalty_cfg(market_id)
+        except Exception:
+            _pm, _cb = 1.0, 0
+        _loy = []
+        if _pm != 1.0:
+            _loy.append(f"**{_pm:g}×** pts")
+        if _cb > 0:
+            _loy.append(f"**+{_cb:,}c** / order")
+        embed.add_field(name="Restock Rewards", value=(" · ".join(_loy) if _loy else "normal (1×, no bonus)"), inline=True)
         embed.add_field(
             name="Site Managers",
             value=", ".join(f"<@{uid}>" for uid in mgr_ids) if mgr_ids else "*None*",
@@ -216,8 +232,8 @@ class MarketCog(commands.Cog):
                 lines.append(f"{arrow} **{md.get('label', mk)}** — net `{net:+,}` 🪙")
             embed.add_field(name="📅 Recent Months", value="\n".join(lines), inline=False)
 
-        embed.set_footer(text=f"Created: {m.get('created_at', '?')[:10]}")
-        await interaction.followup.send(embed=embed)
+        embed.set_footer(text=f"Created: {m.get('created_at', '?')[:10]}  ·  only you can see this")
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
     @market.command(name="earnings", description="Monthly earnings report for a market — income, spending, net profit")
     @app_commands.describe(
