@@ -2593,7 +2593,9 @@ def _load_inventory_data() -> dict:
         return 54 * ss                       # one full barrel = 54 slots × stack size
 
     out = []
-    for mid in (set(catalog) | set(scan)):
+    # Include every registered market (from names) too, so a market with no scan/catalog
+    # items yet still shows up as an (empty) tab instead of silently vanishing.
+    for mid in (set(catalog) | set(scan) | set(names)):
         cat = catalog.get(mid, {})
         sc = scan.get(mid, {})
         items = []
@@ -2620,13 +2622,12 @@ def _load_inventory_data() -> dict:
                 disp = it
             items.append({"item": disp or it, "stock": cur, "capacity": cap,
                           "pct": round(pct, 1), "owner": r.get("owner") or "", "price": price})
-        if not items:
-            continue
         items.sort(key=lambda x: x["pct"])
         low = sum(1 for x in items if x["capacity"] > 0 and x["pct"] <= 20.0)
         out.append({"market_id": mid, "name": names.get(mid, mid),
                     "items": items, "count": len(items), "low": low})
-    out.sort(key=lambda mm: mm["low"], reverse=True)
+    # Markets with items first (most low-stock, then most items); empty markets last.
+    out.sort(key=lambda mm: (mm["count"] == 0, -mm["low"], -mm["count"]))
     return {"markets": out}
 
 
