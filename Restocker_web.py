@@ -977,6 +977,7 @@ _PAGE = """<!DOCTYPE html>
   #page-inventory .iv-tab:hover{color:var(--text)}
   #page-inventory .iv-tab.active{border-color:var(--accent);color:var(--accent)}
   #page-inventory .iv-search{background:var(--panel2);border:1px solid var(--border);color:var(--text);padding:8px 11px;font-size:12px;font-family:var(--font-data);flex:1;min-width:200px}
+  #page-inventory td.item-name{max-width:360px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   #page-inventory .iv-fill{height:8px;background:var(--panel2);position:relative;width:150px;display:inline-block;vertical-align:middle;overflow:hidden}
   #page-inventory .iv-fill>span{position:absolute;left:0;top:0;bottom:0}
   #page-inventory .iv-pos{color:var(--green)}#page-inventory .iv-amb{color:var(--amber)}#page-inventory .iv-neg{color:var(--red)}
@@ -2613,7 +2614,11 @@ def _load_inventory_data() -> dict:
                 price = 0
             if not price:
                 price = round(float((cat.get(it) or {}).get("coin", 0) or 0), 2)
-            items.append({"item": it, "stock": cur, "capacity": cap,
+            try:
+                disp = m._strip_item_code(it)
+            except Exception:
+                disp = it
+            items.append({"item": disp or it, "stock": cur, "capacity": cap,
                           "pct": round(pct, 1), "owner": r.get("owner") or "", "price": price})
         if not items:
             continue

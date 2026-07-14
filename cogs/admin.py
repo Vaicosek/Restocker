@@ -386,5 +386,21 @@ class AdminCog(commands.Cog):
         await interaction.response.send_message(body[:1950], ephemeral=True)
 
 
+    @admin.command(name="purge_brews",
+                   description="(Managers) Remove brew names still carrying raw § colour codes")
+    async def purge_brews(self, interaction: discord.Interaction):
+        if not is_manager(interaction):
+            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
+        try:
+            n = core._purge_garbage_brew_aliases()
+        except Exception as e:
+            return await interaction.response.send_message(f"⚠️ Failed: {e}", ephemeral=True)
+        await interaction.response.send_message(
+            (f"🧪 Purged **{n}** garbage brew alias(es) with colour codes. "
+             f"They'll get clean names on the next stock scan." if n
+             else "✅ No garbage brew aliases found — all clean."),
+            ephemeral=True)
+
+
 async def setup(bot):
     await bot.add_cog(AdminCog(bot))

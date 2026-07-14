@@ -4508,6 +4508,15 @@ def _strip_mc_codes(s) -> str:
     return re.sub(r"[§&].", "", str(s or ""))
 
 
+def _strip_item_code(name) -> str:
+    """Strip the mod's trailing variant hash from an item name for display — e.g.
+    'Diamond Sword#31J' → 'Diamond Sword', 'Potion#ddk' → 'Potion'. The mod appends a short
+    #<hash> (any letters/digits, not just hex) to tell NBT variants apart; it's noise once
+    shown. Also strips any leftover § colour codes."""
+    n = _strip_mc_codes(name)
+    return re.sub(r"\s*#[0-9A-Za-z]{1,8}$", "", n).strip()
+
+
 def _parse_brew_effects(lore) -> str:
     """Extract readable potion effects (e.g. 'Strength II', 'Luck 3', 'Mining Fatigue 1')
     from a brew's captured lore. First strips Minecraft colour/format codes, then keeps only
@@ -4517,19 +4526,27 @@ def _parse_brew_effects(lore) -> str:
     out, seen = [], set()
     for raw in (lore or []):
         s = _strip_mc_codes(raw)
-        for seg in s.split(","):
-            seg = re.split(r"[(\[]", seg)[0].strip()   # drop a "(3:00)" tail if present
+        # Split on commas, plus signs, and bracket boundaries so effects packed inside
+        # parentheses — "(Levitation 50 + Slow Falling)" — come out as separate segments.
+        for seg in re.split(r"[,+()\[\]]", s):
+            seg = seg.strip()
             if not seg:
                 continue
             m = re.match(r"^([A-Za-z][A-Za-z' ]{1,24}?)\s+([IVXLC]{1,4}|\d{1,3})\b", seg)
-            if not m:
-                continue
-            name = m.group(1).strip().lower()
-            if name in _POTION_EFFECTS or any(e.startswith(name) or name.startswith(e) for e in _POTION_EFFECTS):
+            if m:
+                name = m.group(1).strip().lower()
                 label = seg[:m.end()].strip()
-                if label.lower() not in seen:
-                    seen.add(label.lower())
-                    out.append(label)
+                ok = (name in _POTION_EFFECTS
+                      or any(e.startswith(name) or name.startswith(e) for e in _POTION_EFFECTS))
+            else:
+                # level-less effect line, e.g. "Slow Falling" — require an EXACT match so
+                # flavour text ("strength and agility") never slips through.
+                name = seg.lower()
+                label = seg
+                ok = name in _POTION_EFFECTS
+            if ok and label.lower() not in seen:
+                seen.add(label.lower())
+                out.append(label)
     return ", ".join(out)
 
 
