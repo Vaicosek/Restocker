@@ -738,6 +738,23 @@ def upsert_market(market_id: str, name: str, **kwargs):
         })
 
 
+def delete_market(market_id: str) -> dict:
+    """Delete a market and its per-market stock, stock alarms, and share listing. Sales
+    history and orders are intentionally left intact (audit trail). Returns a dict of how
+    many rows were removed from each table, e.g. {'markets':1,'market_stock':0,...}."""
+    counts = {}
+    with db() as conn:
+        for tbl in ("market_stock", "stock_alarms", "market_shares"):
+            try:
+                cur = conn.execute(f"DELETE FROM {tbl} WHERE market_id=?", (str(market_id),))
+                counts[tbl] = cur.rowcount
+            except Exception:
+                counts[tbl] = 0
+        cur = conn.execute("DELETE FROM markets WHERE market_id=?", (str(market_id),))
+        counts["markets"] = cur.rowcount
+    return counts
+
+
 def set_market_report_channel(market_id: str, channel_id) -> None:
     """Bind (or clear, with channel_id=None) a market's CSN report channel WITHOUT
     touching any other market field. upsert_market overwrites owner/managers/fee on

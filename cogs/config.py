@@ -26,6 +26,7 @@ _CHANNEL_KEYS = [
     ("Web-orders channel",        "WEB_ORDERS_CHANNEL_ID"),
     ("Futures approval channel",  "FUTURES_CHANNEL_ID"),
     ("CSN-report channel",        "CSN_REPORT_CHANNEL_ID"),
+    ("Trade-network forum channel", "NETWORK_FORUM_CHANNEL_ID"),
 ]
 _GUILD_KEY = ("Funds-report guild", "FUNDS_REPORT_GUILD_ID")
 
@@ -103,6 +104,78 @@ class ConfigCog(commands.Cog):
         db.delete_config(which.value)
         await interaction.response.send_message(
             f"✅ Cleared **{which.name}** override. Restart to revert to the .env default.", ephemeral=True)
+
+    # ── SW Trade Network broadcast (invite / toggle / manual post) — live, no restart ──
+    network = app_commands.Group(
+        name="network",
+        description="(Managers) SW Trade Network cross-server order broadcasting",
+        default_permissions=discord.Permissions(manage_guild=True),
+    )
+
+    @network.command(name="invite", description="Set the Discord invite workers use to claim network orders")
+    @app_commands.describe(url="A discord.gg/… invite to your server (leave empty to clear)")
+    async def network_invite(self, interaction: discord.Interaction, url: str = ""):
+        if not is_manager(interaction):
+            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
+        url = (url or "").strip()
+        db.set_config("NETWORK_INVITE_URL", url)
+        try:
+            setattr(core, "NETWORK_INVITE_URL", url)
+        except Exception:
+            pass
+        await interaction.response.send_message(
+            (f"✅ Network claim invite → {url}" if url else "✅ Cleared the network claim invite."),
+            ephemeral=True)
+
+    @network.command(name="autopost", description="Turn auto-posting new orders to the trade network on/off")
+    @app_commands.describe(enabled="True = auto-post every new order; False = off")
+    async def network_autopost(self, interaction: discord.Interaction, enabled: bool):
+        if not is_manager(interaction):
+            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
+        db.set_config("NETWORK_AUTOPOST", "true" if enabled else "false")
+        try:
+            setattr(core, "NETWORK_AUTOPOST", bool(enabled))
+        except Exception:
+            pass
+        warn = "" if getattr(core, "NETWORK_FORUM_CHANNEL_ID", 0) else \
+            "\n⚠️ No forum channel set yet — use `/config set_channel` → *Trade-network forum channel*."
+        await interaction.response.send_message(
+            f"✅ Trade-network auto-post **{'ON' if enabled else 'OFF'}**.{warn}", ephemeral=True)
+
+    @network.command(name="post",
+                     description="Post the consolidated open-orders batch to the trade network now (or one order to test)")
+    @app_commands.describe(order_id="Optional: a single order ID to test-post. Leave empty to post the full open-orders batch.")
+    async def network_post(self, interaction: discord.Interaction, order_id: int = 0):
+        if not is_manager(interaction):
+            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
+        if not getattr(core, "NETWORK_FORUM_CHANNEL_ID", 0):
+            return await interaction.response.send_message(
+                "❌ Set the forum channel first: `/config set_channel` → *Trade-network forum channel*.",
+                ephemeral=True)
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        # No id → post the whole consolidated batch (bypass the throttle for a manual push).
+        if not order_id:
+            try:
+                posted, note = await core._post_orders_batch_to_network(self.bot, force=True)
+            except Exception as e:
+                return await interaction.followup.send(f"⚠️ Post failed: {e}", ephemeral=True)
+            return await interaction.followup.send(
+                (f"✅ {note}" if posted else f"ℹ️ {note}"), ephemeral=True)
+        # Otherwise test-post that single order.
+        try:
+            data = core.load_orders()
+            order = next((o for o in (data.get("orders", []) or [])
+                          if int(o.get("id", 0) or 0) == int(order_id)), None)
+        except Exception as e:
+            return await interaction.followup.send(f"⚠️ Couldn't load orders: {e}", ephemeral=True)
+        if not order:
+            return await interaction.followup.send(f"❌ No order #{order_id}.", ephemeral=True)
+        try:
+            await core._post_order_to_network(self.bot, order)
+        except Exception as e:
+            return await interaction.followup.send(f"⚠️ Post failed: {e}", ephemeral=True)
+        await interaction.followup.send(
+            f"✅ Test-posted order #{order_id} to the trade-network forum.", ephemeral=True)
 
     # ── AI allow-list (who may @mention the bot's AI) — live, no restart needed ──
     ai_allow = app_commands.Group(

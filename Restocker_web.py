@@ -1226,6 +1226,24 @@ _PAGE = """<!DOCTYPE html>
   #page-orders .or-claimed{color:var(--muted)}
   </style>
   <div class="page" id="page-orders">
+    <div id="or-place" class="chart-card" style="margin-bottom:16px">
+      <div class="chart-title">🛒 Place an order</div>
+      <div id="or-place-locked" style="font-size:12.5px;color:var(--muted)">Log in (👤 top-right) to order — link your account with <code>/website_login</code> in Discord.</div>
+      <div id="or-place-form" style="display:none">
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin-bottom:10px">
+          <div><div class="lblmini">Item</div><input id="or-item" list="or-catalog" class="ownin" placeholder="Search catalog…" style="width:240px" autocomplete="off"><datalist id="or-catalog"></datalist></div>
+          <div><div class="lblmini">Qty</div><input id="or-qty" class="ownin" type="number" min="1" value="1" style="width:90px"></div>
+          <button class="auth-btn" id="or-add" type="button">Add</button>
+          <span id="or-add-msg" style="font-size:12px;color:var(--muted)"></span>
+        </div>
+        <table id="or-cart-tbl" style="display:none;width:100%;max-width:520px;margin-bottom:10px"><thead><tr><th>Item</th><th>Qty</th><th>Est. ¢</th><th></th></tr></thead><tbody id="or-cart"></tbody></table>
+        <div><div class="lblmini">Notes (optional)</div><input id="or-notes" class="ownin" placeholder="e.g. for war, deliver to spawn" style="width:100%;max-width:520px"></div>
+        <div style="margin-top:10px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+          <button class="auth-btn" id="or-submit" type="button">Submit order</button>
+          <span id="or-submit-msg" style="font-size:12px;color:var(--muted)"></span>
+        </div>
+      </div>
+    </div>
     <div class="stats" id="stats-orders"></div>
     <div class="or-bar"><div class="or-tabs" id="or-markets"></div></div>
     <div class="table-wrap">
@@ -2029,6 +2047,12 @@ document.querySelectorAll(".nav-tab").forEach(tab => {
   document.querySelectorAll('#page-inventory th[data-ivsort]').forEach(th => th.addEventListener("click", () => {
     const k = th.getAttribute("data-ivsort");
     if (sortK === k) sortDir = -sortDir; else { sortK = k; sortDir = (k === "item" || k === "pct") ? 1 : -1; }
+    document.querySelectorAll('#page-inventory th[data-ivsort]').forEach(t => {
+      t.classList.remove("sorted");
+      const a = t.querySelector(".sort-arrow"); if (a) a.textContent = "↕";
+    });
+    th.classList.add("sorted");
+    const a = th.querySelector(".sort-arrow"); if (a) a.textContent = sortDir === 1 ? "↑" : "↓";
     render();
   }));
   render();
@@ -2083,6 +2107,63 @@ document.querySelectorAll(".nav-tab").forEach(tab => {
     }).join("");
   }
   render();
+})();
+
+// ══════════════════════════ PLACE ORDER (cart) ═══════════════════════════════
+(function initOrderForm(){
+  const lock=document.getElementById("or-place-locked"), form=document.getElementById("or-place-form");
+  if(!form) return;
+  const dl=document.getElementById("or-catalog"), itemIn=document.getElementById("or-item"),
+        qtyIn=document.getElementById("or-qty"), addBtn=document.getElementById("or-add"),
+        addMsg=document.getElementById("or-add-msg"), cartBody=document.getElementById("or-cart"),
+        cartTbl=document.getElementById("or-cart-tbl"), notesIn=document.getElementById("or-notes"),
+        subBtn=document.getElementById("or-submit"), subMsg=document.getElementById("or-submit-msg");
+  const escg = s => (typeof esc==="function") ? esc(s) : String(s).replace(/</g,"&lt;");
+  const fmt = n => Math.round(n||0).toLocaleString();
+  let priceMap={}, nameSet={}, cart=[];
+
+  fetch("/api/items").then(r=>r.json()).then(items=>{
+    const names=Object.keys(items||{}).sort((a,b)=>a.localeCompare(b));
+    dl.innerHTML=names.map(n=>`<option value="${escg(n)}">`).join("");
+    names.forEach(n=>{ nameSet[n.toLowerCase()]=n; priceMap[n]=(items[n]&&items[n].coin)||0; });
+  }).catch(()=>{});
+
+  // Show the form only to logged-in users.
+  (window.OWNER_READY||Promise.resolve()).then(()=>fetch("/api/me").then(r=>r.json())).then(me=>{
+    if(me&&me.logged_in){ lock.style.display="none"; form.style.display=""; }
+  }).catch(()=>{});
+
+  function renderCart(){
+    if(!cart.length){ cartTbl.style.display="none"; cartBody.innerHTML=""; return; }
+    cartTbl.style.display="";
+    cartBody.innerHTML=cart.map((c,i)=>`<tr><td class="item-name">${escg(c.item)}</td><td>${fmt(c.qty)}</td><td>${fmt((priceMap[c.item]||0)*c.qty)}</td><td><span data-rm="${i}" style="cursor:pointer;color:var(--muted)">✕</span></td></tr>`).join("");
+    cartBody.querySelectorAll("[data-rm]").forEach(x=>x.onclick=()=>{ cart.splice(+x.getAttribute("data-rm"),1); renderCart(); });
+  }
+  function addToCart(){
+    addMsg.textContent="";
+    const raw=(itemIn.value||"").trim(), real=nameSet[raw.toLowerCase()], qty=parseInt(qtyIn.value||"0",10);
+    if(!real){ addMsg.textContent="Pick an item from the list."; return; }
+    if(!qty||qty<=0){ addMsg.textContent="Enter a quantity."; return; }
+    const ex=cart.find(c=>c.item===real);
+    if(ex) ex.qty+=qty; else cart.push({item:real,qty:qty});
+    itemIn.value=""; qtyIn.value="1"; itemIn.focus(); renderCart();
+  }
+  addBtn.onclick=addToCart;
+  itemIn.addEventListener("keydown",e=>{ if(e.key==="Enter"){ e.preventDefault(); addToCart(); }});
+  subBtn.onclick=async()=>{
+    subMsg.textContent="";
+    if(!cart.length){ subMsg.style.color="var(--amber)"; subMsg.textContent="Add at least one item."; return; }
+    const csrf=(window.OWNER&&window.OWNER.csrf)||"";
+    subBtn.disabled=true; subMsg.style.color="var(--muted)"; subMsg.textContent="Sending…";
+    let res;
+    try{
+      res=await fetch("/api/order",{method:"POST",headers:{"Content-Type":"application/json","X-CSRF-Token":csrf},
+        body:JSON.stringify({items:cart.map(c=>({item:c.item,qty:c.qty})),notes:(notesIn.value||"").trim()})}).then(r=>r.json());
+    }catch(e){ res={ok:false,error:"network error"}; }
+    subBtn.disabled=false;
+    if(res&&res.ok){ subMsg.style.color="var(--green)"; subMsg.textContent=`✅ Order #${res.order_id} sent — a manager will review it.`; cart=[]; notesIn.value=""; renderCart(); }
+    else{ subMsg.style.color="var(--amber)"; subMsg.textContent=(res&&res.error)||"Failed."; }
+  };
 })();
 
 // ══════════════════════════ STOCKS ═══════════════════════════════════════════
@@ -2617,16 +2698,13 @@ def _load_inventory_data() -> dict:
             if not price:
                 price = round(float((cat.get(it) or {}).get("coin", 0) or 0), 2)
             try:
-                disp = m._strip_item_code(it)
+                disp = m._pretty_item_name(it)          # strips lore junk, adds curated effects
             except Exception:
-                disp = it
+                try:
+                    disp = m._strip_item_code(it)
+                except Exception:
+                    disp = it
             disp = disp or it
-            try:
-                _eff = m._manual_brew_effects_for(it)
-                if _eff and _eff.lower() not in disp.lower():
-                    disp = f"{disp} — {_eff}"
-            except Exception:
-                pass
             items.append({"item": disp, "stock": cur, "capacity": cap,
                           "pct": round(pct, 1), "owner": r.get("owner") or "", "price": price})
         items.sort(key=lambda x: x["pct"])
@@ -3213,6 +3291,133 @@ async def _handle_owner_generate_orders(request):
     return web.json_response({"ok": True, "created": int(created), "items": preview})
 
 
+async def _handle_api_order(request):
+    """A logged-in customer places an order from the website (catalog items only, multi-item
+    cart). Saved to web_orders and posted to the web-orders Discord channel for the normal
+    manager approve/decline flow. Every order carries the customer's linked Discord ID."""
+    sess = _session_user(request)
+    if not sess:
+        return web.json_response(
+            {"ok": False, "error": "Log in first — run /website_login in Discord to link your account."},
+            status=401)
+    if not _csrf_ok(request):
+        return web.json_response({"ok": False, "error": "Session expired — reload the page and try again."},
+                                 status=403)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    raw_items = body.get("items") if isinstance(body.get("items"), list) else []
+    notes = str(body.get("notes") or "").strip()[:500]
+    if not raw_items:
+        return web.json_response({"ok": False, "error": "Your cart is empty."})
+
+    catalog = _cached("items", _load_items) or {}
+    cat_lookup = {str(k).strip().lower(): str(k) for k in catalog.keys()}
+    items, unknown = [], []
+    for it in raw_items[:40]:
+        if not isinstance(it, dict):
+            continue
+        name = str(it.get("item") or it.get("name") or "").strip()
+        try:
+            qty = int(it.get("qty") or 0)
+        except (TypeError, ValueError):
+            qty = 0
+        if not name or qty <= 0:
+            continue
+        real = cat_lookup.get(name.lower())
+        if not real:
+            unknown.append(name)
+            continue
+        items.append({"name": real, "qty": min(qty, 100000)})
+    if unknown:
+        return web.json_response({"ok": False, "error": "Not in the catalog: " + ", ".join(unknown[:5])})
+    if not items:
+        return web.json_response({"ok": False, "error": "Add at least one catalog item with a quantity."})
+
+    username   = sess.get("name") or "Web customer"
+    discord_id = str(sess.get("user_id") or "")
+    try:
+        import Restocker_db as _db
+        order_id = _db.save_web_order(discord_username=username, discord_id=discord_id,
+                                      items=items, notes=notes)
+    except Exception as e:
+        return web.json_response({"ok": False, "error": f"Couldn't save your order: {e}"}, status=500)
+
+    # Post the Discord approve/decline notification on the bot's own loop (fire-and-forget).
+    try:
+        notify = globals().get("_order_notify_fn")
+        import Restocker_main as _m
+        loop = getattr(_m, "_BOT_LOOP", None)
+        if notify is not None and loop is not None:
+            import asyncio as _a
+            _a.run_coroutine_threadsafe(notify(order_id, username, items, notes), loop)
+    except Exception as e:
+        print(f"⚠️ web order #{order_id} notify failed: {e}")
+
+    return web.json_response({"ok": True, "order_id": order_id, "count": len(items)})
+
+
+def _network_secret_ok(request) -> bool:
+    """Shared-secret auth for the satellite bot's /api/network/* calls. If V Helper has
+    no NETWORK_SHARED_SECRET set, the network API stays closed."""
+    try:
+        import Restocker_main as _m
+        want = str(getattr(_m, "NETWORK_SHARED_SECRET", "") or "")
+    except Exception:
+        return False
+    got = request.headers.get("X-Network-Secret", "")
+    return bool(want) and got == want
+
+
+async def _handle_network_orders(request):
+    """Satellite bot pulls the current open-order list to post in partner servers."""
+    if not _network_secret_ok(request):
+        return web.json_response({"ok": False, "error": "unauthorized"}, status=401)
+    import Restocker_main as _m
+    try:
+        orders = _m._network_open_orders()
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=500)
+    return web.json_response({"ok": True, "orders": orders})
+
+
+async def _handle_network_claim(request):
+    """Satellite bot reports that a worker in a partner server claimed an order."""
+    if not _network_secret_ok(request):
+        return web.json_response({"ok": False, "error": "unauthorized"}, status=401)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    try:
+        oid = int(body.get("order_id") or 0)
+    except (TypeError, ValueError):
+        oid = 0
+    wid   = str(body.get("worker_id") or "").strip()
+    wname = str(body.get("worker_name") or "worker").strip()[:64]
+    gid   = str(body.get("source_guild_id") or "").strip()
+    if not oid or not wid:
+        return web.json_response({"ok": False, "error": "order_id and worker_id are required"})
+
+    import Restocker_main as _m
+    try:
+        res = await _m.run_on_bot_loop(_m._record_network_claim, oid, wid, wname, gid)
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    # Fire-and-forget ping to the home worker channel (Discord I/O on the bot loop).
+    if res.get("ok"):
+        try:
+            loop = getattr(_m, "_BOT_LOOP", None)
+            if loop is not None:
+                import asyncio as _a
+                _a.run_coroutine_threadsafe(
+                    _m._notify_network_claim(oid, wid, wname, gid), loop)
+        except Exception as e:
+            print(f"⚠️ network claim notify failed: {e}")
+    return web.json_response(res)
+
 
 def start_webserver_thread(port: int = 8080):
     """Run the aiohttp server in its OWN OS thread + event loop so dashboard
@@ -3279,6 +3484,9 @@ async def start_webserver(port: int = 8080):
     app.router.add_get("/api/owner/loyalty",       _handle_owner_get_loyalty)
     app.router.add_post("/api/owner/set_loyalty",  _handle_owner_set_loyalty)
     app.router.add_post("/api/owner/generate_orders", _handle_owner_generate_orders)
+    app.router.add_post("/api/order",    _handle_api_order)
+    app.router.add_get("/api/network/orders", _handle_network_orders)
+    app.router.add_post("/api/network/claim", _handle_network_claim)
     app.router.add_get("/report/{market}/{month}", _handle_report)
     app.router.add_get("/report/{market}",         _handle_report)
     app.router.add_get("/shares/{market}",         _handle_shares)

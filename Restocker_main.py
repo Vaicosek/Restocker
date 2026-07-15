@@ -145,6 +145,23 @@ WEB_ORDERS_CHANNEL_ID = _env_int("WEB_ORDERS_CHANNEL_ID", 0)
 FUTURES_CHANNEL_ID = _env_int("FUTURES_CHANNEL_ID", 1524155131455737967)  # dedicated #futures approval channel
 TICKETS_CATEGORY_ID = _env_int("TICKETS_CATEGORY_ID", 1500543271783501884)
 
+# ── SW Trade Network cross-server broadcast ──────────────────────────────────
+# Our forum channel that's connected to the SW Trade Network bot (add its bot +
+# /setup). Every new order is auto-posted here; the network mirrors it to all its
+# partner servers. Buttons can't work cross-server, so the post carries CLAIM
+# LINKS back to us instead — a Discord invite (to link IGN + claim) and the site.
+DASHBOARD_URL           = _env_str("DASHBOARD_URL", "https://dashboard.vaicosmarket.com")
+NETWORK_FORUM_CHANNEL_ID = _env_int("NETWORK_FORUM_CHANNEL_ID", 0)   # 0 = disabled until set
+NETWORK_INVITE_URL      = _env_str("NETWORK_INVITE_URL", "")          # discord.gg/... for claimers
+NETWORK_AUTOPOST        = _env_str("NETWORK_AUTOPOST", "true").strip().lower() in ("1", "true", "yes", "on")
+NETWORK_POST_TAG        = _env_str("NETWORK_POST_TAG", "Job Listing")  # SWTN standard forum tag to apply
+# Network caps new posts at 3/hour/guild — throttle the consolidated batch post to at most once
+# per this many minutes (30 → ≤2/hour, safe headroom).
+NETWORK_MIN_INTERVAL_MIN = _env_int("NETWORK_MIN_INTERVAL_MIN", 30)
+# Shared secret for the lightweight satellite bot's /api/network/* calls. Must match
+# NETWORK_SHARED_SECRET in the satellite's .env. Empty = the network API is disabled.
+NETWORK_SHARED_SECRET   = _env_str("NETWORK_SHARED_SECRET", "")
+
 HIVE_ACCESS_DM_TARGET_ID = _env_int("HIVE_ACCESS_DM_TARGET_ID", 1203738126850461738)
 MANAGER_DM_IDS: list[int] = _env_ids("MANAGER_DM_IDS", [1203738126850461738, 694299644825698424])
 
@@ -2369,25 +2386,92 @@ def _learn_brew_aliases_from_stock(rows: list) -> int:
     return learned
 
 
+# ── Brew lore junk: state tags, quality bar, durations, in-lore market ads ────
+# Brewery bakes flavour into a potion's lore/name: state tags ("Barrel aged",
+# "Distilled", "Alcoholic"), a quality star bar "[·····]", effect durations
+# ("5 Min", "180s"), and some markets even embed adverts ("@ /la spawn X",
+# "Shop at /La Spawn X"). None of it is a real effect — strip it on display.
+_BREW_JUNK_RE = re.compile(
+    r"§"                                                   # leftover colour code
+    r"|[•·]"                                               # quality star bar dot
+    r"|\[[^\]]{0,24}\]"                                    # [·····] quality bar
+    r"|barrel[\s\-]*aged|distill\w*|alcoholic|fermented|unlabel\w*|sealed"  # state tags
+    r"|/la\b|shop\s+at|spawn\s+\w*market|@\s*/"            # in-lore market ads
+    r"|\b\d+\s*(?:minutes?|mins?|seconds?|secs?|[sm])\b",  # durations 5 Min / 30s / 180s
+    re.IGNORECASE)
+
+
+def _brew_text_has_junk(s) -> bool:
+    """True if a string carries Brewery lore-junk (state tags / quality bar / durations /
+    ads) or any emoji / pictograph — i.e. it is not a clean effect or plain name."""
+    t = str(s or "")
+    if not t.strip():
+        return True
+    if _BREW_JUNK_RE.search(t):
+        return True
+    for ch in t:                                           # emoji / symbols (❤ 🔥 ♻ ☾ …)
+        o = ord(ch)
+        if o >= 0x1F000 or 0x2190 <= o <= 0x2BFF or 0x2600 <= o <= 0x27BF:
+            return True
+    return False
+
+
+def _looks_like_potion_name(s) -> bool:
+    """True for a tidy vanilla-potion type name we can keep as-is, e.g.
+    'Splash Potion of Strong Healing', 'Potion of Long Turtle Master'."""
+    t = str(s or "").strip().lower()
+    return t.startswith(("potion of", "splash potion of", "lingering potion of",
+                         "splash potion", "lingering potion"))
+
+
+def _clean_brew_effect_text(value):
+    """Re-derive a clean label from a possibly-garbage alias value by running it back through
+    the effect whitelist: ads, state tags, the quality bar, durations, emoji and flavour prose
+    all fall away, leaving only real potion effects. Returns 'Base - Effects', a clean vanilla
+    potion name, or None when nothing meaningful survives (caller drops the alias)."""
+    s = str(value or "").strip()
+    if not s:
+        return None
+    base, sep, tail = s.partition(" - ")
+    eff = _parse_brew_effects([tail if sep else s])
+    if eff:
+        return f"{base} - {eff}" if sep else eff
+    cand = (tail if sep else s).strip()
+    if _looks_like_potion_name(cand) and not _brew_text_has_junk(cand):
+        return cand
+    return None
+
+
 def _purge_garbage_brew_aliases() -> int:
-    """Delete brew aliases whose value still carries raw Minecraft § colour codes. Those are
-    garbage learned before the code-stripping fix (a hand-set alias never contains §), so the
-    brew falls back to its plain name until a clean scan or a manual /brew set. Returns count."""
+    """Re-clean every learned brew alias in place: strip in-lore ads, Brewery state tags
+    (Barrel aged / Distilled / Alcoholic), the quality bar, durations, emoji and flavour
+    prose — keeping only real potion effects. Aliases that reduce to nothing meaningful are
+    removed so the brew shows its plain name (or its manual-map effects). Also clears any
+    legacy §-code garbage. Returns how many aliases were changed or removed."""
     try:
         aliases = _load_brew_aliases()
     except Exception:
         return 0
-    bad = [k for k, v in (aliases or {}).items() if "§" in str(v)]
-    if not bad:
+    if not aliases:
         return 0
-    for k in bad:
-        aliases.pop(k, None)
-    try:
-        _save_brew_aliases(aliases)
-    except Exception:
-        return 0
-    log.info("[brew] purged %d garbage brew alias(es) with colour codes", len(bad))
-    return len(bad)
+    affected = 0
+    for k in list(aliases.keys()):
+        old = str(aliases.get(k) or "")
+        new = _clean_brew_effect_text(old)
+        if new is None:
+            aliases.pop(k, None)
+            affected += 1
+        elif new != old:
+            aliases[k] = new
+            affected += 1
+    if affected:
+        try:
+            _save_brew_aliases(aliases)
+        except Exception:
+            return 0
+        log.info("[brew] re-cleaned %d brew alias(es) (ads/state-tags/quality/flavour removed)",
+                 affected)
+    return affected
 
 
 def _fullness_bar(pct: float, width: int = 10) -> str:
@@ -4292,6 +4376,276 @@ async def _handle_web_order(order_id: int, username: str, items: list, notes: st
         print(f"⚠️ Could not post web order notification: {e}")
 
 
+async def _post_order_to_network(client, order):
+    """Auto-post a new order to our SW-Trade-Network-connected forum channel so it fans out to
+    every partner server. Cross-server buttons can't work, so the post carries claim LINKS back
+    to us — a Discord invite (join → link IGN → claim) and the dashboard. The links go in the
+    plain message body too, so text-only network mirrors still keep them clickable. Best-effort;
+    never raises into the caller."""
+    try:
+        if not NETWORK_FORUM_CHANNEL_ID:
+            return
+        ch = client.get_channel(NETWORK_FORUM_CHANNEL_ID)
+        if ch is None:
+            return
+        oid  = int(order.get("id", 0) or 0)
+        item = str(order.get("item", "") or "item")
+        try:
+            qty = int(order.get("requested", order.get("amount", 0)) or 0)
+        except Exception:
+            qty = 0
+        try:
+            per = float(order.get("coin_per_piece", 0) or 0)
+        except Exception:
+            per = 0.0
+        try:
+            info = (_load_items().get("items", {}) or {}).get(item, {})
+            mid  = info.get("market_id", "main")
+            mkt  = (_load_markets().get("markets", {}) or {}).get(mid, {})
+            mkt_name = (mkt.get("name") if isinstance(mkt, dict) else None) or str(mid).capitalize()
+        except Exception:
+            mkt_name = "our market"
+        pay = f"{int(round(per*qty)):,}¢ total (~{int(round(per)):,}/ea)" if per > 0 else "see listing / negotiable"
+
+        links = []
+        if NETWORK_INVITE_URL:
+            links.append(f"🎟️ Claim on Discord: {NETWORK_INVITE_URL}  (join → link your IGN → claim in the orders channel)")
+        links.append(f"🌐 Or on the web: {DASHBOARD_URL}")
+        claim = "\n".join(links)
+
+        pretty = _pretty_item_name(item)
+        title  = f"[{mkt_name}] {qty}× {pretty}"[:96]
+        body   = (f"**Order #{oid}** — worker wanted.\n"
+                  f"**Item:** {pretty}\n**Qty:** {qty}\n**Pay:** {pay}\n\n{claim}")
+        embed = discord.Embed(title=title[:256], description=body[:4000],
+                              color=discord.Color.green(), timestamp=discord.utils.utcnow())
+        embed.set_footer(text="Posted via V Helper")
+
+        if isinstance(ch, discord.ForumChannel):
+            # Apply the SWTN standard tag (e.g. "Job Listing") if the forum has it, so the
+            # order shows in the network's category filters instead of untagged.
+            applied = []
+            try:
+                want = (NETWORK_POST_TAG or "").strip().lower()
+                if want:
+                    t = discord.utils.find(lambda x: x.name.lower() == want, ch.available_tags)
+                    if t:
+                        applied = [t]
+            except Exception:
+                applied = []
+            await ch.create_thread(name=title[:96], content=body[:1800], embed=embed,
+                                   applied_tags=applied)
+        else:
+            await ch.send(content=claim[:400], embed=embed)
+        log.info("[network] auto-posted order #%s to the trade network forum", oid)
+    except Exception as e:
+        log.warning("[network] auto-post for order #%s failed: %s", order.get("id"), e)
+
+
+def _network_open_orders(limit: int = 25) -> list:
+    """Open, unfilled orders as plain dicts for the satellite bot / network API:
+    [{id, item, qty, market, pay}]. Headless — no Discord objects, safe to call from
+    the web thread. Biggest-need first, capped at `limit` (Discord allows 25 options)."""
+    out = []
+    try:
+        data = load_orders()
+        items_map = _load_items().get("items", {}) or {}
+        markets   = _load_markets().get("markets", {}) or {}
+        rows = []
+        for o in (data.get("orders", []) or []):
+            if not isinstance(o, dict) or _order_is_claimed_closed(o):
+                continue
+            try:
+                rem = remaining_to_assign(o)
+            except Exception:
+                rem = int(o.get("requested", 0) or 0)
+            if rem > 0:
+                rows.append((o, rem))
+        rows.sort(key=lambda x: -x[1])
+        for o, rem in rows[:max(1, int(limit))]:
+            item = str(o.get("item", "") or "item")
+            info = items_map.get(item, {})
+            mid  = info.get("market_id", "main")
+            mkt  = markets.get(mid) or {}
+            mkt_name = (mkt.get("name") if isinstance(mkt, dict) else None) or str(mid).capitalize()
+            try:
+                per = float(o.get("coin_per_piece", 0) or 0)
+            except Exception:
+                per = 0.0
+            out.append({"id": int(o.get("id", 0) or 0),
+                        "item": _pretty_item_name(item),
+                        "qty": int(rem),
+                        "market": mkt_name,
+                        "pay": int(round(per * rem)) if per > 0 else 0})
+    except Exception as e:
+        log.warning("[network] open-orders build failed: %s", e)
+    return out
+
+
+def _record_network_claim(order_id, worker_id, worker_name, source_guild_id) -> dict:
+    """Record a claim made from a partner server via the satellite bot. Headless and
+    sync (safe from the web thread). Validates the order is still open, appends the
+    claim to a capped log in bot_config, and returns a result dict for the satellite
+    to show/DM the worker. Does NOT mutate the order's own claim state — a manager
+    still assigns it through the normal UI once the worker joins the home server."""
+    try:
+        import json as _json, time as _t, Restocker_db as _db
+        oid = int(order_id or 0)
+        data = load_orders()
+        order = next((o for o in (data.get("orders", []) or [])
+                      if isinstance(o, dict) and int(o.get("id", 0) or 0) == oid), None)
+        if not order:
+            return {"ok": False, "error": "That order no longer exists."}
+        if _order_is_claimed_closed(order):
+            return {"ok": False, "error": "That order was just taken."}
+        try:
+            rem = remaining_to_assign(order)
+        except Exception:
+            rem = int(order.get("requested", 0) or 0)
+        if rem <= 0:
+            return {"ok": False, "error": "That order is already fully claimed."}
+
+        entry = {"ts": int(_t.time()), "order_id": oid,
+                 "worker_id": str(worker_id), "worker": str(worker_name)[:64],
+                 "guild": str(source_guild_id), "item": str(order.get("item", ""))[:80],
+                 "status": "pending"}
+        try:
+            raw = _db.get_config("network_claims")
+            arr = _json.loads(raw) if raw else []
+            if not isinstance(arr, list):
+                arr = []
+            arr.append(entry)
+            _db.set_config("network_claims", _json.dumps(arr[-300:]))
+        except Exception as _e:
+            log.warning("[network] claim log write failed: %s", _e)
+
+        item_name = _pretty_item_name(order.get("item", "item"))
+        log.info("[network] %s (%s) claimed order #%s from guild %s",
+                 worker_name, worker_id, oid, source_guild_id)
+        return {"ok": True,
+                "message": f"You claimed order #{oid} — {item_name} (×{rem}).",
+                "home_invite": NETWORK_INVITE_URL or ""}
+    except Exception as e:
+        log.warning("[network] record claim failed: %s", e)
+        return {"ok": False, "error": "Couldn't record that claim — try again shortly."}
+
+
+async def _notify_network_claim(order_id, worker_id, worker_name, source_guild_id):
+    """Ping the home worker channel that someone claimed an order from a partner server."""
+    try:
+        ch = bot.get_channel(WORKER_CHANNEL_ID) if WORKER_CHANNEL_ID else None
+        if ch is None:
+            return
+        await ch.send(f"🌐 **Network claim** — <@{worker_id}> (`{worker_name}`) claimed "
+                      f"**order #{order_id}** from a partner server. They've been DM'd an "
+                      f"invite; assign/ticket them as normal once they join.")
+    except Exception as e:
+        log.warning("[network] claim notify failed: %s", e)
+
+
+_NETWORK_LAST_TS_KEY  = "network_last_post_ts"
+_NETWORK_LAST_SIG_KEY = "network_last_post_sig"
+
+
+async def _post_orders_batch_to_network(client, force=False):
+    """Post ONE consolidated 'restock orders wanted' thread to the trade-network forum listing
+    every currently-open, unfilled order, with claim links. Respects the network's 3-posts/hour
+    cap: only posts once the open-order set has changed AND at least NETWORK_MIN_INTERVAL_MIN
+    minutes have passed since the last post. force=True bypasses the throttle (manual command).
+    Returns (posted: bool, note: str). Best-effort — never raises into the caller."""
+    try:
+        if not NETWORK_FORUM_CHANNEL_ID:
+            return (False, "No trade-network forum channel set.")
+        ch = client.get_channel(NETWORK_FORUM_CHANNEL_ID)
+        if ch is None:
+            return (False, "Trade-network forum channel not found.")
+        import Restocker_db as _db
+        import time as _t
+
+        data = load_orders()
+        pending = []
+        for o in (data.get("orders", []) or []):
+            if not isinstance(o, dict) or _order_is_claimed_closed(o):
+                continue
+            try:
+                rem = remaining_to_assign(o)
+            except Exception:
+                rem = int(o.get("requested", 0) or 0)
+            if rem > 0:
+                pending.append((o, rem))
+        if not pending:
+            return (False, "No open orders to post.")
+
+        pending.sort(key=lambda x: int(x[0].get("id", 0) or 0))
+        sig = ",".join(f"{int(o.get('id',0) or 0)}:{rem}" for o, rem in pending)
+        now = int(_t.time())
+        if not force:
+            last_sig = _db.get_config(_NETWORK_LAST_SIG_KEY) or ""
+            try:
+                last_ts = int(_db.get_config(_NETWORK_LAST_TS_KEY) or 0)
+            except Exception:
+                last_ts = 0
+            if sig == last_sig:
+                return (False, "No change since last network post.")
+            interval = max(1, int(NETWORK_MIN_INTERVAL_MIN)) * 60
+            if now - last_ts < interval:
+                wait_m = int((interval - (now - last_ts)) / 60) + 1
+                return (False, f"Throttled — next network post in ~{wait_m} min.")
+
+        items_map = _load_items().get("items", {}) or {}
+        markets   = _load_markets().get("markets", {}) or {}
+        lines = []
+        for o, rem in sorted(pending, key=lambda x: -x[1])[:40]:
+            item = str(o.get("item", "") or "item")
+            info = items_map.get(item, {})
+            mid  = info.get("market_id", "main")
+            mkt  = markets.get(mid) or {}
+            mkt_name = (mkt.get("name") if isinstance(mkt, dict) else None) or str(mid).capitalize()
+            try:
+                per = float(o.get("coin_per_piece", 0) or 0)
+            except Exception:
+                per = 0.0
+            pay = f" — {int(round(per*rem)):,}¢" if per > 0 else ""
+            lines.append(f"• {_pretty_item_name(item)} ×{rem} [{mkt_name}]{pay}")
+
+        claim = []
+        if NETWORK_INVITE_URL:
+            claim.append(f"🎟️ Claim on Discord: {NETWORK_INVITE_URL} (join → link your IGN → claim)")
+        claim.append(f"🌐 Or on the web: {DASHBOARD_URL}")
+
+        title = f"Restock orders wanted — {len(pending)} open"[:96]
+        body  = ("**We're hiring workers to fulfil these orders:**\n"
+                 + "\n".join(lines) + "\n\n" + "\n".join(claim))[:1900]
+        embed = discord.Embed(title=title[:256], description=body[:4000],
+                              color=discord.Color.green(), timestamp=discord.utils.utcnow())
+        embed.set_footer(text="Posted via V Helper")
+
+        if isinstance(ch, discord.ForumChannel):
+            applied = []
+            try:
+                want = (NETWORK_POST_TAG or "").strip().lower()
+                if want:
+                    t = discord.utils.find(lambda x: x.name.lower() == want, ch.available_tags)
+                    if t:
+                        applied = [t]
+            except Exception:
+                applied = []
+            await ch.create_thread(name=title[:96], content=body, embed=embed, applied_tags=applied)
+        else:
+            await ch.send(content="\n".join(claim)[:400], embed=embed)
+
+        try:
+            _db.set_config(_NETWORK_LAST_SIG_KEY, sig)
+            _db.set_config(_NETWORK_LAST_TS_KEY, str(now))
+        except Exception:
+            pass
+        log.info("[network] posted consolidated batch of %d open order(s) to the trade network", len(pending))
+        return (True, f"Posted {len(pending)} open order(s) to the trade network.")
+    except Exception as e:
+        log.warning("[network] batch post failed: %s", e)
+        return (False, f"Failed: {e}")
+
+
 
 
 
@@ -4475,21 +4829,18 @@ def _save_brew_aliases(aliases: dict) -> bool:
 
 
 def _apply_brew_aliases(items: dict) -> dict:
+    """Map each item to its clean display name (curated map → extracted effects → tidy name),
+    merging any variants that collapse to the same label. Junk-free by construction, so stale
+    learned aliases can never leak ads / state tags / quality bars into a report."""
     aliases = _load_brew_aliases()
-    manual  = _load_manual_brew_effects()          # hand-curated, wins over everything
-    if not aliases and not manual:
-        return items
     out: dict = {}
     for key, v in items.items():
-        display = None
-        if manual:
-            eff = manual.get(_fold_brew_name(key))
-            if eff:
-                base = _strip_item_code(re.sub(r"[&§]#?[0-9a-fA-F]{6}", "", str(key))) or str(key)
-                # avoid "Nos - Haste 5 - Haste 5" if the name already states it
-                display = base if eff.lower() in base.lower() else f"{base} — {eff}"
-        if display is None:
-            display = aliases.get(key, key)
+        display = _pretty_item_name(key)
+        # If extraction left only the bare base but a clean learned alias exists, prefer it.
+        if aliases and " — " not in display and " - " not in display:
+            al = aliases.get(key)
+            if al and not _brew_text_has_junk(al):
+                display = al
         if display in out:
             out[display]["sold_qty"]  += v.get("sold_qty", 0)
             out[display]["net_coins"] += v.get("net_coins", 0.0)
@@ -4582,6 +4933,36 @@ def _manual_brew_effects_for(name) -> str:
     """Return the curated effect string for a brew name, or '' if not mapped."""
     mp = _load_manual_brew_effects()
     return mp.get(_fold_brew_name(name), "") if mp else ""
+
+
+def _pretty_item_name(raw) -> str:
+    """Canonical display name for any item, used by both the sales report and the website.
+
+    Brewery bakes a potion's whole lore into its scanned name — state tags ('Barrel aged',
+    'Distilled', 'Alcoholic'), the quality bar '[·····]', durations ('5 Min', '180s'),
+    in-lore market ads ('@ /la spawn ViridianMarket', 'Shop at /La Spawn') and flavour prose.
+    This keeps the base ('Potion') plus only the REAL effects and drops the rest. A curated
+    manual-map entry always wins. Non-brew items are returned unchanged (minus the #variant
+    hash)."""
+    n = _strip_item_code(raw)
+    eff = _manual_brew_effects_for(raw)                 # curated map wins outright
+    if eff:
+        base = n.split(" - ", 1)[0].strip() or "Potion"
+        return base if eff.lower() in base.lower() else f"{base} — {eff}"
+    low = n.lower()
+    is_brew = (low.startswith(("potion", "splash potion", "lingering potion"))
+               or " - " in n or _brew_text_has_junk(n))
+    if not is_brew:
+        return n
+    base, sep, tail = n.partition(" - ")
+    base = base.strip() or "Potion"
+    effects = _parse_brew_effects([tail if sep else n])
+    if effects:
+        return f"{base} — {effects}"
+    cand = (tail if sep else n).strip()                 # no effect → tidy vanilla name, else base
+    if _looks_like_potion_name(cand) and not _brew_text_has_junk(cand):
+        return cand
+    return base
 
 
 def _parse_brew_effects(lore) -> str:
@@ -5797,8 +6178,18 @@ def _save_markets(data: dict) -> bool:
 
 
 def _get_market(market_id: str) -> dict | None:
-    data = _load_markets()
-    return data.get("markets", {}).get(market_id)
+    markets = _load_markets().get("markets", {})
+    m = markets.get(market_id)
+    if m is not None:
+        return m
+    # Case-insensitive fallback so a lookup for 'TEST' still resolves an existing 'test'
+    # market — stops case variants of the same id being treated as two separate markets.
+    if market_id:
+        tgt = str(market_id).strip().lower()
+        for mid, info in markets.items():
+            if str(mid).strip().lower() == tgt:
+                return info
+    return None
 
 
 def _markets_owned_by(user_id) -> set:
@@ -5822,22 +6213,30 @@ def _markets_owned_by(user_id) -> set:
 
 def _ensure_fallback_market() -> str:
     """Make sure the FALLBACK_MARKET_ID market exists (create it once if missing) so
-    unattributed CSN uploads have a real, visible, manageable market to land in
-    instead of silently polluting the default market. Returns the fallback id."""
+    unattributed CSN uploads have a real, visible, manageable market to land in instead of
+    silently polluting the default market. Returns the ACTUAL fallback market id.
+
+    Matches case-insensitively: if a market already exists that equals FALLBACK_MARKET_ID
+    ignoring case (e.g. 'test' when the env says 'TEST'), that existing id is reused instead
+    of creating a second, case-variant duplicate."""
     try:
-        if not _get_market(FALLBACK_MARKET_ID):
-            import Restocker_db as _db_fb
-            _db_fb.upsert_market(
-                market_id=FALLBACK_MARKET_ID,
-                name=FALLBACK_MARKET_NAME,
-                owner_id=None,
-                manager_ids=[],
-                platform_fee_pct=PLATFORM_FEE_PCT,
-                csn_history_file=None,
-                active=True,
-            )
-            log.info("[csn] created fallback market '%s' (%s) for unattributed uploads",
-                     FALLBACK_MARKET_ID, FALLBACK_MARKET_NAME)
+        markets = (_load_markets().get("markets", {}) or {})
+        tgt = FALLBACK_MARKET_ID.strip().lower()
+        for mid in markets:
+            if str(mid).strip().lower() == tgt:
+                return mid   # reuse the existing market (case-corrected) — never duplicate
+        import Restocker_db as _db_fb
+        _db_fb.upsert_market(
+            market_id=FALLBACK_MARKET_ID,
+            name=FALLBACK_MARKET_NAME,
+            owner_id=None,
+            manager_ids=[],
+            platform_fee_pct=PLATFORM_FEE_PCT,
+            csn_history_file=None,
+            active=True,
+        )
+        log.info("[csn] created fallback market '%s' (%s) for unattributed uploads",
+                 FALLBACK_MARKET_ID, FALLBACK_MARKET_NAME)
     except Exception as _e:
         log.warning("[csn] could not ensure fallback market '%s': %s", FALLBACK_MARKET_ID, _e)
     return FALLBACK_MARKET_ID
@@ -7924,6 +8323,22 @@ _AI_TOOLS = [
             "required": ["file", "request"]
         }
     },
+    {
+        "name": "create_futures_order",
+        "description": "File a futures (made-to-order) request ON BEHALF OF a named customer — use when a manager or market owner pings you to place an order for someone, e.g. 'futures order for @Bobbr: Strength+Speed 8x, Fire Res 8x, Turtle Master 4x — for war'. Call this ONCE PER line item. The order is filed under the CUSTOMER's Discord ID (resolve 'for_user' to them), then posted to the #futures channel for the normal manager approve/decline flow — exactly like /futures_order. ONLY managers and market owners may use this; refuse anyone else. Quantity unit defaults to BARRELS for brews unless the requester says pieces/stacks; put the effects/quality in 'effects' and any context (e.g. 'for war') in 'notes'.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "for_user": {"type": "string", "description": "Who the order is FOR — Discord @mention, user ID, username, or display name. The order is filed under this person's Discord ID, not the requester's."},
+                "item": {"type": "string", "description": "The item/brew requested, e.g. 'Strength + Speed brew', 'Fire Resistance brew', 'Turtle Master'."},
+                "quantity": {"type": "integer", "description": "How many units requested (a positive whole number)."},
+                "unit": {"type": "string", "description": "Unit for the quantity: 'barrels' (default for brews), 'pieces', or 'stacks'. Use what the requester said; default to 'barrels' if unstated."},
+                "effects": {"type": "string", "description": "Effects / quality / enchants, e.g. 'Strength II + Speed II', 'Fortune III, Unbreaking'. Optional."},
+                "notes": {"type": "string", "description": "Extra context for workers/managers, e.g. 'for war, Braventhia'. Optional."}
+            },
+            "required": ["for_user", "item", "quantity"]
+        }
+    },
 ]
 
 
@@ -8814,6 +9229,88 @@ async def _ai_tool_propose_code_change(guild, channel, user, args):
         return f"❌ Failed: {type(e).__name__}: {e}"
 
 
+async def _ai_tool_create_futures_order(guild, channel, user, args):
+    """File a futures order on behalf of a named customer and post it to #futures for the
+    normal manager approve/decline flow. Managers and market owners only."""
+    if not guild:
+        return "❌ This can only be used inside a server."
+    try:
+        allowed = _ai_is_manager(user) or bool(_owner_markets_for_user(getattr(user, "id", 0)))
+    except Exception:
+        allowed = _ai_is_manager(user)
+    if not allowed:
+        return "⛔ Only managers and market owners can place futures orders on behalf of others."
+
+    for_ident = str(args.get("for_user", "")).strip()
+    item      = str(args.get("item", "")).strip()
+    effects   = str(args.get("effects", "") or "").strip()
+    notes     = str(args.get("notes", "") or "").strip()
+    unit      = (str(args.get("unit", "") or "").strip().lower() or "barrels")
+    try:
+        qty = int(args.get("quantity") or 0)
+    except Exception:
+        qty = 0
+    if not for_ident or not item or qty <= 0:
+        return "❌ I need a customer, an item, and a positive quantity to place a futures order."
+
+    # Resolve the customer — prefer a real member, else accept a raw numeric Discord ID.
+    member = _resolve_member(guild, for_ident)
+    if member is not None:
+        target_id, target_name = str(member.id), member.display_name
+    else:
+        clean = re.sub(r"[<@!>]", "", for_ident).strip()
+        if clean.isdigit():
+            target_id, target_name = clean, for_ident
+        else:
+            return f"❌ Couldn't find a user matching '{for_ident}'. Give me their @mention or Discord ID."
+
+    qty_label  = f"{qty} {unit}"
+    full_notes = f"{qty_label} • placed by {user} via AI" + (f" — {notes}" if notes else "")
+
+    try:
+        import Restocker_db as _db
+        order_id = _db.save_futures_order(
+            user_id=target_id, username=target_name,
+            item=item, quantity=qty, enchants=effects, notes=full_notes,
+        )
+    except Exception as e:
+        return f"⚠️ DB error saving the order: {e}"
+
+    # Post to the #futures approval channel — normal manager review, same as /futures_order.
+    posted = False
+    try:
+        post_ch = bot.get_channel(FUTURES_CHANNEL_ID) if FUTURES_CHANNEL_ID else None
+        if post_ch is not None:
+            embed = discord.Embed(title=f"🔮 New Futures Order #{order_id}",
+                                  color=discord.Color.gold(), timestamp=discord.utils.utcnow())
+            embed.add_field(name="Customer", value=f"<@{target_id}>", inline=True)
+            embed.add_field(name="Item", value=f"{qty_label} × {item}", inline=True)
+            if effects:
+                embed.add_field(name="Effects / Quality", value=effects, inline=False)
+            if notes:
+                embed.add_field(name="Notes", value=notes, inline=False)
+            embed.set_footer(text=f"Placed by {user} • awaiting manager review")
+            mgr_role = discord.utils.get(post_ch.guild.roles, name=MANAGER_ROLE_NAME) if post_ch.guild else None
+            alt_role = discord.utils.get(post_ch.guild.roles, name=MANAGER_ROLE_ALT)  if post_ch.guild else None
+            ping = " ".join(r.mention for r in [mgr_role, alt_role] if r)
+            msg = await post_ch.send(
+                content=f"{ping} — new futures order!" if ping else "New futures order!",
+                embed=embed, view=FuturesOrderView(order_id))
+            try:
+                _db.update_futures_order_status(order_id, status="pending",
+                                                reviewed_by=None, notify_msg_id=str(msg.id))
+            except Exception:
+                pass
+            posted = True
+    except Exception as e:
+        log.warning("[ai futures] post to #futures failed: %s", e)
+
+    tail = "posted to #futures for approval" if posted else "saved (couldn't post to #futures — check the channel is set)"
+    return (f"✅ Futures order #{order_id}: **{qty_label} × {item}**"
+            + (f" ({effects})" if effects else "")
+            + f" for **{target_name}** — {tail}.")
+
+
 _AI_TOOL_MAP = {
     "get_item_prices":      _ai_tool_get_item_prices,
     "get_market_pricing":   _ai_tool_get_market_pricing,
@@ -8844,6 +9341,7 @@ _AI_TOOL_MAP = {
     "list_aliases":         _ai_tool_list_aliases,
     "get_market_code":      _ai_tool_get_market_code,
     "propose_code_change":  _ai_tool_propose_code_change,
+    "create_futures_order": _ai_tool_create_futures_order,
 }
 
 # Tools whose effects are destructive/moderation-level — flagged in the audit log.
@@ -8851,7 +9349,7 @@ _AI_SENSITIVE_TOOLS = {
     "assign_role", "remove_role", "kick_user", "ban_user", "timeout_user",
     "delete_messages", "create_role", "setup_market_owner", "send_dm", "dm_role",
     "send_channel_message", "ping_user", "propose_code_change", "set_item_price",
-    "add_item", "get_market_code",
+    "add_item", "get_market_code", "create_futures_order",
 }
 
 
@@ -9134,7 +9632,7 @@ def _apply_config_overrides() -> None:
     Runs at startup before cogs load, so bound copies pick up the override."""
     global WORKER_CHANNEL_ID, WELCOME_CHANNEL_ID, TICKETS_CATEGORY_ID
     global FUNDS_REPORT_CHANNEL_ID, FUNDS_REPORT_GUILD_ID, WEB_ORDERS_CHANNEL_ID, CSN_REPORT_CHANNEL_ID
-    global FUTURES_CHANNEL_ID
+    global FUTURES_CHANNEL_ID, NETWORK_FORUM_CHANNEL_ID, NETWORK_INVITE_URL, NETWORK_AUTOPOST
     try:
         import Restocker_db as _db
     except Exception:
@@ -9145,6 +9643,12 @@ def _apply_config_overrides() -> None:
             return int(v) if v not in (None, "") else cur
         except Exception:
             return cur
+    def _ov_str(key, cur):
+        try:
+            v = _db.get_config(key)
+            return str(v) if v not in (None, "") else cur
+        except Exception:
+            return cur
     WORKER_CHANNEL_ID       = _ov("WORKER_CHANNEL_ID", WORKER_CHANNEL_ID)
     WELCOME_CHANNEL_ID      = _ov("WELCOME_CHANNEL_ID", WELCOME_CHANNEL_ID)
     TICKETS_CATEGORY_ID     = _ov("TICKETS_CATEGORY_ID", TICKETS_CATEGORY_ID)
@@ -9153,6 +9657,11 @@ def _apply_config_overrides() -> None:
     WEB_ORDERS_CHANNEL_ID   = _ov("WEB_ORDERS_CHANNEL_ID", WEB_ORDERS_CHANNEL_ID)
     FUTURES_CHANNEL_ID      = _ov("FUTURES_CHANNEL_ID", FUTURES_CHANNEL_ID)
     CSN_REPORT_CHANNEL_ID   = _ov("CSN_REPORT_CHANNEL_ID", CSN_REPORT_CHANNEL_ID)
+    NETWORK_FORUM_CHANNEL_ID = _ov("NETWORK_FORUM_CHANNEL_ID", NETWORK_FORUM_CHANNEL_ID)
+    NETWORK_INVITE_URL      = _ov_str("NETWORK_INVITE_URL", NETWORK_INVITE_URL)
+    _na = _db.get_config("NETWORK_AUTOPOST")
+    if _na not in (None, ""):
+        NETWORK_AUTOPOST = str(_na).strip().lower() in ("1", "true", "yes", "on")
     try:
         log.info("[config] overrides applied: worker=%s tickets_cat=%s funds=%s web_orders=%s csn=%s",
                  WORKER_CHANNEL_ID, TICKETS_CATEGORY_ID, FUNDS_REPORT_CHANNEL_ID, WEB_ORDERS_CHANNEL_ID, CSN_REPORT_CHANNEL_ID)

@@ -144,6 +144,61 @@ class MarketCog(commands.Cog):
         embed.set_footer(text=f"Use /csn market_id:{market_id} to record sales data for this market.")
         await interaction.response.send_message(embed=embed)
 
+    @market.command(name="delete", description="(Manager) Delete a market — removes its dashboard tab, stock, and share listing")
+    @app_commands.describe(
+        market_id="Exact market ID to delete (e.g. TEST). Resolves case-insensitively if only one variant exists.",
+        confirm="Set True to actually delete. Leave off first to preview what will be removed.",
+    )
+    async def market_delete(self, interaction: discord.Interaction, market_id: str, confirm: bool = False):
+        if not is_manager(interaction):
+            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
+
+        import Restocker_db as _db
+        markets = (_load_markets().get("markets", {}) or {})
+        if market_id in markets:
+            real_id = market_id                                  # exact match wins
+        else:
+            cands = [mid for mid in markets if str(mid).strip().lower() == market_id.strip().lower()]
+            if len(cands) == 1:
+                real_id = cands[0]
+            elif len(cands) > 1:
+                return await interaction.response.send_message(
+                    f"⚠️ Multiple markets match `{market_id}` by case: "
+                    + ", ".join(f"`{c}`" for c in cands) + ". Pass the exact one.", ephemeral=True)
+            else:
+                return await interaction.response.send_message(
+                    f"❌ No market `{market_id}`. Use `/market list` to see them.", ephemeral=True)
+
+        try:
+            n_stock = sum(1 for r in (_db.get_all_market_stock() or [])
+                          if str(r.get("market_id")) == str(real_id))
+        except Exception:
+            n_stock = 0
+        try:
+            months = len((_load_csn_for_market(real_id) or {}).get("months", {}) or {})
+        except Exception:
+            months = 0
+        info = markets.get(real_id) if isinstance(markets.get(real_id), dict) else {}
+        name = info.get("name") or real_id
+
+        if not confirm:
+            return await interaction.response.send_message(
+                f"🗑️ **Delete market `{real_id}`** ({name})?\n"
+                f"• Stock items: **{n_stock}**\n"
+                f"• Sales-history months: **{months}** *(kept for audit)*\n\n"
+                f"Removes its dashboard tab, stock, alarms and share listing. "
+                f"Re-run with **`confirm:True`** to delete.",
+                ephemeral=True)
+
+        counts = _db.delete_market(real_id)
+        log.info("[market] %s deleted market '%s' -> %s", interaction.user, real_id, counts)
+        await interaction.response.send_message(
+            f"✅ Deleted market **`{real_id}`** ({name}) — removed "
+            f"{counts.get('market_stock', 0)} stock row(s), {counts.get('stock_alarms', 0)} alarm(s), "
+            f"{counts.get('market_shares', 0)} share listing(s)."
+            + (f" ⚠️ {months} month(s) of sales history were kept." if months else ""),
+            ephemeral=True)
+
     @market.command(name="list", description="List all registered markets")
     async def market_list(self, interaction: discord.Interaction):
         data = _load_markets()

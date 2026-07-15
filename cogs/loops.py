@@ -127,6 +127,16 @@ class LoopsCog(commands.Cog):
                     except Exception:
                         pass
 
+                # After all order cards are posted, fan the whole open-order set out to the SW
+                # Trade Network as ONE consolidated thread. Self-throttled (≤ every
+                # NETWORK_MIN_INTERVAL_MIN min, only when the open set changed) to respect the
+                # network's 3-posts/hour cap. Best-effort.
+                if getattr(core, "NETWORK_AUTOPOST", False) and getattr(core, "NETWORK_FORUM_CHANNEL_ID", 0):
+                    try:
+                        await core._post_orders_batch_to_network(bot)
+                    except Exception:
+                        pass
+
                 lines = []
                 _items_data_ping = _load_items().get("items", {})
                 _markets_ping    = _load_markets().get("markets", {})
