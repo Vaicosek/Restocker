@@ -6,7 +6,9 @@ launched as `python Restocker_main.py` (module __main__) or imported under its
 own name — no double-import, no startup-command change required.
 """
 import sys
+import asyncio
 from typing import Optional
+from datetime import datetime, timedelta, timezone
 
 import discord
 from discord import app_commands
@@ -19,6 +21,7 @@ _loyalty_tier          = core._loyalty_tier
 LOYALTY_TIERS          = core.LOYALTY_TIERS
 _award_loyalty_points  = core._award_loyalty_points
 LOYALTY_EMPLOYEE_ROLES = core.LOYALTY_EMPLOYEE_ROLES
+LOYALTY_IGN_DEADLINE_DAYS = getattr(core, "LOYALTY_IGN_DEADLINE_DAYS", 3)
 MANAGER_DM_IDS         = getattr(core, "MANAGER_DM_IDS", set())
 log                    = getattr(core, "log", None)
 
@@ -179,6 +182,104 @@ class LoyaltyCog(commands.Cog):
             embed.set_footer(text="Unlinked employees' CSN sales credit NO ONE. "
                                   "Link them with /loyalty link <user> <ign>.")
         await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @loyalty.command(
+        name="remind_unlinked",
+        description="(Manager) DM every employee who hasn't linked their IGN, asking them to")
+    @app_commands.describe(
+        apply="false = dry-run preview (default); true = actually send the DMs",
+        set_deadline="⚠️ true = also start the 3-day countdown; their role is REMOVED if they "
+                     "don't reply. Default false = reminder only, nobody loses anything.")
+    async def loyalty_remind_unlinked(self, interaction: discord.Interaction,
+                                      apply: bool = False, set_deadline: bool = False):
+        """Nudges existing unlinked employees. The on-role-gain prompt in events.py only fires
+        when someone RECEIVES an employee role, so anyone who already had it never got asked —
+        this catches them up.
+
+        set_deadline is off by default on purpose: turning it on writes an ign_pending row, and
+        the deadline loop STRIPS THE ROLE of anyone who doesn't reply in time. Fine for a couple
+        of new hires; a bad idea to fire at 60+ existing staff at once."""
+        if not is_manager(interaction):
+            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
+        guild = interaction.guild
+        if guild is None:
+            return await interaction.response.send_message("Run this in a server.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        members = guild.members
+        if not guild.chunked:
+            try:
+                members = await guild.chunk()
+            except Exception:
+                members = guild.members
+
+        import Restocker_db as _db_r
+        employees = [m for m in members if not m.bot
+                     and any(r.name in LOYALTY_EMPLOYEE_ROLES for r in m.roles)]
+        targets = [m for m in employees
+                   if not _db_r.get_ign(str(m.id)) and not _db_r.get_ign_pending(str(m.id))]
+
+        if not targets:
+            return await interaction.followup.send(
+                "✅ Everyone with an employee role is either linked or already prompted.",
+                ephemeral=True)
+
+        if not apply:
+            warn = ("\n\n⚠️ `set_deadline:true` would ALSO start the "
+                    f"{LOYALTY_IGN_DEADLINE_DAYS}-day countdown — anyone who doesn't reply gets "
+                    f"their **role removed**. With {len(targets)} people, think hard before doing that."
+                    if set_deadline else
+                    "\n\nThis sends a reminder only — no deadline, nobody loses their role.")
+            return await interaction.followup.send(
+                f"**Dry run** — would DM **{len(targets)}** unlinked employee(s):\n"
+                + ", ".join(m.mention for m in targets[:30])
+                + (f" … +{len(targets)-30} more" if len(targets) > 30 else "")
+                + warn + "\n\nRe-run with `apply:true` to send.", ephemeral=True)
+
+        sent, blocked = 0, []
+        deadline = (datetime.now(timezone.utc)
+                    + timedelta(days=LOYALTY_IGN_DEADLINE_DAYS)).isoformat()
+        for m in targets:
+            try:
+                dm = await m.create_dm()
+                body = (
+                    f"👋 Hi! You have an employee role in **{guild.name}**, but you haven't linked "
+                    f"your **Minecraft in-game username (IGN)** yet.\n\n"
+                    f"Right now your in-game shop sales **credit nobody** — you're missing out on "
+                    f"loyalty points and payouts.\n\n"
+                    f"Just reply here with your IGN (exactly as it appears in-game), or run "
+                    f"`/loyalty register_ign` in the server."
+                )
+                if set_deadline:
+                    body += (f"\n\n⏰ Please do it within **{LOYALTY_IGN_DEADLINE_DAYS} days** — "
+                             f"after that your role is removed automatically.")
+                await dm.send(body)
+                sent += 1
+                if set_deadline:
+                    role = next((r for r in m.roles if r.name in LOYALTY_EMPLOYEE_ROLES), None)
+                    _db_r.set_ign_pending(str(m.id), str(dm.id),
+                                          str(role.id) if role else "0",
+                                          str(guild.id), deadline)
+            except discord.Forbidden:
+                blocked.append(m)
+            except Exception as e:
+                log.warning("[ign] reminder to %s failed: %s", m.id, e)
+                blocked.append(m)
+            # Throttle — 60+ DMs in a burst is exactly what gets a bot rate-limited or flagged.
+            await asyncio.sleep(1.2)
+
+        msg = f"✅ DM'd **{sent}**/{len(targets)} unlinked employee(s)."
+        if set_deadline:
+            msg += (f"\n⏰ Deadline set — they lose their role in {LOYALTY_IGN_DEADLINE_DAYS} days "
+                    f"if they don't reply.")
+        else:
+            msg += "\n(Reminder only — no deadline set, nobody loses their role.)"
+        if blocked:
+            msg += (f"\n\n🚫 Couldn't DM **{len(blocked)}** (DMs closed): "
+                    + ", ".join(m.mention for m in blocked[:15])
+                    + (f" … +{len(blocked)-15} more" if len(blocked) > 15 else "")
+                    + "\nThose need `/loyalty link <user> <ign>` manually.")
+        await interaction.followup.send(msg[:1900], ephemeral=True)
 
     @loyalty.command(name="link", description="(Manager) Link a member to their Minecraft IGN")
     @app_commands.describe(user="The Discord member", ign="Their EXACT Minecraft username (case-sensitive)")

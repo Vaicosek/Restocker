@@ -23,6 +23,101 @@ is_manager = core.is_manager
 log = core.log
 save_yaml = core.save_yaml
 
+
+# ── Shared repair planners ───────────────────────────────────────────────────
+# Both the individual /admin commands and /admin repair_all build their plans here,
+# so the two can never drift apart.
+
+def _order_is_fulfilled(o: dict) -> bool:
+    status = str(o.get("status", "")).lower()
+    if "fulfil" in status or status in ("complete", "done", "closed"):
+        return True
+    req, prod = int(o.get("requested", 0) or 0), int(o.get("produced", 0) or 0)
+    return req > 0 and prod >= req
+
+
+def _order_worker_pairs(o: dict) -> list:
+    """[(user_id, qty)] credited for this order — from claims, else the whole order to
+    claimed_by. Empty means the order is ORPHANED: fulfilled with nobody attached."""
+    pairs = [(str(c.get("user_id") or ""), int(c.get("qty") or 0))
+             for c in (o.get("claims") or [])]
+    if not pairs and o.get("claimed_by"):
+        pairs = [(str(o.get("claimed_by")), int(o.get("produced") or o.get("requested") or 0))]
+    return [(u, q) for (u, q) in pairs if u and q > 0]
+
+
+def _payout_repair_plan(_db, items_data, orders) -> list:
+    """Orders the OLD exact-match price lookup zeroed (so the worker was silently skipped),
+    that the tolerant lookup can now price. Returns [(order, uid, qty, owed)].
+
+    Safe to re-run: anything already priced fine back then was paid and is excluded, and
+    anything already repaired carries a `repair:order#N` ledger row and is excluded too."""
+    catalog = (items_data or {}).get("items", {}) or {}
+
+    def _old_price(item_name):
+        try:
+            return int((catalog.get(item_name) or {}).get("coin", 0) or 0)
+        except Exception:
+            return 0
+
+    plan = []
+    for o in orders:
+        if not _order_is_fulfilled(o):
+            continue
+        if _old_price(o.get("item", "")) > 0:
+            continue                                   # priced fine then → already paid
+        for uid, qty in _order_worker_pairs(o):
+            try:
+                if _db.coin_ledger_has(uid, f"repair:order#{o.get('id')}"):
+                    continue                           # already repaired
+            except Exception:
+                continue                               # can't verify → never risk double-pay
+            try:
+                owed = int(core._coins_for_pieces(o, qty, items_data))
+            except Exception:
+                owed = 0
+            if owed > 0:
+                plan.append((o, uid, qty, owed))
+    return plan
+
+
+def _team_backfill_plan(_db, items_data, orders) -> tuple:
+    """Team-ledger rows dropped at approval time. Returns (to_write, per_worker_summary).
+    Idempotent — skips anything already in the ledger."""
+    plan, to_write = {}, []
+    for o in orders:
+        if not _order_is_fulfilled(o):
+            continue
+        for wid, qty in _order_worker_pairs(o):
+            detail = f"order#{o.get('id')}"
+            if _db.team_perf_exists(wid, detail, "order"):
+                continue
+            mgr = _db.get_manager_of(wid)
+            if mgr:
+                manager_id = str(mgr)
+            elif _db.get_team(wid):
+                manager_id = wid
+            else:
+                continue                               # no team → nothing to attribute to
+            try:
+                coins = int(core._coins_for_pieces(o, qty, items_data))
+            except Exception:
+                coins = 0
+            if coins <= 0:
+                continue
+            to_write.append((manager_id, wid, qty, coins, detail))
+            p = plan.setdefault(wid, {"orders": 0, "coins": 0})
+            p["orders"] += 1
+            p["coins"] += coins
+    return to_write, plan
+
+
+def _orphaned_orders(orders) -> list:
+    """Fulfilled orders with NO worker attached at all — they can never be paid or credited
+    automatically because nothing records who did the work. These need /admin repair_order."""
+    return [o for o in orders if _order_is_fulfilled(o) and not _order_worker_pairs(o)]
+
+
 class AdminCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -483,6 +578,204 @@ class AdminCog(commands.Cog):
         await interaction.followup.send(
             f"✅ Repaired **{paid_n}** claim(s) — paid **{paid_c:,} coins** total.\n{summary}\n\n"
             f"Workers were DM'd. Ledger rows are tagged `repair:order#N`.", ephemeral=True)
+
+    @admin.command(
+        name="repair_all",
+        description="(Managers) Run every repair at once — payouts, team ledger, brew names")
+    @app_commands.describe(apply="false = dry-run preview (default); true = actually apply everything")
+    async def repair_all(self, interaction: discord.Interaction, apply: bool = False):
+        """One button for the lot: repays workers the price bug zeroed, recovers dropped team
+        ledger rows, cleans brew names, and flags orphaned orders that need a human."""
+        if not is_manager(interaction):
+            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        import Restocker_db as _db
+        try:
+            items_data = core._load_items()
+            orders = _db.load_orders()
+        except Exception as e:
+            return await interaction.followup.send(f"⚠️ Couldn't load orders: {e}", ephemeral=True)
+
+        pay_plan = _payout_repair_plan(_db, items_data, orders)
+        team_rows, team_sum = _team_backfill_plan(_db, items_data, orders)
+        orphans = _orphaned_orders(orders)
+        pay_total = sum(p[3] for p in pay_plan)
+
+        def _ign(uid):
+            try:
+                return _db.get_ign(uid) or uid
+            except Exception:
+                return uid
+
+        parts = []
+        # 1) payouts
+        if pay_plan:
+            lines = [f"• **#{o.get('id')}** {o.get('item','?')} — {_ign(u)} × {q} → **+{c:,}c**"
+                     for o, u, q, c in pay_plan[:10]]
+            parts.append(f"**💰 Unpaid claims ({len(pay_plan)}, {pay_total:,}c)**\n" + "\n".join(lines)
+                         + (f"\n… +{len(pay_plan)-10} more" if len(pay_plan) > 10 else ""))
+        else:
+            parts.append("**💰 Payouts** — nothing owed. ✅")
+        # 2) team ledger
+        if team_rows:
+            lines = [f"• **{_ign(w)}** — {p['orders']} order(s) → +{p['coins']:,}c"
+                     for w, p in sorted(team_sum.items(), key=lambda kv: -kv[1]["coins"])[:10]]
+            parts.append(f"**📊 Team ledger ({len(team_rows)} row(s))**\n" + "\n".join(lines))
+        else:
+            parts.append("**📊 Team ledger** — nothing missing. ✅")
+        # 3) orphans (informational — needs a human decision)
+        if orphans:
+            lines = [f"• **#{o.get('id')}** {o.get('item','?')} — fulfilled, nobody attached"
+                     for o in orphans[:10]]
+            parts.append(f"**🚨 Orphaned orders ({len(orphans)})** — can't auto-repair, no worker "
+                         f"on record:\n" + "\n".join(lines)
+                         + "\nUse `/admin repair_order` to attach the worker who actually did it.")
+
+        if not apply:
+            return await interaction.followup.send(
+                "**Dry run — nothing changed.**\n\n" + "\n\n".join(parts)
+                + "\n\nRe-run with `apply:true` to commit.", ephemeral=True)
+
+        # ── apply ──
+        paid_n = paid_c = 0
+        for o, uid, qty, owed in pay_plan:
+            try:
+                uid_i = int(uid)
+            except Exception:
+                continue
+            detail = f"order#{o.get('id')}"
+            try:
+                _mult, _mkt_bonus = core._market_loyalty_cfg(o.get("market_id"))
+                bonus_pct = core._loyalty_payout_bonus_pct(uid_i)
+                bonus = int(owed * bonus_pct / 100) if bonus_pct > 0 else 0
+                total_payout = owed + bonus + _mkt_bonus
+                core.add_coins(uid_i, total_payout, counts_as_principal=True,
+                               reason=f"repair:{detail}")
+                paid_n += 1
+                paid_c += total_payout
+            except Exception as e:
+                log.warning("[repair_all] payout failed %s %s: %s", uid, detail, e)
+                continue
+            try:
+                u = await interaction.client.fetch_user(uid_i)
+                await u.send(f"💰 **Payment correction** — Order **#{o.get('id')}** "
+                             f"({o.get('item','')}) was approved but a pricing bug paid you 0. "
+                             f"You've now been paid **{total_payout:,} coins**. Sorry about that!")
+            except Exception:
+                pass
+
+        team_n = 0
+        for manager_id, wid, qty, coins, detail in team_rows:
+            try:
+                _db.record_team_perf(manager_id, wid, "order", coins=float(coins),
+                                     qty=qty, detail=detail)
+                team_n += 1
+            except Exception as e:
+                log.warning("[repair_all] ledger write failed %s %s: %s", wid, detail, e)
+
+        try:
+            brews_n = core._purge_garbage_brew_aliases()
+        except Exception as e:
+            log.warning("[repair_all] brew clean failed: %s", e)
+            brews_n = 0
+
+        done = [f"💰 Paid **{paid_n}** claim(s) — **{paid_c:,} coins**",
+                f"📊 Wrote **{team_n}** team-ledger row(s)",
+                f"🧪 Cleaned **{brews_n}** brew name(s)"]
+        if orphans:
+            done.append(f"🚨 **{len(orphans)}** orphaned order(s) still need `/admin repair_order`")
+        await interaction.followup.send("✅ **Repair complete.**\n" + "\n".join(done), ephemeral=True)
+
+    @admin.command(
+        name="repair_order",
+        description="(Managers) Attach a worker to an orphaned order and pay them")
+    @app_commands.describe(
+        order_id="The order that has nobody attached (see /admin repair_all)",
+        worker="The person who actually did the work",
+        qty="How many pieces they made (leave 0 to use the order's full amount)",
+        apply="false = preview (default); true = attach, pay and credit")
+    async def repair_order(self, interaction: discord.Interaction, order_id: int,
+                           worker: discord.User, qty: int = 0, apply: bool = False):
+        """For orders that closed with no claim on record — nothing else can attribute them,
+        so a manager names the worker. Idempotent via the repair:order#N ledger tag."""
+        if not is_manager(interaction):
+            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        import Restocker_db as _db
+        try:
+            items_data = core._load_items()
+            orders = _db.load_orders()
+        except Exception as e:
+            return await interaction.followup.send(f"⚠️ Couldn't load orders: {e}", ephemeral=True)
+
+        o = next((x for x in orders if int(x.get("id", 0) or 0) == int(order_id)), None)
+        if not o:
+            return await interaction.followup.send(f"❌ No order #{order_id}.", ephemeral=True)
+
+        uid = str(worker.id)
+        detail = f"order#{order_id}"
+        try:
+            if _db.coin_ledger_has(uid, f"repair:{detail}"):
+                return await interaction.followup.send(
+                    f"⚠️ {worker.mention} was already repaired for order #{order_id} — refusing to "
+                    f"pay twice.", ephemeral=True)
+        except Exception:
+            return await interaction.followup.send(
+                "⚠️ Couldn't verify the ledger — refusing to pay in case it double-pays.",
+                ephemeral=True)
+
+        pieces = int(qty) if qty > 0 else int(o.get("produced") or o.get("requested") or 0)
+        if pieces <= 0:
+            return await interaction.followup.send("❌ Quantity must be > 0.", ephemeral=True)
+        try:
+            owed = int(core._coins_for_pieces(o, pieces, items_data))
+        except Exception:
+            owed = 0
+        if owed <= 0:
+            return await interaction.followup.send(
+                f"❌ `{o.get('item','?')}` has no catalog price, so the payout would be 0.\n"
+                f"Set one with `/set_price item:{o.get('item','?')} coin:<amount>` and re-run.",
+                ephemeral=True)
+
+        _mult, _mkt_bonus = core._market_loyalty_cfg(o.get("market_id"))
+        bonus_pct = core._loyalty_payout_bonus_pct(worker.id)
+        bonus = int(owed * bonus_pct / 100) if bonus_pct > 0 else 0
+        total_payout = owed + bonus + _mkt_bonus
+
+        if not apply:
+            return await interaction.followup.send(
+                f"**Dry run** — order **#{order_id}** ({o.get('item','?')})\n"
+                f"• Worker: {worker.mention}\n• Pieces: **{pieces}**\n"
+                f"• Payout: **{owed:,}** + {bonus:,} loyalty + {_mkt_bonus:,} market = "
+                f"**{total_payout:,} coins**\n\nRe-run with `apply:true` to commit.",
+                ephemeral=True)
+
+        try:
+            core.add_coins(worker.id, total_payout, counts_as_principal=True,
+                           reason=f"repair:{detail}")
+        except Exception as e:
+            return await interaction.followup.send(f"⚠️ Payout failed: {e}", ephemeral=True)
+        try:
+            if not _db.team_perf_exists(uid, detail, "order"):
+                mgr = _db.get_manager_of(uid)
+                manager_id = str(mgr) if mgr else (uid if _db.get_team(uid) else None)
+                if manager_id:
+                    _db.record_team_perf(manager_id, uid, "order", coins=float(total_payout),
+                                         qty=pieces, detail=detail)
+        except Exception as e:
+            log.warning("[repair_order] ledger failed: %s", e)
+        try:
+            await worker.send(
+                f"💰 **Payment correction** — you've been paid **{total_payout:,} coins** for "
+                f"Order **#{order_id}** ({o.get('item','')}), which closed without your claim "
+                f"recorded. Sorry about that!")
+        except Exception:
+            pass
+        log.info("[repair_order] %s attached %s to order#%s for %s coins",
+                 interaction.user, uid, order_id, total_payout)
+        await interaction.followup.send(
+            f"✅ Attached {worker.mention} to order **#{order_id}** and paid "
+            f"**{total_payout:,} coins** ({pieces} pcs). They've been DM'd.", ephemeral=True)
 
     @admin.command(name="ai_audit", description="(Managers) Recent AI tool actions — who ran what")
     @app_commands.describe(limit="How many recent entries (default 15)", sensitive_only="Only moderation/destructive actions")
