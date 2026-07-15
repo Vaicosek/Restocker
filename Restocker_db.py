@@ -598,6 +598,22 @@ def record_coin_ledger(user_id: str, delta: int, balance_after: int, reason: str
         pass
 
 
+def coin_ledger_has(user_id: str, reason: str) -> bool:
+    """True if this exact (user, reason) coin movement is already on record.
+
+    Used to make retroactive repairs idempotent: a repair tags its payout with
+    `repair:order#N`, so re-running the repair can look here and refuse to pay twice.
+    Fails CLOSED (returns True) on error — if we can't verify, we must not pay again."""
+    try:
+        with db() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM coin_ledger WHERE user_id=? AND reason=? LIMIT 1",
+                (str(user_id), str(reason))).fetchone()
+            return row is not None
+    except Exception:
+        return True
+
+
 def get_coin_ledger(user_id: str, limit: int = 20) -> list:
     with db() as conn:
         rows = conn.execute(

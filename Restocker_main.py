@@ -1396,13 +1396,51 @@ def _get_shop(data, shop_name: str):
     return next((s for s in data.get("shops", []) if (s.get("name","").lower()==shop_name.lower())), None)
 
 
-def _get_coin_price(shops_data: dict, item_name: str) -> int:
+def _get_coin_price(shops_data: dict, item_name: str) -> float:
+    """Coin price PER PIECE for an item, looked up tolerantly.
+
+    This feeds worker payouts, so a miss here silently pays someone 0 coins. Two things
+    used to go wrong:
+
+    * the lookup was exact-key only — an order whose item string drifted from the catalog
+      key by so much as case, stray whitespace, a NBSP, or a trailing '#variant' hash
+      priced at 0 and paid the worker nothing;
+    * the result was cast with int(), which truncated fractional per-piece prices
+      (a 390¢/stack item is 6.09¢/piece → 6) and rounded anything under 1¢/piece to 0.
+
+    So: try the exact key, then case/whitespace-insensitive, then with the variant hash
+    and colour codes stripped. Returns a float — never truncate money."""
     try:
         items = shops_data.get("items") or {}
-        info = items.get(item_name) or {}
-        return int(info.get("coin", 0) or 0)
-    except Exception:
-        return 0
+        if not item_name or not items:
+            return 0.0
+
+        info = items.get(item_name)
+
+        if info is None:                       # case / whitespace drift
+            def _norm(s):
+                return re.sub(r"\s+", " ", str(s or "").replace(" ", " ")).strip().lower()
+            target = _norm(item_name)
+            for k, v in items.items():
+                if _norm(k) == target:
+                    info = v
+                    break
+
+        if info is None:                       # '#variant' hash / colour-code drift
+            target = _fold_brew_name(item_name)
+            if target:
+                for k, v in items.items():
+                    if _fold_brew_name(k) == target:
+                        info = v
+                        break
+
+        if info is None:
+            log.warning("[pay] no catalog price for item %r — payout would be 0", item_name)
+            return 0.0
+        return float(info.get("coin", 0) or 0)
+    except Exception as e:
+        log.warning("[pay] price lookup failed for %r: %s", item_name, e)
+        return 0.0
 
 
 def fmt_qty(order: dict, pieces: int, *, prefer_original_amount: bool = False) -> str:

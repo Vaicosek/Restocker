@@ -353,6 +353,137 @@ class AdminCog(commands.Cog):
             f"✅ Backfilled **{n}** ledger row(s):\n{summary}\n\n"
             f"They now show on the team leaderboard (7-day window).", ephemeral=True)
 
+    @admin.command(
+        name="repair_payouts",
+        description="(Managers) Find & repay workers who were paid 0 by the price-lookup bug")
+    @app_commands.describe(
+        apply="false = dry-run preview (default); true = actually pay the workers")
+    async def repair_payouts(self, interaction: discord.Interaction, apply: bool = False):
+        """Repairs orders broken by the old exact-match price lookup.
+
+        An order is only touched when it is *provably* a victim of that bug:
+          • it is fulfilled, and has a claim, and
+          • the OLD exact-key lookup priced it at 0 (so the worker was silently skipped), and
+          • the NEW tolerant lookup prices it > 0 (so we know what they were owed).
+
+        That pairing is what makes this safe to run repeatedly: an order that priced fine
+        under the old logic was already paid, fails the filter, and is never re-paid. It is
+        NOT a blanket "pay everyone again" — it can't double-pay.
+        """
+        if not is_manager(interaction):
+            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        import Restocker_db as _db
+        try:
+            items_data = core._load_items()
+            orders = _db.load_orders()
+        except Exception as e:
+            return await interaction.followup.send(f"⚠️ Couldn't load orders: {e}", ephemeral=True)
+
+        catalog = (items_data or {}).get("items", {}) or {}
+
+        def _old_price(item_name):
+            """Exactly the old buggy lookup: exact key only, int()-truncated."""
+            try:
+                info = catalog.get(item_name) or {}
+                return int(info.get("coin", 0) or 0)
+            except Exception:
+                return 0
+
+        plan = []          # (order, uid, qty, owed)
+        for o in orders:
+            status = str(o.get("status", "")).lower()
+            if "fulfil" not in status and status not in ("complete", "done", "closed"):
+                continue
+            item = o.get("item", "")
+            if _old_price(item) > 0:
+                continue                       # priced fine before → was paid → never touch
+            claims = o.get("claims") or []
+            pairs = [(str(c.get("user_id") or ""), int(c.get("qty") or 0)) for c in claims]
+            if not pairs and o.get("claimed_by"):
+                pairs = [(str(o.get("claimed_by")), int(o.get("produced") or o.get("requested") or 0))]
+            for uid, qty in pairs:
+                if not uid or qty <= 0:
+                    continue
+                # Idempotency: a previous repair tags the ledger with repair:order#N. Without
+                # this check the filter below stays true forever and a second run would pay
+                # the same worker again.
+                try:
+                    if _db.coin_ledger_has(uid, f"repair:order#{o.get('id')}"):
+                        continue
+                except Exception:
+                    continue                   # can't verify → don't risk a double payment
+                try:
+                    owed = int(core._coins_for_pieces(o, qty, items_data))
+                except Exception:
+                    owed = 0
+                if owed > 0:                   # tolerant lookup found a real price → was underpaid
+                    plan.append((o, uid, qty, owed))
+
+        if not plan:
+            return await interaction.followup.send(
+                "✅ Nothing to repair — no fulfilled order was paid 0 by the price bug.\n"
+                "(If a worker is still short, their item may have **no catalog price at all** — "
+                "set one with `/set_price`, then re-run this.)", ephemeral=True)
+
+        lines, total = [], 0
+        for o, uid, qty, owed in plan[:20]:
+            try:
+                ign = _db.get_ign(uid) or uid
+            except Exception:
+                ign = uid
+            lines.append(f"• **#{o.get('id')}** {o.get('item','?')} — {ign} × {qty} pcs → **+{owed:,}c**")
+            total += owed
+        more = f"\n… and {len(plan) - 20} more" if len(plan) > 20 else ""
+        summary = "\n".join(lines) + more
+
+        if not apply:
+            return await interaction.followup.send(
+                f"**Dry run** — {len(plan)} unpaid claim(s), **{sum(p[3] for p in plan):,} coins** owed:\n"
+                f"{summary}\n\nRe-run with `apply:true` to pay them.", ephemeral=True)
+
+        paid_n, paid_c = 0, 0
+        for o, uid, qty, owed in plan:
+            try:
+                uid_i = int(uid)
+            except Exception:
+                continue
+            detail = f"order#{o.get('id')}"
+            try:
+                _mkt_mult, _mkt_bonus = core._market_loyalty_cfg(o.get("market_id"))
+                bonus_pct = core._loyalty_payout_bonus_pct(uid_i)
+                bonus = int(owed * bonus_pct / 100) if bonus_pct > 0 else 0
+                total_payout = owed + bonus + _mkt_bonus
+                core.add_coins(uid_i, total_payout, counts_as_principal=True,
+                               reason=f"repair:{detail}")
+                paid_n += 1
+                paid_c += total_payout
+            except Exception as e:
+                log.warning("[repair] payout failed for %s %s: %s", uid, detail, e)
+                continue
+            # Team ledger — idempotent, so this is safe even if backfill already ran.
+            try:
+                if not _db.team_perf_exists(uid, detail, "order"):
+                    mgr = _db.get_manager_of(uid)
+                    manager_id = str(mgr) if mgr else (uid if _db.get_team(uid) else None)
+                    if manager_id:
+                        _db.record_team_perf(manager_id, uid, "order",
+                                             coins=float(total_payout), qty=qty, detail=detail)
+            except Exception as e:
+                log.warning("[repair] team ledger failed for %s %s: %s", uid, detail, e)
+            try:
+                u = await interaction.client.fetch_user(uid_i)
+                await u.send(
+                    f"💰 **Payment correction** — Order **#{o.get('id')}** ({o.get('item','')}) "
+                    f"was approved but a pricing bug paid you **0 coins**.\n"
+                    f"You've now been paid **{total_payout:,} coins** for {qty} pcs. Sorry about that!")
+            except Exception:
+                pass
+
+        await interaction.followup.send(
+            f"✅ Repaired **{paid_n}** claim(s) — paid **{paid_c:,} coins** total.\n{summary}\n\n"
+            f"Workers were DM'd. Ledger rows are tagged `repair:order#N`.", ephemeral=True)
+
     @admin.command(name="ai_audit", description="(Managers) Recent AI tool actions — who ran what")
     @app_commands.describe(limit="How many recent entries (default 15)", sensitive_only="Only moderation/destructive actions")
     async def ai_audit(self, interaction: discord.Interaction, limit: int = 15, sensitive_only: bool = False):

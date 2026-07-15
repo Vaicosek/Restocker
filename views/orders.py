@@ -479,6 +479,7 @@ class ManagerReviewView(View):
 
         claims = list(order.get("claims") or [])
         paid_lines = []
+        unpaid_lines = []
         total_paid = 0
         for c in claims:
             try:
@@ -490,6 +491,15 @@ class ManagerReviewView(View):
                 continue
             payout = _coins_for_pieces(order, qty, items_data)
             if payout <= 0:
+                # NEVER silently skip. A 0 payout means the item has no catalog price (or its
+                # name drifted from the catalog key), and the worker would be paid nothing with
+                # no trace while the order still closed as fulfilled. Surface it loudly so a
+                # manager can fix the price and run /admin repair_payouts.
+                unpaid_lines.append(
+                    f"• <@{uid}> — **NOT PAID** for {qty} pcs: no catalog price for "
+                    f"`{order.get('item','?')}`")
+                log.warning("[pay] order #%s: no price for %r — worker %s NOT paid for %s pcs",
+                            order.get("id"), order.get("item"), uid, qty)
                 continue
             # Per-market reward: the owning market can grant a points multiplier and/or a
             # flat coin bonus per fulfilled order to incentivise its restockers.
@@ -497,7 +507,10 @@ class ManagerReviewView(View):
             bonus_pct = _loyalty_payout_bonus_pct(uid)
             bonus_coins = int(payout * bonus_pct / 100) if bonus_pct > 0 else 0
             total_payout = payout + bonus_coins + _mkt_bonus
-            new_bal, _principal = add_coins(uid, total_payout, counts_as_principal=True)
+            # Tag the ledger with the order so payouts are auditable after the fact — without
+            # this, coin_ledger rows are anonymous and "was order #N paid?" is unanswerable.
+            new_bal, _principal = add_coins(uid, total_payout, counts_as_principal=True,
+                                            reason=f"order#{order['id']}")
             total_paid += total_payout
             bonus_str = f" (+{bonus_coins} loyalty bonus)" if bonus_coins > 0 else ""
             if _mkt_bonus > 0:
@@ -577,8 +590,14 @@ class ManagerReviewView(View):
             msg += f"\n\n💸 Paid total: **{total_paid} coins**\n" + "\n".join(paid_lines[:15])
             if len(paid_lines) > 15:
                 msg += f"\n… and {len(paid_lines) - 15} more"
-        else:
+        elif not unpaid_lines:
             msg += "\n\n⚠️ No valid claims found to pay."
+        if unpaid_lines:
+            # Loud, actionable — this is the failure mode that quietly cost Dr 6 orders.
+            msg += ("\n\n🚨 **Some workers were NOT paid** — the item has no catalog price, so the "
+                    "payout computed to 0:\n" + "\n".join(unpaid_lines[:10]) +
+                    f"\n\nFix the price with `/set_price item:{order.get('item','?')} coin:<amount>` "
+                    f"then run `/admin repair_payouts` to pay them retroactively.")
         try:
             await interaction.followup.send(msg, ephemeral=True)
         except Exception:
