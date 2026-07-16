@@ -689,69 +689,41 @@ _PAGE = """<!DOCTYPE html>
     --font-mono:    var(--font-data);
     --font-display: var(--font-ui);
 
-    /* ── LIGHT theme (default) — the clean card look from the Cap Table Tracker ── */
-    --bg:            #f5f6f8;
-    --surface:       #ffffff;
-    --panel2:        #f3f4f6;
-    --overlay:       #ffffff;
-    --border:        #e5e7eb;
-    --border-dim:    #eef0f3;
-    --border-strong: #d1d5db;
+    /* ── Dark card theme (the only theme) — the clean Cap Table Tracker layout in dark.
+       A soft near-black surface set rather than the old brutalist #0A0A0A terminal, so
+       the rounded cards / pills / sentence-case refinements below read as intended. ── */
+    --bg:            #0d1117;
+    --surface:       #161b22;
+    --panel2:        #1c2230;
+    --overlay:       #1c2230;
+    --border:        #262c36;
+    --border-dim:    #20252e;
+    --border-strong: #333b47;
 
-    --text:    #111827;
-    --text-body: #374151;
-    --muted:   #6b7280;
-    --faint:   #9ca3af;
+    --text:    #e6edf3;
+    --text-body: #b6c0cc;
+    --muted:   #8b949e;
+    --faint:   #6e7681;
 
-    --green:   #16a34a;
-    --green-dim: #15803d;
-    --accent:  #16a34a;
-    --red:     #dc2626;
-    --down:    #dc2626;
-    --amber:   #d97706;
-    --gold:    #ca8a04;
-    --yellow:  #ca8a04;
-    --blue:    #2563eb;
-    --purple:  #7c3aed;
-    --shadow:  0 1px 2px rgba(16,24,40,.05);
+    --green:   #3fb950;
+    --green-dim: #2ea043;
+    --accent:  #3fb950;
+    --red:     #f85149;
+    --down:    #f85149;
+    --amber:   #d29922;
+    --gold:    #d29922;
+    --yellow:  #d29922;
+    --blue:    #58a6ff;
+    --purple:  #bc8cff;
+    --shadow:  0 1px 2px rgba(1,4,9,.5);
 
-    --market-bnl:    #2563eb;
-    --market-nether: #ea580c;
-    --market-end:    #7c3aed;
-    --market-sky:    #16a34a;
-  }
-  /* Old dark terminal theme, kept behind the 🌙 toggle in the header. */
-  html[data-theme="dark"] {
-    --bg:            #0A0A0A;
-    --surface:       #111111;
-    --panel2:        #161616;
-    --overlay:       #1C1C1C;
-    --border:        #1E1E1E;
-    --border-dim:    #191919;
-    --border-strong: #2A2A2A;
-    --text:    #F0F0F0;
-    --text-body: #BBBBBB;
-    --muted:   #666666;
-    --faint:   #444444;
-    --green:   #22FF7A;
-    --green-dim: #1A9E4F;
-    --accent:  #22FF7A;
-    --red:     #FF4444;
-    --down:    #FF4444;
-    --amber:   #F5A623;
-    --gold:    #F5A623;
-    --yellow:  #F5A623;
-    --blue:    #4A9EFF;
-    --purple:  #B47FFF;
-    --shadow:  none;
-    --market-bnl:    #4A9EFF;
-    --market-nether: #FF6B35;
-    --market-end:    #B47FFF;
-    --market-sky:    #22FF7A;
+    --market-bnl:    #58a6ff;
+    --market-nether: #ff7b39;
+    --market-end:    #bc8cff;
+    --market-sky:    #3fb950;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  html { color-scheme: light; }
-  html[data-theme="dark"] { color-scheme: dark; }
+  html { color-scheme: dark; }
   body {
     background-color: var(--bg);
     background-image: radial-gradient(var(--border-strong) 0.5px, transparent 0.5px);
@@ -763,39 +735,39 @@ _PAGE = """<!DOCTYPE html>
     min-height: 100vh;
     -webkit-font-smoothing: antialiased;
   }
-  /* ── Light-theme softening: rounded cards, pills, subtle shadows (Tracker look).
-     Scoped to :not(dark) so the 🌙 dark theme keeps its brutalist edges. ── */
-  html:not([data-theme="dark"]) body { background-image: radial-gradient(var(--border) 0.5px, transparent 0.5px); }
-  html:not([data-theme="dark"]) .chart-card,
-  html:not([data-theme="dark"]) .chart-section,
-  html:not([data-theme="dark"]) .table-wrap,
-  html:not([data-theme="dark"]) .stat-card,
-  html:not([data-theme="dark"]) .tick {
+  /* ── Card refinements: rounded cards, pills, subtle shadows (Tracker look). Now the
+     only theme, so applied unconditionally (was scoped to the light theme). ── */
+  body { background-image: radial-gradient(var(--border) 0.5px, transparent 0.5px); }
+  .chart-card,
+  .chart-section,
+  .table-wrap,
+  .stat-card,
+  .tick {
     border-radius: 12px; box-shadow: var(--shadow); background: var(--surface);
   }
-  html:not([data-theme="dark"]) .stat-card { border: 1px solid var(--border); padding: 12px 16px; }
-  html:not([data-theme="dark"]) .tab,
-  html:not([data-theme="dark"]) .market-tab,
-  html:not([data-theme="dark"]) .iv-tab,
-  html:not([data-theme="dark"]) .auth-btn,
-  html:not([data-theme="dark"]) .mini-btn { border-radius: 999px; }
-  html:not([data-theme="dark"]) .auth-btn { color: #fff; }
-  html:not([data-theme="dark"]) .auth-btn.ghost { color: var(--muted); }
-  html:not([data-theme="dark"]) .logo-icon { color: #fff; border-radius: 8px; }
-  html:not([data-theme="dark"]) .ownin,
-  html:not([data-theme="dark"]) .own-price,
-  html:not([data-theme="dark"]) .search-wrap input,
-  html:not([data-theme="dark"]) textarea.ownin { border-radius: 8px; background: #fff; border: 1px solid var(--border-strong); }
-  html:not([data-theme="dark"]) .tab.active,
-  html:not([data-theme="dark"]) .market-tab.active { background: rgba(22,163,74,.08); }
-  html:not([data-theme="dark"]) .ticker { border-radius: 12px; overflow: hidden; }
-  /* Light theme drops the SHOUTING-CAPS microcopy: sentence-case buttons, nav, card titles
-     and table headers (the Tracker look). Small stat labels stay uppercase — that's a
-     deliberate financial-dashboard convention, not a default. Dark theme keeps its caps. */
-  html:not([data-theme="dark"]) .auth-btn { text-transform: none; letter-spacing: 0; font-size: 12px; }
-  html:not([data-theme="dark"]) .nav-tab { text-transform: none; letter-spacing: .01em; font-size: 12.5px; }
-  html:not([data-theme="dark"]) .chart-title { text-transform: none; letter-spacing: 0; font-size: 13.5px; font-weight: 600; color: var(--text); }
-  html:not([data-theme="dark"]) th { text-transform: none; letter-spacing: .02em; font-size: 11px; }
+  .stat-card { border: 1px solid var(--border); padding: 12px 16px; }
+  .tab,
+  .market-tab,
+  .iv-tab,
+  .auth-btn,
+  .mini-btn { border-radius: 999px; }
+  .auth-btn { color: #fff; }
+  .auth-btn.ghost { color: var(--muted); }
+  .logo-icon { color: #fff; border-radius: 8px; }
+  .ownin,
+  .own-price,
+  .search-wrap input,
+  textarea.ownin { border-radius: 8px; background: var(--panel2); border: 1px solid var(--border-strong); color: var(--text); }
+  .tab.active,
+  .market-tab.active { background: rgba(63,185,80,.14); }
+  .ticker { border-radius: 12px; overflow: hidden; }
+  /* Sentence-case microcopy (the Tracker look): buttons, nav, card titles and table
+     headers. Small stat labels stay uppercase — a deliberate financial-dashboard
+     convention, not a default. */
+  .auth-btn { text-transform: none; letter-spacing: 0; font-size: 12px; }
+  .nav-tab { text-transform: none; letter-spacing: .01em; font-size: 12.5px; }
+  .chart-title { text-transform: none; letter-spacing: 0; font-size: 13.5px; font-weight: 600; color: var(--text); }
+  th { text-transform: none; letter-spacing: .02em; font-size: 11px; }
   :focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
   /* DATA renders in the mono terminal face with tabular figures. */
   .mono, td, .stat-card .val, .badge, .coin-badge, .market-tag, .est-tag,
@@ -1011,7 +983,6 @@ _PAGE = """<!DOCTYPE html>
     </div>
   </a>
   <div class="header-right">
-    <button id="theme-toggle" class="auth-btn ghost" title="Switch light/dark theme" style="padding:6px 10px">Dark</button>
     <span id="auth-area" class="auth-area"></span>
     <span class="updated" id="updated-ts"></span>
   </div>
@@ -1461,25 +1432,8 @@ const UPDATED       = "__UPDATED__";
 
 document.getElementById("updated-ts").textContent = "Updated: " + UPDATED;
 
-// ── Theme: light (Tracker look) is the default; 🌙 switches to the old dark terminal.
-// Persisted per browser. (Applied here, right at script start, to minimize flash.)
-(function initTheme() {
-  const btn = document.getElementById("theme-toggle");
-  function apply(t) {
-    if (t === "dark") document.documentElement.setAttribute("data-theme", "dark");
-    else document.documentElement.removeAttribute("data-theme");
-    if (btn) btn.textContent = (t === "dark") ? "Light" : "Dark";
-  }
-  let saved = null;
-  try { saved = localStorage.getItem("abx-theme"); } catch (e) {}
-  apply(saved === "dark" ? "dark" : "light");
-  if (btn) btn.onclick = () => {
-    const cur = document.documentElement.getAttribute("data-theme") === "dark" ? "dark" : "light";
-    const next = cur === "dark" ? "light" : "dark";
-    try { localStorage.setItem("abx-theme", next); } catch (e) {}
-    apply(next);
-  };
-})();
+// Theme: dark is the only theme (the light toggle was removed 2026-07-16). The dark
+// palette lives in :root, so nothing to apply here at runtime.
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 function esc(s) {

@@ -24,7 +24,6 @@ _get_market = core._get_market
 _is_market_manager = core._is_market_manager
 _load_markets = core._load_markets
 _public_market_autocomplete = core._public_market_autocomplete
-_market_autocomplete = core._market_autocomplete
 _recompute_share_price = core._recompute_share_price
 _remember_holder_name = core._remember_holder_name
 is_manager = core.is_manager
@@ -302,44 +301,10 @@ class StockCog(commands.Cog):
     # shows inside /stock price. _market_backing() stays (delist still uses it); restore the
     # full breakdown command from git history if the detail is wanted again.
 
-    @stock.command(name="import_captable",
-                   description="(Manager) Paste a Crimson cap-table export to set this market's holders")
-    @app_commands.describe(market_id="The listed market these shares belong to (e.g. greyhames = GEX)")
-    @app_commands.autocomplete(market_id=_public_market_autocomplete)
-    async def stock_import_captable(self, interaction: discord.Interaction, market_id: str):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
-        import Restocker_db as _db
-        if not _db.get_market_shares(market_id):
-            return await interaction.response.send_message(
-                f"❌ `{market_id}` isn't a listed stock — take it public first.", ephemeral=True)
-        from views.stock import CaptableImportModal
-        await interaction.response.send_modal(CaptableImportModal(market_id))
-
-    @stock.command(name="golive",
-                   description="(Manager) ONE-TIME V Tech/GEX merger — imports the baked Crimson cap tables")
-    @app_commands.describe(
-        market_id="The bot market V Tech stock lives on",
-        apply="False (default) = preview only. True = write the merger to the books.")
-    @app_commands.autocomplete(market_id=_market_autocomplete)
-    async def stock_golive(self, interaction: discord.Interaction, market_id: str,
-                           apply: bool = False):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        import io
-        import golive_gex
-        try:
-            report = "\n".join(golive_gex.run(market_id, dry=not apply))
-        except (ValueError, RuntimeError) as e:
-            return await interaction.followup.send(f"❌ {e}", ephemeral=True)
-        head = ("✅ **Merger applied.** Full report attached — next: `/investor apply_roles` "
-                f"and `/stock apply_roles {market_id}`. This command can be removed now."
-                if apply else
-                "🔍 **Dry run** — nothing was written. Check the attached report, then re-run "
-                "with `apply:True` to execute. (Idempotent: applying twice changes nothing.)")
-        f = discord.File(io.BytesIO(report.encode("utf-8")), filename="merger_report.txt")
-        await interaction.followup.send(head, file=f, ephemeral=True)
+    # /stock golive + /stock import_captable removed 2026-07-16 — one-shot V Tech/GEX
+    # merger tooling, applied on the live bot that day (100,000 shares @ 1,000; see
+    # golive_gex.py in git history). Post-merger the bot's book is authoritative, so a
+    # raw Crimson re-import would clobber the converted holdings — deliberately gone.
 
     @stock.command(name="apply_roles",
                    description="(Manager) Give every current shareholder of a market a role")
@@ -358,7 +323,7 @@ class StockCog(commands.Cog):
                    if float(h.get("shares") or 0) > 0]
         if not holders:
             return await interaction.response.send_message(
-                f"❌ `{market_id}` has no holders on record — run `/stock import_captable` first.",
+                f"❌ `{market_id}` has no holders on record.",
                 ephemeral=True)
         await interaction.response.defer(ephemeral=True, thinking=True)
         if role is None:
