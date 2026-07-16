@@ -562,6 +562,13 @@ def _migrate(conn: sqlite3.Connection) -> None:
         "ALTER TABLE futures_bulk_lines ADD COLUMN item_key TEXT",
         "ALTER TABLE futures_bulk_lines ADD COLUMN sold_baseline INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE futures_bulk_lines ADD COLUMN sold_override INTEGER",
+        # Investors (GEX.PR preferred shareholders): display name + preferred-share count
+        # from the Crimson Banking cap-table export, share_pct derived from it, and a
+        # running total of profit-share coins paid out.
+        "ALTER TABLE investors ADD COLUMN name TEXT",
+        "ALTER TABLE investors ADD COLUMN pref_shares REAL NOT NULL DEFAULT 0",
+        "ALTER TABLE investors ADD COLUMN share_pct REAL NOT NULL DEFAULT 0",
+        "ALTER TABLE investors ADD COLUMN total_received REAL NOT NULL DEFAULT 0",
     ]
     for sql in migrations:
         try:
@@ -1112,12 +1119,50 @@ def add_investor_payout(user_id: str, amount: float, note: str = None):
             "INSERT INTO investor_payout_log (user_id, amount, note) VALUES (?,?,?)",
             (str(user_id), amount, note)
         )
+        conn.execute("UPDATE investors SET total_received = total_received + ?, "
+                     "updated_at = datetime('now') WHERE user_id=?",
+                     (float(amount), str(user_id)))
 
 
-def get_investor_payout_log() -> list[dict]:
+def get_investor_payout_log(limit: int = 50) -> list[dict]:
     with db() as conn:
-        rows = conn.execute("SELECT * FROM investor_payout_log ORDER BY paid_at DESC").fetchall()
+        rows = conn.execute("SELECT * FROM investor_payout_log ORDER BY paid_at DESC LIMIT ?",
+                            (int(limit),)).fetchall()
         return [dict(r) for r in rows]
+
+
+def investor_payout_exists(note: str) -> bool:
+    """True if a distribution with this note tag already ran — makes the monthly V Tech
+    profit share idempotent per (market, month) even if a CSN month is re-ingested."""
+    with db() as conn:
+        return conn.execute("SELECT 1 FROM investor_payout_log WHERE note=? LIMIT 1",
+                            (str(note),)).fetchone() is not None
+
+
+def replace_investors(rows: list, total_shares: float = None) -> int:
+    """Replace the investor register from a Crimson cap-table export: rows are
+    (user_id, name, pref_shares). share_pct is derived from the total so it always sums
+    to 100. Existing total_received/joined_at are preserved for returning investors;
+    holders no longer on the cap table are removed. Returns how many investors are set.
+
+    total_shares: derive share_pct against THIS total instead of the rows' sum — used when
+    liquidated investors are dropped but the company keeps their slice, so the pcts sum
+    to <100 and the payout loop simply never pays the liquidated portion out."""
+    total = float(total_shares) if total_shares else (sum(float(r[2]) for r in rows) or 1.0)
+    with db() as conn:
+        keep_ids = [str(r[0]) for r in rows]
+        for uid, name, shares in rows:
+            conn.execute("""
+                INSERT INTO investors (user_id, balance, principal, name, pref_shares, share_pct)
+                VALUES (?, 0, 0, ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    name=excluded.name, pref_shares=excluded.pref_shares,
+                    share_pct=excluded.share_pct, updated_at=datetime('now')
+            """, (str(uid), str(name or ""), float(shares), round(100.0 * float(shares) / total, 4)))
+        if keep_ids:
+            q = ",".join("?" * len(keep_ids))
+            conn.execute(f"DELETE FROM investors WHERE user_id NOT IN ({q})", keep_ids)
+        return len(rows)
 
 
 
@@ -2134,14 +2179,6 @@ def record_futures_bulk_payment(bulk_id: int, amount: float) -> float:
                      (float(amount), int(bulk_id)))
         row = conn.execute("SELECT paid FROM futures_bulk WHERE id=?", (int(bulk_id),)).fetchone()
         return float(row["paid"]) if row else 0.0
-
-
-def delete_item(name: str) -> bool:
-    """Delete one catalog item row by exact name. Returns True if a row was removed.
-    (upsert-based saves never delete, so renames must remove the old row explicitly.)"""
-    with db() as conn:
-        cur = conn.execute("DELETE FROM items WHERE name=?", (str(name),))
-        return cur.rowcount > 0
 
 
 def set_item_worker_cost(name: str, worker_cost) -> None:

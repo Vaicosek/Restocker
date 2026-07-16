@@ -1,4 +1,5 @@
 """Money / futures / investor commands (extracted from Restocker_main)."""
+import re
 import sys
 import discord
 from discord import app_commands
@@ -27,6 +28,33 @@ bot = core.bot
 ephemeral_kwargs = core.ephemeral_kwargs
 is_manager = core.is_manager
 timezone = core.timezone
+
+
+async def _liquidate_target_autocomplete(interaction: discord.Interaction, current: str):
+    """Suggest anyone the bot knows as an investor or shareholder (register + cached
+    holder names), so people who already LEFT Discord are still pickable."""
+    import Restocker_db as _db
+    seen = {}
+    try:
+        for uid, name in (core.load_yaml("stock_names.yml", {}) or {}).items():
+            seen[str(uid)] = str(name or uid)
+    except Exception:
+        pass
+    try:
+        for uid, inv in (_db.get_investors() or {}).items():
+            seen[str(uid)] = str(inv.get("name") or seen.get(str(uid)) or uid)
+    except Exception:
+        pass
+    cur = (current or "").lower()
+    out = []
+    for uid, name in sorted(seen.items(), key=lambda kv: kv[1].lower()):
+        if cur and cur not in name.lower() and cur not in uid:
+            continue
+        out.append(app_commands.Choice(name=f"{name} ({uid})"[:100], value=uid))
+        if len(out) >= 25:
+            break
+    return out
+
 
 class MoneyCog(commands.Cog):
     def __init__(self, bot):
@@ -170,6 +198,189 @@ class MoneyCog(commands.Cog):
         await interaction.response.send_modal(FuturesBulkModal(
             customer_id=customer.id, customer_name=customer.display_name,
             market_id=market_id or "", created_by=interaction.user.id))
+
+    # ── Investors (/investor ...) — GEX.PR preferred shareholders, profit-share engine ──
+    investor = app_commands.Group(
+        name="investor",
+        description="(Managers) V Tech investors — sync the GEX.PR cap table, pool %, payouts",
+        default_permissions=discord.Permissions(manage_guild=True))
+
+    @investor.command(name="sync", description="Paste a Crimson Banking cap-table export to (re)build the investor register")
+    async def investor_sync(self, interaction: discord.Interaction):
+        if not is_manager(interaction):
+            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
+        from views.web import InvestorSyncModal
+        await interaction.response.send_modal(InvestorSyncModal())
+
+    @investor.command(name="status", description="Investor register, pool %, and recent distributions")
+    async def investor_status(self, interaction: discord.Interaction):
+        if not is_manager(interaction):
+            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
+        import Restocker_db as _db
+        invs = sorted((_db.get_investors() or {}).values(),
+                      key=lambda i: -float(i.get("share_pct") or 0))
+        pool = core._investor_pool_pct()
+        embed = discord.Embed(title="V Tech investors (GEX.PR)", color=discord.Color.gold())
+        embed.add_field(name="Profit pool", value=f"`{pool:g}%` of each V Tech market's monthly net "
+                        f"(change: `/investor set_pool`)", inline=False)
+        if invs:
+            lines = [f"• <@{i['user_id']}> **{i.get('name') or '?'}** — "
+                     f"{float(i.get('pref_shares') or 0):,.0f} pref · **{float(i.get('share_pct') or 0):g}%** · "
+                     f"received `{float(i.get('total_received') or 0):,.0f}`"
+                     for i in invs[:20]]
+            embed.add_field(name=f"Register ({len(invs)})", value="\n".join(lines)[:1000], inline=False)
+        else:
+            embed.add_field(name="Register", value="*empty — run `/investor sync` with the GEX.PR "
+                            "cap-table export from Crimson Banking*", inline=False)
+        try:
+            recent = _db.get_investor_payout_log(6)
+        except Exception:
+            recent = []
+        if recent:
+            embed.add_field(name="Recent distributions", value="\n".join(
+                f"• <@{r['user_id']}> +`{float(r['amount']):,.0f}` · {r.get('note') or ''}"
+                for r in recent)[:1000], inline=False)
+        embed.set_footer(text="Distributions run automatically when a V Tech market's monthly "
+                              "CSN net records — positive months only, once per market-month.")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @investor.command(name="set_pool", description="Set what % of V Tech monthly net goes to investors")
+    @app_commands.describe(pct="0–100. The pool is then split by each investor's share.")
+    async def investor_set_pool(self, interaction: discord.Interaction,
+                                pct: app_commands.Range[float, 0.0, 100.0]):
+        if not is_manager(interaction):
+            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
+        import Restocker_db as _db
+        _db.set_config("investor_pool_pct", str(float(pct)))
+        await interaction.response.send_message(
+            f"✅ Investor pool set to **{pct:g}%** of each V Tech market's monthly net. "
+            f"Applies to distributions from now on (never retroactive).", ephemeral=True)
+
+    @investor.command(name="apply_roles",
+                      description="Give every synced investor the Investor role on THIS server")
+    @app_commands.describe(role="Role to assign (default: find or create an 'Investor' role)")
+    async def investor_apply_roles(self, interaction: discord.Interaction,
+                                   role: Optional[discord.Role] = None):
+        if not is_manager(interaction):
+            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
+        guild = interaction.guild
+        if guild is None:
+            return await interaction.response.send_message("Run this in the server.", ephemeral=True)
+        import Restocker_db as _db
+        invs = [i for i in (_db.get_investors() or {}).values()
+                if float(i.get("share_pct") or 0) > 0]
+        if not invs:
+            return await interaction.response.send_message(
+                "❌ Investor register is empty — run `/investor sync` first.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        if role is None:
+            role = discord.utils.get(guild.roles, name="Investor")
+            if role is None:
+                try:
+                    role = await guild.create_role(name="Investor", reason="V Tech investor register")
+                except Exception as e:
+                    return await interaction.followup.send(f"❌ Couldn't create the Investor role: {e}",
+                                                           ephemeral=True)
+        import asyncio as _aio
+        added, had, absent, failed = [], [], [], []
+        for inv in invs:
+            uid = int(inv["user_id"])
+            member = guild.get_member(uid)
+            if member is None:
+                try:
+                    member = await guild.fetch_member(uid)
+                except Exception:
+                    member = None
+            if member is None:
+                absent.append(inv)          # not on the V Tech discord (yet)
+                continue
+            if role in member.roles:
+                had.append(member)
+                continue
+            try:
+                await member.add_roles(role, reason="GEX.PR investor")
+                added.append(member)
+            except Exception:
+                failed.append(member)       # usually role hierarchy — move the bot's role up
+            await _aio.sleep(0.4)
+        msg = (f"🏷️ **{role.mention}** applied.\n"
+               f"• Added: **{len(added)}**" + (" — " + ", ".join(m.mention for m in added) if added else "") +
+               f"\n• Already had it: **{len(had)}**")
+        if absent:
+            msg += ("\n• Not on this server: **%d** — " % len(absent)
+                    + ", ".join(f"{i.get('name') or '?'} (<@{i['user_id']}>)" for i in absent))
+        if failed:
+            msg += (f"\n• ⚠ Couldn't assign to {len(failed)} (role hierarchy? move the bot's role "
+                    f"above {role.mention}): " + ", ".join(m.mention for m in failed))
+        await interaction.followup.send(msg[:1900], ephemeral=True,
+                                        allowed_mentions=discord.AllowedMentions.none())
+
+    @investor.command(name="payout", description="Manual extra payout to one investor (straight to their coins)")
+    @app_commands.describe(user="The investor", amount="Coins to credit", reason="Shows on the log")
+    async def investor_payout(self, interaction: discord.Interaction, user: discord.Member,
+                              amount: app_commands.Range[int, 1, 1_000_000_000], reason: str = "manual"):
+        if not is_manager(interaction):
+            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
+        import Restocker_db as _db
+        if not _db.get_investor(str(user.id)):
+            return await interaction.response.send_message(
+                f"❌ {user.mention} isn't on the investor register — `/investor sync` first.", ephemeral=True)
+        core.add_coins(user.id, int(amount), counts_as_principal=False,
+                       reason=f"investor:manual:{reason[:80]}")
+        _db.add_investor_payout(str(user.id), int(amount), note=f"manual:{reason[:80]}")
+        await interaction.response.send_message(
+            f"💸 Paid {user.mention} **{amount:,}** coins (investor payout: *{reason}*).", ephemeral=True)
+        try:
+            await user.send(f"💸 Investor payout: **{amount:,}** coins — *{reason}*.")
+        except Exception:
+            pass
+
+    @investor.command(name="liquidate",
+                      description="Mark a gone-for-good holder for liquidation — their equity returns to the company")
+    @app_commands.describe(
+        action="add = mark, remove = unmark, list = show everyone marked",
+        user_id="Who (works for people who already left Discord — pick from the list or paste an ID)",
+        note="Why, e.g. 'perma banned' — shows on the list")
+    @app_commands.choices(action=[
+        app_commands.Choice(name="add", value="add"),
+        app_commands.Choice(name="remove", value="remove"),
+        app_commands.Choice(name="list", value="list")])
+    @app_commands.autocomplete(user_id=_liquidate_target_autocomplete)
+    async def investor_liquidate(self, interaction: discord.Interaction, action: str,
+                                 user_id: Optional[str] = None, note: Optional[str] = None):
+        if not is_manager(interaction):
+            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
+        cur = core._liquidated_holders()
+        if action == "list":
+            if not cur:
+                return await interaction.response.send_message("Nobody is marked for liquidation.", ephemeral=True)
+            names = core.load_yaml("stock_names.yml", {}) or {}
+            lines = [f"• <@{uid}> **{names.get(uid, '?')}**" + (f" — *{why}*" if why else "")
+                     for uid, why in cur.items()]
+            return await interaction.response.send_message(
+                "🧹 **Marked for liquidation** (equity reroutes to the company on the next "
+                "cap-table import / investor sync):\n" + "\n".join(lines)[:1800],
+                ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+        uid = re.sub(r"\D", "", str(user_id or ""))
+        if not uid:
+            return await interaction.response.send_message(
+                "❌ Pick a holder from the list (or paste their Discord ID).", ephemeral=True)
+        if action == "remove":
+            if uid not in cur:
+                return await interaction.response.send_message(f"<@{uid}> wasn't marked.", ephemeral=True,
+                                                               allowed_mentions=discord.AllowedMentions.none())
+            core._set_liquidated_holder(uid, remove=True)
+            return await interaction.response.send_message(
+                f"✅ <@{uid}> unmarked — future imports treat their shares normally again.",
+                ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+        core._set_liquidated_holder(uid, note)
+        await interaction.response.send_message(
+            f"🧹 <@{uid}> marked for liquidation" + (f" (*{note}*)" if note else "") + ".\n"
+            "From now on: cap-table imports send their **common shares to the market owner**, "
+            "and investor syncs drop them while the **company keeps their payout slice** "
+            "(other investors' % doesn't inflate). Already-imported holdings aren't touched — "
+            "re-run the import/sync to apply.",
+            ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
 
     # ── Platform fees (/fees ...) — infrastructure is live, charging is OFF by default ──
     fees = app_commands.Group(

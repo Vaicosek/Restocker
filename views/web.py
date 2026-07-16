@@ -661,6 +661,47 @@ async def post_futures_bulk_review(bulk_id: int):
             pass
 
 
+class InvestorSyncModal(discord.ui.Modal, title="Sync investors — paste GEX.PR cap table"):
+    """Paste the Crimson Banking cap-table export for GEX.PR (the CSV block:
+    account_id,discord_id,name,shares). Rebuilds the investor register: shares aggregate by
+    Discord id (one person can hold via several entities) and share_pct is derived so it
+    always sums to 100. Same format the future Crimson API will return."""
+
+    def __init__(self):
+        super().__init__(timeout=600)
+        self.blob = discord.ui.TextInput(
+            label="Cap-table export (CSV lines)",
+            style=discord.TextStyle.paragraph, required=True, max_length=3900,
+            placeholder="10001,429708337039278101,Crimson Vault,221,\n10869,180182849381466113,Maestro Inc.,111,")
+        self.add_item(self.blob)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        import Restocker_db as _db
+        rows = core._parse_crimson_captable(str(self.blob.value or ""))
+        if not rows:
+            return await interaction.response.send_message(
+                "❌ Couldn't parse any holder lines — paste the raw CSV block from the "
+                "Crimson cap-table report (`account,discord_id,name,shares,`).", ephemeral=True)
+        # Liquidated holders (left for good — /investor liquidate) are dropped, but the
+        # pcts stay derived from the FULL total: the company keeps their payout slice
+        # instead of the remaining investors absorbing it.
+        total = sum(sh for _, _, sh in rows)
+        liq = core._liquidated_holders()
+        dropped = [(uid, nm, sh) for uid, nm, sh in rows if str(uid) in liq]
+        kept = [(uid, nm, sh) for uid, nm, sh in rows if str(uid) not in liq]
+        n = _db.replace_investors(kept, total_shares=total if dropped else None)
+        lines = [f"• <@{uid}> **{nm}** — {sh:,.0f} pref · {100.0*sh/total:.1f}%"
+                 for uid, nm, sh in sorted(kept, key=lambda r: -r[2])]
+        msg = (f"✅ Investor register synced — **{n}** investor(s), {total:,.0f} preferred shares "
+               f"(entities aggregated by Discord account):\n" + "\n".join(lines)[:1500])
+        if dropped:
+            liq_sh = sum(sh for _, _, sh in dropped)
+            msg += (f"\n🧹 Liquidated (company keeps their {100.0*liq_sh/total:.1f}% slice): "
+                    + ", ".join(f"{nm} ({sh:,.0f})" for _, nm, sh in dropped))
+        await interaction.response.send_message(msg[:1900], ephemeral=True,
+                                                allowed_mentions=discord.AllowedMentions.none())
+
+
 class PayoutReviewView(discord.ui.View):
     def __init__(self, user_id: int, amount: int, channel_id: int):
         super().__init__(timeout=None)

@@ -670,7 +670,11 @@ _PAGE = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Abexilas Economy Hub</title>
+<title>Abexilas Economy Hub — live market data</title>
+<meta name="description" content="Live prices, market earnings, restock orders and the share exchange for the Abexilas server economy. Run by V Tech.">
+<meta property="og:title" content="Abexilas Economy Hub">
+<meta property="og:description" content="Live prices, market earnings, restock orders and the share exchange for the Abexilas server economy.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2316a34a'/%3E%3Cpath d='M8 19v5h3v-5zM14.5 13v11h3V13zM21 8v16h3V8z' fill='%23fff'/%3E%3C/svg%3E">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js">
 
 </script>
@@ -785,6 +789,14 @@ _PAGE = """<!DOCTYPE html>
   html:not([data-theme="dark"]) .tab.active,
   html:not([data-theme="dark"]) .market-tab.active { background: rgba(22,163,74,.08); }
   html:not([data-theme="dark"]) .ticker { border-radius: 12px; overflow: hidden; }
+  /* Light theme drops the SHOUTING-CAPS microcopy: sentence-case buttons, nav, card titles
+     and table headers (the Tracker look). Small stat labels stay uppercase — that's a
+     deliberate financial-dashboard convention, not a default. Dark theme keeps its caps. */
+  html:not([data-theme="dark"]) .auth-btn { text-transform: none; letter-spacing: 0; font-size: 12px; }
+  html:not([data-theme="dark"]) .nav-tab { text-transform: none; letter-spacing: .01em; font-size: 12.5px; }
+  html:not([data-theme="dark"]) .chart-title { text-transform: none; letter-spacing: 0; font-size: 13.5px; font-weight: 600; color: var(--text); }
+  html:not([data-theme="dark"]) th { text-transform: none; letter-spacing: .02em; font-size: 11px; }
+  :focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
   /* DATA renders in the mono terminal face with tabular figures. */
   .mono, td, .stat-card .val, .badge, .coin-badge, .market-tag, .est-tag,
   .t-price, .t-chg, .updated, code, .own-price, .ownin, .search-wrap input,
@@ -999,7 +1011,7 @@ _PAGE = """<!DOCTYPE html>
     </div>
   </a>
   <div class="header-right">
-    <button id="theme-toggle" class="auth-btn ghost" title="Switch light/dark theme" style="padding:6px 10px">🌙</button>
+    <button id="theme-toggle" class="auth-btn ghost" title="Switch light/dark theme" style="padding:6px 10px">Dark</button>
     <span id="auth-area" class="auth-area"></span>
     <span class="updated" id="updated-ts"></span>
   </div>
@@ -1048,7 +1060,7 @@ _PAGE = """<!DOCTYPE html>
     </div>
     <div class="iv-bar">
       <input class="iv-search" id="iv-search" placeholder="Search items…" autocomplete="off">
-      <button class="auth-btn" id="iv-genorders" style="display:none">⚡ Generate restock orders (→80%)</button>
+      <button class="auth-btn" id="iv-genorders" style="display:none">Generate restock orders (to 80%)</button>
       <span id="iv-genmsg" style="font-size:12px;color:var(--muted)"></span>
     </div>
     <div class="table-wrap">
@@ -1252,6 +1264,16 @@ _PAGE = """<!DOCTYPE html>
       </div>
       <div id="ct-note" style="font-size:11.5px;color:var(--faint);margin-top:10px"></div>
     </div>
+    <div class="chart-card" id="inv-card" style="display:none">
+      <div class="chart-title" id="inv-title">V Tech investors (GEX.PR)</div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Investor</th><th>Preferred shares</th><th>Share</th><th>Profit received</th></tr></thead>
+          <tbody id="inv-tbody"></tbody>
+        </table>
+      </div>
+      <div id="inv-note" style="font-size:11.5px;color:var(--faint);margin-top:10px"></div>
+    </div>
     <div class="table-wrap">
       <table>
         <thead>
@@ -1268,7 +1290,7 @@ _PAGE = """<!DOCTYPE html>
     </div>
     <div id="holders-section" style="margin-top:28px;display:none">
       <div class="chart-title" style="margin-bottom:12px">Top holders · <span id="holders-market-name"></span>
-        <a id="captable-link" href="#" target="_blank" style="float:right;font-size:13px;color:var(--accent);text-decoration:none">📊 Full cap table →</a></div>
+        <a id="captable-link" href="#" target="_blank" style="float:right;font-size:13px;color:var(--accent);text-decoration:none">Full cap table →</a></div>
       <div class="table-wrap">
         <table>
           <thead><tr><th>#</th><th>Holder</th><th>Shares</th><th>Value</th></tr></thead>
@@ -1304,8 +1326,8 @@ _PAGE = """<!DOCTYPE html>
   </style>
   <div class="page" id="page-orders">
     <div id="or-place" class="chart-card" style="margin-bottom:16px">
-      <div class="chart-title">🛒 Place an order</div>
-      <div id="or-place-locked" style="font-size:12.5px;color:var(--muted)">Log in (👤 top-right) to order — link your account with <code>/website_login</code> in Discord.</div>
+      <div class="chart-title">Place an order</div>
+      <div id="or-place-locked" style="font-size:12.5px;color:var(--muted)">Log in (top right) to order — link your account with <code>/website_login</code> in Discord.</div>
       <div id="or-place-form" style="display:none">
         <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin-bottom:10px">
           <div><div class="lblmini">Item</div><input id="or-item" list="or-catalog" class="ownin" placeholder="Search catalog…" style="width:240px" autocomplete="off"><datalist id="or-catalog"></datalist></div>
@@ -1446,7 +1468,7 @@ document.getElementById("updated-ts").textContent = "Updated: " + UPDATED;
   function apply(t) {
     if (t === "dark") document.documentElement.setAttribute("data-theme", "dark");
     else document.documentElement.removeAttribute("data-theme");
-    if (btn) btn.textContent = (t === "dark") ? "☀️" : "🌙";
+    if (btn) btn.textContent = (t === "dark") ? "Light" : "Dark";
   }
   let saved = null;
   try { saved = localStorage.getItem("abx-theme"); } catch (e) {}
@@ -1646,7 +1668,7 @@ document.querySelectorAll(".nav-tab").forEach(tab => {
     const hintEl = document.getElementById("prices-owner-hint");
     if (hintEl) {
       hintEl.style.display = ownActive ? "" : "none";
-      if (ownActive) hintEl.textContent = "✏️ You own this market — edit price or stock right here and press Enter to save (set stock to 0 to zero it, or use My Market to remove an item).";
+      if (ownActive) hintEl.textContent = "You own this market — edit price or stock right here and press Enter to save (set stock to 0 to zero it, or use My Market to remove an item).";
     }
     rows.forEach(r => {
       const tr = document.createElement("tr");
@@ -1895,7 +1917,7 @@ document.querySelectorAll(".nav-tab").forEach(tab => {
       const missing = r.missing;
       let missingHtml;
       if (missing > 0) {
-        missingHtml = `<span class="badge neg-badge">⚠ missing ${num(missing)}</span>`;
+        missingHtml = `<span class="badge neg-badge">missing ${num(missing)}</span>`;
       } else if (missing < 0) {
         missingHtml = `<span class="badge pos-badge">+${num(Math.abs(missing))} surplus</span>`;
       } else {
@@ -2156,7 +2178,7 @@ document.querySelectorAll(".nav-tab").forEach(tab => {
         body: JSON.stringify({ market_id: mid, target_percent: 80, apply: true }) }).then(r => r.json());
     } catch (e) { res = { ok: false, error: "network" }; }
     genBtn.disabled = false;
-    if (genMsg) genMsg.textContent = (res && res.ok) ? `✅ Created ${res.created} order(s) — see the Orders tab.` : ((res && res.error) || "Failed.");
+    if (genMsg) genMsg.textContent = (res && res.ok) ? `Created ${res.created} order(s) — see the Orders tab.` : ((res && res.error) || "Failed.");
   });
   document.querySelectorAll('#page-inventory th[data-ivsort]').forEach(th => th.addEventListener("click", () => {
     const k = th.getAttribute("data-ivsort");
@@ -2275,7 +2297,7 @@ document.querySelectorAll(".nav-tab").forEach(tab => {
         body:JSON.stringify({items:cart.map(c=>({item:c.item,qty:c.qty})),notes:(notesIn.value||"").trim()})}).then(r=>r.json());
     }catch(e){ res={ok:false,error:"network error"}; }
     subBtn.disabled=false;
-    if(res&&res.ok){ subMsg.style.color="var(--green)"; subMsg.textContent=`✅ Order #${res.order_id} sent — a manager will review it.`; cart=[]; notesIn.value=""; renderCart(); }
+    if(res&&res.ok){ subMsg.style.color="var(--green)"; subMsg.textContent=`Order #${res.order_id} sent — a manager will review it.`; cart=[]; notesIn.value=""; renderCart(); }
     else{ subMsg.style.color="var(--amber)"; subMsg.textContent=(res&&res.error)||"Failed."; }
   };
 })();
@@ -2461,6 +2483,29 @@ document.querySelectorAll(".nav-tab").forEach(tab => {
       + (r.privileged ? "" : " Holder names follow each holder's privacy setting.");
   }
 
+  // ── Investors card (GEX.PR register) — user-independent, loaded once ──
+  (async function loadInvestors() {
+    const card = document.getElementById("inv-card");
+    if (!card) return;
+    let r;
+    try { r = await fetch("/api/investors").then(x => x.json()); }
+    catch (e) { r = null; }
+    const invs = (r && r.ok && r.investors) || [];
+    if (!invs.length) { card.style.display = "none"; return; }
+    card.style.display = "";
+    const tb = document.getElementById("inv-tbody"); tb.innerHTML = "";
+    invs.forEach(v => {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td class="item-name">${esc(v.name)}</td>` +
+        `<td>${num(Math.round(v.pref_shares))}</td>` +
+        `<td>${v.share_pct.toFixed(1)}%</td>` +
+        `<td>${num(Math.round(v.total_received))} ¢</td>`;
+      tb.appendChild(tr);
+    });
+    document.getElementById("inv-note").textContent =
+      `Investors receive ${r.pool_pct}% of each V Tech market's monthly net, split by share — paid automatically when monthly results record.`;
+  })();
+
   let chart = null;
   function select(mid) {
     const m = markets.find(x => x.mid === mid);
@@ -2549,7 +2594,7 @@ document.querySelectorAll(".nav-tab").forEach(tab => {
     area.innerHTML = "";
     if (me && me.logged_in) {
       const span = document.createElement("span");
-      span.innerHTML = `👤 <span class="auth-name">${esc(me.name || "You")}</span>`;
+      span.innerHTML = `<span class="auth-name">${esc(me.name || "You")}</span>`;
       const anonBtn = document.createElement("button");
       anonBtn.className = "auth-btn ghost";
       anonBtn.textContent = me.anonymous ? "Anonymous: ON" : "Anonymous: off";
@@ -2741,7 +2786,7 @@ document.querySelectorAll(".nav-tab").forEach(tab => {
         try { res = await post("/api/owner/build_order", { market_id: mid, apply: true }); }
         catch (e) { res = { ok: false, error: "network" }; }
         buildBtn.disabled = false;
-        if (msgEl) msgEl.textContent = (res && res.ok) ? `✅ Created ${res.created} order(s) — see the Orders tab.` : ((res && res.error) || "Failed.");
+        if (msgEl) msgEl.textContent = (res && res.ok) ? `Created ${res.created} order(s) — see the Orders tab.` : ((res && res.error) || "Failed.");
       };
     }
     // "Request as futures": the SAME ticked items + targets, but submitted as ONE futures
@@ -2781,7 +2826,7 @@ document.querySelectorAll(".nav-tab").forEach(tab => {
         catch (e) { res = { ok: false, error: "network" }; }
         futBtn.disabled = false;
         if (res && res.ok) {
-          if (msgEl) msgEl.textContent = `✅ Futures request #${res.bulk_id} sent (${res.count} item(s))`
+          if (msgEl) msgEl.textContent = `Futures request #${res.bulk_id} sent (${res.count} item(s))`
             + (skipped ? ` · ${skipped} non-futures item(s) left for Build order.` : " — awaiting manager approval.");
           const nEl = document.getElementById("fut-notes"); if (nEl) nEl.value = "";
         } else {
@@ -2909,7 +2954,7 @@ document.querySelectorAll(".nav-tab").forEach(tab => {
       const head = document.createElement("div");
       head.style.cssText = "display:flex;gap:10px;align-items:center;font-size:12.5px;flex-wrap:wrap";
       const remCol = d.remaining > 0 ? "var(--down)" : "var(--accent)";
-      const stTag = d.status === "pending" ? " · 🕒 awaiting approval" : "";
+      const stTag = d.status === "pending" ? " · awaiting approval" : "";
       head.innerHTML =
         `<span style="color:var(--muted)">#${d.id}</span>` +
         `<span style="flex:1">${esc(d.market_id || "—")}${stTag}` +
@@ -2931,7 +2976,7 @@ document.querySelectorAll(".nav-tab").forEach(tab => {
     });
     if (totalEl) totalEl.innerHTML = totRemaining > 0
       ? `Total remaining: <b style="color:var(--down)">${num(Math.round(totRemaining))} ¢</b> — pay a manager; they record it with <code>/futures pay</code>.`
-      : `✅ Nothing outstanding — all caught up.`;
+      : `Nothing outstanding — all caught up.`;
   }
   const addBtn = document.getElementById("rs-add");
   if (addBtn) addBtn.onclick = async () => {
@@ -2986,7 +3031,7 @@ document.querySelectorAll(".nav-tab").forEach(tab => {
   }
   tbody.innerHTML = "";
   teams.forEach((t, i) => {
-    const medal = i === 0 ? "🥇" : i === 1 ? "🥈" : i === 2 ? "🥉" : (i + 1);
+    const medal = i + 1;
     const tw = (t.top_workers || []).map(w => `${esc(w.ign)} (${num(w.coins)})`).join(" · ");
     const tr = document.createElement("tr");
     tr.innerHTML = `<td>${medal}</td>
@@ -3965,6 +4010,27 @@ async def _handle_exchange_captable(request):
                               "rows": rows})
 
 
+async def _handle_api_investors(request):
+    """Public investor register (the GEX.PR preferred shareholders): entity name, preferred
+    shares, share % and total profit-share received. The cap table is already public on the
+    Crimson Banking server, so names here aren't a privacy leak; coin balances are NOT
+    exposed — only the profit-share totals."""
+    import Restocker_db as db
+    try:
+        invs = sorted((db.get_investors() or {}).values(),
+                      key=lambda i: -float(i.get("share_pct") or 0))
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=500)
+    import Restocker_main as m
+    return web.json_response({"ok": True, "pool_pct": m._investor_pool_pct(),
+                              "investors": [{
+                                  "name": i.get("name") or ("…" + str(i.get("user_id"))[-4:]),
+                                  "pref_shares": float(i.get("pref_shares") or 0),
+                                  "share_pct": float(i.get("share_pct") or 0),
+                                  "total_received": float(i.get("total_received") or 0),
+                              } for i in invs if float(i.get("share_pct") or 0) > 0]})
+
+
 async def _handle_api_order(request):
     """A logged-in customer places an order from the website (catalog items only, multi-item
     cart). Saved to web_orders and posted to the web-orders Discord channel for the normal
@@ -4164,6 +4230,7 @@ async def start_webserver(port: int = 8080):
     app.router.add_post("/api/owner/futures",      _handle_owner_futures)
     app.router.add_get("/api/owner/futures_bills", _handle_owner_futures_bills)
     app.router.add_get("/api/exchange/captable",   _handle_exchange_captable)
+    app.router.add_get("/api/investors",           _handle_api_investors)
     app.router.add_post("/api/order",    _handle_api_order)
     app.router.add_get("/api/network/orders", _handle_network_orders)
     app.router.add_post("/api/network/claim", _handle_network_claim)

@@ -6592,6 +6592,113 @@ def _credit_platform_balance(amount: int, *, market_id: str = "", note: str = ""
     return amt
 
 
+# ── Investors (GEX.PR preferred shareholders) ────────────────────────────────────────
+def _investor_pool_pct() -> float:
+    """What slice of each V Tech market's monthly net goes to the investor pool. This is a
+    business knob (default 10%) — /investor set_pool changes it live. The pool is then split
+    by each investor's share_pct (their preferred shares / 500)."""
+    try:
+        import Restocker_db as _db
+        raw = _db.get_config("investor_pool_pct")
+        if raw is not None and str(raw).strip() != "":
+            return max(0.0, min(100.0, float(raw)))
+    except Exception:
+        pass
+    return _env_float("INVESTOR_POOL_PCT", 10.0)
+
+
+def _liquidated_holders() -> dict:
+    """{discord_id: note} of shareholders/investors marked for liquidation — people who
+    left the server for good (quit, banned, vanished). Their equity goes BACK TO THE
+    COMPANY: cap-table imports reroute their common shares to the market owner, and
+    investor syncs drop them while keeping share_pct on the full total (so the company
+    keeps their payout slice instead of other investors absorbing it).
+    Managed via /investor liquidate; stored in bot_config as JSON."""
+    try:
+        import json as _json, Restocker_db as _db
+        raw = _db.get_config("liquidated_holders")
+        data = _json.loads(raw) if raw else {}
+        return {str(k): str(v or "") for k, v in data.items()} if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _set_liquidated_holder(user_id, note=None, *, remove: bool = False) -> dict:
+    """Add (or remove) one user on the liquidation list; returns the updated dict."""
+    import json as _json, Restocker_db as _db
+    cur = _liquidated_holders()
+    uid = str(user_id)
+    if remove:
+        cur.pop(uid, None)
+    else:
+        cur[uid] = str(note or "")
+    _db.set_config("liquidated_holders", _json.dumps(cur, ensure_ascii=False))
+    return cur
+
+
+def _parse_crimson_captable(text: str) -> list:
+    """Parse a Crimson Banking cap-table export (lines of `account_id,discord_id,name,shares,`)
+    into [(discord_id, name, shares)], AGGREGATED by discord id — one person can hold via
+    several entities (Maestro Inc. + Maestro Master Fund are the same Discord user) and
+    payouts land on the person, not the entity. Ignores headers/backticks/blank lines."""
+    import re as _re
+    agg: dict = {}
+    for raw in (text or "").splitlines():
+        ln = raw.strip().strip("`").strip()
+        if not ln:
+            continue
+        m = _re.match(r'^\d+\s*,\s*(\d{17,20})\s*,\s*(.+?)\s*,\s*([\d.]+)\s*,?\s*$', ln)
+        if not m:
+            continue
+        uid, name, shares = m.group(1), m.group(2), float(m.group(3))
+        if uid in agg:
+            prev_name, prev_sh = agg[uid]
+            # keep the larger holding's entity name, sum the shares
+            agg[uid] = (prev_name if prev_sh >= shares else name, prev_sh + shares)
+        else:
+            agg[uid] = (name, shares)
+    return [(uid, nm, sh) for uid, (nm, sh) in agg.items()]
+
+
+def _distribute_investor_profit(market_id: str, month_key: str, net: float) -> list:
+    """Split the investor pool of one V Tech market's monthly net among investors by their
+    share_pct, paid STRAIGHT TO BOT COINS (add_coins → ledger-tagged, auditable). Only V Tech
+    group markets' profit counts, only positive months, and it's idempotent per
+    (market, month) — a re-ingested CSN month can never pay twice. Returns
+    [(user_id, amount)] actually paid; [] when nothing was distributed."""
+    import Restocker_db as _db
+    try:
+        if net <= 0 or not _is_vtech_market(market_id):
+            return []
+        tag = f"vtech:{market_id}:{month_key}"
+        if _db.investor_payout_exists(tag):
+            return []
+        pool_pct = _investor_pool_pct()
+        if pool_pct <= 0:
+            return []
+        investors = [i for i in (_db.get_investors() or {}).values()
+                     if float(i.get("share_pct") or 0) > 0]
+        if not investors:
+            return []
+        pool = float(net) * pool_pct / 100.0
+        paid = []
+        for inv in investors:
+            uid = str(inv["user_id"])
+            amt = int(round(pool * float(inv["share_pct"]) / 100.0))
+            if amt <= 0:
+                continue
+            add_coins(int(uid), amt, counts_as_principal=False, reason=f"investor:{tag}")
+            _db.add_investor_payout(uid, amt, note=tag)
+            paid.append((uid, amt))
+        if paid:
+            log.info("[investors] %s %s: pool %.0f (%.1f%% of %.0f net) → %d investor(s)",
+                     market_id, month_key, pool, pool_pct, net, len(paid))
+        return paid
+    except Exception as e:
+        log.warning("[investors] distribution failed for %s %s: %s", market_id, month_key, e)
+        return []
+
+
 def _charge_platform_fee(base_amount, *, market_id: str = None, note: str = "",
                          month: str = None, force: bool = False) -> int:
     """Charge the platform fee on a base amount: fee = base × the market's platform_fee_pct
@@ -6887,6 +6994,14 @@ def _record_to_market_history(market_id: str, month_key: str, label: str, source
                              market_id, month_key, _fee, _net)
     except Exception as _e:
         log.warning("[fees] csn fee failed for %s %s: %s", market_id, month_key, _e)
+    # Investor profit share — V Tech markets only, positive months only, idempotent per
+    # (market, month), paid straight to bot coins. No-op until /investor sync registers
+    # the GEX.PR holders (empty register → nothing to pay).
+    try:
+        _distribute_investor_profit(market_id, month_key,
+                                    float(history["months"][month_key].get("net", 0.0) or 0.0))
+    except Exception as _e:
+        log.warning("[investors] csn hook failed for %s %s: %s", market_id, month_key, _e)
 
 
 

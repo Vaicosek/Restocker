@@ -24,6 +24,7 @@ _get_market = core._get_market
 _is_market_manager = core._is_market_manager
 _load_markets = core._load_markets
 _public_market_autocomplete = core._public_market_autocomplete
+_market_autocomplete = core._market_autocomplete
 _recompute_share_price = core._recompute_share_price
 _remember_holder_name = core._remember_holder_name
 is_manager = core.is_manager
@@ -300,6 +301,105 @@ class StockCog(commands.Cog):
     # /stock backing removed 2026-07-15 — its headline number (total backed % vs target) now
     # shows inside /stock price. _market_backing() stays (delist still uses it); restore the
     # full breakdown command from git history if the detail is wanted again.
+
+    @stock.command(name="import_captable",
+                   description="(Manager) Paste a Crimson cap-table export to set this market's holders")
+    @app_commands.describe(market_id="The listed market these shares belong to (e.g. greyhames = GEX)")
+    @app_commands.autocomplete(market_id=_public_market_autocomplete)
+    async def stock_import_captable(self, interaction: discord.Interaction, market_id: str):
+        if not is_manager(interaction):
+            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
+        import Restocker_db as _db
+        if not _db.get_market_shares(market_id):
+            return await interaction.response.send_message(
+                f"❌ `{market_id}` isn't a listed stock — take it public first.", ephemeral=True)
+        from views.stock import CaptableImportModal
+        await interaction.response.send_modal(CaptableImportModal(market_id))
+
+    @stock.command(name="golive",
+                   description="(Manager) ONE-TIME V Tech/GEX merger — imports the baked Crimson cap tables")
+    @app_commands.describe(
+        market_id="The bot market V Tech stock lives on",
+        apply="False (default) = preview only. True = write the merger to the books.")
+    @app_commands.autocomplete(market_id=_market_autocomplete)
+    async def stock_golive(self, interaction: discord.Interaction, market_id: str,
+                           apply: bool = False):
+        if not is_manager(interaction):
+            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        import io
+        import golive_gex
+        try:
+            report = "\n".join(golive_gex.run(market_id, dry=not apply))
+        except (ValueError, RuntimeError) as e:
+            return await interaction.followup.send(f"❌ {e}", ephemeral=True)
+        head = ("✅ **Merger applied.** Full report attached — next: `/investor apply_roles` "
+                f"and `/stock apply_roles {market_id}`. This command can be removed now."
+                if apply else
+                "🔍 **Dry run** — nothing was written. Check the attached report, then re-run "
+                "with `apply:True` to execute. (Idempotent: applying twice changes nothing.)")
+        f = discord.File(io.BytesIO(report.encode("utf-8")), filename="merger_report.txt")
+        await interaction.followup.send(head, file=f, ephemeral=True)
+
+    @stock.command(name="apply_roles",
+                   description="(Manager) Give every current shareholder of a market a role")
+    @app_commands.describe(market_id="The listed market (import its cap table first)",
+                           role="Role to assign (default: find or create 'Shareholder')")
+    @app_commands.autocomplete(market_id=_public_market_autocomplete)
+    async def stock_apply_roles(self, interaction: discord.Interaction, market_id: str,
+                                role: Optional[discord.Role] = None):
+        if not is_manager(interaction):
+            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
+        guild = interaction.guild
+        if guild is None:
+            return await interaction.response.send_message("Run this in the server.", ephemeral=True)
+        import Restocker_db as _db
+        holders = [h for h in (_db.get_holders(market_id) or [])
+                   if float(h.get("shares") or 0) > 0]
+        if not holders:
+            return await interaction.response.send_message(
+                f"❌ `{market_id}` has no holders on record — run `/stock import_captable` first.",
+                ephemeral=True)
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        if role is None:
+            role = discord.utils.get(guild.roles, name="Shareholder")
+            if role is None:
+                try:
+                    role = await guild.create_role(name="Shareholder", reason=f"{market_id} shareholders")
+                except Exception as e:
+                    return await interaction.followup.send(f"❌ Couldn't create the role: {e}", ephemeral=True)
+        import asyncio as _aio
+        added, had, absent, failed = [], [], [], []
+        for h in holders:
+            uid = int(h["user_id"])
+            member = guild.get_member(uid)
+            if member is None:
+                try:
+                    member = await guild.fetch_member(uid)
+                except Exception:
+                    member = None
+            if member is None:
+                absent.append(str(uid))
+                continue
+            if role in member.roles:
+                had.append(member)
+                continue
+            try:
+                await member.add_roles(role, reason=f"{market_id} shareholder")
+                added.append(member)
+            except Exception:
+                failed.append(member)
+            await _aio.sleep(0.4)
+        msg = (f"🏷️ **{role.mention}** applied to `{market_id}` holders.\n"
+               f"• Added: **{len(added)}**" + (" — " + ", ".join(m.mention for m in added[:20]) if added else "") +
+               f"\n• Already had it: **{len(had)}**")
+        if absent:
+            msg += f"\n• Not on this server: **{len(absent)}** — " + ", ".join(f"<@{u}>" for u in absent[:15])
+        if failed:
+            msg += (f"\n• ⚠ Couldn't assign to {len(failed)} (move the bot's role above {role.mention}): "
+                    + ", ".join(m.mention for m in failed[:10]))
+        await interaction.followup.send(msg[:1900], ephemeral=True,
+                                        allowed_mentions=discord.AllowedMentions.none())
 
     @stock.command(name="delist",
                    description="(Manager/Owner) Bankrupt + delist a market, paying shareholders from its backing")
