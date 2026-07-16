@@ -2499,18 +2499,34 @@ document.querySelectorAll(".nav-tab").forEach(tab => {
         post("/api/owner/set_target", Object.assign({ market_id: mid, item: item }, patch));
       }, 500);
     }
+    // Collapsed-by-default accordion: each category is a clickable header showing its
+    // fullness % and how many items are ticked, so you can scan health without expanding.
+    names.sort();
     names.forEach(cat => {
       const rows = cats[cat] || [];
       if (!rows.length) return;
+      let cap = 0, stk = 0, ticked = 0;
+      rows.forEach(r => { cap += (r.capacity || 0); stk += (r.stock || 0); if (r.tracked) ticked++; });
+      const fullPct = cap > 0 ? Math.round(100 * stk / cap) : 0;
+      const fullCol = fullPct <= 20 ? "var(--down)" : (fullPct < 60 ? "#E8B339" : "var(--accent)");
       const wrap = document.createElement("div");
-      wrap.style.marginBottom = "14px";
-      const title = document.createElement("div");
-      title.style.cssText = "font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin:10px 0 6px";
-      title.textContent = cat + " (" + rows.length + ")";
-      wrap.appendChild(title);
+      wrap.style.marginBottom = "2px";
+      const header = document.createElement("div");
+      header.style.cssText = "cursor:pointer;user-select:none;display:flex;align-items:center;gap:8px;font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;padding:9px 0;border-bottom:1px solid var(--border)";
+      const caret = document.createElement("span");
+      caret.textContent = "▸"; caret.style.cssText = "display:inline-block;width:12px";
+      const lbl = document.createElement("span");
+      lbl.style.flex = "1"; lbl.textContent = cat + " (" + rows.length + ")";
+      const meta = document.createElement("span");
+      meta.style.textTransform = "none";
+      meta.innerHTML = (cap > 0 ? '<span style="color:' + fullCol + '">' + fullPct + '% full</span>' : "")
+                     + (ticked ? ' · <span style="color:var(--accent)">' + ticked + ' ticked</span>' : "");
+      header.appendChild(caret); header.appendChild(lbl); header.appendChild(meta);
+      const body = document.createElement("div");
+      body.style.display = "none";
       rows.forEach(row => {
         const line = document.createElement("div");
-        line.style.cssText = "display:flex;align-items:center;gap:10px;padding:5px 0;border-bottom:1px solid var(--border)";
+        line.style.cssText = "display:flex;align-items:center;gap:10px;padding:5px 0 5px 20px;border-bottom:1px solid var(--border)";
         const cb = document.createElement("input");
         cb.type = "checkbox"; cb.checked = !!row.tracked;
         cb.title = "Track this item in the order builder";
@@ -2528,8 +2544,14 @@ document.querySelectorAll(".nav-tab").forEach(tab => {
         pctLbl.textContent = "%"; pctLbl.style.color = "var(--muted)";
         line.appendChild(cb); line.appendChild(name); line.appendChild(stockSpan);
         line.appendChild(pctIn); line.appendChild(pctLbl);
-        wrap.appendChild(line);
+        body.appendChild(line);
       });
+      header.onclick = () => {
+        const open = body.style.display !== "none";
+        body.style.display = open ? "none" : "";
+        caret.textContent = open ? "▸" : "▾";
+      };
+      wrap.appendChild(header); wrap.appendChild(body);
       catsEl.appendChild(wrap);
     });
     if (buildBtn) {
@@ -2571,39 +2593,65 @@ document.querySelectorAll(".nav-tab").forEach(tab => {
     st.appendChild(statCard(num(totSold), "Units sold (CSN)"));
     st.appendChild(statCard(num(items.filter(i => i.in_catalog).length), "In catalog"));
     document.getElementById("owner-empty").style.display = items.length ? "none" : "";
+    // Group the price/stock table by category into collapsed-by-default sections (matches
+    // the Order builder). The datalist still lists every item so the manual-restock box
+    // autocompletes regardless of which sections are expanded.
+    const groups = {};
     items.forEach(it => {
       const opt = document.createElement("option"); opt.value = it.item; dl.appendChild(opt);
-      const tr = document.createElement("tr");
-      const tdName = document.createElement("td"); tdName.className = "item-name"; tdName.textContent = it.item;
-      const tdStock = document.createElement("td");
-      const stockIn = document.createElement("input"); stockIn.className = "own-price"; stockIn.type = "number"; stockIn.value = Math.round(it.stock); stockIn.style.width = "80px"; stockIn.title = "Editable stock — set the real amount (or 0), then Save";
-      tdStock.appendChild(stockIn);
-      const tdPrice = document.createElement("td");
-      const price = document.createElement("input"); price.className = "own-price"; price.type = "number"; price.step = "any"; price.value = Math.round((it.coin || 0) * 100) / 100; price.style.width = "92px";
-      tdPrice.appendChild(price);
-      const tdSold = document.createElement("td"); tdSold.textContent = num(it.sold);
-      const tdOpt = document.createElement("td");
-      const optSpan = document.createElement("span"); optSpan.style.color = "var(--purple)"; optSpan.style.fontWeight = "600"; optSpan.textContent = num(it.suggested) + " ¢";
-      const useBtn = document.createElement("button"); useBtn.className = "mini-btn"; useBtn.textContent = "use"; useBtn.style.marginLeft = "8px";
-      useBtn.onclick = () => { price.value = it.suggested; };
-      tdOpt.appendChild(optSpan); tdOpt.appendChild(useBtn);
-      const tdAct = document.createElement("td");
-      const saveBtn = document.createElement("button"); saveBtn.className = "mini-btn"; saveBtn.textContent = "Save";
-      saveBtn.onclick = async () => {
-        saveBtn.textContent = "…";
-        const res = await post("/api/owner/set_item", { market_id: mid, item: it.item, coin: Number(price.value), stock: Number(stockIn.value) });
-        saveBtn.textContent = (res && res.ok) ? "Saved" : "Err";
-        setTimeout(() => { saveBtn.textContent = "Save"; }, 1200);
+      const c = it.category || "Misc";
+      (groups[c] = groups[c] || []).push(it);
+    });
+    Object.keys(groups).sort().forEach(cat => {
+      const rows = groups[cat];
+      const catId = "oc_" + cat.replace(/[^A-Za-z0-9]/g, "");
+      const htr = document.createElement("tr");
+      htr.style.cursor = "pointer"; htr.dataset.open = "0";
+      const htd = document.createElement("td"); htd.colSpan = 6;
+      htd.style.cssText = "color:var(--muted);text-transform:uppercase;letter-spacing:.08em;font-size:11px;padding:9px 0;user-select:none";
+      htd.innerHTML = '<span class="oc-caret" style="display:inline-block;width:14px">▸</span>' + esc(cat) + " (" + rows.length + ")";
+      htr.appendChild(htd);
+      htr.onclick = () => {
+        const open = htr.dataset.open === "1";
+        htr.dataset.open = open ? "0" : "1";
+        const cr = htd.querySelector(".oc-caret"); if (cr) cr.textContent = open ? "▸" : "▾";
+        tb.querySelectorAll('tr[data-cat="' + catId + '"]').forEach(r => { r.style.display = open ? "none" : ""; });
       };
-      const rmBtn = document.createElement("button"); rmBtn.className = "mini-btn danger"; rmBtn.textContent = "Remove"; rmBtn.style.marginLeft = "6px";
-      rmBtn.onclick = async () => {
-        if (!confirm(`Remove "${it.item}" from this market?\n\nFull remove also adjusts historical net and your share price.`)) return;
-        await post("/api/owner/remove_item", { market_id: mid, item: it.item, mode: "full" });
-        loadInv(mid);
-      };
-      tdAct.appendChild(saveBtn); tdAct.appendChild(rmBtn);
-      tr.appendChild(tdName); tr.appendChild(tdStock); tr.appendChild(tdPrice); tr.appendChild(tdSold); tr.appendChild(tdOpt); tr.appendChild(tdAct);
-      tb.appendChild(tr);
+      tb.appendChild(htr);
+      rows.forEach(it => {
+        const tr = document.createElement("tr");
+        tr.dataset.cat = catId; tr.style.display = "none";
+        const tdName = document.createElement("td"); tdName.className = "item-name"; tdName.textContent = it.item;
+        const tdStock = document.createElement("td");
+        const stockIn = document.createElement("input"); stockIn.className = "own-price"; stockIn.type = "number"; stockIn.value = Math.round(it.stock); stockIn.style.width = "80px"; stockIn.title = "Editable stock — set the real amount (or 0), then Save";
+        tdStock.appendChild(stockIn);
+        const tdPrice = document.createElement("td");
+        const price = document.createElement("input"); price.className = "own-price"; price.type = "number"; price.step = "any"; price.value = Math.round((it.coin || 0) * 100) / 100; price.style.width = "92px";
+        tdPrice.appendChild(price);
+        const tdSold = document.createElement("td"); tdSold.textContent = num(it.sold);
+        const tdOpt = document.createElement("td");
+        const optSpan = document.createElement("span"); optSpan.style.color = "var(--purple)"; optSpan.style.fontWeight = "600"; optSpan.textContent = num(it.suggested) + " ¢";
+        const useBtn = document.createElement("button"); useBtn.className = "mini-btn"; useBtn.textContent = "use"; useBtn.style.marginLeft = "8px";
+        useBtn.onclick = () => { price.value = it.suggested; };
+        tdOpt.appendChild(optSpan); tdOpt.appendChild(useBtn);
+        const tdAct = document.createElement("td");
+        const saveBtn = document.createElement("button"); saveBtn.className = "mini-btn"; saveBtn.textContent = "Save";
+        saveBtn.onclick = async () => {
+          saveBtn.textContent = "…";
+          const res = await post("/api/owner/set_item", { market_id: mid, item: it.item, coin: Number(price.value), stock: Number(stockIn.value) });
+          saveBtn.textContent = (res && res.ok) ? "Saved" : "Err";
+          setTimeout(() => { saveBtn.textContent = "Save"; }, 1200);
+        };
+        const rmBtn = document.createElement("button"); rmBtn.className = "mini-btn danger"; rmBtn.textContent = "Remove"; rmBtn.style.marginLeft = "6px";
+        rmBtn.onclick = async () => {
+          if (!confirm(`Remove "${it.item}" from this market?\n\nFull remove also adjusts historical net and your share price.`)) return;
+          await post("/api/owner/remove_item", { market_id: mid, item: it.item, mode: "full" });
+          loadInv(mid);
+        };
+        tdAct.appendChild(saveBtn); tdAct.appendChild(rmBtn);
+        tr.appendChild(tdName); tr.appendChild(tdStock); tr.appendChild(tdPrice); tr.appendChild(tdSold); tr.appendChild(tdOpt); tr.appendChild(tdAct);
+        tb.appendChild(tr);
+      });
     });
   }
   const loySave = document.getElementById("loy-save");

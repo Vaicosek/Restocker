@@ -7157,7 +7157,8 @@ def _market_inventory(market_id: str) -> list:
         for name, it in (_db.get_items(market_id) or {}).items():
             out[name] = {"item": name, "stock": int(it.get("stock", 0) or 0),
                          "coin": float(it.get("coin", 0) or 0),
-                         "sold": 0, "bought": 0, "in_catalog": True}
+                         "sold": 0, "bought": 0, "in_catalog": True,
+                         "category": _item_category(name, it)}
     except Exception:
         pass
     for name, m in mine.items():
@@ -7188,6 +7189,8 @@ def _market_inventory(market_id: str) -> list:
         sug, eff = _suggest(name, e["coin"])
         e["suggested"] = sug
         e["effective"] = eff
+        if not e.get("category"):
+            e["category"] = _item_category(name)
     return sorted(out.values(), key=lambda x: -x["sold"])
 
 
