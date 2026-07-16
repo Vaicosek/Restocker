@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import Optional
 
 core = sys.modules.get("Restocker_main") or sys.modules["__main__"]
+_market_autocomplete = core._market_autocomplete
 ANNOUNCE_DELAY_MINUTES = core.ANNOUNCE_DELAY_MINUTES
 EMPLOYEE_ROLE_NAME = core.EMPLOYEE_ROLE_NAME
 MANAGER_ROLE_NAME = core.MANAGER_ROLE_NAME
@@ -666,9 +667,32 @@ class OrdersCog(commands.Cog):
 
         deleted_msgs = 0
         deleted_channels = 0
+        deleted_dms = 0
 
+        import asyncio as _aio
+        client = interaction.client
 
         for o in orders:
+
+            # Delete the employee DMs this order sent (messages.dms = {user_id: message_id}).
+            # A bot can delete its own DMs; do this BEFORE the records are wiped, since the
+            # message IDs live inside the order record. Throttled to respect rate limits.
+            try:
+                dms = ((o.get("messages") or {}).get("dms") or {})
+                for uid_str, mid in list(dms.items()):
+                    try:
+                        user = client.get_user(int(uid_str)) or await client.fetch_user(int(uid_str))
+                        if not user:
+                            continue
+                        dm = user.dm_channel or await user.create_dm()
+                        msg = await dm.fetch_message(int(mid))
+                        await msg.delete()
+                        deleted_dms += 1
+                        await _aio.sleep(0.35)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
 
             try:
                 msg_meta = o.get("messages") or {}
@@ -705,10 +729,130 @@ class OrdersCog(commands.Cog):
             f"🧨 **ALL ORDERS DELETED**\n\n"
             f"• Orders removed: **{total}**\n"
             f"• Public messages deleted: **{deleted_msgs}**\n"
+            f"• Employee DMs deleted: **{deleted_dms}**\n"
             f"• Verification channels deleted: **{deleted_channels}**\n\n"
             f"Ready for fresh testing ✅",
             **ephemeral_kwargs(interaction)
         )
+
+    @app_commands.command(
+        name="orders_purge",
+        description="(Managers) Delete only a scoped batch of orders — by age / ID range / market. Keeps the rest."
+    )
+    @app_commands.describe(
+        confirm="Type YES to actually delete. Anything else = preview only (shows counts, deletes nothing).",
+        since_minutes="Only orders created within the last N minutes (e.g. 60 = the last hour).",
+        market_id="Only orders tagged this market (optional).",
+        min_id="Only orders with ID ≥ this (optional).",
+        max_id="Only orders with ID ≤ this (optional).",
+    )
+    @app_commands.autocomplete(market_id=_market_autocomplete)
+    async def orders_purge(self, interaction: discord.Interaction, confirm: str = "no",
+                           since_minutes: Optional[int] = None,
+                           market_id: Optional[str] = None,
+                           min_id: Optional[int] = None,
+                           max_id: Optional[int] = None):
+        if not is_manager(interaction):
+            return await interaction.response.send_message("⛔ Managers only.", **ephemeral_kwargs(interaction))
+        if since_minutes is None and market_id is None and min_id is None and max_id is None:
+            return await interaction.response.send_message(
+                "❌ Give at least one filter (`since_minutes` / `market_id` / `min_id` / `max_id`). "
+                "To wipe the whole board, that's `/orders_clear_all`.", **ephemeral_kwargs(interaction))
+        await interaction.response.defer(**ephemeral_kwargs(interaction), thinking=True)
+        data = load_orders()
+        orders = list(data.get("orders", []) or [])
+        cutoff = (datetime.now(timezone.utc) - timedelta(minutes=int(since_minutes))) if since_minutes else None
+        mid_f = str(market_id).strip() if market_id else None
+
+        def _match(o):
+            try:
+                oid = int(o.get("id", 0) or 0)
+            except Exception:
+                oid = 0
+            if min_id is not None and oid < int(min_id):
+                return False
+            if max_id is not None and oid > int(max_id):
+                return False
+            if mid_f is not None and str(o.get("market_id") or "") != mid_f:
+                return False
+            if cutoff is not None:
+                try:
+                    ts = parse_iso(o.get("created_at"))
+                except Exception:
+                    ts = None
+                if ts is None:
+                    return False
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                if ts < cutoff:
+                    return False
+            return True
+
+        matched = [o for o in orders if _match(o)]
+        if not matched:
+            return await interaction.followup.send("No orders match that filter.", **ephemeral_kwargs(interaction))
+        ids = sorted(int(o.get("id", 0) or 0) for o in matched)
+        id_span = f"#{ids[0]}–#{ids[-1]}" if len(ids) > 1 else f"#{ids[0]}"
+
+        if confirm.strip().upper() != "YES":
+            sample = ", ".join(f"#{i}" for i in ids[:25]) + (" …" if len(ids) > 25 else "")
+            return await interaction.followup.send(
+                f"🔍 **Preview** — **{len(matched)}** order(s) match ({id_span}):\n{sample}\n\n"
+                f"Re-run with **`confirm:YES`** to delete them (DMs, posts, tickets, records). "
+                f"Your other **{len(orders) - len(matched)}** order(s) stay untouched.",
+                **ephemeral_kwargs(interaction))
+
+        import asyncio as _aio
+        client = interaction.client
+        deleted_dms = deleted_msgs = deleted_channels = 0
+        for o in matched:
+            try:
+                dms = ((o.get("messages") or {}).get("dms") or {})
+                for uid_str, m_id in list(dms.items()):
+                    try:
+                        user = client.get_user(int(uid_str)) or await client.fetch_user(int(uid_str))
+                        if not user:
+                            continue
+                        dm = user.dm_channel or await user.create_dm()
+                        msg = await dm.fetch_message(int(m_id))
+                        await msg.delete()
+                        deleted_dms += 1
+                        await _aio.sleep(0.35)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            try:
+                mm = o.get("messages") or {}
+                ch_id, msg_id = mm.get("channel_id"), mm.get("message_id")
+                if ch_id and msg_id:
+                    ch = client.get_channel(int(ch_id))
+                    if ch:
+                        msg = await ch.fetch_message(int(msg_id))
+                        await msg.delete()
+                        deleted_msgs += 1
+            except Exception:
+                pass
+            try:
+                vid = o.get("verification_ticket_id")
+                if vid:
+                    ch = client.get_channel(int(vid))
+                    if ch:
+                        await ch.delete(reason="Order purge (scoped)")
+                        deleted_channels += 1
+            except Exception:
+                pass
+
+        match_ids = {int(o.get("id", 0) or 0) for o in matched}
+        data["orders"] = [o for o in orders if int(o.get("id", 0) or 0) not in match_ids]
+        save_orders(data, prune=True)
+        await interaction.followup.send(
+            f"🧹 **Purged {len(matched)} order(s)** ({id_span}).\n"
+            f"• Posts deleted: **{deleted_msgs}**\n"
+            f"• Employee DMs deleted: **{deleted_dms}**\n"
+            f"• Verification channels deleted: **{deleted_channels}**\n"
+            f"• Kept: **{len(data['orders'])}** other order(s).",
+            **ephemeral_kwargs(interaction))
 
 
 async def setup(bot):

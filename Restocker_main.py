@@ -135,6 +135,12 @@ STOCK_LOW_PCT = _env_float("STOCK_LOW_PCT", 20.0)  # live-stock alert: warn when
 STOCK_ALARM_DEFAULT_PCT = _env_float("STOCK_ALARM_DEFAULT_PCT", 20.0)
 STOCK_REVERT_DAILY = _env_float("STOCK_REVERT_DAILY", 0.05)
 STOCK_DIVIDEND_PCT = _env_float("STOCK_DIVIDEND_PCT", 0.0)
+# Restock-order sanity guards (protect the website "Build order" / refill scan): never
+# auto-create an order for an item with no sell price (0-coin, pointless) or one whose
+# total payout would blow past this ceiling (e.g. a Beacon at 30k/pc x 2765 = 82M — a
+# clear mistake, not a real bulk buy). Items over the cap are skipped and reported so the
+# owner can order them deliberately. Set ORDER_MAX_AUTO_PAYOUT=0 to disable the cap.
+ORDER_MAX_AUTO_PAYOUT = _env_float("ORDER_MAX_AUTO_PAYOUT", 1_000_000.0)
 STOCK_LIMIT_ORDERS_ENABLED = _env_bool("STOCK_LIMIT_ORDERS_ENABLED", True)
 
 FUNDS_REPORT_GUILD_ID = _env_int("FUNDS_REPORT_GUILD_ID", 1447833151329009726)
@@ -935,6 +941,24 @@ def get_claimers(order: dict) -> set[int]:
     return s
 
 
+def _market_sell_location(market_id) -> str:
+    """Where a worker delivers/sells goods for this market — the in-game warp. Defaults
+    to '/la spawn <market_id>' (the convention on this server); a market can override it
+    (casing, alias, or a different warp) via /market set_location, stored as the market's
+    'sell_location' field. Returns '' only for a blank/unknown market."""
+    mid = str(market_id or "").strip()
+    if not mid:
+        return ""
+    try:
+        import Restocker_db as _db
+        override = str(_db.get_config(f"sell_loc:{mid}") or "").strip()
+        if override:
+            return override
+    except Exception:
+        pass
+    return f"/la spawn {mid}"
+
+
 def build_order_embed(order: dict, items_data: dict) -> discord.Embed:
     requested = int(order.get("requested", 0) or 0)
     assigned = sum(int(c.get("qty", 0) or 0) for c in (order.get("claims") or []))
@@ -949,6 +973,9 @@ def build_order_embed(order: dict, items_data: dict) -> discord.Embed:
     embed.add_field(name="Requested", value=fmt_qty(order, requested, prefer_original_amount=True), inline=True)
     embed.add_field(name="Remaining", value=fmt_qty(order, remaining), inline=True)
     embed.add_field(name="Status", value=str(order.get("status", "open")).capitalize(), inline=True)
+    _sell_loc = _market_sell_location(order.get("market_id"))
+    if _sell_loc:
+        embed.add_field(name="📍 Deliver to", value=f"`{_sell_loc}`", inline=False)
     if _is_futures:
         _cust = order.get("customer_id")
         embed.add_field(name="🔮 Futures",
@@ -3917,6 +3944,23 @@ async def orders_cmd(interaction: discord.Interaction):
 
         view = OrdersBrowser(all_active_for_view, viewer_id=int(interaction.user.id))
 
+    # Delivery locations for the markets with open orders — so workers know where to sell.
+    try:
+        _locs, _seen = [], set()
+        for _o in all_active_for_view:
+            _mid = str(_o.get("market_id") or "").strip()
+            if not _mid or _mid in _seen:
+                continue
+            _seen.add(_mid)
+            _loc = _market_sell_location(_mid)
+            if _loc:
+                _mkt = _get_market(_mid) or {}
+                _locs.append(f"**{_mkt.get('name', _mid)}** → `{_loc}`")
+        if _locs:
+            embed.add_field(name="📍 Deliver to", value="\n".join(_locs[:12])[:1000], inline=False)
+    except Exception:
+        pass
+
     try:
         await interaction.followup.send(
             embed=embed,
@@ -6108,7 +6152,12 @@ def _create_restock_orders(to_order: list, market_id=None) -> int:
             "priority_role": "TESTER",
             "verification_ticket_id": None, "assist_ticket_id": None,
             "assist_ticket_ids": {}, "blocked_claimers": [],
-            "market_id": info.get("market_id") or market_id,
+            # The market being restocked wins. Only fall back to the item's home
+            # market when no market_id was passed (e.g. the stock-alarm view). Without
+            # this, an item first registered by another market (its catalog entry
+            # carries that market_id) would mis-tag the order — a build for Amazonia
+            # could stamp a line [BNL] just because BNL created that item.
+            "market_id": market_id or info.get("market_id"),
         }
         data_orders.setdefault("orders", []).append(order)
         created += 1
@@ -6355,6 +6404,7 @@ def _stock_refill_plan(market_id: str, target_pct: float = 80.0, item_targets: d
     }
     st = _db.get_market_stock(market_id) or {}
     to_order, skipped_active, at_target = [], 0, 0
+    skipped_guard = []   # [{item, reason, payout}] — 0-coin or over-cap items dropped
     for row in st.values():
         item = str(row.get("item") or "").strip()
         if not item or _is_future_item(item):
@@ -6379,9 +6429,18 @@ def _stock_refill_plan(market_id: str, target_pct: float = 80.0, item_targets: d
         if item in active:
             skipped_active += 1
             continue
+        # Sanity guards: don't auto-create pointless (0-coin) or runaway-payout orders.
+        piece_price = float((known[item] or {}).get("coin", 0) or 0)
+        if piece_price <= 0:
+            skipped_guard.append({"item": item, "reason": "no_price", "payout": 0})
+            continue
+        payout = need * piece_price
+        if ORDER_MAX_AUTO_PAYOUT > 0 and payout > ORDER_MAX_AUTO_PAYOUT:
+            skipped_guard.append({"item": item, "reason": "over_cap", "payout": int(payout)})
+            continue
         to_order.append((item, need, known[item]))
     to_order.sort(key=lambda t: -t[1])
-    return to_order, skipped_active, at_target
+    return to_order, skipped_active, at_target, skipped_guard
 
 
 def _market_catalog_by_category(market_id: str) -> dict:

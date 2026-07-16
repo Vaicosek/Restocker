@@ -1316,6 +1316,7 @@ _PAGE = """<!DOCTYPE html>
     </div>
     <div class="stats" id="stats-orders"></div>
     <div class="or-bar"><div class="or-tabs" id="or-markets"></div></div>
+    <div id="or-deliver" style="display:none;font-family:var(--font-data);font-size:12px;color:var(--muted);margin:0 0 12px">📍 Deliver to <span id="or-deliver-loc" style="color:var(--text)"></span></div>
     <div class="table-wrap">
       <table><thead><tr>
         <th>#</th><th>Item</th><th>Requested</th><th>Claimed</th><th>Progress</th><th>Status</th>
@@ -2175,7 +2176,14 @@ document.querySelectorAll(".nav-tab").forEach(tab => {
     return `<span class="or-tag ${cls}">${st}</span>`;
   }
 
+  const deliverEl = document.getElementById("or-deliver");
+  const deliverLocEl = document.getElementById("or-deliver-loc");
   function render(){
+    const loc = (DATA[active] || {}).sell_location || "";
+    if (deliverEl) {
+      if (loc) { deliverEl.style.display = ""; if (deliverLocEl) deliverLocEl.textContent = loc; }
+      else { deliverEl.style.display = "none"; }
+    }
     const orders = (DATA[active] || {}).orders || [];
     const totalReq = orders.reduce((s, o) => s + (o.requested || 0), 0);
     const openN = orders.filter(o => (o.claimed || 0) < (o.requested || 0)).length;
@@ -2731,8 +2739,25 @@ document.querySelectorAll(".nav-tab").forEach(tab => {
         try { prev = await post("/api/owner/build_order", { market_id: mid, apply: false }); }
         catch (e) { prev = { ok: false, error: "network" }; }
         if (!prev || !prev.ok) { buildBtn.disabled = false; if (msgEl) msgEl.textContent = (prev && prev.error) || "Failed."; return; }
-        if (!prev.count) { buildBtn.disabled = false; if (msgEl) msgEl.textContent = "Nothing to restock — every ticked item is at or above its target."; return; }
-        if (!confirm(`Create ${prev.count} restock order(s) for your ticked items?`)) {
+        const sg = prev.skipped_guard || [];
+        const noPrice = sg.filter(s => s.reason === "no_price").length;
+        const overCap = sg.filter(s => s.reason === "over_cap");
+        if (!prev.count) {
+          buildBtn.disabled = false;
+          let m0 = "Nothing to restock — every ticked item is at or above its target.";
+          if (sg.length) m0 += ` (${sg.length} item(s) skipped: ${noPrice} with no price, ${overCap.length} over the payout cap.)`;
+          if (msgEl) msgEl.textContent = m0;
+          return;
+        }
+        let warn = "";
+        if (sg.length) {
+          warn = "\n\n⚠ " + sg.length + " item(s) skipped: "
+            + (noPrice ? noPrice + " with no sell price" : "")
+            + (noPrice && overCap.length ? "; " : "")
+            + (overCap.length ? overCap.length + " over the payout cap (" + overCap.slice(0,4).map(s => s.item).join(", ") + (overCap.length > 4 ? "…" : "") + ")" : "")
+            + ". Set a price / order those manually if you meant to.";
+        }
+        if (!confirm(`Create ${prev.count} restock order(s) for your ticked items?` + warn)) {
           buildBtn.disabled = false; if (msgEl) msgEl.textContent = ""; return;
         }
         if (msgEl) msgEl.textContent = "Creating…";
@@ -3145,11 +3170,21 @@ def _load_orders_data() -> dict:
             "claimed": claimed,
             "status": st or "open",
         })
+    try:
+        import Restocker_main as _m
+    except Exception:
+        _m = None
     out = []
     for mid, orders in by_market.items():
         orders.sort(key=lambda x: x["id"], reverse=True)
+        loc = ""
+        if _m is not None:
+            try:
+                loc = _m._market_sell_location(mid)
+            except Exception:
+                loc = ""
         out.append({"market_id": mid, "name": names.get(mid, mid),
-                    "orders": orders, "count": len(orders)})
+                    "orders": orders, "count": len(orders), "sell_location": loc})
     out.sort(key=lambda m: m["count"], reverse=True)
     return {"markets": out}
 
@@ -3678,20 +3713,21 @@ async def _handle_owner_generate_orders(request):
         target = 80.0
     import Restocker_main as m
     try:
-        to_order, skipped_active, at_target = m._stock_refill_plan(mid, target)
+        to_order, skipped_active, at_target, skipped_guard = m._stock_refill_plan(mid, target)
     except Exception as e:
         return web.json_response({"ok": False, "error": str(e)}, status=500)
     preview = [{"item": it, "qty": int(q)} for it, q, _ in to_order[:50]]
     if not bool(body.get("apply", False)):
         return web.json_response({"ok": True, "preview": True, "count": len(to_order),
                                   "skipped_active": skipped_active, "at_target": at_target,
-                                  "items": preview})
+                                  "skipped_guard": skipped_guard, "items": preview})
     try:
         created = await m.run_on_bot_loop(m._create_restock_orders, to_order, mid)
     except Exception as e:
         return web.json_response({"ok": False, "error": str(e)}, status=500)
     _CACHE.clear()
-    return web.json_response({"ok": True, "created": int(created), "items": preview})
+    return web.json_response({"ok": True, "created": int(created),
+                              "skipped_guard": skipped_guard, "items": preview})
 
 
 async def _handle_owner_catalog(request):
@@ -3755,22 +3791,24 @@ async def _handle_owner_build_order(request):
     import Restocker_main as m, Restocker_db as db
     try:
         targets = db.get_market_item_targets(mid) or {}
-        to_order, skipped_active, at_target = m._stock_refill_plan(mid, item_targets=targets)
+        to_order, skipped_active, at_target, skipped_guard = m._stock_refill_plan(mid, item_targets=targets)
     except Exception as e:
         return web.json_response({"ok": False, "error": str(e)}, status=500)
     preview = [{"item": it, "qty": int(q)} for it, q, _ in to_order[:50]]
     if not bool(body.get("apply", False)):
         return web.json_response({"ok": True, "preview": True, "count": len(to_order),
                                   "skipped_active": skipped_active, "at_target": at_target,
-                                  "items": preview})
+                                  "skipped_guard": skipped_guard, "items": preview})
     if not to_order:
-        return web.json_response({"ok": True, "created": 0, "items": []})
+        return web.json_response({"ok": True, "created": 0,
+                                  "skipped_guard": skipped_guard, "items": []})
     try:
         created = await m.run_on_bot_loop(m._create_restock_orders, to_order, mid)
     except Exception as e:
         return web.json_response({"ok": False, "error": str(e)}, status=500)
     _CACHE.clear()
-    return web.json_response({"ok": True, "created": int(created), "items": preview})
+    return web.json_response({"ok": True, "created": int(created),
+                              "skipped_guard": skipped_guard, "items": preview})
 
 
 async def _handle_owner_futures(request):

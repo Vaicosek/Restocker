@@ -852,6 +852,38 @@ class MarketCog(commands.Cog):
             ephemeral=True,
         )
 
+    @app_commands.command(
+        name="market_set_location",
+        description="(Manager/Owner) Set where workers deliver goods for a market (the /la spawn warp)",
+    )
+    @app_commands.describe(
+        market_id="The market",
+        location="e.g. '/la spawn BNL'. Leave blank to reset to the default '/la spawn <market_id>'.",
+    )
+    @app_commands.autocomplete(market_id=_market_autocomplete)
+    async def market_set_location(self, interaction: discord.Interaction,
+                                  market_id: str, location: Optional[str] = None):
+        if not (is_manager(interaction) or _is_market_manager(interaction, market_id)):
+            return await interaction.response.send_message(
+                "⛔ Managers or this market's owner only.", ephemeral=True)
+        markets = (_load_markets() or {}).get("markets") or {}
+        if market_id not in markets:
+            return await interaction.response.send_message(
+                f"❌ Market `{market_id}` not found.", ephemeral=True)
+        import Restocker_db as _db
+        loc = (location or "").strip()[:100]
+        if not loc:
+            _db.delete_config(f"sell_loc:{market_id}")
+            return await interaction.response.send_message(
+                f"✅ Delivery location for **{markets[market_id].get('name', market_id)}** reset to the "
+                f"default `/la spawn {market_id}`. It shows on worker order cards, `/orders`, and the website.",
+                ephemeral=True)
+        _db.set_config(f"sell_loc:{market_id}", loc)
+        await interaction.response.send_message(
+            f"✅ Workers restocking **{markets[market_id].get('name', market_id)}** will now be told to "
+            f"deliver to `{loc}`. It shows on their order cards, `/orders`, and the website.",
+            ephemeral=True)
+
     @market.command(
         name="go_public",
         description="(Manager/Owner) List a market on the stock exchange so its shares can be traded",
