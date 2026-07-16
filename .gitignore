@@ -1,45 +1,41 @@
-# ---- Secrets & auth — never commit (token + live dashboard sessions) ----
-.env
-env
-*.env
-.env.*
-Mconfig.yml
-data/state/Mconfig.yml
-data/state/web_sessions.yml
-data/state/web_login_codes.yml
-
-# ---- Environment / virtualenv / caches (not useful in git) ----
-.venv/
-venv/
-__pycache__/
-__pycache_/
-*.pyc
-*.pyo
-.cache/
-.local/
-
-# ---- Logs ----
-*.log
-
-# ---- Large OS-specific binaries (upload per-host; 38-52 MB each) ----
-cloudflared
-cloudflared.exe
-*.exe
-
-# ---- Editor / IDE ----
-.idea/
-.vscode/
-*.swp
-.DS_Store
-
-# ---- Live database + bot-written state — CANNOT be tracked in git ----
-# The running bot writes these constantly, so every `git pull` conflicts and aborts.
-# Keep them per-host (upload manually / reinstall). Code still syncs via git fine.
+# ── Live data — NEVER commit these ───────────────────────────────────────────
+# The bot writes to restocker.db constantly. Committing it means every push carries
+# a stale snapshot, and every server pull fights (or overwrites) the live database.
+# It stays on disk; it just must not travel through git.
 restocker.db
+restocker.db-journal
+restocker.db-wal
+restocker.db-shm
 *.db
+*.db-journal
 *.db-wal
 *.db-shm
-*.sqlite
-*.sqlite3
-data/
-csn_stock_MERGED.csv
+
+# Automatic DB backups (see db_backup_loop) — local to each machine.
+backups/
+
+# Runtime YAML state the bot writes (the DB is the source of truth; these are its
+# write-only mirrors/fallbacks and would cause the same pull conflicts if tracked).
+data/state/
+data/csn_history/
+data/exports/
+
+# Secrets / environment
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+
+# Editor / OS junk
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db

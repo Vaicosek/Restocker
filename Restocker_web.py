@@ -2751,11 +2751,10 @@ document.querySelectorAll(".nav-tab").forEach(tab => {
         }
         let warn = "";
         if (sg.length) {
-          warn = "\n\n⚠ " + sg.length + " item(s) skipped: "
-            + (noPrice ? noPrice + " with no sell price" : "")
-            + (noPrice && overCap.length ? "; " : "")
-            + (overCap.length ? overCap.length + " over the payout cap (" + overCap.slice(0,4).map(s => s.item).join(", ") + (overCap.length > 4 ? "…" : "") + ")" : "")
-            + ". Set a price / order those manually if you meant to.";
+          const parts = [];
+          if (noPrice) parts.push(noPrice + " with no sell price");
+          if (overCap.length) parts.push(overCap.length + " over the payout cap (" + overCap.slice(0,4).map(s => s.item).join(", ") + (overCap.length > 4 ? "..." : "") + ")");
+          warn = "  --  " + sg.length + " item(s) skipped: " + parts.join("; ") + ". Set a price / order those manually if you meant to.";
         }
         if (!confirm(`Create ${prev.count} restock order(s) for your ticked items?` + warn)) {
           buildBtn.disabled = false; if (msgEl) msgEl.textContent = ""; return;
