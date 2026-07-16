@@ -2009,13 +2009,15 @@ def create_futures_bulk(customer_id: str, customer_name: str, market_id: str,
 
 
 def add_futures_bulk_line(bulk_id: int, item: str, qty: int, unit: str = "pieces",
-                          enchants: str = "", raw_line: str = "") -> int:
+                          enchants: str = "", raw_line: str = "", item_key: str = None) -> int:
+    """item_key: when the line was picked from the catalog (web builder), link it immediately
+    so consignment pricing/CSN matching doesn't need a manual /futures price item match."""
     with db() as conn:
         cur = conn.execute(
-            "INSERT INTO futures_bulk_lines (bulk_id, item, qty, unit, enchants, raw_line) "
-            "VALUES (?,?,?,?,?,?)",
+            "INSERT INTO futures_bulk_lines (bulk_id, item, qty, unit, enchants, raw_line, item_key) "
+            "VALUES (?,?,?,?,?,?,?)",
             (int(bulk_id), str(item), int(qty), str(unit or "pieces"),
-             str(enchants or ""), str(raw_line or "")))
+             str(enchants or ""), str(raw_line or ""), (str(item_key) if item_key else None)))
         return int(cur.lastrowid)
 
 

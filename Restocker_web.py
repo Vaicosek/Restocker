@@ -1294,14 +1294,20 @@ _PAGE = """<!DOCTYPE html>
         <button class="auth-btn" id="ob-build">Build order</button>
         <span id="ob-msg" style="font-size:12px;color:var(--muted)"></span>
       </div>
-    </div>
-    <div class="chart-card">
-      <div class="chart-title">Request futures <span style="color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0">— custom crafts made to order; a manager approves &amp; queues them for workers</span></div>
-      <textarea id="fut-items" class="ownin" rows="4" placeholder="One item per line, e.g.&#10;2 barrels Warlord Potion (Str 2 + Speed 2)&#10;Sword Sharp V Fire Aspect II x10" style="width:100%;resize:vertical;font-family:var(--font-data)"></textarea>
-      <input id="fut-notes" class="ownin" placeholder="Notes (optional)" style="width:100%;margin-top:8px">
-      <div style="display:flex;gap:12px;align-items:center;margin-top:10px">
-        <button class="auth-btn" id="fut-send">Submit futures request</button>
-        <span id="fut-msg" style="font-size:12px;color:var(--muted)"></span>
+      <div style="border-top:1px solid var(--border);margin-top:18px;padding-top:14px">
+        <div class="chart-title">Futures — custom crafts <span style="color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0">— pick from the catalog (enchant details in notes); a manager approves &amp; queues them for workers</span></div>
+        <datalist id="fut-catalog"></datalist>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
+          <div style="flex:1;min-width:220px"><div class="lblmini">Item</div><input id="fut-item" class="ownin" list="fut-catalog" placeholder="Search catalog…" style="width:100%"></div>
+          <div><div class="lblmini">Qty</div><input id="fut-qty" class="ownin" type="number" min="1" value="1" style="width:84px"></div>
+          <button class="auth-btn ghost" id="fut-add">Add</button>
+        </div>
+        <div id="fut-lines" style="margin-top:8px"></div>
+        <input id="fut-notes" class="ownin" placeholder="Notes (optional — enchants, quality, delivery)" style="width:100%;margin-top:8px">
+        <div style="display:flex;gap:12px;align-items:center;margin-top:10px">
+          <button class="auth-btn" id="fut-send">Request futures</button>
+          <span id="fut-msg" style="font-size:12px;color:var(--muted)"></span>
+        </div>
       </div>
     </div>
     <div class="chart-card">
@@ -2681,18 +2687,60 @@ document.querySelectorAll(".nav-tab").forEach(tab => {
     const res = await post("/api/owner/set_loyalty", { market_id: curMid, pts_mult: pm, coin_bonus: cb, pct_bonus: pct });
     msg.textContent = (res && res.ok) ? "Saved ✓" : ((res && res.error) || "Failed.");
   };
+  // ── Futures picker (inside the Order Builder card): catalog-driven, not text-based.
+  // Lines picked here arrive server-side pre-linked to their catalog item (item_key),
+  // so consignment pricing doesn't need a manual item match later.
+  const futLines = [];
+  (function initFutCatalog() {
+    const dl = document.getElementById("fut-catalog");
+    if (!dl || typeof ITEMS === "undefined") return;
+    Object.keys(ITEMS).forEach(k => {
+      if (/^future /i.test(k)) return;         // skip legacy "Future X" twin entries
+      const opt = document.createElement("option"); opt.value = k; dl.appendChild(opt);
+    });
+  })();
+  function renderFutLines() {
+    const box = document.getElementById("fut-lines");
+    if (!box) return;
+    box.innerHTML = "";
+    futLines.forEach((l, i) => {
+      const row = document.createElement("div");
+      row.style.cssText = "display:flex;align-items:center;gap:10px;padding:4px 0;border-bottom:1px solid var(--border);font-size:12.5px";
+      const nm = document.createElement("span"); nm.style.flex = "1"; nm.textContent = l.item;
+      const q = document.createElement("span"); q.style.color = "var(--muted)"; q.textContent = "× " + l.qty;
+      const rm = document.createElement("button"); rm.className = "mini-btn danger"; rm.textContent = "×";
+      rm.onclick = () => { futLines.splice(i, 1); renderFutLines(); };
+      row.appendChild(nm); row.appendChild(q); row.appendChild(rm);
+      box.appendChild(row);
+    });
+  }
+  const futAdd = document.getElementById("fut-add");
+  if (futAdd) futAdd.onclick = () => {
+    const msg = document.getElementById("fut-msg");
+    const itemEl = document.getElementById("fut-item");
+    const qtyEl = document.getElementById("fut-qty");
+    const name = (itemEl.value || "").trim();
+    const qty = Math.max(1, Number(qtyEl.value || 1));
+    if (!name) { msg.textContent = "Pick an item from the catalog."; return; }
+    const exists = typeof ITEMS !== "undefined" &&
+      Object.keys(ITEMS).some(k => k.toLowerCase() === name.toLowerCase());
+    if (!exists) { msg.textContent = `"${name}" isn't in the catalog — pick from the suggestions.`; return; }
+    futLines.push({ item: name, qty });
+    itemEl.value = ""; qtyEl.value = 1; msg.textContent = "";
+    renderFutLines();
+  };
   const futSend = document.getElementById("fut-send");
   if (futSend) futSend.onclick = async () => {
     const msg = document.getElementById("fut-msg");
-    const items = document.getElementById("fut-items").value.trim();
     const notes = document.getElementById("fut-notes").value.trim();
-    if (!items) { msg.textContent = "Paste at least one item (one per line)."; return; }
+    if (!futLines.length) { msg.textContent = "Add at least one item first."; return; }
     futSend.disabled = true; msg.textContent = "Submitting…";
-    const res = await post("/api/owner/futures", { market_id: curMid, items, notes });
+    const res = await post("/api/owner/futures", { market_id: curMid, lines: futLines, notes });
     futSend.disabled = false;
     if (res && res.ok) {
       msg.textContent = `✅ Futures request #${res.bulk_id} sent (${res.count} item(s)) — a manager will approve it.`;
-      document.getElementById("fut-items").value = ""; document.getElementById("fut-notes").value = "";
+      futLines.length = 0; renderFutLines();
+      document.getElementById("fut-notes").value = "";
     } else {
       msg.textContent = (res && res.error) || "Failed.";
     }
@@ -3553,20 +3601,46 @@ async def _handle_owner_futures(request):
     mid = str(body.get("market_id") or "").strip()
     if not mid or not _require_owner(request, mid):
         return web.json_response({"ok": False, "error": "Not authorized for this market."}, status=403)
-    text = str(body.get("items") or "")
     notes = str(body.get("notes") or "").strip()[:500]
     import Restocker_main as m, Restocker_db as _db
-    parsed = m._parse_futures_bulk_text(text)
+    # Preferred: structured lines picked from the catalog on the website ({item, qty} dicts).
+    # These validate against the catalog and arrive pre-linked (item_key) for consignment
+    # pricing. Fallback: a pasted text blob (the Discord modal's format), parsed line-by-line.
+    parsed = []
+    raw_lines = body.get("lines") if isinstance(body.get("lines"), list) else None
+    if raw_lines:
+        catalog = _cached("items", _load_items) or {}
+        cat_lookup = {str(k).strip().lower(): str(k) for k in catalog.keys()}
+        unknown = []
+        for it in raw_lines[:40]:
+            if not isinstance(it, dict):
+                continue
+            name = str(it.get("item") or "").strip()
+            try:
+                qty = max(1, min(100000, int(it.get("qty") or 0)))
+            except (TypeError, ValueError):
+                continue
+            real = cat_lookup.get(name.lower())
+            if not real:
+                unknown.append(name)
+                continue
+            parsed.append({"item": real, "qty": qty, "unit": "pieces",
+                           "raw": f"web:{real} x{qty}", "item_key": real})
+        if unknown:
+            return web.json_response({"ok": False,
+                                      "error": "Not in the catalog: " + ", ".join(unknown[:5])})
+    else:
+        parsed = m._parse_futures_bulk_text(str(body.get("items") or ""))
     if not parsed:
         return web.json_response({"ok": False,
-                                  "error": "No items read — one per line, e.g. '2 barrels Warlord Potion'."})
+                                  "error": "Add at least one catalog item (or paste one per line)."})
     uid = str(sess.get("user_id") or "")
     uname = sess.get("name") or "Web owner"
     try:
         bulk_id = _db.create_futures_bulk(uid, uname, mid, uid, notes)
         for p in parsed:
             _db.add_futures_bulk_line(bulk_id, p["item"], p["qty"], p.get("unit", "pieces"),
-                                      "", p.get("raw", ""))
+                                      "", p.get("raw", ""), item_key=p.get("item_key"))
     except Exception as e:
         return web.json_response({"ok": False, "error": str(e)}, status=500)
     # Post the manager review card on the bot loop (fire-and-forget), same pattern as web orders.
