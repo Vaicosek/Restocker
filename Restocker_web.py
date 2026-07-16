@@ -1290,25 +1290,17 @@ _PAGE = """<!DOCTYPE html>
       <div class="chart-title">Order builder <span style="color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0">— tick what you restock, tune each item's target %, then build the order</span></div>
       <div id="ob-cats"></div>
       <div class="empty" id="ob-empty" style="display:none">No stock scan on file for this market yet.</div>
-      <div style="display:flex;gap:12px;align-items:center;margin-top:12px">
+      <div style="display:flex;gap:10px;align-items:center;margin-top:12px;flex-wrap:wrap">
         <button class="auth-btn" id="ob-build">Build order</button>
+        <button class="auth-btn ghost" id="ob-futures" title="Same ticked items + targets, but sent as ONE futures request a manager approves (consignment terms)">Request as futures</button>
+        <input id="fut-notes" class="ownin" placeholder="Futures notes (optional — enchants, delivery…)" style="flex:1;min-width:200px">
         <span id="ob-msg" style="font-size:12px;color:var(--muted)"></span>
       </div>
-      <div style="border-top:1px solid var(--border);margin-top:18px;padding-top:14px">
-        <div class="chart-title">Futures — custom crafts <span style="color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0">— pick from the catalog (enchant details in notes); a manager approves &amp; queues them for workers</span></div>
-        <datalist id="fut-catalog"></datalist>
-        <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
-          <div style="flex:1;min-width:220px"><div class="lblmini">Item</div><input id="fut-item" class="ownin" list="fut-catalog" placeholder="Search catalog…" style="width:100%"></div>
-          <div><div class="lblmini">Qty</div><input id="fut-qty" class="ownin" type="number" min="1" value="1" style="width:84px"></div>
-          <button class="auth-btn ghost" id="fut-add">Add</button>
-        </div>
-        <div id="fut-lines" style="margin-top:8px"></div>
-        <input id="fut-notes" class="ownin" placeholder="Notes (optional — enchants, quality, delivery)" style="width:100%;margin-top:8px">
-        <div style="display:flex;gap:12px;align-items:center;margin-top:10px">
-          <button class="auth-btn" id="fut-send">Request futures</button>
-          <span id="fut-msg" style="font-size:12px;color:var(--muted)"></span>
-        </div>
-      </div>
+    </div>
+    <div class="chart-card" id="fb-card" style="display:none">
+      <div class="chart-title">Futures bills <span style="color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0">— what you owe on consignment: you paid worker cost upfront, the margin comes due as you resell (tracked via your CSN sales)</span></div>
+      <div id="fb-list"></div>
+      <div id="fb-total" style="margin-top:10px;font-size:13px"></div>
     </div>
     <div class="chart-card">
       <div class="chart-title">Log manual restock <span style="color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0">— stock you added by hand (bought via /pay)</span></div>
@@ -2592,6 +2584,51 @@ document.querySelectorAll(".nav-tab").forEach(tab => {
         if (msgEl) msgEl.textContent = (res && res.ok) ? `✅ Created ${res.created} order(s) — see the Orders tab.` : ((res && res.error) || "Failed.");
       };
     }
+    // "Request as futures": the SAME ticked items + targets, but submitted as ONE futures
+    // request a manager approves (consignment terms) instead of direct restock orders.
+    // Futures is for the high-margin goods (brews, enchanted gear, xp, dia) — blocks etc.
+    // are auto-skipped so a mixed tick-list still does the right thing for each half.
+    const futBtn = document.getElementById("ob-futures");
+    if (futBtn) {
+      const FUT_CATS = { "Brews": 1, "Enchanted Gear": 1, "Bows": 1 };
+      const FUT_RX = /(diamond|\bxp\b|experience|bottle o)/i;
+      const catOf = {};
+      Object.keys(cats).forEach(c => (cats[c] || []).forEach(rw => { catOf[rw.item] = c; }));
+      futBtn.onclick = async () => {
+        futBtn.disabled = true; if (msgEl) msgEl.textContent = "Checking…";
+        let prev;
+        try { prev = await post("/api/owner/build_order", { market_id: mid, apply: false }); }
+        catch (e) { prev = { ok: false, error: "network" }; }
+        if (!prev || !prev.ok) { futBtn.disabled = false; if (msgEl) msgEl.textContent = (prev && prev.error) || "Failed."; return; }
+        const all = prev.items || [];
+        const fut = all.filter(l => FUT_CATS[catOf[l.item]] || FUT_RX.test(l.item));
+        const skipped = all.length - fut.length;
+        if (!fut.length) {
+          futBtn.disabled = false;
+          if (msgEl) msgEl.textContent = prev.count
+            ? "No futures-worthy items under target — futures is for brews / enchanted gear / xp / dia."
+            : "Nothing under target — tick items and set their % first.";
+          return;
+        }
+        if (!confirm(`Request ${fut.length} item(s) as ONE futures order (manager approves)?`
+                     + (skipped ? `\n${skipped} non-futures item(s) skipped — use Build order for those.` : ""))) {
+          futBtn.disabled = false; if (msgEl) msgEl.textContent = ""; return;
+        }
+        if (msgEl) msgEl.textContent = "Submitting…";
+        const notes = (document.getElementById("fut-notes") || { value: "" }).value.trim();
+        let res;
+        try { res = await post("/api/owner/futures", { market_id: mid, lines: fut, notes }); }
+        catch (e) { res = { ok: false, error: "network" }; }
+        futBtn.disabled = false;
+        if (res && res.ok) {
+          if (msgEl) msgEl.textContent = `✅ Futures request #${res.bulk_id} sent (${res.count} item(s))`
+            + (skipped ? ` · ${skipped} non-futures item(s) left for Build order.` : " — awaiting manager approval.");
+          const nEl = document.getElementById("fut-notes"); if (nEl) nEl.value = "";
+        } else {
+          if (msgEl) msgEl.textContent = (res && res.error) || "Failed.";
+        }
+      };
+    }
   }
   async function loadInv(mid) {
     curMid = mid;
@@ -2687,64 +2724,55 @@ document.querySelectorAll(".nav-tab").forEach(tab => {
     const res = await post("/api/owner/set_loyalty", { market_id: curMid, pts_mult: pm, coin_bonus: cb, pct_bonus: pct });
     msg.textContent = (res && res.ok) ? "Saved ✓" : ((res && res.error) || "Failed.");
   };
-  // ── Futures picker (inside the Order Builder card): catalog-driven, not text-based.
-  // Lines picked here arrive server-side pre-linked to their catalog item (item_key),
-  // so consignment pricing doesn't need a manual item match later.
-  const futLines = [];
-  (function initFutCatalog() {
-    const dl = document.getElementById("fut-catalog");
-    if (!dl || typeof ITEMS === "undefined") return;
-    Object.keys(ITEMS).forEach(k => {
-      if (/^future /i.test(k)) return;         // skip legacy "Future X" twin entries
-      const opt = document.createElement("option"); opt.value = k; dl.appendChild(opt);
+  // (Futures is part of the Order Builder now — see the ob-futures handler inside
+  // loadOrderBuilder: same ticked items + targets, sent as ONE futures request.)
+
+  // ── Futures bills: the logged-in user's consignment debt, per deal, with per-line
+  // resale progress. User-scoped (not per-market-tab), loaded once after login.
+  async function loadFuturesBills() {
+    const card = document.getElementById("fb-card");
+    const list = document.getElementById("fb-list");
+    const totalEl = document.getElementById("fb-total");
+    if (!card || !list) return;
+    let r;
+    try { r = await fetch("/api/owner/futures_bills").then(x => x.json()); }
+    catch (e) { r = { ok: false }; }
+    const deals = (r && r.ok && r.deals) || [];
+    if (!deals.length) { card.style.display = "none"; return; }
+    card.style.display = "";
+    list.innerHTML = "";
+    let totRemaining = 0;
+    deals.forEach(d => {
+      totRemaining += (d.remaining || 0);
+      const wrap = document.createElement("div");
+      wrap.style.cssText = "border-bottom:1px solid var(--border);padding:8px 0";
+      const head = document.createElement("div");
+      head.style.cssText = "display:flex;gap:10px;align-items:center;font-size:12.5px;flex-wrap:wrap";
+      const remCol = d.remaining > 0 ? "var(--down)" : "var(--accent)";
+      const stTag = d.status === "pending" ? " · 🕒 awaiting approval" : "";
+      head.innerHTML =
+        `<span style="color:var(--muted)">#${d.id}</span>` +
+        `<span style="flex:1">${esc(d.market_id || "—")}${stTag}` +
+        (d.unpriced ? ` · <span style="color:#E8B339">${d.unpriced} line(s) not priced yet</span>` : "") + `</span>` +
+        `<span style="color:var(--muted)">upfront ${num(Math.round(d.upfront))}</span>` +
+        `<span style="color:var(--muted)">owed ${num(Math.round(d.owed))} · paid ${num(Math.round(d.paid))}</span>` +
+        `<span style="color:${remCol};font-weight:600">${num(Math.round(d.remaining))} ¢ left</span>`;
+      wrap.appendChild(head);
+      (d.lines || []).forEach(l => {
+        if (!l.resold && !l.owed) return;      // only show lines with resale activity
+        const ln = document.createElement("div");
+        ln.style.cssText = "display:flex;gap:10px;padding:3px 0 3px 20px;font-size:12px;color:var(--muted)";
+        ln.innerHTML = `<span style="flex:1">${esc(l.item)}</span>` +
+                       `<span>resold ${num(l.resold)}/${num(l.qty)}</span>` +
+                       `<span>→ ${num(Math.round(l.owed))} ¢</span>`;
+        wrap.appendChild(ln);
+      });
+      list.appendChild(wrap);
     });
-  })();
-  function renderFutLines() {
-    const box = document.getElementById("fut-lines");
-    if (!box) return;
-    box.innerHTML = "";
-    futLines.forEach((l, i) => {
-      const row = document.createElement("div");
-      row.style.cssText = "display:flex;align-items:center;gap:10px;padding:4px 0;border-bottom:1px solid var(--border);font-size:12.5px";
-      const nm = document.createElement("span"); nm.style.flex = "1"; nm.textContent = l.item;
-      const q = document.createElement("span"); q.style.color = "var(--muted)"; q.textContent = "× " + l.qty;
-      const rm = document.createElement("button"); rm.className = "mini-btn danger"; rm.textContent = "×";
-      rm.onclick = () => { futLines.splice(i, 1); renderFutLines(); };
-      row.appendChild(nm); row.appendChild(q); row.appendChild(rm);
-      box.appendChild(row);
-    });
+    if (totalEl) totalEl.innerHTML = totRemaining > 0
+      ? `Total remaining: <b style="color:var(--down)">${num(Math.round(totRemaining))} ¢</b> — pay a manager; they record it with <code>/futures pay</code>.`
+      : `✅ Nothing outstanding — all caught up.`;
   }
-  const futAdd = document.getElementById("fut-add");
-  if (futAdd) futAdd.onclick = () => {
-    const msg = document.getElementById("fut-msg");
-    const itemEl = document.getElementById("fut-item");
-    const qtyEl = document.getElementById("fut-qty");
-    const name = (itemEl.value || "").trim();
-    const qty = Math.max(1, Number(qtyEl.value || 1));
-    if (!name) { msg.textContent = "Pick an item from the catalog."; return; }
-    const exists = typeof ITEMS !== "undefined" &&
-      Object.keys(ITEMS).some(k => k.toLowerCase() === name.toLowerCase());
-    if (!exists) { msg.textContent = `"${name}" isn't in the catalog — pick from the suggestions.`; return; }
-    futLines.push({ item: name, qty });
-    itemEl.value = ""; qtyEl.value = 1; msg.textContent = "";
-    renderFutLines();
-  };
-  const futSend = document.getElementById("fut-send");
-  if (futSend) futSend.onclick = async () => {
-    const msg = document.getElementById("fut-msg");
-    const notes = document.getElementById("fut-notes").value.trim();
-    if (!futLines.length) { msg.textContent = "Add at least one item first."; return; }
-    futSend.disabled = true; msg.textContent = "Submitting…";
-    const res = await post("/api/owner/futures", { market_id: curMid, lines: futLines, notes });
-    futSend.disabled = false;
-    if (res && res.ok) {
-      msg.textContent = `✅ Futures request #${res.bulk_id} sent (${res.count} item(s)) — a manager will approve it.`;
-      futLines.length = 0; renderFutLines();
-      document.getElementById("fut-notes").value = "";
-    } else {
-      msg.textContent = (res && res.error) || "Failed.";
-    }
-  };
   const addBtn = document.getElementById("rs-add");
   if (addBtn) addBtn.onclick = async () => {
     const item = document.getElementById("rs-item").value.trim();
@@ -2774,6 +2802,7 @@ document.querySelectorAll(".nav-tab").forEach(tab => {
       tabs.appendChild(b);
     });
     loadInv(owned[0].mid);
+    loadFuturesBills();   // user-scoped (their debt across all markets), so load once
   }).catch(() => {});
 })();
 // ══════════════════════════ TEAMS ══════════════════════════════════════════
@@ -3612,7 +3641,7 @@ async def _handle_owner_futures(request):
         catalog = _cached("items", _load_items) or {}
         cat_lookup = {str(k).strip().lower(): str(k) for k in catalog.keys()}
         unknown = []
-        for it in raw_lines[:40]:
+        for it in raw_lines[:60]:              # ≥ the build_order preview's 50-line slice
             if not isinstance(it, dict):
                 continue
             name = str(it.get("item") or "").strip()
@@ -3656,6 +3685,42 @@ async def _handle_owner_futures(request):
     return web.json_response({"ok": True, "bulk_id": bulk_id, "count": len(parsed),
                               "items": [{"item": p["item"], "qty": p["qty"],
                                          "unit": p.get("unit", "pieces")} for p in parsed]})
+
+
+async def _handle_owner_futures_bills(request):
+    """The logged-in user's consignment bills: every futures deal where THEY are the customer,
+    with upfront / margin-owed-so-far (from their CSN resales) / paid / remaining. Keyed to the
+    session user, so it can only ever show someone their own debt."""
+    sess = _session_user(request)
+    if not sess:
+        return web.json_response({"ok": False, "error": "Log in first."}, status=401)
+    uid = str(sess.get("user_id") or "")
+    import Restocker_main as m, Restocker_db as _db
+    out = []
+    try:
+        for b in _db.list_futures_bulk(customer_id=uid, limit=25):
+            if str(b.get("status")) in ("declined", "cancelled"):
+                continue
+            full = _db.get_futures_bulk(b["id"])
+            o = m._futures_bulk_owed(full)
+            lines = []
+            for l in o["lines"]:
+                if not l.get("priced"):
+                    continue
+                try:
+                    disp = m._pretty_item_name(l.get("item") or "")
+                except Exception:
+                    disp = l.get("item") or ""
+                lines.append({"item": disp, "qty": l["qty"], "resold": l["resold"],
+                              "owed": l["owed"]})
+            out.append({"id": b["id"], "market_id": b.get("market_id") or "",
+                        "status": b.get("status"), "created_at": b.get("created_at"),
+                        "upfront": o["upfront"], "owed": o["owed_so_far"],
+                        "paid": o["paid"], "remaining": o["remaining"],
+                        "unpriced": o["unpriced"], "lines": lines})
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=500)
+    return web.json_response({"ok": True, "deals": out})
 
 
 async def _handle_api_order(request):
@@ -3855,6 +3920,7 @@ async def start_webserver(port: int = 8080):
     app.router.add_post("/api/owner/set_target",   _handle_owner_set_target)
     app.router.add_post("/api/owner/build_order",  _handle_owner_build_order)
     app.router.add_post("/api/owner/futures",      _handle_owner_futures)
+    app.router.add_get("/api/owner/futures_bills", _handle_owner_futures_bills)
     app.router.add_post("/api/order",    _handle_api_order)
     app.router.add_get("/api/network/orders", _handle_network_orders)
     app.router.add_post("/api/network/claim", _handle_network_claim)
