@@ -589,22 +589,22 @@ class LoopsCog(commands.Cog):
     @tasks.loop(hours=1)
     async def db_backup_loop(self, ):
         import os, glob, asyncio as _aio
-        # Ticks hourly but only writes once per DB_BACKUP_EVERY_HOURS-hour window (default 6 →
-        # ~4 snapshots/day), gated by a time-bucket key so a "database is locked" hiccup can't
+        # Ticks hourly but only writes once per DB_BACKUP_EVERY_HOURS-hour window (default 3 →
+        # ~8 snapshots/day), gated by a time-bucket key so a "database is locked" hiccup can't
         # permanently stop it. The first tick after a (re)start backs up if the current window
         # hasn't been captured yet — so you get a fresh restore point right after every restart,
         # which is exactly when things tend to go wrong.
         try:
             import Restocker_db as _db
             now = datetime.now(timezone.utc)
-            every = max(1, int(getattr(core, "DB_BACKUP_EVERY_HOURS", 6)))
+            every = max(1, int(getattr(core, "DB_BACKUP_EVERY_HOURS", 3)))
             bucket = now.strftime("%Y-%m-%d") + f"_{now.hour // every}"
             if _db.get_config("last_db_backup_bucket") == bucket:
                 return
             os.makedirs("backups", exist_ok=True)
             dest = os.path.join("backups", f"restocker_{now.strftime('%Y%m%d_%H%M%S')}.db")
             await _aio.to_thread(_db.backup_database, dest)
-            keep = int(getattr(core, "DB_BACKUP_KEEP", 40))   # ~10 days at 4/day
+            keep = int(getattr(core, "DB_BACKUP_KEEP", 56))   # ~1 week at 8/day (3-hourly)
             files = sorted(glob.glob(os.path.join("backups", "restocker_*.db")))
             for f in files[:-keep] if keep > 0 else []:
                 try:
