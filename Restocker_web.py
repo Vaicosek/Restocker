@@ -685,6 +685,39 @@ _PAGE = """<!DOCTYPE html>
     --font-mono:    var(--font-data);
     --font-display: var(--font-ui);
 
+    /* ── LIGHT theme (default) — the clean card look from the Cap Table Tracker ── */
+    --bg:            #f5f6f8;
+    --surface:       #ffffff;
+    --panel2:        #f3f4f6;
+    --overlay:       #ffffff;
+    --border:        #e5e7eb;
+    --border-dim:    #eef0f3;
+    --border-strong: #d1d5db;
+
+    --text:    #111827;
+    --text-body: #374151;
+    --muted:   #6b7280;
+    --faint:   #9ca3af;
+
+    --green:   #16a34a;
+    --green-dim: #15803d;
+    --accent:  #16a34a;
+    --red:     #dc2626;
+    --down:    #dc2626;
+    --amber:   #d97706;
+    --gold:    #ca8a04;
+    --yellow:  #ca8a04;
+    --blue:    #2563eb;
+    --purple:  #7c3aed;
+    --shadow:  0 1px 2px rgba(16,24,40,.05);
+
+    --market-bnl:    #2563eb;
+    --market-nether: #ea580c;
+    --market-end:    #7c3aed;
+    --market-sky:    #16a34a;
+  }
+  /* Old dark terminal theme, kept behind the 🌙 toggle in the header. */
+  html[data-theme="dark"] {
     --bg:            #0A0A0A;
     --surface:       #111111;
     --panel2:        #161616;
@@ -692,30 +725,29 @@ _PAGE = """<!DOCTYPE html>
     --border:        #1E1E1E;
     --border-dim:    #191919;
     --border-strong: #2A2A2A;
-
     --text:    #F0F0F0;
     --text-body: #BBBBBB;
     --muted:   #666666;
     --faint:   #444444;
-
     --green:   #22FF7A;
     --green-dim: #1A9E4F;
     --accent:  #22FF7A;
     --red:     #FF4444;
+    --down:    #FF4444;
     --amber:   #F5A623;
     --gold:    #F5A623;
     --yellow:  #F5A623;
     --blue:    #4A9EFF;
     --purple:  #B47FFF;
     --shadow:  none;
-
     --market-bnl:    #4A9EFF;
     --market-nether: #FF6B35;
     --market-end:    #B47FFF;
     --market-sky:    #22FF7A;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  html { color-scheme: dark; }
+  html { color-scheme: light; }
+  html[data-theme="dark"] { color-scheme: dark; }
   body {
     background-color: var(--bg);
     background-image: radial-gradient(var(--border-strong) 0.5px, transparent 0.5px);
@@ -727,6 +759,32 @@ _PAGE = """<!DOCTYPE html>
     min-height: 100vh;
     -webkit-font-smoothing: antialiased;
   }
+  /* ── Light-theme softening: rounded cards, pills, subtle shadows (Tracker look).
+     Scoped to :not(dark) so the 🌙 dark theme keeps its brutalist edges. ── */
+  html:not([data-theme="dark"]) body { background-image: radial-gradient(var(--border) 0.5px, transparent 0.5px); }
+  html:not([data-theme="dark"]) .chart-card,
+  html:not([data-theme="dark"]) .chart-section,
+  html:not([data-theme="dark"]) .table-wrap,
+  html:not([data-theme="dark"]) .stat-card,
+  html:not([data-theme="dark"]) .tick {
+    border-radius: 12px; box-shadow: var(--shadow); background: var(--surface);
+  }
+  html:not([data-theme="dark"]) .stat-card { border: 1px solid var(--border); padding: 12px 16px; }
+  html:not([data-theme="dark"]) .tab,
+  html:not([data-theme="dark"]) .market-tab,
+  html:not([data-theme="dark"]) .iv-tab,
+  html:not([data-theme="dark"]) .auth-btn,
+  html:not([data-theme="dark"]) .mini-btn { border-radius: 999px; }
+  html:not([data-theme="dark"]) .auth-btn { color: #fff; }
+  html:not([data-theme="dark"]) .auth-btn.ghost { color: var(--muted); }
+  html:not([data-theme="dark"]) .logo-icon { color: #fff; border-radius: 8px; }
+  html:not([data-theme="dark"]) .ownin,
+  html:not([data-theme="dark"]) .own-price,
+  html:not([data-theme="dark"]) .search-wrap input,
+  html:not([data-theme="dark"]) textarea.ownin { border-radius: 8px; background: #fff; border: 1px solid var(--border-strong); }
+  html:not([data-theme="dark"]) .tab.active,
+  html:not([data-theme="dark"]) .market-tab.active { background: rgba(22,163,74,.08); }
+  html:not([data-theme="dark"]) .ticker { border-radius: 12px; overflow: hidden; }
   /* DATA renders in the mono terminal face with tabular figures. */
   .mono, td, .stat-card .val, .badge, .coin-badge, .market-tag, .est-tag,
   .t-price, .t-chg, .updated, code, .own-price, .ownin, .search-wrap input,
@@ -941,6 +999,7 @@ _PAGE = """<!DOCTYPE html>
     </div>
   </a>
   <div class="header-right">
+    <button id="theme-toggle" class="auth-btn ghost" title="Switch light/dark theme" style="padding:6px 10px">🌙</button>
     <span id="auth-area" class="auth-area"></span>
     <span class="updated" id="updated-ts"></span>
   </div>
@@ -1175,6 +1234,24 @@ _PAGE = """<!DOCTYPE html>
       <div class="chart-title" id="stock-chart-title">Share price history</div>
       <div class="chart-box"><canvas id="stock-chart"></canvas></div>
     </div>
+    <div class="chart-card" id="ct-card" style="display:none">
+      <div class="chart-title" id="ct-title">Cap table</div>
+      <div class="stats" id="ct-stats"></div>
+      <div id="ct-conc-wrap" style="margin:6px 0 14px">
+        <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--muted);margin-bottom:6px">
+          <span>Ownership concentration</span><span id="ct-conc-note"></span>
+        </div>
+        <div id="ct-conc" style="display:flex;height:12px;overflow:hidden;background:var(--panel2)"></div>
+        <div id="ct-legend" style="display:flex;gap:14px;flex-wrap:wrap;margin-top:8px;font-size:11.5px;color:var(--muted)"></div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>#</th><th>Holder</th><th>Shares</th><th>%</th><th>Value</th></tr></thead>
+          <tbody id="ct-tbody"></tbody>
+        </table>
+      </div>
+      <div id="ct-note" style="font-size:11.5px;color:var(--faint);margin-top:10px"></div>
+    </div>
     <div class="table-wrap">
       <table>
         <thead>
@@ -1361,6 +1438,26 @@ const ORDERS        = __ORDERS_JSON__;
 const UPDATED       = "__UPDATED__";
 
 document.getElementById("updated-ts").textContent = "Updated: " + UPDATED;
+
+// ── Theme: light (Tracker look) is the default; 🌙 switches to the old dark terminal.
+// Persisted per browser. (Applied here, right at script start, to minimize flash.)
+(function initTheme() {
+  const btn = document.getElementById("theme-toggle");
+  function apply(t) {
+    if (t === "dark") document.documentElement.setAttribute("data-theme", "dark");
+    else document.documentElement.removeAttribute("data-theme");
+    if (btn) btn.textContent = (t === "dark") ? "☀️" : "🌙";
+  }
+  let saved = null;
+  try { saved = localStorage.getItem("abx-theme"); } catch (e) {}
+  apply(saved === "dark" ? "dark" : "light");
+  if (btn) btn.onclick = () => {
+    const cur = document.documentElement.getAttribute("data-theme") === "dark" ? "dark" : "light";
+    const next = cur === "dark" ? "light" : "dark";
+    try { localStorage.setItem("abx-theme", next); } catch (e) {}
+    apply(next);
+  };
+})();
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 function esc(s) {
@@ -2302,11 +2399,74 @@ document.querySelectorAll(".nav-tab").forEach(tab => {
     tabsEl.appendChild(b);
   });
 
+  // ── Cap table (live version of the pinned "GEX Cap Table Tracker") ─────────────────
+  const CT_COLORS = ["#FF4444", "#F5A623", "#E8B339", "#B47FFF", "#4A9EFF", "#22FF7A"];
+  async function loadCapTable(mid) {
+    const card = document.getElementById("ct-card");
+    if (!card) return;
+    let r;
+    try { r = await fetch("/api/exchange/captable?market_id=" + encodeURIComponent(mid)).then(x => x.json()); }
+    catch (e) { r = null; }
+    if (!r || !r.ok || !(r.rows || []).length) { card.style.display = "none"; return; }
+    card.style.display = "";
+    document.getElementById("ct-title").textContent =
+      `Cap table — ${r.name}${r.ticker ? " (" + r.ticker + ")" : ""} · ${num(Math.round(r.outstanding))} shares outstanding · mark ${num(r.price.toFixed(2))} ¢`;
+    // Stat tiles (Your stake / Your value highlighted like the tracker)
+    const st = document.getElementById("ct-stats"); st.innerHTML = "";
+    const tiles = [
+      [num(Math.round(r.outstanding)), "Outstanding", 0],
+      [r.logged_in ? `${num(Math.round(r.your_shares))} · ${r.your_pct}%` : "log in", "Your stake", 1],
+      [r.logged_in ? num(r.your_value) + " ¢" : "—", "Your value (mark)", 1],
+      [num(r.mktcap) + " ¢", "Total mktcap", 0],
+      [String(r.holders), "Holders", 0],
+      [`${num(Math.round(r.free_float))} · ${r.outstanding > 0 ? (100 * r.free_float / r.outstanding).toFixed(1) : 0}%`, "Free float", 0],
+    ];
+    tiles.forEach(([v, l, hot]) => {
+      const d = document.createElement("div");
+      d.className = "stat-card";
+      if (hot && r.logged_in && r.your_shares > 0) d.style.cssText = "border:1px solid var(--accent);background:rgba(34,255,122,.05)";
+      d.innerHTML = `<div class="val" style="font-size:16px">${v}</div><div class="lbl">${l}</div>`;
+      st.appendChild(d);
+    });
+    // Concentration bar: top 5 + Others
+    const conc = document.getElementById("ct-conc"), leg = document.getElementById("ct-legend");
+    conc.innerHTML = ""; leg.innerHTML = "";
+    const top5 = r.rows.slice(0, 5);
+    const otherPct = Math.max(0, r.rows.slice(5).reduce((s, x) => s + x.pct, 0));
+    const segs = top5.map((x, i) => [x.name, x.pct, CT_COLORS[i % CT_COLORS.length]]);
+    if (otherPct > 0.01) segs.push(["Others", otherPct, "#555"]);
+    segs.forEach(([nm, pct, col]) => {
+      const s = document.createElement("div");
+      s.style.cssText = `width:${Math.max(0.5, pct)}%;background:${col}`;
+      s.title = `${nm} ${pct.toFixed(2)}%`;
+      conc.appendChild(s);
+      const li = document.createElement("span");
+      li.innerHTML = `<span style="display:inline-block;width:8px;height:8px;background:${col};margin-right:5px"></span>${esc(nm)} ${pct.toFixed(2)}%`;
+      leg.appendChild(li);
+    });
+    document.getElementById("ct-conc-note").textContent =
+      `Top holder ${(r.rows[0] ? r.rows[0].pct : 0).toFixed(1)}% · Top 5 ${top5.reduce((s, x) => s + x.pct, 0).toFixed(1)}%`;
+    // Holders table, "you" highlighted
+    const tb = document.getElementById("ct-tbody"); tb.innerHTML = "";
+    r.rows.forEach(x => {
+      const tr = document.createElement("tr");
+      if (x.you) tr.style.background = "rgba(34,255,122,.06)";
+      tr.innerHTML = `<td style="color:var(--muted)">${x.rank}</td>` +
+        `<td class="item-name">${esc(x.name)}${x.you ? ' <span class="badge" style="color:var(--accent);border:1px solid var(--accent);font-size:9px;padding:1px 6px">you</span>' : ""}</td>` +
+        `<td>${num(Math.round(x.shares))}</td><td>${x.pct.toFixed(2)}%</td><td>${num(x.value)} ¢</td>`;
+      tb.appendChild(tr);
+    });
+    document.getElementById("ct-note").textContent =
+      "Values are notional at the current mark (share price) — realizing them moves the price."
+      + (r.privileged ? "" : " Holder names follow each holder's privacy setting.");
+  }
+
   let chart = null;
   function select(mid) {
     const m = markets.find(x => x.mid === mid);
     if (!m) return;
     [...tabsEl.children].forEach(b => b.classList.toggle("active", b.textContent === m.name));
+    loadCapTable(mid);
     document.getElementById("stock-chart-title").textContent = "Share price history — " + m.name;
     const ctx = document.getElementById("stock-chart");
     if (chart) chart.destroy();
@@ -3723,6 +3883,88 @@ async def _handle_owner_futures_bills(request):
     return web.json_response({"ok": True, "deals": out})
 
 
+async def _handle_exchange_captable(request):
+    """Live cap table for one public market (the web version of the old /stock holders):
+    ranked holders with %, value at the current mark, your stake, and free float. Names
+    follow the same privacy rules as the public leaderboard — anonymized unless the holder
+    opted in — EXCEPT: you always see yourself, and the market's owner/manager sees real
+    names (matching the old owner-gated Discord command)."""
+    mid = (request.query.get("market_id") or "").strip()
+    if not mid:
+        return web.json_response({"ok": False, "error": "market_id required"}, status=400)
+    import Restocker_db as db
+    try:
+        listing = db.get_market_shares(mid)
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=500)
+    if not listing or not listing.get("active"):
+        return web.json_response({"ok": False, "error": "not a public market"})
+    price = float(listing.get("share_price") or 0)
+    outstanding = float(listing.get("shares_outstanding") or 0)
+    holders = sorted(db.get_holders(mid) or [],
+                     key=lambda h: -float(h.get("shares") or 0))
+    sess = _session_user(request)
+    uid = str(sess.get("user_id")) if sess else ""
+    privileged = bool(uid) and mid in _owner_markets_web(uid)
+
+    holder_names = {}
+    if _YAML_AVAILABLE:
+        try:
+            with open(_resolve_data_file("stock_names.yml"), encoding="utf-8") as f:
+                holder_names = _yaml.safe_load(f) or {}
+        except Exception:
+            pass
+    prefs = _user_prefs()
+
+    def _label(huid: str) -> str:
+        real = holder_names.get(huid)
+        if not real:
+            try:
+                real = db.get_ign(huid)
+            except Exception:
+                real = None
+        if huid == uid:
+            return real or (sess.get("name") if sess else None) or ("…" + huid[-4:])
+        if privileged:
+            return real or ("…" + huid[-4:])
+        if prefs.get(huid, {}).get("anonymous", True):
+            return "…" + huid[-4:]
+        return real or ("…" + huid[-4:])
+
+    rows, held_total, your_shares = [], 0.0, 0.0
+    for i, h in enumerate(holders, 1):
+        huid = str(h.get("user_id"))
+        sh = float(h.get("shares") or 0)
+        if sh <= 0:
+            continue
+        held_total += sh
+        if huid == uid:
+            your_shares = sh
+        pct = (100.0 * sh / outstanding) if outstanding > 0 else 0.0
+        rows.append({"rank": i, "name": _label(huid), "shares": sh,
+                     "pct": round(pct, 2), "value": round(sh * price),
+                     "you": huid == uid})
+    mname = mid
+    try:
+        raw = _load_markets() or {}
+        info = raw.get(mid)
+        if isinstance(info, dict):
+            mname = info.get("name") or mid
+    except Exception:
+        pass
+    return web.json_response({"ok": True, "market_id": mid, "name": mname,
+                              "ticker": listing.get("ticker") or "",
+                              "price": price, "outstanding": outstanding,
+                              "mktcap": round(price * outstanding),
+                              "holders": len(rows), "held_total": held_total,
+                              "free_float": max(0.0, outstanding - held_total),
+                              "your_shares": your_shares,
+                              "your_pct": round(100.0 * your_shares / outstanding, 2) if outstanding > 0 else 0,
+                              "your_value": round(your_shares * price),
+                              "logged_in": bool(uid), "privileged": privileged,
+                              "rows": rows})
+
+
 async def _handle_api_order(request):
     """A logged-in customer places an order from the website (catalog items only, multi-item
     cart). Saved to web_orders and posted to the web-orders Discord channel for the normal
@@ -3921,6 +4163,7 @@ async def start_webserver(port: int = 8080):
     app.router.add_post("/api/owner/build_order",  _handle_owner_build_order)
     app.router.add_post("/api/owner/futures",      _handle_owner_futures)
     app.router.add_get("/api/owner/futures_bills", _handle_owner_futures_bills)
+    app.router.add_get("/api/exchange/captable",   _handle_exchange_captable)
     app.router.add_post("/api/order",    _handle_api_order)
     app.router.add_get("/api/network/orders", _handle_network_orders)
     app.router.add_post("/api/network/claim", _handle_network_claim)
