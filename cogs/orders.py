@@ -9,6 +9,8 @@ from typing import Optional
 
 core = sys.modules.get("Restocker_main") or sys.modules["__main__"]
 _market_autocomplete = core._market_autocomplete
+cleanup_batch_dms_for_closed_order = core.cleanup_batch_dms_for_closed_order
+_purge_worker_ping_messages = core._purge_worker_ping_messages
 ANNOUNCE_DELAY_MINUTES = core.ANNOUNCE_DELAY_MINUTES
 EMPLOYEE_ROLE_NAME = core.EMPLOYEE_ROLE_NAME
 MANAGER_ROLE_NAME = core.MANAGER_ROLE_NAME
@@ -725,6 +727,22 @@ class OrdersCog(commands.Cog):
         # leaving every order alive while their Discord messages/tickets are already gone.
         save_orders(data, prune=True)
 
+        # Refresh/delete the interactive "New Production Requests (batch)" digest DMs — a
+        # separate per-employee message (tracked in the UI store), NOT in each order's
+        # messages.dms. With no orders left, every digest is deleted.
+        try:
+            await cleanup_batch_dms_for_closed_order(interaction.client, 0)
+        except Exception:
+            pass
+        # And the plain-text "🔔 New restock requests:" pings (channel + DMs), which are sent
+        # un-tracked — removed by history scan. No id filter: the board is empty now.
+        try:
+            _pc, _pd = await _purge_worker_ping_messages(interaction.client, None)
+            deleted_msgs += _pc
+            deleted_dms += _pd
+        except Exception:
+            pass
+
         await interaction.followup.send(
             f"🧨 **ALL ORDERS DELETED**\n\n"
             f"• Orders removed: **{total}**\n"
@@ -745,20 +763,25 @@ class OrdersCog(commands.Cog):
         market_id="Only orders tagged this market (optional).",
         min_id="Only orders with ID ≥ this (optional).",
         max_id="Only orders with ID ≤ this (optional).",
+        clear_dms="Also sweep leftover 'New restock requests' digests + pings from the worker channel and DMs.",
     )
     @app_commands.autocomplete(market_id=_market_autocomplete)
     async def orders_purge(self, interaction: discord.Interaction, confirm: str = "no",
                            since_minutes: Optional[int] = None,
                            market_id: Optional[str] = None,
                            min_id: Optional[int] = None,
-                           max_id: Optional[int] = None):
+                           max_id: Optional[int] = None,
+                           clear_dms: bool = False):
         if not is_manager(interaction):
             return await interaction.response.send_message("⛔ Managers only.", **ephemeral_kwargs(interaction))
-        if since_minutes is None and market_id is None and min_id is None and max_id is None:
+        has_filter = not (since_minutes is None and market_id is None and min_id is None and max_id is None)
+        if not has_filter and not clear_dms:
             return await interaction.response.send_message(
-                "❌ Give at least one filter (`since_minutes` / `market_id` / `min_id` / `max_id`). "
+                "❌ Give at least one filter (`since_minutes` / `market_id` / `min_id` / `max_id`), "
+                "or set `clear_dms:True` to just sweep leftover announcement DMs. "
                 "To wipe the whole board, that's `/orders_clear_all`.", **ephemeral_kwargs(interaction))
         await interaction.response.defer(**ephemeral_kwargs(interaction), thinking=True)
+        client = interaction.client
         data = load_orders()
         orders = list(data.get("orders", []) or [])
         cutoff = (datetime.now(timezone.utc) - timedelta(minutes=int(since_minutes))) if since_minutes else None
@@ -788,22 +811,27 @@ class OrdersCog(commands.Cog):
                     return False
             return True
 
-        matched = [o for o in orders if _match(o)]
-        if not matched:
-            return await interaction.followup.send("No orders match that filter.", **ephemeral_kwargs(interaction))
+        matched = [o for o in orders if _match(o)] if has_filter else []
         ids = sorted(int(o.get("id", 0) or 0) for o in matched)
-        id_span = f"#{ids[0]}–#{ids[-1]}" if len(ids) > 1 else f"#{ids[0]}"
+        id_span = (f"#{ids[0]}–#{ids[-1]}" if len(ids) > 1 else (f"#{ids[0]}" if ids else "—"))
 
+        if not matched and not clear_dms:
+            return await interaction.followup.send("No orders match that filter.", **ephemeral_kwargs(interaction))
+
+        # Anything destructive is gated behind confirm:YES — preview otherwise.
         if confirm.strip().upper() != "YES":
-            sample = ", ".join(f"#{i}" for i in ids[:25]) + (" …" if len(ids) > 25 else "")
+            bits = []
+            if matched:
+                sample = ", ".join(f"#{i}" for i in ids[:25]) + (" …" if len(ids) > 25 else "")
+                bits.append(f"**{len(matched)}** order(s) ({id_span}) — DMs, posts, tickets, records:\n{sample}")
+            if clear_dms:
+                bits.append("sweep leftover **restock-request digests + pings** from the worker channel and every employee DM")
             return await interaction.followup.send(
-                f"🔍 **Preview** — **{len(matched)}** order(s) match ({id_span}):\n{sample}\n\n"
-                f"Re-run with **`confirm:YES`** to delete them (DMs, posts, tickets, records). "
-                f"Your other **{len(orders) - len(matched)}** order(s) stay untouched.",
+                "🔍 **Preview** — would " + "; and ".join(bits)
+                + f"\n\nRe-run with **`confirm:YES`** to do it. Your other **{len(orders) - len(matched)}** order(s) stay.",
                 **ephemeral_kwargs(interaction))
 
         import asyncio as _aio
-        client = interaction.client
         deleted_dms = deleted_msgs = deleted_channels = 0
         for o in matched:
             try:
@@ -843,15 +871,36 @@ class OrdersCog(commands.Cog):
             except Exception:
                 pass
 
-        match_ids = {int(o.get("id", 0) or 0) for o in matched}
-        data["orders"] = [o for o in orders if int(o.get("id", 0) or 0) not in match_ids]
-        save_orders(data, prune=True)
+        kept = len(orders)
+        if matched:
+            match_ids = {int(o.get("id", 0) or 0) for o in matched}
+            data["orders"] = [o for o in orders if int(o.get("id", 0) or 0) not in match_ids]
+            save_orders(data, prune=True)
+            kept = len(data["orders"])
+
+        # Sweep the batch digests + plain-text pings. When clear_dms is set we sweep ALL restock
+        # pings (no id filter) — needed to catch a stale ping whose order is already gone;
+        # otherwise only pings referencing the purged ids.
+        try:
+            await cleanup_batch_dms_for_closed_order(client, 0)
+        except Exception:
+            pass
+        try:
+            ping_ids = None if clear_dms else {int(o.get("id", 0) or 0) for o in matched}
+            _pc, _pd = await _purge_worker_ping_messages(client, ping_ids)
+            deleted_msgs += _pc
+            deleted_dms += _pd
+        except Exception:
+            pass
+
+        head = (f"🧹 **Purged {len(matched)} order(s)** ({id_span})."
+                if matched else "🧹 **Swept leftover announcement DMs/pings.**")
         await interaction.followup.send(
-            f"🧹 **Purged {len(matched)} order(s)** ({id_span}).\n"
-            f"• Posts deleted: **{deleted_msgs}**\n"
+            head + "\n"
+            f"• Posts/pings deleted: **{deleted_msgs}**\n"
             f"• Employee DMs deleted: **{deleted_dms}**\n"
             f"• Verification channels deleted: **{deleted_channels}**\n"
-            f"• Kept: **{len(data['orders'])}** other order(s).",
+            f"• Kept: **{kept}** other order(s).",
             **ephemeral_kwargs(interaction))
 
 

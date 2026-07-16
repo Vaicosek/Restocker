@@ -609,6 +609,66 @@ async def _delete_worker_ping_lines_for_order(client: discord.Client, order_id: 
         pass
 
 
+async def _purge_worker_ping_messages(client, purged_ids=None, *, scan_limit: int = 40) -> tuple:
+    """Delete the plain-text '🔔 New restock requests:' pings — in the worker channel AND in
+    every employee's DMs. These are sent un-tracked (channel send + safe_dm), so the only way
+    to remove them is to scan recent history. If purged_ids is given, only pings that reference
+    one of those order #ids are deleted (surgical, for a scoped purge); if None, every recent
+    restock-request ping is removed (used by clear-all / a stale-digest cleanup). The
+    worker_announce loop regenerates a fresh ping for whatever orders are still live.
+    Returns (channel_deleted, dm_deleted)."""
+    me = getattr(client, "user", None)
+    if not me:
+        return (0, 0)
+    tokens = None
+    if purged_ids:
+        tokens = {f"#{int(i)}" for i in purged_ids}
+
+    def _hits(txt: str) -> bool:
+        if not txt or ("New restock request" not in txt):
+            return False
+        return True if tokens is None else any(t in txt for t in tokens)
+
+    ch_del = dm_del = 0
+    ch = client.get_channel(WORKER_CHANNEL_ID)
+    if ch is not None:
+        try:
+            async for msg in ch.history(limit=int(scan_limit), oldest_first=False):
+                if msg.author and msg.author.id == me.id and _hits(msg.content or ""):
+                    try:
+                        await msg.delete()
+                        ch_del += 1
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+    try:
+        import asyncio as _aio
+        guild = getattr(ch, "guild", None)
+        role = discord.utils.get(guild.roles, name=EMPLOYEE_ROLE_NAME) if guild else None
+        if role:
+            for member in list(role.members):
+                if getattr(member, "bot", False):
+                    continue
+                try:
+                    dm = member.dm_channel or await member.create_dm()
+                    async for msg in dm.history(limit=int(scan_limit), oldest_first=False):
+                        if msg.author and msg.author.id == me.id and _hits(msg.content or ""):
+                            try:
+                                await msg.delete()
+                                dm_del += 1
+                            except Exception:
+                                pass
+                    await _aio.sleep(0.3)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    return (ch_del, dm_del)
+
+
 def _normalize_site(s: str) -> str:
     s = (s or "").strip()
     low = s.lower()
