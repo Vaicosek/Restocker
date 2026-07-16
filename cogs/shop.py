@@ -18,6 +18,7 @@ any_item_autocomplete = core.any_item_autocomplete
 ephemeral_kwargs = core.ephemeral_kwargs
 is_manager = core.is_manager
 load_orders = core.load_orders
+log = core.log
 save_orders = core.save_orders
 update_order_messages = core.update_order_messages
 
@@ -55,8 +56,23 @@ class ShopCog(commands.Cog):
             if new_name in items and new_name != old_name:
                 return await interaction.response.send_message(f"❌ `{new_name}` already exists.", **ephemeral_kwargs(interaction))
 
+            # Capture DB-only columns first — _save_items' upsert doesn't write category or
+            # worker_cost, so a plain pop+save would lose them on the new name.
+            import Restocker_db as _db_rn
+            _old_row = _db_rn.get_item(old_name) or {}
             items[new_name] = items.pop(old_name)
             _save_items(data_items)
+            # _save_items only UPSERTS — the old-name sqlite row survives and would come back
+            # as a duplicate item (stale price, still in autocomplete). Remove it, and carry
+            # the DB-only columns over to the new row.
+            try:
+                if _old_row.get("category"):
+                    _db_rn.set_item_category(new_name, _old_row["category"])
+                if _old_row.get("worker_cost") is not None:
+                    _db_rn.set_item_worker_cost(new_name, _old_row["worker_cost"])
+                _db_rn.delete_item(old_name)
+            except Exception as _e_rn:
+                log.warning("[rename] old-row cleanup failed for %r: %s", old_name, _e_rn)
         except Exception as e:
             return await interaction.response.send_message(f"❌ Failed to update items.yml: {e}", **ephemeral_kwargs(interaction))
 
@@ -148,12 +164,13 @@ class ShopCog(commands.Cog):
     @app_commands.describe(
         item="Item name",
         coin="Price amount",
-        per_stack="Set to True if the price is per stack of 64 (bot divides by 64 automatically)"
+        per_stack="Set to True if the price is per stack of 64 (bot divides by 64 automatically)",
+        worker_cost="(Optional) per-piece break-even cost for consignment futures. -1 = leave unchanged.",
     )
     @app_commands.autocomplete(item=any_item_autocomplete)
     @app_commands.default_permissions(manage_guild=True)
     async def set_price(self, interaction: discord.Interaction, item: str, coin: int,
-                        per_stack: bool = False):
+                        per_stack: bool = False, worker_cost: int = -1):
         if coin < 0:
             return await interaction.response.send_message("❌ Coin must be ≥ 0.", **ephemeral_kwargs(interaction))
 
@@ -175,7 +192,15 @@ class ShopCog(commands.Cog):
         if per_val == "stack":
             items[item]["stackable"] = True
             items[item]["stack_size"] = stack_size
+        if worker_cost is not None and worker_cost >= 0:
+            items[item]["worker_cost"] = int(worker_cost)
         _save_items(shops)
+        if worker_cost is not None and worker_cost >= 0:
+            try:
+                import Restocker_db as _db_wc
+                _db_wc.set_item_worker_cost(item, int(worker_cost))
+            except Exception:
+                pass
 
         try:
             import Restocker_db as _db_sp2

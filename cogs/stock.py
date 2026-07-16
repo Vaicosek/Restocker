@@ -324,7 +324,25 @@ class StockCog(commands.Cog):
                 f"`{int(b['fund_share']):,}`) pro-rata to **{len(holders)}** holder(s), then removes the stock. "
                 f"Asset backing (`{int(b['assets']):,}`) is honored off-exchange by the owner. "
                 f"Re-run with `confirm:true`.", ephemeral=True)
-        await interaction.response.defer()   # payouts can exceed the 3s interaction window
+        # Re-entrancy guard: holders/pool were snapshotted above, and defer() yields the event
+        # loop — a second `/stock delist confirm:true` dispatched in that window would pass the
+        # same active-listing check and pay EVERY holder twice from the same snapshot. Claim the
+        # market synchronously (no await between check and set) before the first await.
+        busy = getattr(type(self), "_delisting_now", None)
+        if busy is None:
+            busy = type(self)._delisting_now = set()
+        if market_id in busy:
+            return await interaction.response.send_message(
+                "⏳ A delist for this market is already in progress.", ephemeral=True)
+        busy.add(market_id)
+        try:
+            await interaction.response.defer()   # payouts can exceed the 3s interaction window
+            return await self._delist_payout(interaction, market_id, name, holders, total_shares, pool, b)
+        finally:
+            busy.discard(market_id)
+
+    async def _delist_payout(self, interaction, market_id, name, holders, total_shares, pool, b):
+        import Restocker_db as _db
         if total_shares <= 0 or pool <= 0:
             _db.upsert_market_shares(market_id, active=0)
             return await interaction.followup.send(

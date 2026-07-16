@@ -16,6 +16,8 @@ _re_alarm = re.compile(r"mkt:(\S+)")
 _alarm_triggered_items = core._alarm_triggered_items
 _create_restock_orders = core._create_restock_orders
 _load_items = core._load_items
+is_manager = core.is_manager
+_markets_owned_by = core._markets_owned_by
 
 class StockTradeModal(discord.ui.Modal):
     """Popup for buying/selling an arbitrary number of shares."""
@@ -154,6 +156,12 @@ class StockAlarmView(discord.ui.View):
         mid = self._mid(interaction)
         if not mid:
             return await interaction.response.send_message("Couldn't determine the market.", ephemeral=True)
+        # The alarm can land in a public channel (owner-DM fallback) and this view is
+        # persistent — without a gate ANY member could click and spawn payable restock
+        # orders for someone else's market. Owner/manager of THIS market only.
+        if not (is_manager(interaction) or mid in _markets_owned_by(interaction.user.id)):
+            return await interaction.response.send_message(
+                "⛔ Only this market's owner or a manager can create these orders.", ephemeral=True)
         trig = _alarm_triggered_items(mid)
         known = (_load_items().get("items") or {})
         to_order = [(t["item"], t["deficit"], known[t["item"]])
@@ -172,6 +180,10 @@ class StockAlarmView(discord.ui.View):
     @discord.ui.button(label="✅ Acknowledge", style=discord.ButtonStyle.secondary,
                        custom_id="stockalarm_dismiss")
     async def dismiss(self, interaction: discord.Interaction, button: discord.ui.Button):
+        mid = self._mid(interaction)
+        if mid and not (is_manager(interaction) or mid in _markets_owned_by(interaction.user.id)):
+            return await interaction.response.send_message(
+                "⛔ Only this market's owner or a manager can dismiss its alarm.", ephemeral=True)
         try:
             await interaction.response.edit_message(content="🔕 Acknowledged — no orders created.", view=None)
         except Exception:

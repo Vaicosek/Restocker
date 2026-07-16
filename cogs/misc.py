@@ -169,6 +169,7 @@ class MiscCog(commands.Cog):
         market_name = m_info.get("name", chosen)
         csn_file = m_info.get("csn_history_file") or f"csn_history_{chosen}.yml"
 
+        identified = True                      # did we positively identify the leader?
         if leader and mgr:
             code_owner = leader
         elif not mgr:
@@ -180,9 +181,15 @@ class MiscCog(commands.Cog):
             if len(role_holders) == 1:
                 code_owner = role_holders[0]
             else:
-                code_owner = member
+                code_owner = member            # ambiguous fallback: the invoking manager
+                identified = False
 
-        all_markets[chosen]["leader_discord_id"] = str(code_owner.id)
+        # Don't clobber an existing leader on the ambiguous fallback: leader_discord_id gates
+        # market-ownership rights (_markets_owned_by → redemption approvals etc.), so blindly
+        # assigning it silently transferred those rights to whoever fetched a code.
+        existing_leader = (m_info.get("leader_discord_id") or "").strip()
+        if identified or not existing_leader:
+            all_markets[chosen]["leader_discord_id"] = str(code_owner.id)
         all_markets[chosen]["leader_code"] = code
         _save_markets(markets_data)
 

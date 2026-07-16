@@ -53,6 +53,8 @@ ephemeral_kwargs = core.ephemeral_kwargs
 fmt_qty = core.fmt_qty
 is_manager = core.is_manager
 load_orders = core.load_orders
+log = core.log   # NOT auto-available — without this, the 🚨 NOT-PAID warning path NameErrors
+                 # mid-payout-loop (the exact failure the payout fix was built to prevent)
 remaining_to_assign = core.remaining_to_assign
 save_orders = core.save_orders
 update_order_messages = core.update_order_messages
@@ -507,10 +509,12 @@ class ManagerReviewView(View):
                 continue
             # Per-market reward: the owning market can grant a points multiplier and/or a
             # flat coin bonus per fulfilled order to incentivise its restockers.
-            _mkt_mult, _mkt_bonus = _market_loyalty_cfg(order.get("market_id"))
+            _mkt_mult, _mkt_bonus, _mkt_pct = _market_loyalty_cfg(order.get("market_id"))
             bonus_pct = _loyalty_payout_bonus_pct(uid)
             bonus_coins = int(payout * bonus_pct / 100) if bonus_pct > 0 else 0
-            total_payout = payout + bonus_coins + _mkt_bonus
+            # Per-market %-of-order bonus — scales with the order's value, unlike the flat bonus.
+            mkt_pct_coins = int(payout * _mkt_pct / 100) if _mkt_pct > 0 else 0
+            total_payout = payout + bonus_coins + _mkt_bonus + mkt_pct_coins
             # Tag the ledger with the order so payouts are auditable after the fact — without
             # this, coin_ledger rows are anonymous and "was order #N paid?" is unanswerable.
             new_bal, _principal = add_coins(uid, total_payout, counts_as_principal=True,
@@ -519,6 +523,8 @@ class ManagerReviewView(View):
             bonus_str = f" (+{bonus_coins} loyalty bonus)" if bonus_coins > 0 else ""
             if _mkt_bonus > 0:
                 bonus_str += f" (+{_mkt_bonus} market bonus)"
+            if mkt_pct_coins > 0:
+                bonus_str += f" (+{mkt_pct_coins} market {_mkt_pct:g}%)"
             paid_lines.append(f"• <@{uid}> +**{total_payout}**{bonus_str} (new bal: {new_bal})")
             lp = _loyalty_points_for_order(order, items_data)
             lp_scaled = max(1, int(lp * qty / max(1, int(order.get("requested", 1) or 1))))

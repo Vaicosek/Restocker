@@ -595,7 +595,19 @@ class OrdersCog(commands.Cog):
                 posted += 1
             except Exception as e:
                 errors.append(f"#{o.get('id')}: {type(e).__name__}: {e}")
-        save_orders(data)
+        # Do NOT save the whole pre-loop snapshot: the posting loop awaits Discord per order,
+        # and a claim made meanwhile would be clobbered back to unclaimed (save_orders upserts
+        # every row). Re-load fresh state and merge ONLY the fields this command changed.
+        fresh = load_orders()
+        by_id = {int(x.get("id", 0) or 0): x for x in (fresh.get("orders") or []) if isinstance(x, dict)}
+        for o in open_orders:
+            f = by_id.get(int(o.get("id", 0) or 0))
+            if f is not None:
+                f["worker_announced"] = o.get("worker_announced", True)
+                f["employee_announced"] = o.get("employee_announced", False)
+                f["employee_announce_at"] = o.get("employee_announce_at")
+                f["messages"] = o.get("messages") or f.get("messages")
+        save_orders(fresh)
 
         msg = (f"📮 Posted **{posted}/{len(open_orders)}** order card(s) to <#{WORKER_CHANNEL_ID}>, "
                f"and queued the **@Employee DM digest** — it goes out within ~1 min once the loop fix is live.")
@@ -684,7 +696,10 @@ class OrdersCog(commands.Cog):
 
 
         data["orders"] = []
-        save_orders(data)
+        # prune=True is REQUIRED: since the SQLite migration, save_orders only upserts the
+        # rows present in the list — saving an empty list without prune deletes NOTHING,
+        # leaving every order alive while their Discord messages/tickets are already gone.
+        save_orders(data, prune=True)
 
         await interaction.followup.send(
             f"🧨 **ALL ORDERS DELETED**\n\n"

@@ -1280,6 +1280,7 @@ _PAGE = """<!DOCTYPE html>
       <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end">
         <div><div class="lblmini">Loyalty × (points)</div><input id="loy-mult" class="ownin" type="number" step="0.1" min="0.1" placeholder="1.5" style="width:110px"></div>
         <div><div class="lblmini">Coin bonus / order</div><input id="loy-bonus" class="ownin" type="number" min="0" placeholder="500" style="width:130px"></div>
+        <div><div class="lblmini">% bonus / order</div><input id="loy-pct" class="ownin" type="number" min="0" step="1" placeholder="20" style="width:110px" title="Extra pay as a % of the order's value — scales with order size"></div>
         <button class="auth-btn" id="loy-save">Save rewards</button>
         <span id="loy-msg" style="font-size:12px;color:var(--muted)"></span>
       </div>
@@ -1292,6 +1293,15 @@ _PAGE = """<!DOCTYPE html>
       <div style="display:flex;gap:12px;align-items:center;margin-top:12px">
         <button class="auth-btn" id="ob-build">Build order</button>
         <span id="ob-msg" style="font-size:12px;color:var(--muted)"></span>
+      </div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-title">Request futures <span style="color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0">— custom crafts made to order; a manager approves &amp; queues them for workers</span></div>
+      <textarea id="fut-items" class="ownin" rows="4" placeholder="One item per line, e.g.&#10;2 barrels Warlord Potion (Str 2 + Speed 2)&#10;Sword Sharp V Fire Aspect II x10" style="width:100%;resize:vertical;font-family:var(--font-data)"></textarea>
+      <input id="fut-notes" class="ownin" placeholder="Notes (optional)" style="width:100%;margin-top:8px">
+      <div style="display:flex;gap:12px;align-items:center;margin-top:10px">
+        <button class="auth-btn" id="fut-send">Submit futures request</button>
+        <span id="fut-msg" style="font-size:12px;color:var(--muted)"></span>
       </div>
     </div>
     <div class="chart-card">
@@ -2472,10 +2482,11 @@ document.querySelectorAll(".nav-tab").forEach(tab => {
   }
   async function loadLoyalty(mid) {
     const mult = document.getElementById("loy-mult"), bonus = document.getElementById("loy-bonus");
+    const pct = document.getElementById("loy-pct");
     if (!mult || !bonus) return;
     try {
       const r = await fetch("/api/owner/loyalty?market_id=" + encodeURIComponent(mid)).then(x => x.json());
-      if (r && r.ok) { mult.value = r.pts_mult; bonus.value = r.coin_bonus; }
+      if (r && r.ok) { mult.value = r.pts_mult; bonus.value = r.coin_bonus; if (pct) pct.value = r.pct_bonus || 0; }
     } catch (e) {}
   }
   let obSaveTimer = null;
@@ -2662,11 +2673,29 @@ document.querySelectorAll(".nav-tab").forEach(tab => {
     const msg = document.getElementById("loy-msg");
     const pm = Number(document.getElementById("loy-mult").value);
     const cb = Number(document.getElementById("loy-bonus").value);
+    const pctEl = document.getElementById("loy-pct");
+    const pct = pctEl ? Number(pctEl.value || 0) : 0;
     if (!(pm > 0)) { msg.textContent = "Multiplier must be > 0."; return; }
-    if (cb < 0) { msg.textContent = "Bonus can't be negative."; return; }
+    if (cb < 0 || pct < 0) { msg.textContent = "Bonuses can't be negative."; return; }
     msg.textContent = "Saving…";
-    const res = await post("/api/owner/set_loyalty", { market_id: curMid, pts_mult: pm, coin_bonus: cb });
+    const res = await post("/api/owner/set_loyalty", { market_id: curMid, pts_mult: pm, coin_bonus: cb, pct_bonus: pct });
     msg.textContent = (res && res.ok) ? "Saved ✓" : ((res && res.error) || "Failed.");
+  };
+  const futSend = document.getElementById("fut-send");
+  if (futSend) futSend.onclick = async () => {
+    const msg = document.getElementById("fut-msg");
+    const items = document.getElementById("fut-items").value.trim();
+    const notes = document.getElementById("fut-notes").value.trim();
+    if (!items) { msg.textContent = "Paste at least one item (one per line)."; return; }
+    futSend.disabled = true; msg.textContent = "Submitting…";
+    const res = await post("/api/owner/futures", { market_id: curMid, items, notes });
+    futSend.disabled = false;
+    if (res && res.ok) {
+      msg.textContent = `✅ Futures request #${res.bulk_id} sent (${res.count} item(s)) — a manager will approve it.`;
+      document.getElementById("fut-items").value = ""; document.getElementById("fut-notes").value = "";
+    } else {
+      msg.textContent = (res && res.error) || "Failed.";
+    }
   };
   const addBtn = document.getElementById("rs-add");
   if (addBtn) addBtn.onclick = async () => {
@@ -3350,16 +3379,17 @@ async def _handle_owner_get_loyalty(request):
     if not mid or not _require_owner(request, mid):
         return web.json_response({"ok": False, "error": "Not authorized for this market."}, status=403)
     import json as _json, Restocker_db as db
-    pm, cb = 1.0, 0
+    pm, cb, pct = 1.0, 0, 0.0
     try:
         raw = db.get_config(f"market_loyalty:{mid}")
         if raw:
             d = _json.loads(raw)
             pm = float(d.get("pts_mult", 1.0) or 1.0)
             cb = int(d.get("coin_bonus", 0) or 0)
+            pct = float(d.get("pct_bonus", 0.0) or 0.0)
     except Exception:
         pass
-    return web.json_response({"ok": True, "market_id": mid, "pts_mult": pm, "coin_bonus": cb})
+    return web.json_response({"ok": True, "market_id": mid, "pts_mult": pm, "coin_bonus": cb, "pct_bonus": pct})
 
 
 async def _handle_owner_set_loyalty(request):
@@ -3377,17 +3407,19 @@ async def _handle_owner_set_loyalty(request):
     try:
         pm = float(body.get("pts_mult", 1.0))
         cb = int(round(float(body.get("coin_bonus", 0))))
+        pct = float(body.get("pct_bonus", 0.0))
     except (TypeError, ValueError):
         return web.json_response({"ok": False, "error": "Values must be numbers."}, status=400)
-    if pm <= 0 or cb < 0:
-        return web.json_response({"ok": False, "error": "Multiplier must be > 0 and bonus must be ≥ 0."}, status=400)
+    if pm <= 0 or cb < 0 or pct < 0:
+        return web.json_response({"ok": False, "error": "Multiplier must be > 0; bonuses must be ≥ 0."}, status=400)
     import json as _json, Restocker_db as db
     try:
-        db.set_config(f"market_loyalty:{mid}", _json.dumps({"pts_mult": pm, "coin_bonus": cb}))
+        db.set_config(f"market_loyalty:{mid}",
+                      _json.dumps({"pts_mult": pm, "coin_bonus": cb, "pct_bonus": pct}))
     except Exception as e:
         return web.json_response({"ok": False, "error": str(e)}, status=500)
     _CACHE.clear()
-    return web.json_response({"ok": True, "pts_mult": pm, "coin_bonus": cb})
+    return web.json_response({"ok": True, "pts_mult": pm, "coin_bonus": cb, "pct_bonus": pct})
 
 
 async def _handle_owner_generate_orders(request):
@@ -3503,6 +3535,53 @@ async def _handle_owner_build_order(request):
         return web.json_response({"ok": False, "error": str(e)}, status=500)
     _CACHE.clear()
     return web.json_response({"ok": True, "created": int(created), "items": preview})
+
+
+async def _handle_owner_futures(request):
+    """A logged-in market owner requests a (bulk) futures order for THEIR market from the
+    website — pasted as a text list, same parser as the Discord modal. Saved pending and
+    posted to the futures channel for a manager to Approve & Fulfill."""
+    if not _csrf_ok(request):
+        return web.json_response({"ok": False, "error": "Bad or missing CSRF token."}, status=403)
+    sess = _session_user(request)
+    if not sess:
+        return web.json_response({"ok": False, "error": "Log in first."}, status=401)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    mid = str(body.get("market_id") or "").strip()
+    if not mid or not _require_owner(request, mid):
+        return web.json_response({"ok": False, "error": "Not authorized for this market."}, status=403)
+    text = str(body.get("items") or "")
+    notes = str(body.get("notes") or "").strip()[:500]
+    import Restocker_main as m, Restocker_db as _db
+    parsed = m._parse_futures_bulk_text(text)
+    if not parsed:
+        return web.json_response({"ok": False,
+                                  "error": "No items read — one per line, e.g. '2 barrels Warlord Potion'."})
+    uid = str(sess.get("user_id") or "")
+    uname = sess.get("name") or "Web owner"
+    try:
+        bulk_id = _db.create_futures_bulk(uid, uname, mid, uid, notes)
+        for p in parsed:
+            _db.add_futures_bulk_line(bulk_id, p["item"], p["qty"], p.get("unit", "pieces"),
+                                      "", p.get("raw", ""))
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=500)
+    # Post the manager review card on the bot loop (fire-and-forget), same pattern as web orders.
+    try:
+        loop = getattr(m, "_BOT_LOOP", None)
+        if loop is not None:
+            import asyncio as _a
+            from views.web import post_futures_bulk_review
+            _a.run_coroutine_threadsafe(post_futures_bulk_review(bulk_id), loop)
+    except Exception as e:
+        print(f"⚠️ web futures #{bulk_id} notify failed: {e}")
+    _CACHE.clear()
+    return web.json_response({"ok": True, "bulk_id": bulk_id, "count": len(parsed),
+                              "items": [{"item": p["item"], "qty": p["qty"],
+                                         "unit": p.get("unit", "pieces")} for p in parsed]})
 
 
 async def _handle_api_order(request):
@@ -3701,6 +3780,7 @@ async def start_webserver(port: int = 8080):
     app.router.add_get("/api/owner/catalog",       _handle_owner_catalog)
     app.router.add_post("/api/owner/set_target",   _handle_owner_set_target)
     app.router.add_post("/api/owner/build_order",  _handle_owner_build_order)
+    app.router.add_post("/api/owner/futures",      _handle_owner_futures)
     app.router.add_post("/api/order",    _handle_api_order)
     app.router.add_get("/api/network/orders", _handle_network_orders)
     app.router.add_post("/api/network/claim", _handle_network_claim)

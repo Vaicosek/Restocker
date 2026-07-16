@@ -151,6 +151,234 @@ class MoneyCog(commands.Cog):
             **ephemeral_kwargs(interaction)
         )
 
+    @app_commands.command(
+        name="futures_bulk",
+        description="(Owner/Manager) One bulk futures order from a pasted item list — then Approve & Fulfill")
+    @app_commands.describe(
+        customer="Who this order is for (the buyer)",
+        market_id="The buyer's market — where resales are tracked for consignment billing (optional)")
+    @app_commands.autocomplete(market_id=core._market_autocomplete)
+    async def futures_bulk(self, interaction: discord.Interaction, customer: discord.Member,
+                           market_id: Optional[str] = None):
+        if not (is_manager(interaction) or _owner_markets_for_user(interaction.user.id)):
+            return await interaction.response.send_message(
+                "📈 Bulk futures orders are for market owners / managers only.",
+                **ephemeral_kwargs(interaction))
+        # A modal is the natural place to paste a multi-line list. It parses on submit and
+        # posts the review card with Approve & Fulfill.
+        from views.web import FuturesBulkModal
+        await interaction.response.send_modal(FuturesBulkModal(
+            customer_id=customer.id, customer_name=customer.display_name,
+            market_id=market_id or "", created_by=interaction.user.id))
+
+    # ── Consignment futures management (/futures ...) ───────────────────────────────────
+    futures = app_commands.Group(
+        name="futures",
+        description="(Owner/Manager) Manage consignment futures deals — price, bill, and collect")
+
+    def _fut_ok(self, interaction) -> bool:
+        return is_manager(interaction) or bool(_owner_markets_for_user(interaction.user.id))
+
+    @staticmethod
+    def _fut_deal_ok(interaction, bulk) -> tuple[bool, str]:
+        """Money-affecting deal actions (price / sold / pay) need more than 'owns any market':
+        the deal's CUSTOMER is by design a market owner too, so without this check the debtor
+        could run `/futures pay` or `/futures sold qty:0` on their own deal and write off their
+        entire margin owed with no coins moving. Managers, or the deal's creator (the supplier)
+        — and never the customer unless they're a manager."""
+        uid = str(interaction.user.id)
+        if is_manager(interaction):
+            return True, ""
+        if uid == str(bulk.get("customer_id") or ""):
+            return False, "⛔ You're the customer on this deal — its pricing/billing is managed by the supplier."
+        if uid == str(bulk.get("created_by") or ""):
+            return True, ""
+        return False, "⛔ Only a manager or the deal's creator can do that."
+
+    @futures.command(name="deals", description="List consignment / bulk futures deals")
+    @app_commands.describe(customer="Only show this customer's deals (optional)")
+    async def futures_deals(self, interaction: discord.Interaction,
+                            customer: Optional[discord.Member] = None):
+        if not self._fut_ok(interaction):
+            return await interaction.response.send_message("⛔ Owners / managers only.", ephemeral=True)
+        import Restocker_db as _db
+        rows = _db.list_futures_bulk(customer_id=(str(customer.id) if customer else None), limit=25)
+        if not rows:
+            return await interaction.response.send_message("📭 No bulk futures deals yet.", ephemeral=True)
+        lines = []
+        for b in rows:
+            full = _db.get_futures_bulk(b["id"])
+            o = core._futures_bulk_owed(full)
+            tag = ("✅" if b["status"] == "fulfilled" else
+                   "🕒" if b["status"] == "pending" else "🗑")
+            extra = f" · ⚠{o['unpriced']} unpriced" if o["unpriced"] else ""
+            lines.append(
+                f"{tag} **#{b['id']}** <@{b['customer_id']}> · {len(full['lines'])} lines · "
+                f"owed `{o['owed_so_far']:.0f}` paid `{o['paid']:.0f}` → **`{o['remaining']:.0f}`** left{extra}")
+        embed = discord.Embed(title="🔮 Consignment futures deals",
+                              description="\n".join(lines)[:4000], color=discord.Color.gold())
+        embed.set_footer(text="/futures view <id> for line detail · /futures bill <id> to invoice")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @futures.command(name="view", description="Full per-line breakdown of one deal")
+    @app_commands.describe(deal_id="Bulk deal # from /futures deals")
+    async def futures_view(self, interaction: discord.Interaction, deal_id: int):
+        if not self._fut_ok(interaction):
+            return await interaction.response.send_message("⛔ Owners / managers only.", ephemeral=True)
+        import Restocker_db as _db
+        bulk = _db.get_futures_bulk(deal_id)
+        if not bulk:
+            return await interaction.response.send_message(f"❌ No deal #{deal_id}.", ephemeral=True)
+        o = core._futures_bulk_owed(bulk)
+        rows = []
+        for i, l in enumerate(o["lines"], 1):
+            if l["priced"]:
+                margin = (l["full_price"] or 0) - (l["worker_cost"] or 0)
+                rows.append(f"`{i:>2}.` {l['item']} ×{l['qty']} → `{l['item_key']}` · "
+                            f"cost `{l['worker_cost']:.0f}`/full `{l['full_price']:.0f}` "
+                            f"(margin `{margin:.0f}`) · resold {l['resold']}/{l['qty']} · owed `{l['owed']:.0f}`")
+            else:
+                rows.append(f"`{i:>2}.` {l['item']} ×{l['qty']} · ⚠ unpriced — "
+                            f"`/futures price {deal_id} {i} <item>`")
+        embed = discord.Embed(
+            title=f"🔮 Deal #{deal_id} — {str(bulk.get('status','')).capitalize()}",
+            description="\n".join(rows)[:4000], color=discord.Color.gold())
+        embed.add_field(name="Customer", value=f"<@{bulk.get('customer_id')}>", inline=True)
+        if bulk.get("market_id"):
+            embed.add_field(name="Market", value=f"`{bulk.get('market_id')}`", inline=True)
+        embed.add_field(name="Upfront (break-even)", value=f"`{o['upfront']:.0f}` 🪙", inline=True)
+        embed.add_field(name="Margin owed so far", value=f"`{o['owed_so_far']:.0f}` 🪙", inline=True)
+        embed.add_field(name="Paid back", value=f"`{o['paid']:.0f}` 🪙", inline=True)
+        embed.add_field(name="Remaining", value=f"**`{o['remaining']:.0f}`** 🪙", inline=True)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @futures.command(name="price", description="Price one line — link it to a catalog item")
+    @app_commands.describe(
+        deal_id="Bulk deal #", line="Line number from /futures view",
+        item="Catalog item to link (its sell price + break-even are used, and CSN resales match it)",
+        worker_cost="Override per-unit break-even (optional)",
+        full_price="Override per-unit full price (optional)")
+    @app_commands.autocomplete(item=any_item_autocomplete)
+    async def futures_price(self, interaction: discord.Interaction, deal_id: int, line: int, item: str,
+                            worker_cost: Optional[float] = None, full_price: Optional[float] = None):
+        if not self._fut_ok(interaction):
+            return await interaction.response.send_message("⛔ Owners / managers only.", ephemeral=True)
+        import Restocker_db as _db
+        bulk = _db.get_futures_bulk(deal_id)
+        if not bulk:
+            return await interaction.response.send_message(f"❌ No deal #{deal_id}.", ephemeral=True)
+        ok, why = self._fut_deal_ok(interaction, bulk)
+        if not ok:
+            return await interaction.response.send_message(why, ephemeral=True)
+        lines = bulk.get("lines") or []
+        if line < 1 or line > len(lines):
+            return await interaction.response.send_message(
+                f"❌ Line must be 1–{len(lines)} (see `/futures view {deal_id}`).", ephemeral=True)
+        ln = lines[line - 1]
+        res = core._price_futures_bulk_line(ln["id"], item, bulk.get("market_id") or "",
+                                            worker_cost, full_price,
+                                            getattr(core, "FUTURES_MIN_MARGIN", 0))
+        if not res.get("ok"):
+            if res.get("reason") == "no_price":
+                return await interaction.response.send_message(
+                    f"❌ `{item}` has no sell price — set one with `/item_set_price` or pass `full_price:`.",
+                    ephemeral=True)
+            # low_margin — cheap item, not worth putting on consignment
+            return await interaction.response.send_message(
+                f"⛔ Margin too small for consignment: **{res['margin']:.0f}** /unit "
+                f"(break-even {res['worker_cost']:.0f}, full {res['full_price']:.0f}) — the minimum is "
+                f"**{res['min_margin']:.0f}**.\nFutures is for high-margin items (gear, brews), not cheap "
+                f"blocks. Raise the sell price, lower the worker cost, or override with `full_price:`. "
+                f"(The floor is `FUTURES_MIN_MARGIN`.)", ephemeral=True)
+        await interaction.response.send_message(
+            f"💲 Priced line **{line}** of deal #{deal_id} → `{item}`\n"
+            f"• break-even **{res['worker_cost']:.0f}** · full **{res['full_price']:.0f}** · "
+            f"margin **{res['margin']:.0f}** /unit\n"
+            f"• CSN baseline set at **{res['baseline']}** sold (only resales after now bill).",
+            ephemeral=True)
+
+    @futures.command(name="sold", description="Manually set how many of a line the customer has resold")
+    @app_commands.describe(deal_id="Bulk deal #", line="Line number",
+                           qty="Resold count (use -1 to clear the override and fall back to CSN)")
+    async def futures_sold(self, interaction: discord.Interaction, deal_id: int, line: int, qty: int):
+        if not self._fut_ok(interaction):
+            return await interaction.response.send_message("⛔ Owners / managers only.", ephemeral=True)
+        import Restocker_db as _db
+        bulk = _db.get_futures_bulk(deal_id)
+        if not bulk:
+            return await interaction.response.send_message(f"❌ No deal #{deal_id}.", ephemeral=True)
+        ok, why = self._fut_deal_ok(interaction, bulk)
+        if not ok:
+            return await interaction.response.send_message(why, ephemeral=True)
+        lines = bulk.get("lines") or []
+        if line < 1 or line > len(lines):
+            return await interaction.response.send_message(
+                f"❌ Line must be 1–{len(lines)}.", ephemeral=True)
+        ln = lines[line - 1]
+        if qty < 0:
+            _db.set_futures_bulk_line_sold(ln["id"], None)
+            return await interaction.response.send_message(
+                f"↩️ Cleared manual resold on line {line} — back to CSN auto-tracking.", ephemeral=True)
+        _db.set_futures_bulk_line_sold(ln["id"], qty)
+        await interaction.response.send_message(
+            f"✍️ Line {line}: resold set to **{qty}** (manual override).", ephemeral=True)
+
+    @futures.command(name="bill", description="Post the current invoice for a deal (and DM the customer)")
+    @app_commands.describe(deal_id="Bulk deal #", dm="Also DM the customer the invoice (default: yes)")
+    async def futures_bill(self, interaction: discord.Interaction, deal_id: int, dm: bool = True):
+        if not self._fut_ok(interaction):
+            return await interaction.response.send_message("⛔ Owners / managers only.", ephemeral=True)
+        import Restocker_db as _db
+        bulk = _db.get_futures_bulk(deal_id)
+        if not bulk:
+            return await interaction.response.send_message(f"❌ No deal #{deal_id}.", ephemeral=True)
+        o = core._futures_bulk_owed(bulk)
+        rows = []
+        for i, l in enumerate(o["lines"], 1):
+            if l["priced"] and l["resold"] > 0:
+                rows.append(f"• {l['item']} — resold {l['resold']}/{l['qty']} × margin → **{l['owed']:.0f}** 🪙")
+        detail = "\n".join(rows) if rows else "_No resales tracked yet._"
+        embed = discord.Embed(
+            title=f"🧾 Invoice — consignment deal #{deal_id}",
+            description=detail, color=discord.Color.gold())
+        embed.add_field(name="Owed so far", value=f"`{o['owed_so_far']:.0f}` 🪙", inline=True)
+        embed.add_field(name="Paid", value=f"`{o['paid']:.0f}` 🪙", inline=True)
+        embed.add_field(name="Remaining", value=f"**`{o['remaining']:.0f}`** 🪙", inline=True)
+        embed.set_footer(text=f"Upfront break-even {o['upfront']:.0f} paid at deal · "
+                              f"max margin if all resells {o['total_margin']:.0f}"
+                              + (f" · ⚠ {o['unpriced']} line(s) unpriced" if o['unpriced'] else ""))
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        if dm and o["remaining"] > 0:
+            try:
+                cust = await interaction.client.fetch_user(int(bulk.get("customer_id")))
+                await cust.send(
+                    f"🧾 **Invoice — your consignment order #{deal_id}**\n"
+                    f"Based on what you've resold so far you owe **{o['remaining']:.0f}** coins "
+                    f"(margin {o['owed_so_far']:.0f} − paid {o['paid']:.0f}).\n"
+                    f"Pay whenever you can — thanks!")
+            except Exception:
+                pass
+
+    @futures.command(name="pay", description="Record a payment the customer made against a deal")
+    @app_commands.describe(deal_id="Bulk deal #", amount="Coins the customer paid back")
+    async def futures_pay(self, interaction: discord.Interaction, deal_id: int, amount: int):
+        if not self._fut_ok(interaction):
+            return await interaction.response.send_message("⛔ Owners / managers only.", ephemeral=True)
+        if amount <= 0:
+            return await interaction.response.send_message("❌ Amount must be positive.", ephemeral=True)
+        import Restocker_db as _db
+        bulk = _db.get_futures_bulk(deal_id)
+        if not bulk:
+            return await interaction.response.send_message(f"❌ No deal #{deal_id}.", ephemeral=True)
+        ok, why = self._fut_deal_ok(interaction, bulk)
+        if not ok:
+            return await interaction.response.send_message(why, ephemeral=True)
+        new_paid = _db.record_futures_bulk_payment(deal_id, amount)
+        o = core._futures_bulk_owed(_db.get_futures_bulk(deal_id))
+        await interaction.response.send_message(
+            f"💰 Recorded **{amount:,}** 🪙 on deal #{deal_id}. "
+            f"Paid total **{new_paid:.0f}** · remaining **{o['remaining']:.0f}**.", ephemeral=True)
+
     @app_commands.command(name="my_futures_orders", description="Check the status of your submitted futures orders")
     async def my_futures_orders(self, interaction: discord.Interaction):
         import Restocker_db as _db

@@ -178,15 +178,20 @@ class LoopsCog(commands.Cog):
                                 except Exception:
                                     pass
 
-                            ui2["last_worker_ping_hash"] = content_hash
-                            ui2["last_worker_ping_ts"] = now_ts2
-                            save_orders(data2)
+                            # Reload before saving — the history scan above awaited, so data2
+                            # may be stale (see the main save below for the full rationale).
+                            _d = load_orders()
+                            _u = _d.setdefault("ui", {})
+                            _u["last_worker_ping_hash"] = content_hash
+                            _u["last_worker_ping_ts"] = now_ts2
+                            save_orders(_d)
                             return
                     except Exception:
                         pass
 
                 await channel.send(content, allowed_mentions=discord.AllowedMentions(roles=True))
 
+                import asyncio as _aio_wa
                 worker_role = discord.utils.get(channel.guild.roles, name=EMPLOYEE_ROLE_NAME)
                 if worker_role:
                     for member in list(worker_role.members):
@@ -196,10 +201,18 @@ class LoopsCog(commands.Cog):
                             await safe_dm(member, dm_content)
                         except Exception:
                             pass
+                        # Throttle: 60+ DMs in a tight burst is what gets a bot rate-limited.
+                        await _aio_wa.sleep(0.4)
 
-                ui2["last_worker_ping_hash"] = content_hash
-                ui2["last_worker_ping_ts"] = now_ts2
-                save_orders(data2)
+                # Do NOT save the stale pre-fanout snapshot (data2) — save_orders upserts every
+                # order row, so a claim made during the minutes-long DM loop would be reverted
+                # to unclaimed (→ double claim / double payout). Reload fresh and write ONLY
+                # the ui dedup keys this loop actually owns.
+                data3 = load_orders()
+                ui3 = data3.setdefault("ui", {})
+                ui3["last_worker_ping_hash"] = content_hash
+                ui3["last_worker_ping_ts"] = now_ts2
+                save_orders(data3)
 
             except Exception as e:
                 print(f"[worker_announce_loop] error: {e}")
@@ -296,7 +309,14 @@ class LoopsCog(commands.Cog):
 
                 members = [m for m in list(employee_role.members) if not getattr(m, "bot", False)]
 
+                # Collect DM-tracking updates locally and apply them to a FRESH load after the
+                # fan-out: saving the pre-fanout snapshot would upsert every stale order row,
+                # reverting any claim made during the minutes this loop spends DMing (→ double
+                # claim / double payout). The stale `store` reads above are fine (read-only).
+                import asyncio as _aio_eb
+                dm_tracks = []
                 for member in members:
+                    await _aio_eb.sleep(0.4)   # throttle — 60+ DMs in a burst = rate-limit bait
                     uid_str = str(int(member.id))
                     tracked = store.get(uid_str)
                     tracked_ids = tracked if isinstance(tracked, list) else ([tracked] if tracked else [])
@@ -320,7 +340,7 @@ class LoopsCog(commands.Cog):
                                     except Exception:
                                         pass
 
-                                _track_batch_dm_message(data, member.id, int(last_id))
+                                dm_tracks.append((member.id, int(last_id)))
                                 continue
                             except Exception:
                                 pass
@@ -335,14 +355,17 @@ class LoopsCog(commands.Cog):
                             except Exception:
                                 pass
 
-                        _track_batch_dm_message(data, member.id, int(msg.id))
+                        dm_tracks.append((member.id, int(msg.id)))
 
                     except discord.Forbidden:
                         failed += 1
                     except Exception:
                         failed += 1
 
-                save_orders(data)
+                fresh = load_orders()
+                for _mid, _msgid in dm_tracks:
+                    _track_batch_dm_message(fresh, _mid, _msgid)
+                save_orders(fresh)
                 log.info("[employee_batch_dispatch_loop] edited=%d sent=%d failed=%d ready=%d", edited, sent, failed, len(ready))
 
             except Exception as e:
@@ -378,8 +401,9 @@ class LoopsCog(commands.Cog):
                 return
             if now.weekday() != 0:
                 return
-            if now.hour < 0 or now.hour > 2:
-                return
+            # NOTE: no hour gate. tasks.loop(hours=24) ticks at whatever time-of-day the bot
+            # booted, so an "early-UTC only" window could simply never coincide with the tick
+            # and the report would never send. Weekday + the week-key above are sufficient.
             ok = await _send_funds_report(bot)
             if ok:
                 meta["last_funds_report_week"] = iso_week
@@ -397,6 +421,12 @@ class LoopsCog(commands.Cog):
         try:
             import Restocker_db as _db_decay
             now = datetime.now(timezone.utc)
+            # LOYALTY_DECAY_PCT_WEEKLY is a WEEKLY rate but this loop ticks DAILY — without a
+            # week guard an idle user lost 20% per DAY (0.8^7 ≈ 79%/week instead of 20%).
+            # Same once-per-week key pattern as apply_weekly_interest.
+            iso_week = f"{now.isocalendar().year}-W{now.isocalendar().week}"
+            if _db_decay.get_config("last_loyalty_decay_week") == iso_week:
+                return
             idle_threshold = (now - timedelta(days=LOYALTY_DECAY_IDLE_DAYS)).isoformat()
             all_loy = _db_decay.get_all_loyalty()
             updates = []
@@ -415,6 +445,7 @@ class LoopsCog(commands.Cog):
             if updates:
                 _db_decay.update_loyalty_points_bulk(updates)
                 log.info("[loyalty] Decay applied to %d users", len(updates))
+            _db_decay.set_config("last_loyalty_decay_week", iso_week)
         except Exception as e:
             log.warning("[loyalty] decay_loop failed: %s", e)
 
@@ -431,6 +462,12 @@ class LoopsCog(commands.Cog):
             overdue = [p for p in _db_ign_dl.get_all_ign_pending() if p["deadline"] < now]
             for pending in overdue:
                 uid = int(pending["user_id"])
+                # SAFETY: never strip someone who DID register. Pending-row cleanup is spread
+                # across several registration paths and one missed row here would cost a real
+                # employee their role — re-check the registry and self-heal the stale row.
+                if _db_ign_dl.get_ign(str(uid)):
+                    _db_ign_dl.delete_ign_pending(str(uid))
+                    continue
                 guild = bot.get_guild(int(pending["guild_id"]))
                 if not guild:
                     continue
@@ -511,33 +548,39 @@ class LoopsCog(commands.Cog):
 
     @tasks.loop(hours=24)
     async def team_digest_loop(self, ):
-        import Restocker_db as _db
-        now = datetime.now(timezone.utc)
-        iso_week = f"{now.isocalendar().year}-W{now.isocalendar().week}"
-        if _db.get_config("last_team_digest_week") == iso_week:
-            return
-        if now.weekday() != 0:      # Mondays only
-            return
-        if now.hour > 2:            # early-UTC window
-            return
+        # Whole body guarded: an unhandled exception (e.g. a transient "database is locked"
+        # from get_config/get_team_settings) would permanently stop this loop — tasks.loop
+        # only auto-retries connection errors. Also: no hour gate — the daily tick lands at
+        # boot time-of-day, so a narrow window could never coincide and the digest would
+        # never send. Monday + the week-key are sufficient.
         try:
-            managers = sorted({r["manager_id"] for r in _db.get_all_team_perf(None)})
-        except Exception:
-            managers = []
-        posted = 0
-        for mgr in managers:
-            st = _db.get_team_settings(mgr)
-            if not st or not ((st.get("webhook_url") or "").strip() or (st.get("channel_id") or "").strip()):
-                continue
+            import Restocker_db as _db
+            now = datetime.now(timezone.utc)
+            iso_week = f"{now.isocalendar().year}-W{now.isocalendar().week}"
+            if _db.get_config("last_team_digest_week") == iso_week:
+                return
+            if now.weekday() != 0:      # Mondays only
+                return
             try:
-                embed = _team_perf_embed(mgr, 7)
-                ok = await _team_post(mgr, content="📅 Weekly team performance digest", embed=embed)
-                if ok:
-                    posted += 1
-            except Exception as e:
-                log.warning("[team-digest] %s failed: %s", mgr, e)
-        _db.set_config("last_team_digest_week", iso_week)
-        log.info("[team-digest] posted %d team digest(s)", posted)
+                managers = sorted({r["manager_id"] for r in _db.get_all_team_perf(None)})
+            except Exception:
+                managers = []
+            posted = 0
+            for mgr in managers:
+                try:
+                    st = _db.get_team_settings(mgr)
+                    if not st or not ((st.get("webhook_url") or "").strip() or (st.get("channel_id") or "").strip()):
+                        continue
+                    embed = _team_perf_embed(mgr, 7)
+                    ok = await _team_post(mgr, content="📅 Weekly team performance digest", embed=embed)
+                    if ok:
+                        posted += 1
+                except Exception as e:
+                    log.warning("[team-digest] %s failed: %s", mgr, e)
+            _db.set_config("last_team_digest_week", iso_week)
+            log.info("[team-digest] posted %d team digest(s)", posted)
+        except Exception as e:
+            log.warning("[team-digest] loop error: %s", e)
 
     @team_digest_loop.before_loop
     async def _wait_ready_team_digest(self, ):
@@ -545,15 +588,18 @@ class LoopsCog(commands.Cog):
 
     @tasks.loop(hours=24)
     async def db_backup_loop(self, ):
-        import Restocker_db as _db
         import os, glob, asyncio as _aio
-        now = datetime.now(timezone.utc)
-        today = now.strftime("%Y-%m-%d")
-        if _db.get_config("last_db_backup_day") == today:
-            return
-        if now.hour > 4:
-            return
+        # The day-key check must be inside the try: one transient "database is locked" on an
+        # unguarded get_config would permanently stop this loop = backups silently end forever.
+        # No hour gate either — the daily tick fires at boot time-of-day, so a 00-04 window
+        # could never coincide with it and backups would never run at all. Once/day via the
+        # day-key is the real guard.
         try:
+            import Restocker_db as _db
+            now = datetime.now(timezone.utc)
+            today = now.strftime("%Y-%m-%d")
+            if _db.get_config("last_db_backup_day") == today:
+                return
             os.makedirs("backups", exist_ok=True)
             dest = os.path.join("backups", f"restocker_{now.strftime('%Y%m%d_%H%M%S')}.db")
             await _aio.to_thread(_db.backup_database, dest)

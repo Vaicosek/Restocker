@@ -65,7 +65,8 @@ CREATE TABLE IF NOT EXISTS items (
     stackable       INTEGER NOT NULL DEFAULT 1,
     stack_size      INTEGER NOT NULL DEFAULT 64,
     barrel_slots    INTEGER NOT NULL DEFAULT 54,
-    market_id       TEXT NOT NULL DEFAULT 'main'
+    market_id       TEXT NOT NULL DEFAULT 'main',
+    worker_cost     REAL                            -- break-even cost (consignment futures); NULL = unset
 );
 
 -- ── Markets ──────────────────────────────────────────────────────────────────
@@ -298,6 +299,45 @@ CREATE TABLE IF NOT EXISTS futures_orders (
 CREATE INDEX IF NOT EXISTS idx_futures_orders_status ON futures_orders(status);
 CREATE INDEX IF NOT EXISTS idx_futures_orders_user ON futures_orders(user_id);
 
+-- Bulk / consignment futures — ONE order holding many line items (pasted as a text list).
+-- Consignment model: the customer pays worker_cost upfront and owes (full_price - worker_cost)
+-- per unit, billed as they RESELL the goods (tracked via their market's CSN sales). The price
+-- columns stay NULL until priced (Stage B); Stage A captures item+qty and turns each line into
+-- a real claimable work order on approval.
+CREATE TABLE IF NOT EXISTS futures_bulk (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    customer_id    TEXT NOT NULL,
+    customer_name  TEXT,
+    market_id      TEXT,                     -- the buyer's market (where resales are tracked)
+    created_by     TEXT,                     -- who set up the deal (the supplier/owner)
+    status         TEXT NOT NULL DEFAULT 'pending',  -- pending|fulfilled|declined|cancelled
+    notes          TEXT,
+    notify_msg_id  TEXT,
+    reviewed_by    TEXT,
+    reviewed_at    TEXT,
+    paid           REAL NOT NULL DEFAULT 0,   -- margin the customer has paid back so far (Stage B)
+    created_at     TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS futures_bulk_lines (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    bulk_id        INTEGER NOT NULL,
+    item           TEXT NOT NULL,
+    qty            INTEGER NOT NULL DEFAULT 1,
+    unit           TEXT NOT NULL DEFAULT 'pieces',   -- pieces|stacks|barrels
+    enchants       TEXT,
+    raw_line       TEXT,                     -- the original pasted text (for review/repair)
+    item_key       TEXT,                     -- linked catalog item (for CSN resale matching, Stage B)
+    worker_cost    REAL,                     -- per-unit break-even paid upfront (Stage B)
+    full_price     REAL,                     -- per-unit full price (Stage B)
+    sold_baseline  INTEGER NOT NULL DEFAULT 0,  -- customer's CSN cumulative sold at pricing time
+    sold_qty       INTEGER NOT NULL DEFAULT 0,  -- last-computed CSN resold (cache/info, Stage B)
+    sold_override  INTEGER,                  -- manual resold count; when set, overrides CSN auto
+    work_order_id  INTEGER                   -- claimable order created on fulfill
+);
+CREATE INDEX IF NOT EXISTS idx_futures_bulk_status ON futures_bulk(status);
+CREATE INDEX IF NOT EXISTS idx_futures_bulk_customer ON futures_bulk(customer_id);
+CREATE INDEX IF NOT EXISTS idx_fbl_bulk ON futures_bulk_lines(bulk_id);
+
 -- ── Stock Exchange (markets that go public, traded with server currency) ────
 CREATE TABLE IF NOT EXISTS market_shares (
     market_id           TEXT PRIMARY KEY REFERENCES markets(market_id),
@@ -515,6 +555,13 @@ def _migrate(conn: sqlite3.Connection) -> None:
         # market owner can browse and restock by section. NULL = uncategorised; the auto-
         # classifier fills these in from the item name on demand.
         "ALTER TABLE items ADD COLUMN category TEXT",
+        # Consignment futures (Stage B): item break-even, per-line pricing + resale tracking,
+        # and the running paid-back total on a bulk deal.
+        "ALTER TABLE items ADD COLUMN worker_cost REAL",
+        "ALTER TABLE futures_bulk ADD COLUMN paid REAL NOT NULL DEFAULT 0",
+        "ALTER TABLE futures_bulk_lines ADD COLUMN item_key TEXT",
+        "ALTER TABLE futures_bulk_lines ADD COLUMN sold_baseline INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE futures_bulk_lines ADD COLUMN sold_override INTEGER",
     ]
     for sql in migrations:
         try:
@@ -1609,7 +1656,9 @@ def get_loyalty(user_id: str) -> dict:
 
 
 def add_loyalty_points(user_id: str, points: float, *, update_activity: bool = True) -> float:
-    """Add points to a user. Returns new point total."""
+    """Add points to a user. Returns new point total.
+    total_earned only ever GROWS: negative deltas (redemption deductions) reduce the balance
+    but must not shrink the all-time-earned stat shown in /loyalty stats."""
     now = datetime.now(timezone.utc).isoformat()
     with db() as conn:
         conn.execute("""
@@ -1617,10 +1666,10 @@ def add_loyalty_points(user_id: str, points: float, *, update_activity: bool = T
             VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(user_id) DO UPDATE SET
                 points       = points + excluded.points,
-                total_earned = total_earned + excluded.points,
+                total_earned = total_earned + CASE WHEN excluded.points > 0 THEN excluded.points ELSE 0 END,
                 last_activity = CASE WHEN ? THEN excluded.last_activity ELSE last_activity END,
                 updated_at   = excluded.updated_at
-        """, (str(user_id), points, points, now if update_activity else None, now, int(update_activity)))
+        """, (str(user_id), points, max(0.0, points), now if update_activity else None, now, int(update_activity)))
         row = conn.execute("SELECT points FROM loyalty WHERE user_id=?", (str(user_id),)).fetchone()
         return row["points"] if row else points
 
@@ -1682,10 +1731,10 @@ def add_market_loyalty_points(user_id: str, market_id: str, points: float,
             VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(user_id, market_id) DO UPDATE SET
                 points        = points + excluded.points,
-                total_earned  = total_earned + excluded.points,
+                total_earned  = total_earned + CASE WHEN excluded.points > 0 THEN excluded.points ELSE 0 END,
                 last_activity = CASE WHEN ? THEN excluded.last_activity ELSE last_activity END,
                 updated_at    = excluded.updated_at
-        """, (str(user_id), str(market_id), points, points,
+        """, (str(user_id), str(market_id), points, max(0.0, points),
               now if update_activity else None, now, int(update_activity)))
         row = conn.execute(
             "SELECT points FROM market_loyalty_ledger WHERE user_id=? AND market_id=?",
@@ -1945,6 +1994,150 @@ def list_futures_orders(status: str = None, user_id: str = None, limit: int = 50
                 "SELECT * FROM futures_orders ORDER BY created_at DESC LIMIT ?", (limit,)
             ).fetchall()
         return [dict(r) for r in rows]
+
+
+# ── Bulk / consignment futures ────────────────────────────────────────────────────────
+def create_futures_bulk(customer_id: str, customer_name: str, market_id: str,
+                        created_by: str, notes: str = "") -> int:
+    with db() as conn:
+        cur = conn.execute(
+            "INSERT INTO futures_bulk (customer_id, customer_name, market_id, created_by, notes) "
+            "VALUES (?,?,?,?,?)",
+            (str(customer_id), str(customer_name or ""), str(market_id or ""),
+             str(created_by or ""), str(notes or "")))
+        return int(cur.lastrowid)
+
+
+def add_futures_bulk_line(bulk_id: int, item: str, qty: int, unit: str = "pieces",
+                          enchants: str = "", raw_line: str = "") -> int:
+    with db() as conn:
+        cur = conn.execute(
+            "INSERT INTO futures_bulk_lines (bulk_id, item, qty, unit, enchants, raw_line) "
+            "VALUES (?,?,?,?,?,?)",
+            (int(bulk_id), str(item), int(qty), str(unit or "pieces"),
+             str(enchants or ""), str(raw_line or "")))
+        return int(cur.lastrowid)
+
+
+def get_futures_bulk_lines(bulk_id: int) -> list:
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM futures_bulk_lines WHERE bulk_id=? ORDER BY id ASC", (int(bulk_id),)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_futures_bulk(bulk_id: int) -> Optional[dict]:
+    with db() as conn:
+        row = conn.execute("SELECT * FROM futures_bulk WHERE id=?", (int(bulk_id),)).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        d["lines"] = get_futures_bulk_lines(bulk_id)
+        return d
+
+
+def get_futures_bulk_by_msg(notify_msg_id) -> Optional[dict]:
+    """Recover a bulk order from the review message its buttons live on — lets the persistent
+    view work after a restart without carrying the id on the view instance."""
+    if not notify_msg_id:
+        return None
+    with db() as conn:
+        row = conn.execute("SELECT id FROM futures_bulk WHERE notify_msg_id=?",
+                           (str(notify_msg_id),)).fetchone()
+    return get_futures_bulk(int(row["id"])) if row else None
+
+
+def list_futures_bulk(status: str = None, customer_id: str = None, limit: int = 25) -> list:
+    with db() as conn:
+        if status and customer_id:
+            rows = conn.execute("SELECT * FROM futures_bulk WHERE status=? AND customer_id=? "
+                                "ORDER BY created_at DESC LIMIT ?", (status, str(customer_id), limit)).fetchall()
+        elif status:
+            rows = conn.execute("SELECT * FROM futures_bulk WHERE status=? ORDER BY created_at DESC LIMIT ?",
+                                (status, limit)).fetchall()
+        elif customer_id:
+            rows = conn.execute("SELECT * FROM futures_bulk WHERE customer_id=? ORDER BY created_at DESC LIMIT ?",
+                                (str(customer_id), limit)).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM futures_bulk ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def update_futures_bulk_status(bulk_id: int, status: str, reviewed_by: str = None,
+                               notify_msg_id: str = None) -> None:
+    with db() as conn:
+        conn.execute(
+            "UPDATE futures_bulk SET status=?, "
+            "reviewed_by=COALESCE(?, reviewed_by), "
+            "reviewed_at=CASE WHEN ? IN ('fulfilled','declined','cancelled') THEN datetime('now') ELSE reviewed_at END, "
+            "notify_msg_id=COALESCE(?, notify_msg_id) WHERE id=?",
+            (status, reviewed_by, status, notify_msg_id, int(bulk_id)))
+
+
+def set_futures_bulk_line_order(line_id: int, work_order_id: int) -> None:
+    with db() as conn:
+        conn.execute("UPDATE futures_bulk_lines SET work_order_id=? WHERE id=?",
+                     (int(work_order_id), int(line_id)))
+
+
+def set_futures_bulk_line_prices(line_id: int, worker_cost: float = None,
+                                 full_price: float = None) -> None:
+    """Stage B: set a line's per-unit break-even (worker_cost) and full price. Either may be
+    omitted to leave it unchanged."""
+    with db() as conn:
+        conn.execute(
+            "UPDATE futures_bulk_lines SET "
+            "worker_cost=COALESCE(?, worker_cost), full_price=COALESCE(?, full_price) WHERE id=?",
+            (worker_cost, full_price, int(line_id)))
+
+
+def price_futures_bulk_line(line_id: int, item_key: str, worker_cost: float,
+                            full_price: float, sold_baseline: int) -> None:
+    """Stage B: lock a line's consignment pricing — link it to a catalog item (for CSN resale
+    matching), snapshot the per-unit break-even + full price, and record the customer's current
+    CSN cumulative sold as the baseline (only resales AFTER this count toward the bill)."""
+    with db() as conn:
+        conn.execute(
+            "UPDATE futures_bulk_lines SET item_key=?, worker_cost=?, full_price=?, "
+            "sold_baseline=? WHERE id=?",
+            (str(item_key or ""), float(worker_cost or 0), float(full_price or 0),
+             int(sold_baseline or 0), int(line_id)))
+
+
+def set_futures_bulk_line_sold(line_id: int, sold_override, sold_qty: int = None) -> None:
+    """Set a line's manual resold override (pass None to clear it and fall back to CSN auto),
+    and optionally cache the last-computed CSN resold count."""
+    with db() as conn:
+        conn.execute(
+            "UPDATE futures_bulk_lines SET sold_override=?, "
+            "sold_qty=COALESCE(?, sold_qty) WHERE id=?",
+            (None if sold_override is None else int(sold_override),
+             None if sold_qty is None else int(sold_qty), int(line_id)))
+
+
+def record_futures_bulk_payment(bulk_id: int, amount: float) -> float:
+    """Add a customer payment against a bulk deal's owed margin. Returns the new paid total."""
+    with db() as conn:
+        conn.execute("UPDATE futures_bulk SET paid = paid + ? WHERE id=?",
+                     (float(amount), int(bulk_id)))
+        row = conn.execute("SELECT paid FROM futures_bulk WHERE id=?", (int(bulk_id),)).fetchone()
+        return float(row["paid"]) if row else 0.0
+
+
+def delete_item(name: str) -> bool:
+    """Delete one catalog item row by exact name. Returns True if a row was removed.
+    (upsert-based saves never delete, so renames must remove the old row explicitly.)"""
+    with db() as conn:
+        cur = conn.execute("DELETE FROM items WHERE name=?", (str(name),))
+        return cur.rowcount > 0
+
+
+def set_item_worker_cost(name: str, worker_cost) -> None:
+    """Set an item's break-even cost (used as the default when pricing a consignment line).
+    Pass None to clear it."""
+    with db() as conn:
+        conn.execute("UPDATE items SET worker_cost=? WHERE name=?",
+                     (None if worker_cost is None else float(worker_cost), str(name)))
 
 
 def delete_note(note_id: int):

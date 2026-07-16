@@ -471,6 +471,196 @@ class FuturesOrderView(discord.ui.View):
         )
 
 
+def _futures_bulk_preview_embed(bulk: dict) -> discord.Embed:
+    """The review card for a bulk futures order: customer, market, and every parsed line."""
+    status = str(bulk.get("status") or "pending")
+    color = {"fulfilled": discord.Color.green(), "declined": discord.Color.red(),
+             "cancelled": discord.Color.dark_grey()}.get(status, discord.Color.gold())
+    lines = bulk.get("lines") or []
+    total_units = sum(int(l.get("qty") or 0) for l in lines)
+    body = []
+    for i, l in enumerate(lines, 1):
+        unit = l.get("unit") or "pieces"
+        ench = f" · _{l.get('enchants')}_" if l.get("enchants") else ""
+        done = " ✅" if l.get("work_order_id") else ""
+        body.append(f"`{i:>2}.` **{int(l.get('qty') or 0)}** {unit} — {l.get('item','?')}{ench}{done}")
+    desc = "\n".join(body) if body else "_(no lines parsed — cancel and re-paste)_"
+    embed = discord.Embed(title=f"🔮 Bulk Futures #{bulk.get('id')} — {status.capitalize()}",
+                          description=desc, color=color)
+    embed.add_field(name="Customer", value=f"<@{bulk.get('customer_id')}>", inline=True)
+    if bulk.get("market_id"):
+        embed.add_field(name="Their market", value=f"`{bulk.get('market_id')}`", inline=True)
+    embed.add_field(name="Lines / units", value=f"{len(lines)} · {total_units:,}", inline=True)
+    if status == "pending":
+        embed.set_footer(text="Review the parsed lines, then Approve & Fulfill to create the work orders.")
+    return embed
+
+
+class FuturesBulkModal(discord.ui.Modal, title="Bulk futures — paste item list"):
+    """One paragraph field: paste the customer's order, one item per line. On submit we parse
+    it, save the bulk order, and post the review card with Approve & Fulfill."""
+
+    def __init__(self, customer_id: int, customer_name: str, market_id: str, created_by: int):
+        super().__init__(timeout=600)
+        self._customer_id = int(customer_id)
+        self._customer_name = customer_name or ""
+        self._market_id = market_id or ""
+        self._created_by = int(created_by)
+        self.items = discord.ui.TextInput(
+            label="Items (one per line)",
+            style=discord.TextStyle.paragraph,
+            required=True,
+            max_length=3500,
+            placeholder="2 barrels Warlord Potion (Str 2 + Speed 2)\nRegen Potion 2 barrels\nSword Sharp V Fire Aspect II x10",
+        )
+        self.notes = discord.ui.TextInput(
+            label="Notes (optional)", style=discord.TextStyle.paragraph,
+            required=False, max_length=500, placeholder="Consignment: pays worker cost now, rest on resale.")
+        self.add_item(self.items)
+        self.add_item(self.notes)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        import Restocker_db as _db
+        parsed = core._parse_futures_bulk_text(str(self.items.value or ""))
+        if not parsed:
+            return await interaction.response.send_message(
+                "❌ Couldn't read any items from that. One item per line, e.g. `2 barrels Warlord Potion`.",
+                ephemeral=True)
+        try:
+            bulk_id = _db.create_futures_bulk(
+                self._customer_id, self._customer_name, self._market_id,
+                self._created_by, str(self.notes.value or ""))
+            for p in parsed:
+                _db.add_futures_bulk_line(bulk_id, p["item"], p["qty"], p.get("unit", "pieces"),
+                                          enchants="", raw_line=p.get("raw", ""))
+        except Exception as e:
+            return await interaction.response.send_message(f"⚠️ DB error: {e}", ephemeral=True)
+        bulk = _db.get_futures_bulk(bulk_id)
+        await interaction.response.send_message(
+            embed=_futures_bulk_preview_embed(bulk), view=FuturesBulkView(bulk_id))
+        # Record the message id so the persistent view can recover the bulk after a restart.
+        try:
+            msg = await interaction.original_response()
+            _db.update_futures_bulk_status(bulk_id, "pending", notify_msg_id=str(msg.id))
+        except Exception:
+            pass
+
+
+class FuturesBulkView(discord.ui.View):
+    """Approve & Fulfill / Cancel for a bulk futures order. Persistent: recovers the bulk id
+    from the message it lives on, so the buttons survive a restart."""
+
+    def __init__(self, bulk_id: int = 0):
+        super().__init__(timeout=None)
+        self.bulk_id = int(bulk_id or 0)
+
+    def _resolve(self, interaction):
+        if self.bulk_id:
+            return self.bulk_id
+        try:
+            import Restocker_db as _db
+            b = _db.get_futures_bulk_by_msg(getattr(interaction, "message", None) and interaction.message.id)
+            return int(b["id"]) if b else 0
+        except Exception:
+            return 0
+
+    @discord.ui.button(label="✅ Approve & Fulfill", style=discord.ButtonStyle.success,
+                       custom_id="futures_bulk_fulfill")
+    async def fulfill(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not is_manager(interaction):
+            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
+        import Restocker_db as _db
+        bulk_id = self._resolve(interaction)
+        bulk = _db.get_futures_bulk(bulk_id) if bulk_id else None
+        if not bulk:
+            return await interaction.response.send_message("⚠️ Bulk order not found.", ephemeral=True)
+        if str(bulk.get("status")) == "fulfilled":
+            return await interaction.response.send_message("⚠️ Already fulfilled.", ephemeral=True)
+        if str(bulk.get("status")) in ("declined", "cancelled"):
+            return await interaction.response.send_message(f"⚠️ This order is {bulk.get('status')}.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            created = core._create_futures_bulk_work_orders(bulk_id)
+        except Exception as e:
+            return await interaction.followup.send(f"⚠️ Couldn't create work orders: {e}", ephemeral=True)
+        _db.update_futures_bulk_status(bulk_id, "fulfilled", reviewed_by=str(interaction.user.id))
+        try:
+            await interaction.message.edit(embed=_futures_bulk_preview_embed(_db.get_futures_bulk(bulk_id)),
+                                           view=None)
+        except Exception:
+            pass
+        try:
+            cid = str(bulk.get("customer_id") or "")
+            if cid:
+                cust = await interaction.client.fetch_user(int(cid))
+                await cust.send(f"✅ Your bulk futures order **#{bulk_id}** was approved — "
+                                f"**{len(created)}** item(s) are now queued for our workers to craft.")
+        except Exception:
+            pass
+        await interaction.followup.send(
+            f"✅ Fulfilled bulk futures **#{bulk_id}** — created **{len(created)}** claimable work "
+            f"order(s). They post to the worker channel on the next announce slot.", ephemeral=True)
+
+    @discord.ui.button(label="🗑 Cancel", style=discord.ButtonStyle.danger,
+                       custom_id="futures_bulk_cancel")
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not is_manager(interaction):
+            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
+        import Restocker_db as _db
+        bulk_id = self._resolve(interaction)
+        bulk = _db.get_futures_bulk(bulk_id) if bulk_id else None
+        if not bulk:
+            return await interaction.response.send_message("⚠️ Bulk order not found.", ephemeral=True)
+        if str(bulk.get("status")) == "fulfilled":
+            return await interaction.response.send_message(
+                "⚠️ Already fulfilled — the work orders exist. Cancel those individually if needed.",
+                ephemeral=True)
+        _db.update_futures_bulk_status(bulk_id, "cancelled", reviewed_by=str(interaction.user.id))
+        try:
+            await interaction.message.edit(embed=_futures_bulk_preview_embed(_db.get_futures_bulk(bulk_id)),
+                                           view=None)
+        except Exception:
+            pass
+        await interaction.response.send_message(f"🗑 Cancelled bulk futures #{bulk_id}.", ephemeral=True)
+
+
+async def post_futures_bulk_review(bulk_id: int):
+    """Post a bulk futures request's review card (embed + Approve & Fulfill / Cancel) to the
+    futures channel so a manager can action it. Used when the order comes from the WEBSITE
+    (no Discord interaction to reply to). Records the message id so the persistent view can
+    recover the deal after a restart. Runs on the bot loop."""
+    import Restocker_db as _db
+    bulk = _db.get_futures_bulk(int(bulk_id))
+    if not bulk:
+        return
+    ch = None
+    for cid in (getattr(core, "FUTURES_CHANNEL_ID", 0), getattr(core, "WEB_ORDERS_CHANNEL_ID", 0),
+                getattr(core, "FUNDS_REPORT_CHANNEL_ID", 0)):
+        if cid:
+            ch = bot.get_channel(cid)
+            if ch:
+                break
+    if ch is None:
+        try:
+            log.warning("[futures web] no channel configured to post bulk #%s", bulk_id)
+        except Exception:
+            pass
+        return
+    mgr = discord.utils.get(ch.guild.roles, name=getattr(core, "MANAGER_ROLE_NAME", "")) if ch.guild else None
+    ping = mgr.mention if mgr else ""
+    content = (f"{ping} — new **web** futures request from <@{bulk.get('customer_id')}> "
+               f"for `{bulk.get('market_id') or '—'}`") if ping else "New web futures request"
+    try:
+        msg = await ch.send(content=content, embed=_futures_bulk_preview_embed(bulk),
+                            view=FuturesBulkView(int(bulk_id)))
+        _db.update_futures_bulk_status(int(bulk_id), "pending", notify_msg_id=str(msg.id))
+    except Exception as e:
+        try:
+            log.warning("[futures web] post failed for #%s: %s", bulk_id, e)
+        except Exception:
+            pass
+
+
 class PayoutReviewView(discord.ui.View):
     def __init__(self, user_id: int, amount: int, channel_id: int):
         super().__init__(timeout=None)

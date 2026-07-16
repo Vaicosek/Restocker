@@ -55,6 +55,9 @@ class TeamCog(commands.Cog):
             return await interaction.response.send_message(
                 f"You're already on <@{existing}>'s team - ask them to `/team remove` you first.", ephemeral=True)
         db.set_ign(str(interaction.user.id), ign)
+        db.delete_ign_pending(str(interaction.user.id))   # registered now → cancel any pending
+        # role-strip deadline (every registration path must clear this, or the deadline loop
+        # would strip the role of someone who DID register)
         db.set_team_member(str(interaction.user.id), str(manager.id))
         await interaction.response.send_message(
             f"Joined {manager.mention}'s team as **{ign}**. Your orders (and tracked sales) now credit them.",

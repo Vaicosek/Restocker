@@ -250,6 +250,15 @@ class ReportsCog(commands.Cog):
         confirm_restock: bool = False,
         market_id: str = DEFAULT_MARKET_ID,
     ):
+        # Recorded CSN history is the money source of truth: it re-anchors the share price
+        # and can trigger dividend payouts. Without this gate ANY user could upload a crafted
+        # CSV against any market. Managers, or the owner of the target market, only. (The
+        # webhook ingest path verifies a market code; this slash command must gate too.)
+        if not (is_manager(interaction)
+                or market_id in getattr(core, "_markets_owned_by", lambda _: set())(interaction.user.id)):
+            return await interaction.response.send_message(
+                "⛔ Managers, or this market's owner, only — CSN data drives share prices and dividends.",
+                ephemeral=True)
         await interaction.response.defer(thinking=True)
 
         csv_text = ""

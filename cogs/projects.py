@@ -30,8 +30,12 @@ class ProjectsCog(commands.Cog):
     async def create(self, interaction: discord.Interaction, manager: discord.Member,
                      budget: app_commands.Range[int, 1, 1_000_000_000], title: str):
         funder = interaction.user
-        if manager.bot:
-            return await interaction.response.send_message("Pick a real manager.", ephemeral=True)
+        if manager.bot or manager.id == funder.id:
+            # Self-funding is a free round-trip (deduct N, add N back) that would mint
+            # budget//1000 loyalty points per run — and points drive weekly interest (real
+            # coins). Same guard class as futures' no-self-approval.
+            return await interaction.response.send_message(
+                "Pick a real manager (not yourself or a bot).", ephemeral=True)
         bal = int(db.get_balance(str(funder.id)).get("coins") or 0)
         if bal < budget:
             return await interaction.response.send_message(

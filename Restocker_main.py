@@ -188,6 +188,10 @@ ETF_REBAL_DRIFT_PCT = _env_float("ETF_REBAL_DRIFT_PCT", 10.0)  # rebalance a nam
 ANNOUNCE_DELAY_MINUTES = _env_int("ANNOUNCE_DELAY_MINUTES", 5)
 PRIORITY_HOURS = _env_float("PRIORITY_HOURS", 0.75)
 BARREL_PIECES = _env_int("BARREL_PIECES", 54)
+# Consignment futures only pay off on a real margin (front the goods, wait to get paid). Cheap
+# blocks aren't worth it — refuse to price a futures line whose per-unit margin (full − cost)
+# is below this. Set FUTURES_MIN_MARGIN=0 to disable the guard.
+FUTURES_MIN_MARGIN = _env_int("FUTURES_MIN_MARGIN", 50)
 EMPLOYEE_BATCH_LOOP_SECONDS = _env_int("EMPLOYEE_BATCH_LOOP_SECONDS", 15)
 
 LOYALTY_POINTS_DIVISOR   = _env_int("LOYALTY_POINTS_DIVISOR", 50)
@@ -1385,7 +1389,11 @@ def _load_items():
         for name, info in rows.items():
             items[name] = {
                 "stock": int(info.get("stock", 0)),
-                "coin": int(info.get("coin", 0)),
+                # float, NOT int: per-stack pricing legitimately stores fractional per-piece
+                # prices (100c/stack ÷ 64 = 1.5625). int() here silently truncated every
+                # fractional price to 1 (or 0!) for ALL payouts, and _save_items then
+                # persisted the truncation catalog-wide. _coins_for_pieces rounds the TOTAL.
+                "coin": float(info.get("coin", 0) or 0),
                 "unit_type": info.get("unit_type", "pieces"),
                 "stackable": bool(info.get("stackable", True)),
                 "stack_size": int(info.get("stack_size", 64)),
@@ -1782,6 +1790,14 @@ def add_coins(uid: int, amount: int, *, counts_as_principal: bool = True, reason
         if counts_as_principal and amt > 0:
             u["principal"] = max(0, u["principal"] + amt)
         _save_balances(data)
+        # Still record the ledger row (best-effort): without it a repair payment that went
+        # through this fallback is untagged, and a later re-run of the repair would pay the
+        # same worker again — the fail-closed idempotency must hold on the WRITE side too.
+        try:
+            import Restocker_db as _db_lg
+            _db_lg.record_coin_ledger(str(uid), amt, u["coins"], reason)
+        except Exception:
+            pass
         return u["coins"], u["principal"]
 
 
@@ -2088,31 +2104,36 @@ def _loyalty_points_for_order(order: dict, items_data: dict) -> int:
         return 1
 
 
-def _market_loyalty_cfg(market_id) -> tuple[float, int]:
-    """Per-market reward config: (points_multiplier, flat_coin_bonus) granted on each
-    fulfilled order for that market. Lets an owner incentivise restockers on their shop
-    (e.g. ViridianMarket = 1.5x points, +500c/order). Defaults to (1.0, 0)."""
+def _market_loyalty_cfg(market_id) -> tuple[float, int, float]:
+    """Per-market reward config: (points_multiplier, flat_coin_bonus, pct_bonus) granted on
+    each fulfilled order for that market. Lets an owner incentivise restockers on their shop.
+    pct_bonus is a % of the ORDER'S coin value — so the reward scales with order size (a flat
+    +500 is absurd on a 100c item but fine on a bulk order; a % is fair on both). Defaults to
+    (1.0, 0, 0.0)."""
     if not market_id:
-        return 1.0, 0
+        return 1.0, 0, 0.0
     try:
         import json as _json, Restocker_db as _db
         raw = _db.get_config(f"market_loyalty:{market_id}")
         if not raw:
-            return 1.0, 0
+            return 1.0, 0, 0.0
         d = _json.loads(raw)
         mult = float(d.get("pts_mult", 1.0) or 1.0)
         bonus = int(d.get("coin_bonus", 0) or 0)
-        return (mult if mult > 0 else 1.0), max(0, bonus)
+        pct = float(d.get("pct_bonus", 0.0) or 0.0)
+        return (mult if mult > 0 else 1.0), max(0, bonus), max(0.0, pct)
     except Exception:
-        return 1.0, 0
+        return 1.0, 0, 0.0
 
 
-def _set_market_loyalty(market_id, pts_mult: float, coin_bonus: int) -> None:
-    """Persist a market's loyalty reward config (points multiplier + flat coin bonus)."""
+def _set_market_loyalty(market_id, pts_mult: float, coin_bonus: int, pct_bonus: float = 0.0) -> None:
+    """Persist a market's loyalty reward config (points multiplier + flat coin bonus + a
+    %-of-order-value bonus)."""
     import json as _json, Restocker_db as _db
     _db.set_config(
         f"market_loyalty:{market_id}",
-        _json.dumps({"pts_mult": float(pts_mult), "coin_bonus": int(coin_bonus)}))
+        _json.dumps({"pts_mult": float(pts_mult), "coin_bonus": int(coin_bonus),
+                     "pct_bonus": max(0.0, float(pct_bonus))}))
 
 
 # ── V Tech group (Stage 4) ────────────────────────────────────────────────────────────
@@ -3422,6 +3443,7 @@ async def on_ready():
         bot.add_view(OrdersBrowser([]))
         bot.add_view(WebOrderView(0))
         bot.add_view(FuturesOrderView(0))
+        bot.add_view(FuturesBulkView())
         bot.add_view(StockPanelView())
         bot.add_view(StockAlarmView())
         print("🧩 Persistent views registered.")
@@ -6092,6 +6114,221 @@ def _create_restock_orders(to_order: list, market_id=None) -> int:
         created += 1
     save_orders(data_orders)
     return created
+
+
+def _parse_futures_bulk_text(text: str) -> list:
+    """Parse a pasted multi-line futures list into line items — ONE item per non-empty line.
+    Best-effort quantity + unit extraction; whatever's left is the item description (enchants
+    included). Always returns a row per line so the owner can review and fix in the preview
+    rather than silently dropping a line it couldn't read.
+
+    Examples it handles: '2 barrels Warlord Potion', 'Sword Sharp V Fire Aspect II x10',
+    '- Regen Potion 3 stacks', 'Invisibility 15min 64'. Roman-numeral enchant levels
+    ('Sharp V', 'Fire Aspect II') are NOT treated as quantities."""
+    import re as _re
+    UNIT_MAP = {"barrel": "barrels", "barrels": "barrels", "stack": "stacks", "stacks": "stacks",
+                "piece": "pieces", "pieces": "pieces", "pcs": "pieces", "pc": "pieces"}
+    out = []
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        # strip a leading bullet / list-number marker ("- ", "• ", "1. ", "2) ")
+        line = _re.sub(r'^\s*(?:[-*••]|\d{1,3}[.)])\s*', '', line).strip()
+        if not line:
+            continue
+        qty, unit = 1, "pieces"
+        um = _re.search(r'\b(barrels?|stacks?|pieces?|pcs?|pc)\b', line, _re.I)
+        num_m = None
+        if um:
+            unit = UNIT_MAP.get(um.group(1).lower(), "pieces")
+            num_m = (_re.search(r'(\d{1,5})\s*$', line[:um.start()])
+                     or _re.search(r'^\s*(\d{1,5})', line[um.end():]))
+        if not num_m:
+            num_m = (_re.search(r'\bx\s*(\d{1,5})\b', line, _re.I)
+                     or _re.search(r'\b(\d{1,5})\s*x\b', line, _re.I))
+        if num_m:
+            qty = max(1, int(num_m.group(1)))
+        elif not um:
+            # last-resort: a standalone number (take the LAST one so 'Sharp V ... 10' → 10)
+            allnums = _re.findall(r'(?<!\w)(\d{1,5})(?!\w)', line)
+            if allnums:
+                qty = max(1, int(allnums[-1]))
+        # build the item text: drop the unit word and the qty token(s) we consumed
+        item = line
+        if um:
+            item = item[:um.start()] + " " + item[um.end():]
+        item = _re.sub(r'\bx\s*\d{1,5}\b|\b\d{1,5}\s*x\b', ' ', item, flags=_re.I)
+        item = _re.sub(r'(?<!\w)' + str(qty) + r'(?!\w)', ' ', item, count=1)
+        item = _re.sub(r'\s{2,}', ' ', item).strip(" -–—,;:·")
+        if not item:
+            item = line
+        out.append({"item": item[:200], "qty": qty, "unit": unit, "raw": raw.strip()[:300]})
+    return out
+
+
+def _create_futures_bulk_work_orders(bulk_id: int) -> list:
+    """Turn every line of an approved bulk futures order into a real claimable work order
+    (orders.yml), tagged back to the bulk for later consignment billing. Idempotent per line
+    (skips lines that already produced an order). Returns the created order ids. Cards get
+    posted by the normal employee-announce loop. Mirrors the single-futures approval path."""
+    import Restocker_db as _db
+    bulk = _db.get_futures_bulk(int(bulk_id))
+    if not bulk:
+        return []
+    known = (_load_items().get("items") or {})
+    data_orders = load_orders()
+    now_utc = datetime.now(timezone.utc)
+    next_id = max([o.get("id", 0) for o in (data_orders.get("orders") or [])], default=0)
+    created = []
+    for ln in (bulk.get("lines") or []):
+        if ln.get("work_order_id"):
+            continue
+        item = str(ln.get("item") or "").strip()
+        if not item:
+            continue
+        qty = int(ln.get("qty") or 1)
+        unit = str(ln.get("unit") or "pieces")
+        info = known.get(item) or {}
+        sv = info.get("stackable")
+        if sv is None:                       # infer: tools/armour/sets/weapons don't stack
+            nl = item.lower()
+            nonstack = ("pickaxe", "axe", "shovel", "sword", "hoe", "helmet", "chestplate",
+                        "leggings", "boots", "set", "bow", "trident", "shield", "elytra",
+                        "fishing rod")
+            stackable = not any(k in nl for k in nonstack)
+        else:
+            stackable = bool(sv)
+        try:
+            stack_size = int(info.get("stack_size") or (64 if stackable else 1))
+        except Exception:
+            stack_size = 64 if stackable else 1
+        next_id += 1
+        wo = {
+            "id": next_id, "shop": "", "item": item,
+            "requested": qty, "produced": 0, "status": "open",
+            "claimed_by": None, "claims": [], "created_at": utcnow_iso(),
+            "messages": {"channel_id": None, "message_id": None, "dms": {}},
+            "unit_type": unit, "amount": qty,
+            "stackable": bool(stackable), "stack_size": stack_size, "barrel_slots": BARREL_PIECES,
+            "employee_announce_at": next_batch_slot(ANNOUNCE_DELAY_MINUTES).isoformat(),
+            "employee_announced": False, "worker_announced": False,
+            "priority_until": (now_utc + timedelta(hours=PRIORITY_HOURS)).isoformat(),
+            "priority_role": EMPLOYEE_ROLE_NAME,
+            "verification_ticket_id": None, "assist_ticket_id": None,
+            "assist_ticket_ids": {}, "blocked_claimers": [],
+            "market_id": bulk.get("market_id") or None,
+            # traceability back to the bulk futures deal (drives Stage-B consignment billing)
+            "source": "futures_bulk", "futures_bulk_id": int(bulk_id),
+            "customer_id": str(bulk.get("customer_id") or ""),
+            "enchants": ln.get("enchants") or "",
+        }
+        data_orders.setdefault("orders", []).append(wo)
+        try:
+            _db.set_futures_bulk_line_order(int(ln["id"]), next_id)
+        except Exception:
+            pass
+        created.append(next_id)
+    save_orders(data_orders)
+    return created
+
+
+# ── Consignment futures billing (Stage B) ─────────────────────────────────────────────
+def _csn_item_sold(market_id: str, item_key: str) -> int:
+    """Cumulative units of `item_key` SOLD in `market_id` across its whole CSN history.
+    Best-effort name match (exact, then case-insensitive) so a customer's resales still
+    attribute if the shop-name case drifts. Returns 0 if nothing is found."""
+    if not market_id or not item_key:
+        return 0
+    try:
+        months = (_load_csn_for_market(market_id).get("months") or {})
+    except Exception:
+        return 0
+    key = str(item_key).strip()
+    key_l = key.lower()
+    total = 0
+    for md in months.values():
+        if not isinstance(md, dict):
+            continue
+        items = md.get("items") or {}
+        rec = items.get(key)
+        if rec is None:
+            for nm, r in items.items():
+                if str(nm).strip().lower() == key_l:
+                    rec = r
+                    break
+        if isinstance(rec, dict):
+            total += int(rec.get("sold_qty", 0) or 0)
+    return total
+
+
+def _price_futures_bulk_line(line_id: int, catalog_item: str, market_id: str,
+                             worker_cost=None, full_price=None, min_margin=0) -> dict:
+    """Price one consignment line: link it to `catalog_item` (so CSN resales can be matched),
+    snapshot per-unit worker_cost (default from the item's break-even) and full_price (default
+    = the item's sell price), and baseline the customer's current CSN sold for it — only
+    resales AFTER now count toward the bill.
+
+    Guards (nothing is written when a guard fails):
+      * no_price   — the item has no sell price (full_price ≤ 0)
+      * low_margin — per-unit margin (full − cost) is below `min_margin` (cheap-block block)
+    Returns {'ok': True, ...resolved numbers...} on success, else {'ok': False, 'reason': ...}."""
+    import Restocker_db as _db
+    it = _db.get_item(catalog_item) or {}
+    wc = float(worker_cost) if worker_cost is not None else float(it.get("worker_cost") or 0)
+    fp = float(full_price) if full_price is not None else float(it.get("coin") or 0)
+    margin = fp - wc
+    if fp <= 0:
+        return {"ok": False, "reason": "no_price", "worker_cost": wc, "full_price": fp, "margin": margin}
+    if min_margin and margin < float(min_margin):
+        return {"ok": False, "reason": "low_margin", "worker_cost": wc, "full_price": fp,
+                "margin": margin, "min_margin": float(min_margin)}
+    baseline = _csn_item_sold(market_id, catalog_item)
+    _db.price_futures_bulk_line(int(line_id), catalog_item, wc, fp, baseline)
+    return {"ok": True, "item_key": catalog_item, "worker_cost": wc, "full_price": fp,
+            "margin": margin, "baseline": baseline}
+
+
+def _futures_bulk_owed(bulk: dict) -> dict:
+    """Compute the consignment invoice for a bulk deal from its lines:
+      upfront      = Σ worker_cost × qty        (paid at deal time, out of band)
+      resold       = per line: manual override if set, else CSN(current − baseline) capped at qty
+      owed_so_far  = Σ (full_price − worker_cost) × resold   (margin due on what's resold)
+      total_margin = Σ (full_price − worker_cost) × qty      (max margin if everything resells)
+      remaining    = owed_so_far − paid
+    Unpriced lines (no full_price) contribute nothing but are flagged."""
+    market_id = bulk.get("market_id") or ""
+    lines_out, upfront, owed, total_margin, unpriced = [], 0.0, 0.0, 0.0, 0
+    for ln in (bulk.get("lines") or []):
+        qty = int(ln.get("qty") or 0)
+        wc = ln.get("worker_cost")
+        fp = ln.get("full_price")
+        pub = {"id": ln.get("id"), "item": ln.get("item"), "item_key": ln.get("item_key"),
+               "qty": qty, "unit": ln.get("unit"),
+               "worker_cost": (float(wc) if wc is not None else None),
+               "full_price": (float(fp) if fp is not None else None)}
+        if fp is None or float(fp) <= 0:
+            unpriced += 1
+            lines_out.append({**pub, "priced": False, "resold": 0, "owed": 0.0})
+            continue
+        wc = float(wc or 0); fp = float(fp or 0)
+        margin = max(0.0, fp - wc)
+        if ln.get("sold_override") is not None:
+            resold = max(0, int(ln["sold_override"]))
+        else:
+            cur = _csn_item_sold(market_id, ln.get("item_key") or "")
+            resold = max(0, cur - int(ln.get("sold_baseline") or 0))
+        resold = min(resold, qty)
+        line_owed = margin * resold
+        upfront += wc * qty
+        total_margin += margin * qty
+        owed += line_owed
+        lines_out.append({**pub, "priced": True, "resold": resold, "owed": round(line_owed, 2)})
+    paid = float(bulk.get("paid") or 0)
+    return {"upfront": round(upfront, 2), "owed_so_far": round(owed, 2),
+            "total_margin": round(total_margin, 2), "paid": round(paid, 2),
+            "remaining": round(max(0.0, owed - paid), 2), "unpriced": unpriced,
+            "lines": lines_out}
 
 
 def _stock_refill_plan(market_id: str, target_pct: float = 80.0, item_targets: dict = None):
@@ -10009,7 +10246,7 @@ async def _main():
 from views.hive import HiveAccessModal, JoinHarvesterView, HivePickupView
 from views.orders import ClaimPartModal, ManagerReviewView, OrderView, OrdersBrowser, PartialFulfillModal, CoinPriceModal, CoinPriceSearchModal, EscalateModal, EscalatePickView, ItemPricePickerView, ManagerPanelView, RemindByIdModal, FillMissingPricesModal, ReleaseClaimModal, RemindModal, WorkerView, CloseTicketView
 from views.stock import StockTradeModal, StockPanelView, StockAlarmView
-from views.web import FuturesOrderView, WebOrderView, PayoutReviewView, InvestorWithdrawApprovalView
+from views.web import FuturesOrderView, WebOrderView, PayoutReviewView, InvestorWithdrawApprovalView, FuturesBulkView
 # __VIEW_IMPORTS__
 
 asyncio.run(_main())

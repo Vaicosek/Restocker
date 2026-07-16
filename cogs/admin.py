@@ -91,14 +91,19 @@ def _team_backfill_plan(_db, items_data, orders) -> tuple:
             continue
         for wid, qty in _order_worker_pairs(o):
             detail = f"order#{o.get('id')}"
-            if _db.team_perf_exists(wid, detail, "order"):
-                continue
+            # Resolve the manager FIRST: team_perf_log rows are keyed on manager_id, so the
+            # idempotency check must use the manager, not the worker — checking with wid never
+            # matched for managed workers and every re-run double-counted the whole ledger.
             mgr = _db.get_manager_of(wid)
             if mgr:
                 manager_id = str(mgr)
             elif _db.get_team(wid):
                 manager_id = wid
             else:
+                manager_id = None
+            if manager_id and _db.team_perf_exists(manager_id, detail, "order"):
+                continue
+            if not manager_id:
                 continue                               # no team → nothing to attribute to
             try:
                 coins = int(core._coins_for_pieces(o, qty, items_data))
@@ -400,10 +405,6 @@ class AdminCog(commands.Cog):
                 if not wid or qty <= 0:
                     continue
                 detail = f"order#{o.get('id')}"
-                # Idempotent: if this order is already in the ledger for this worker, skip
-                # (never double-count). Only genuinely-dropped rows get recovered.
-                if _db.team_perf_exists(wid, detail, "order"):
-                    continue
                 # Attribute to the worker's CURRENT team: their manager if they're a worker,
                 # else themselves if they own a team. No team affiliation → can't attribute.
                 mgr = _db.get_manager_of(wid)
@@ -412,6 +413,10 @@ class AdminCog(commands.Cog):
                 elif _db.get_team(wid):
                     manager_id = wid
                 else:
+                    continue
+                # Idempotent: rows are keyed on manager_id, so the check MUST use it — checking
+                # with wid never matched for managed workers, double-counting every re-run.
+                if _db.team_perf_exists(manager_id, detail, "order"):
                     continue
                 try:
                     coins = int(core._coins_for_pieces(o, qty, items_data))
@@ -545,11 +550,21 @@ class AdminCog(commands.Cog):
             except Exception:
                 continue
             detail = f"order#{o.get('id')}"
+            # Re-check the ledger AT PAY TIME, not just at plan time: the apply loop awaits
+            # Discord between payments, so an overlapping repair run (e.g. repair_all while
+            # this is mid-loop) could otherwise pay claims both plans captured. Check→pay
+            # here is synchronous, so this closes the window.
             try:
-                _mkt_mult, _mkt_bonus = core._market_loyalty_cfg(o.get("market_id"))
+                if _db.coin_ledger_has(uid, f"repair:{detail}"):
+                    continue
+            except Exception:
+                continue                       # can't verify → never risk a double payment
+            try:
+                _mkt_mult, _mkt_bonus, _mkt_pct = core._market_loyalty_cfg(o.get("market_id"))
                 bonus_pct = core._loyalty_payout_bonus_pct(uid_i)
                 bonus = int(owed * bonus_pct / 100) if bonus_pct > 0 else 0
-                total_payout = owed + bonus + _mkt_bonus
+                _mkt_pct_coins = int(owed * _mkt_pct / 100) if _mkt_pct > 0 else 0
+                total_payout = owed + bonus + _mkt_bonus + _mkt_pct_coins
                 core.add_coins(uid_i, total_payout, counts_as_principal=True,
                                reason=f"repair:{detail}")
                 paid_n += 1
@@ -558,13 +573,13 @@ class AdminCog(commands.Cog):
                 log.warning("[repair] payout failed for %s %s: %s", uid, detail, e)
                 continue
             # Team ledger — idempotent, so this is safe even if backfill already ran.
+            # (Check keyed on manager_id — rows are stored under the manager, not the worker.)
             try:
-                if not _db.team_perf_exists(uid, detail, "order"):
-                    mgr = _db.get_manager_of(uid)
-                    manager_id = str(mgr) if mgr else (uid if _db.get_team(uid) else None)
-                    if manager_id:
-                        _db.record_team_perf(manager_id, uid, "order",
-                                             coins=float(total_payout), qty=qty, detail=detail)
+                mgr = _db.get_manager_of(uid)
+                manager_id = str(mgr) if mgr else (uid if _db.get_team(uid) else None)
+                if manager_id and not _db.team_perf_exists(manager_id, detail, "order"):
+                    _db.record_team_perf(manager_id, uid, "order",
+                                         coins=float(total_payout), qty=qty, detail=detail)
             except Exception as e:
                 log.warning("[repair] team ledger failed for %s %s: %s", uid, detail, e)
             try:
@@ -645,11 +660,17 @@ class AdminCog(commands.Cog):
             except Exception:
                 continue
             detail = f"order#{o.get('id')}"
+            # Pay-time ledger re-check (see repair_payouts): closes the overlapping-run window.
             try:
-                _mult, _mkt_bonus = core._market_loyalty_cfg(o.get("market_id"))
+                if _db.coin_ledger_has(uid, f"repair:{detail}"):
+                    continue
+            except Exception:
+                continue                       # can't verify → never risk a double payment
+            try:
+                _mult, _mkt_bonus, _mkt_pct = core._market_loyalty_cfg(o.get("market_id"))
                 bonus_pct = core._loyalty_payout_bonus_pct(uid_i)
                 bonus = int(owed * bonus_pct / 100) if bonus_pct > 0 else 0
-                total_payout = owed + bonus + _mkt_bonus
+                total_payout = owed + bonus + _mkt_bonus + (int(owed * _mkt_pct / 100) if _mkt_pct > 0 else 0)
                 core.add_coins(uid_i, total_payout, counts_as_principal=True,
                                reason=f"repair:{detail}")
                 paid_n += 1
@@ -739,10 +760,10 @@ class AdminCog(commands.Cog):
                 f"Set one with `/item_set_price item:{o.get('item','?')} coin:<amount>` and re-run.",
                 ephemeral=True)
 
-        _mult, _mkt_bonus = core._market_loyalty_cfg(o.get("market_id"))
+        _mult, _mkt_bonus, _mkt_pct = core._market_loyalty_cfg(o.get("market_id"))
         bonus_pct = core._loyalty_payout_bonus_pct(worker.id)
         bonus = int(owed * bonus_pct / 100) if bonus_pct > 0 else 0
-        total_payout = owed + bonus + _mkt_bonus
+        total_payout = owed + bonus + _mkt_bonus + (int(owed * _mkt_pct / 100) if _mkt_pct > 0 else 0)
 
         if not apply:
             return await interaction.followup.send(

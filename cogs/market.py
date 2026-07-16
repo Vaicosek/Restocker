@@ -66,10 +66,12 @@ class MarketCog(commands.Cog):
         market_id="Which market to configure",
         points_multiplier="Loyalty-point multiplier for orders fulfilled in this market (e.g. 1.5). 1 = normal.",
         coin_bonus="Flat extra coins paid per fulfilled order in this market (e.g. 500). 0 = none.",
+        percent_bonus="Extra pay as a % of the order's value (e.g. 20 = +20%). Scales with order size. 0 = none.",
     )
     @app_commands.autocomplete(market_id=_market_autocomplete)
     async def market_loyalty(self, interaction: discord.Interaction, market_id: str,
-                             points_multiplier: float = 1.0, coin_bonus: int = 0):
+                             points_multiplier: float = 1.0, coin_bonus: int = 0,
+                             percent_bonus: float = 0.0):
         if not (is_manager(interaction) or market_id in _markets_owned_by(interaction.user.id)):
             return await interaction.response.send_message(
                 "⛔ Only a manager or this market's owner can set its rewards.", ephemeral=True)
@@ -79,16 +81,18 @@ class MarketCog(commands.Cog):
         if points_multiplier <= 0:
             return await interaction.response.send_message(
                 "❌ points_multiplier must be greater than 0 (1 = normal, 1.5 = +50%).", ephemeral=True)
-        if coin_bonus < 0:
+        if coin_bonus < 0 or percent_bonus < 0:
             return await interaction.response.send_message(
-                "❌ coin_bonus can't be negative.", ephemeral=True)
-        _set_market_loyalty(market_id, points_multiplier, coin_bonus)
+                "❌ coin_bonus and percent_bonus can't be negative.", ephemeral=True)
+        _set_market_loyalty(market_id, points_multiplier, coin_bonus, percent_bonus)
         mname = (_get_market(market_id) or {}).get("name", market_id)
         parts = []
         if points_multiplier != 1.0:
             parts.append(f"**{points_multiplier:g}×** loyalty points")
         if coin_bonus > 0:
             parts.append(f"**+{coin_bonus:,}** coins per fulfilled order")
+        if percent_bonus > 0:
+            parts.append(f"**+{percent_bonus:g}%** of order value")
         reward = " and ".join(parts) if parts else "normal rewards (no bonus)"
         await interaction.response.send_message(
             f"✅ **{mname}** (`{market_id}`) now grants {reward} to restockers.\n"
@@ -313,14 +317,16 @@ class MarketCog(commands.Cog):
         rc = m.get("report_channel_id")
         embed.add_field(name="Report Channel", value=(f"<#{rc}>" if rc else "*Not bound*"), inline=True)
         try:
-            _pm, _cb = _market_loyalty_cfg(market_id)
+            _pm, _cb, _pct = _market_loyalty_cfg(market_id)
         except Exception:
-            _pm, _cb = 1.0, 0
+            _pm, _cb, _pct = 1.0, 0, 0.0
         _loy = []
         if _pm != 1.0:
             _loy.append(f"**{_pm:g}×** pts")
         if _cb > 0:
             _loy.append(f"**+{_cb:,}c** / order")
+        if _pct > 0:
+            _loy.append(f"**+{_pct:g}%** / order")
         embed.add_field(name="Restock Rewards", value=(" · ".join(_loy) if _loy else "normal (1×, no bonus)"), inline=True)
         embed.add_field(
             name="Site Managers",
