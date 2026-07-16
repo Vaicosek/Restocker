@@ -16,6 +16,7 @@ import Restocker_db as db
 core = sys.modules.get("Restocker_main") or sys.modules["__main__"]
 is_manager = core.is_manager
 log = core.log
+order_id_autocomplete = core.order_id_autocomplete
 
 # (friendly name, DB key / module constant) for the channel-type IDs.
 _CHANNEL_KEYS = [
@@ -145,6 +146,7 @@ class ConfigCog(commands.Cog):
     @network.command(name="post",
                      description="Post the consolidated open-orders batch to the trade network now (or one order to test)")
     @app_commands.describe(order_id="Optional: a single order ID to test-post. Leave empty to post the full open-orders batch.")
+    @app_commands.autocomplete(order_id=order_id_autocomplete)
     async def network_post(self, interaction: discord.Interaction, order_id: int = 0):
         if not is_manager(interaction):
             return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)

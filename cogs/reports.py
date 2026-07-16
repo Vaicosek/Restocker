@@ -54,6 +54,38 @@ log = core.log
 timezone = core.timezone
 utcnow_dt = core.utcnow_dt
 
+
+async def _recent_months_autocomplete(interaction: discord.Interaction, current: str):
+    """The last 18 calendar months as YYYY-MM — for /monthly_report so nobody has to hand-
+    type the format or guess which month."""
+    now = utcnow_dt()
+    out = []
+    y, mo = now.year, now.month
+    for _ in range(18):
+        key = f"{y:04d}-{mo:02d}"
+        if not current or current.lower() in key:
+            out.append(app_commands.Choice(name=key, value=key))
+        mo -= 1
+        if mo == 0:
+            mo = 12; y -= 1
+    return out[:25]
+
+
+async def _csn_month_autocomplete(interaction: discord.Interaction, current: str):
+    """The CSN months actually on file for the market_id being typed — for /csn_audit."""
+    market_id = getattr(interaction.namespace, "market_id", None) or ""
+    try:
+        months = (_load_csn_for_market(market_id).get("months") or {})
+    except Exception:
+        months = {}
+    out = []
+    for mk, md in sorted(months.items(), reverse=True):
+        label = (md.get("label", mk) if isinstance(md, dict) else mk)
+        if not current or current.lower() in mk.lower() or current.lower() in str(label).lower():
+            out.append(app_commands.Choice(name=str(label), value=mk))
+    return out[:25]
+
+
 class ReportsCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -62,6 +94,7 @@ class ReportsCog(commands.Cog):
 
 
     @app_commands.describe(month="YYYY-MM (leave empty for current month)")
+    @app_commands.autocomplete(month=_recent_months_autocomplete)
     @app_commands.default_permissions(manage_guild=True)
     async def monthly_report(self, interaction: discord.Interaction, month: Optional[str] = None):
         if not is_manager(interaction):
@@ -630,7 +663,7 @@ class ReportsCog(commands.Cog):
     @app_commands.command(name="csn_audit",
                           description="(Manager) Verify a market's CSN month: dedup stats, net, and pricing")
     @app_commands.describe(market_id="Market to audit", month="YYYY-MM (default: latest)")
-    @app_commands.autocomplete(market_id=_market_autocomplete)
+    @app_commands.autocomplete(market_id=_market_autocomplete, month=_csn_month_autocomplete)
     @app_commands.default_permissions(manage_guild=True)
     async def csn_audit(self, interaction: discord.Interaction, market_id: str, month: str = ""):
         if not is_manager(interaction):

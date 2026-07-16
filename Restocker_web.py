@@ -2532,7 +2532,9 @@ document.querySelectorAll(".nav-tab").forEach(tab => {
         cb.title = "Track this item in the order builder";
         cb.onchange = () => scheduleSave(row.item, { tracked: cb.checked });
         const name = document.createElement("span");
-        name.textContent = row.item; name.style.cssText = "flex:1;min-width:0";
+        name.textContent = row.display || row.item;   // cleaned name; API calls still use row.item
+        name.title = row.item;                         // hover shows the raw catalog name
+        name.style.cssText = "flex:1;min-width:0";
         const stockSpan = document.createElement("span");
         stockSpan.style.cssText = "color:var(--muted);font-size:11.5px;min-width:90px;text-align:right";
         stockSpan.textContent = num(row.stock) + " / " + num(row.capacity);
@@ -2621,7 +2623,8 @@ document.querySelectorAll(".nav-tab").forEach(tab => {
       rows.forEach(it => {
         const tr = document.createElement("tr");
         tr.dataset.cat = catId; tr.style.display = "none";
-        const tdName = document.createElement("td"); tdName.className = "item-name"; tdName.textContent = it.item;
+        const tdName = document.createElement("td"); tdName.className = "item-name";
+        tdName.textContent = it.display || it.item; tdName.title = it.item;   // cleaned name; raw is the save key
         const tdStock = document.createElement("td");
         const stockIn = document.createElement("input"); stockIn.className = "own-price"; stockIn.type = "number"; stockIn.value = Math.round(it.stock); stockIn.style.width = "80px"; stockIn.title = "Editable stock — set the real amount (or 0), then Save";
         tdStock.appendChild(stockIn);

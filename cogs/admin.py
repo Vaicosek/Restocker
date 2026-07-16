@@ -16,6 +16,7 @@ _get_market = core._get_market
 _load_csn_for_market = core._load_csn_for_market
 _load_markets = core._load_markets
 _market_autocomplete = core._market_autocomplete
+order_id_autocomplete = core.order_id_autocomplete
 _recompute_share_price = core._recompute_share_price
 _save_csn_for_market = core._save_csn_for_market
 _save_markets = core._save_markets
@@ -694,6 +695,7 @@ class AdminCog(commands.Cog):
         worker="The person who actually did the work",
         qty="How many pieces they made (leave 0 to use the order's full amount)",
         apply="false = preview (default); true = attach, pay and credit")
+    @app_commands.autocomplete(order_id=order_id_autocomplete)
     async def repair_order(self, interaction: discord.Interaction, order_id: int,
                            worker: discord.User, qty: int = 0, apply: bool = False):
         """For orders that closed with no claim on record — nothing else can attribute them,

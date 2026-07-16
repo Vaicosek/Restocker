@@ -13,6 +13,18 @@ _save_brew_aliases = core._save_brew_aliases
 is_manager = core.is_manager
 
 
+async def _alias_code_autocomplete(interaction: discord.Interaction, current: str):
+    """Suggest already-mapped codes (matches on code OR its name) so /tool remove and
+    updating /tool set don't need the raw code typed from memory."""
+    aliases = _load_brew_aliases() or {}
+    cur = (current or "").lower()
+    out = []
+    for code, name in aliases.items():
+        if cur in str(code).lower() or cur in str(name).lower():
+            out.append(app_commands.Choice(name=f"{code} → {name}"[:100], value=str(code)[:100]))
+    return out[:25]
+
+
 class ToolCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -23,6 +35,7 @@ class ToolCog(commands.Cog):
     @tool.command(name="set", description="Map a tool code to a clean name")
     @app_commands.describe(code="The raw code, e.g. Diamond Pickaxe#ahc",
                            name="What it is, e.g. Diamond Pickaxe (Efficiency V)")
+    @app_commands.autocomplete(code=_alias_code_autocomplete)
     async def tool_set(self, interaction: discord.Interaction, code: str, name: str):
         if not is_manager(interaction):
             return await interaction.response.send_message("❌ Managers only.", ephemeral=True)
@@ -39,6 +52,7 @@ class ToolCog(commands.Cog):
 
     @tool.command(name="remove", description="Remove a tool code alias")
     @app_commands.describe(code="The raw code to un-map")
+    @app_commands.autocomplete(code=_alias_code_autocomplete)
     async def tool_remove(self, interaction: discord.Interaction, code: str):
         if not is_manager(interaction):
             return await interaction.response.send_message("❌ Managers only.", ephemeral=True)

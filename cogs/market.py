@@ -25,6 +25,7 @@ _load_markets = core._load_markets
 _load_platform_balance = core._load_platform_balance
 _log_manual_restock = core._log_manual_restock
 _market_autocomplete = core._market_autocomplete
+any_item_autocomplete = core.any_item_autocomplete
 _market_loyalty_cfg = core._market_loyalty_cfg
 _set_market_loyalty = core._set_market_loyalty
 _markets_owned_by = core._markets_owned_by
@@ -198,6 +199,7 @@ class MarketCog(commands.Cog):
         market_id="Exact market ID to delete (e.g. TEST). Resolves case-insensitively if only one variant exists.",
         confirm="Set True to actually delete. Leave off first to preview what will be removed.",
     )
+    @app_commands.autocomplete(market_id=_market_autocomplete)
     async def market_delete(self, interaction: discord.Interaction, market_id: str, confirm: bool = False):
         if not is_manager(interaction):
             return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
@@ -1007,7 +1009,7 @@ class MarketCog(commands.Cog):
         app_commands.Choice(name="full - adjust totals (moves share price)", value="full"),
         app_commands.Choice(name="hide - keep totals (cosmetic)", value="hide"),
     ])
-    @app_commands.autocomplete(market_id=_market_autocomplete)
+    @app_commands.autocomplete(market_id=_market_autocomplete, item=any_item_autocomplete)
     async def market_remove_item(self, interaction: discord.Interaction, market_id: str, item: str,
                                  mode: Optional[app_commands.Choice[str]] = None):
         if not _is_market_manager(interaction, market_id):
@@ -1025,7 +1027,7 @@ class MarketCog(commands.Cog):
 
     @market.command(name="log_restock", description="(Manager/Owner) Log stock you added by hand so net profit stays accurate")
     @app_commands.describe(market_id="Your market", item="Item name", qty="Units you added", cost="Total coins you paid")
-    @app_commands.autocomplete(market_id=_market_autocomplete)
+    @app_commands.autocomplete(market_id=_market_autocomplete, item=any_item_autocomplete)
     async def market_log_restock(self, interaction: discord.Interaction, market_id: str, item: str,
                                  qty: app_commands.Range[int, 1, 1_000_000],
                                  cost: app_commands.Range[int, 0, 1_000_000_000]):
@@ -1042,7 +1044,7 @@ class MarketCog(commands.Cog):
 
     @market.command(name="suggest_price", description="(Manager/Owner) Suggested price for an item vs the general market")
     @app_commands.describe(market_id="Your market", item="Item name")
-    @app_commands.autocomplete(market_id=_market_autocomplete)
+    @app_commands.autocomplete(market_id=_market_autocomplete, item=any_item_autocomplete)
     async def market_suggest_price(self, interaction: discord.Interaction, market_id: str, item: str):
         if not _is_market_manager(interaction, market_id):
             return await interaction.response.send_message("⛔ Managers or this market's owner only.", ephemeral=True)

@@ -1407,16 +1407,18 @@ def _get_shop(data, shop_name: str):
 # restock armour"). Order matters: the FIRST matching rule wins, so put narrower rules
 # above broader ones — "Diamond Sword" must land in Swords, not Tools, even though both
 # could plausibly match a gear item.
-ITEM_CATEGORIES = ["Swords", "Tools", "Armor", "Bows", "Brews", "Food",
+ITEM_CATEGORIES = ["Enchanted Gear", "Bows", "Brews", "Food",
                    "Materials", "Blocks", "Nature", "Misc"]
 
 _CATEGORY_RULES = [
-    ("Swords", ("sword", "blade", "katana", "cutlass")),
+    # Swords, armour, and tools are all enchanted gear on this server, so they share ONE
+    # category instead of three tiny ones. Bows/tridents stay separate (ranged gear).
+    ("Enchanted Gear", ("sword", "blade", "katana", "cutlass",
+                        "helmet", "chestplate", "leggings", "boots", "shield", "elytra", "cap",
+                        "tunic", "pants", "chainmail", "turtle shell", "horse armor",
+                        "pickaxe", "axe", "shovel", "spade", "hoe", "shears", "flint and steel",
+                        "fishing rod", "brush", "bucket", "compass", "clock", "spyglass")),
     ("Bows",   ("bow", "crossbow", "arrow", "quiver", "trident")),
-    ("Armor",  ("helmet", "chestplate", "leggings", "boots", "shield", "elytra", "cap",
-                "tunic", "pants", "chainmail", "turtle shell", "horse armor")),
-    ("Tools",  ("pickaxe", "axe", "shovel", "spade", "hoe", "shears", "flint and steel",
-                "fishing rod", "brush", "bucket", "compass", "clock", "spyglass")),
     ("Brews",  ("potion", "brew", "elixir", "tonic", "draught", "bottle o")),
     ("Food",   ("apple", "bread", "steak", "porkchop", "carrot", "potato", "melon",
                 "cookie", "cake", "stew", "soup", "beef", "chicken", "mutton", "berries",
@@ -1488,13 +1490,20 @@ def _classify_item(name: str) -> str:
     return "Misc"
 
 
+# Legacy stored categories → current merged category. Items backfilled before the Swords/
+# Armor/Tools → "Enchanted Gear" merge may still carry the old value in items.category; remap
+# those on read so the owner UI shows one group, without needing a DB rewrite.
+_CATEGORY_ALIASES = {"Swords": "Enchanted Gear", "Armor": "Enchanted Gear", "Tools": "Enchanted Gear"}
+
+
 def _item_category(name: str, info: dict = None) -> str:
     """The item's stored category, falling back to the auto-classifier. Lets an owner
-    override a bad guess (via the DB/command) without the guess overwriting them later."""
+    override a bad guess (via the DB/command) without the guess overwriting them later.
+    Legacy pre-merge categories are normalized via _CATEGORY_ALIASES."""
     if isinstance(info, dict):
         stored = str(info.get("category") or "").strip()
         if stored:
-            return stored
+            return _CATEGORY_ALIASES.get(stored, stored)
     return _classify_item(name)
 
 
@@ -6157,14 +6166,15 @@ def _market_catalog_by_category(market_id: str) -> dict:
         cat = _item_category(name, info)
         t = targets.get(name) or {}
         by_cat.setdefault(cat, []).append({
-            "item": name,
+            "item": name,                        # raw catalog key — used for every API call
+            "display": _pretty_item_name(name),  # cleaned name shown to the owner
             "stock": int(row.get("stock") or 0),
             "capacity": int(row.get("capacity") or 0),
             "target_pct": float(t.get("target_pct", 80.0)),
             "tracked": bool(t.get("tracked", False)),
         })
     for cat in by_cat:
-        by_cat[cat].sort(key=lambda r: r["item"].lower())
+        by_cat[cat].sort(key=lambda r: r["display"].lower())
     return by_cat
 
 
@@ -7191,6 +7201,7 @@ def _market_inventory(market_id: str) -> list:
         e["effective"] = eff
         if not e.get("category"):
             e["category"] = _item_category(name)
+        e["display"] = _pretty_item_name(name)   # cleaned name; raw stays in e["item"] as the key
     return sorted(out.values(), key=lambda x: -x["sold"])
 
 

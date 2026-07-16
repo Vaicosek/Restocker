@@ -9,6 +9,19 @@ _load_brew_aliases = core._load_brew_aliases
 _save_brew_aliases = core._save_brew_aliases
 is_manager = core.is_manager
 
+
+async def _alias_code_autocomplete(interaction: discord.Interaction, current: str):
+    """Suggest already-mapped codes (matches on code OR its name) so /brew remove and
+    updating /brew set don't need the raw code typed from memory."""
+    aliases = _load_brew_aliases() or {}
+    cur = (current or "").lower()
+    out = []
+    for code, name in aliases.items():
+        if cur in str(code).lower() or cur in str(name).lower():
+            out.append(app_commands.Choice(name=f"{code} → {name}"[:100], value=str(code)[:100]))
+    return out[:25]
+
+
 class BrewCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -22,6 +35,7 @@ class BrewCog(commands.Cog):
         code="The raw code, e.g. Potion#32L",
         name="What this brew actually is, e.g. Speed II Potion",
     )
+    @app_commands.autocomplete(code=_alias_code_autocomplete)
     async def brew_set(self, interaction: discord.Interaction, code: str, name: str):
         if not is_manager(interaction):
             return await interaction.response.send_message(
@@ -47,6 +61,7 @@ class BrewCog(commands.Cog):
 
 
     @app_commands.describe(code="The raw code to un-map, e.g. Potion#32L")
+    @app_commands.autocomplete(code=_alias_code_autocomplete)
     async def brew_remove(self, interaction: discord.Interaction, code: str):
         if not is_manager(interaction):
             return await interaction.response.send_message(
