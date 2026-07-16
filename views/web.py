@@ -21,7 +21,22 @@ save_orders = core.save_orders
 update_order_messages = core.update_order_messages
 utcnow_iso = core.utcnow_iso
 _load_items = core._load_items
+_create_restock_orders = core._create_restock_orders
+_is_future_item = core._is_future_item
+log = core.log
 PRIORITY_HOURS = core.PRIORITY_HOURS
+
+def _web_items_text(order: dict) -> str:
+    """'• Diamond Sword × 2' lines from a web order's items_json, for customer DMs."""
+    try:
+        import json as _json
+        raw = order.get("items_json") or "[]"
+        items = _json.loads(raw) if isinstance(raw, str) else (raw or [])
+        lines = [f"• {i.get('name', '?')} × {i.get('qty', 1)}" for i in items if isinstance(i, dict)]
+        return "\n".join(lines) or "—"
+    except Exception:
+        return "—"
+
 
 class WebOrderView(discord.ui.View):
     """Persistent view posted to the orders channel when a web order comes in."""
@@ -55,6 +70,7 @@ class WebOrderView(discord.ui.View):
 
         try:
             import Restocker_db as _db
+            order = _db.get_web_order(self.order_id)      # needed for the customer's DM
             _db.update_web_order_status(
                 self.order_id,
                 status="declined",
@@ -74,8 +90,24 @@ class WebOrderView(discord.ui.View):
         except Exception:
             pass
 
+        # Tell the customer. They ordered on the website and would otherwise never hear
+        # anything back — we store discord_id precisely so we can reach them.
+        dm_ok = False
+        try:
+            if order and order.get("discord_id"):
+                customer = await bot.fetch_user(int(order["discord_id"]))
+                await customer.send(
+                    f"❌ Your web order **#{self.order_id}** was declined.\n"
+                    f"{_web_items_text(order)}\n\n"
+                    f"Ask a manager if you think that's a mistake.")
+                dm_ok = True
+        except Exception:
+            pass
+
         await interaction.response.send_message(
-            f"❌ Order #{self.order_id} declined.", ephemeral=True
+            f"❌ Order #{self.order_id} declined."
+            + ("" if dm_ok else " ⚠️ Couldn't DM the customer (DMs closed?)."),
+            ephemeral=True,
         )
 
     async def _do_approve(self, interaction: discord.Interaction, *, ping_workers: bool):
@@ -90,6 +122,26 @@ class WebOrderView(discord.ui.View):
             await interaction.response.send_message("⚠️ Order not found.", ephemeral=True)
             return
 
+        # Block self-approval — same guard futures already has. A manager who orders through
+        # the website must not be able to wave their own order through; another manager reviews
+        # it. Decline is unaffected (you may always cancel your own order).
+        if str(order.get("discord_id") or "") == str(interaction.user.id):
+            await interaction.response.send_message(
+                "⚠️ You can't approve your **own** web order — another manager has to review it.",
+                ephemeral=True)
+            return
+
+        # Idempotency: approving twice would create a second set of restock orders. The buttons
+        # are stripped on approve, but a stale message or two managers racing could still fire
+        # this path, so re-check the live status before doing anything.
+        if str(order.get("status") or "").lower() == "approved":
+            await interaction.response.send_message(
+                f"ℹ️ Order #{self.order_id} is already approved — not creating duplicate orders.",
+                ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
         try:
             import Restocker_db as _db
             _db.update_web_order_status(
@@ -99,8 +151,42 @@ class WebOrderView(discord.ui.View):
                 notify_msg_id=str(interaction.message.id) if interaction.message else None,
             )
         except Exception as e:
-            await interaction.response.send_message(f"⚠️ DB error: {e}", ephemeral=True)
+            await interaction.followup.send(f"⚠️ DB error: {e}", ephemeral=True)
             return
+
+        # Turn the approved web order into REAL restock orders workers can claim, instead of
+        # just pinging @Employee to eyeball an embed. Everything downstream (claiming, payouts,
+        # team credit) then works exactly as it does for any other order.
+        created, skipped = 0, []
+        try:
+            import json as _json
+            raw = order.get("items_json") or "[]"
+            wanted = _json.loads(raw) if isinstance(raw, str) else (raw or [])
+            catalog = (_load_items() or {}).get("items", {}) or {}
+            to_order = []
+            for it in wanted:
+                if not isinstance(it, dict):
+                    continue
+                name = str(it.get("name") or "").strip()
+                try:
+                    qty = int(it.get("qty") or 0)
+                except (TypeError, ValueError):
+                    qty = 0
+                if not name or qty <= 0:
+                    continue
+                info = catalog.get(name)
+                if info is None:                       # renamed/removed since they ordered
+                    skipped.append(f"{name} (not in catalog)")
+                    continue
+                if _is_future_item(name):              # _create_restock_orders drops these silently
+                    skipped.append(f"{name} (Future item — needs /futures_order)")
+                    continue
+                to_order.append((name, qty, info))
+            if to_order:
+                created = int(_create_restock_orders(to_order) or 0)
+        except Exception as e:
+            log.warning("[web-order] couldn't create restock orders for #%s: %s", self.order_id, e)
+            skipped.append(f"error: {e}")
 
         try:
             embed = interaction.message.embeds[0] if interaction.message and interaction.message.embeds else None
@@ -125,11 +211,32 @@ class WebOrderView(discord.ui.View):
                 except Exception:
                     pass
 
-        await interaction.response.send_message(
-            f"✅ Order #{self.order_id} approved."
-            + (f" {worker_mention} pinged." if worker_mention else ""),
-            ephemeral=True,
-        )
+        # Confirm to the customer — without this they order on the site and hear nothing.
+        dm_ok = False
+        try:
+            if order.get("discord_id"):
+                customer = await bot.fetch_user(int(order["discord_id"]))
+                await customer.send(
+                    f"✅ Your web order **#{self.order_id}** was approved!\n"
+                    f"{_web_items_text(order)}\n\n"
+                    f"Our workers are on it — you'll be contacted when it's ready.")
+                dm_ok = True
+        except Exception:
+            pass
+
+        msg = f"✅ Order #{self.order_id} approved."
+        if created:
+            msg += f"\n🧰 Created **{created}** restock order(s) — workers can claim them now."
+        elif not skipped:
+            msg += "\n⚠️ No restock orders created (nothing orderable in this request)."
+        if worker_mention:
+            msg += f" {worker_mention} pinged."
+        msg += "\n" + ("👤 Customer notified." if dm_ok
+                       else "⚠️ Couldn't DM the customer (DMs closed?).")
+        if skipped:
+            msg += ("\n\n🚨 **Not turned into orders:**\n• " + "\n• ".join(skipped[:8])
+                    + "\nThese need handling by hand.")
+        await interaction.followup.send(msg[:1900], ephemeral=True)
 
 
 class FuturesOrderView(discord.ui.View):

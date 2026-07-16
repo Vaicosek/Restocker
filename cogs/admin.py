@@ -519,7 +519,7 @@ class AdminCog(commands.Cog):
             return await interaction.followup.send(
                 "✅ Nothing to repair — no fulfilled order was paid 0 by the price bug.\n"
                 "(If a worker is still short, their item may have **no catalog price at all** — "
-                "set one with `/set_price`, then re-run this.)", ephemeral=True)
+                "set one with `/item_set_price`, then re-run this.)", ephemeral=True)
 
         lines, total = [], 0
         for o, uid, qty, owed in plan[:20]:
@@ -734,7 +734,7 @@ class AdminCog(commands.Cog):
         if owed <= 0:
             return await interaction.followup.send(
                 f"❌ `{o.get('item','?')}` has no catalog price, so the payout would be 0.\n"
-                f"Set one with `/set_price item:{o.get('item','?')} coin:<amount>` and re-run.",
+                f"Set one with `/item_set_price item:{o.get('item','?')} coin:<amount>` and re-run.",
                 ephemeral=True)
 
         _mult, _mkt_bonus = core._market_loyalty_cfg(o.get("market_id"))

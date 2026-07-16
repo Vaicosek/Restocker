@@ -119,7 +119,7 @@ class ShopCog(commands.Cog):
         items = shops.setdefault("items", {})
 
         if item_name in items:
-            return await interaction.response.send_message(f"❌ Item `{item_name}` already exists. Use `/set_price` to update it.", **ephemeral_kwargs(interaction))
+            return await interaction.response.send_message(f"❌ Item `{item_name}` already exists. Use `/item_set_price` to update it.", **ephemeral_kwargs(interaction))
 
         # Auto-detect the real Minecraft stack size from the name (potions/brews, tools,
         # jetpacks etc. → 1) so barrels aren't sized 64× too big. An explicit `stackable`
@@ -143,7 +143,7 @@ class ShopCog(commands.Cog):
             **ephemeral_kwargs(interaction)
         )
 
-    @app_commands.command(name="set_price", description="Set the coin price for an existing item (per piece or per stack of 64)")
+    @app_commands.command(name="item_set_price", description="Set the coin price for an existing item (per piece or per stack of 64)")
     @app_commands.checks.has_any_role(MANAGER_ROLE_NAME)
     @app_commands.describe(
         item="Item name",
@@ -205,83 +205,10 @@ class ShopCog(commands.Cog):
                 **ephemeral_kwargs(interaction)
             )
 
-    @app_commands.command(name="fix_stacks",
-        description="(Manager) Re-detect every item's stack size vs Minecraft so barrels aren't sized 64× too big")
-    @app_commands.checks.has_any_role(MANAGER_ROLE_NAME)
-    @app_commands.describe(apply="False = preview what would change (default). True = actually apply the fixes.")
-    @app_commands.default_permissions(manage_guild=True)
-    async def fix_stacks(self, interaction: discord.Interaction, apply: bool = False):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", **ephemeral_kwargs(interaction))
-        await interaction.response.defer(**ephemeral_kwargs(interaction), thinking=True)
-        shops = _load_items()
-        items = shops.get("items", {}) or {}
-        changes = []
-        for name, info in items.items():
-            if not isinstance(info, dict):
-                continue
-            cur = int(info.get("stack_size", 64) or 64)
-            correct = _detect_stack_size(name)   # cross-references MC rules (potions/tools/etc.)
-            if correct != cur:
-                changes.append((name, cur, correct))
-                if apply:
-                    info["stack_size"] = correct
-                    info["stackable"] = correct > 1
-        if apply and changes:
-            _save_items(shops)
-        if not changes:
-            return await interaction.followup.send("✅ All items already have the correct stack size.", **ephemeral_kwargs(interaction))
-        changes.sort(key=lambda c: c[0].lower())
-        preview = "\n".join(f"• **{n}**: {a} → {b}" for n, a, b in changes[:25])
-        more = f"\n…and {len(changes) - 25} more" if len(changes) > 25 else ""
-        head = (f"✅ Fixed **{len(changes)}** item(s):" if apply
-                else f"🔎 **{len(changes)}** item(s) would change (preview — run with `apply:True` to apply):")
-        await interaction.followup.send(f"{head}\n{preview}{more}", **ephemeral_kwargs(interaction))
-
-    @app_commands.command(name="pair_items",
-        description="(Manager) Ensure every item has both a normal and a 'Future' twin (copies price/stack)")
-    @app_commands.checks.has_any_role(MANAGER_ROLE_NAME)
-    @app_commands.describe(apply="False = preview what would be created (default). True = create the missing twins.")
-    @app_commands.default_permissions(manage_guild=True)
-    async def pair_items(self, interaction: discord.Interaction, apply: bool = False):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", **ephemeral_kwargs(interaction))
-        await interaction.response.defer(**ephemeral_kwargs(interaction), thinking=True)
-        shops = _load_items()
-        items = shops.setdefault("items", {})
-        have = {k.lower() for k in items.keys()}
-        to_create = []   # (twin_name, source_name)
-        for name, info in list(items.items()):
-            if not isinstance(info, dict):
-                continue
-            twin = name[7:].strip() if _is_future_item(name) else ("Future " + name)
-            if not twin or twin.lower() in have:
-                continue
-            if any(t[0].lower() == twin.lower() for t in to_create):
-                continue
-            to_create.append((twin, name))
-        if not to_create:
-            return await interaction.followup.send(
-                "✅ Every item already has both a normal and a Future twin.", **ephemeral_kwargs(interaction))
-        if apply:
-            for twin, src in to_create:
-                s = items.get(src, {}) or {}
-                items[twin] = {
-                    "stock": 0,
-                    "coin": int(s.get("coin", 0) or 0),
-                    "unit_type": s.get("unit_type", "pieces"),
-                    "stackable": bool(s.get("stackable", True)),
-                    "stack_size": int(s.get("stack_size", 64) or 64),
-                    "barrel_slots": int(s.get("barrel_slots", 54) or 54),
-                    "market_id": s.get("market_id", "main"),
-                }
-            _save_items(shops)
-        to_create.sort(key=lambda t: t[0].lower())
-        preview = "\n".join(f"• **{tw}** ⟵ copies **{src}**" for tw, src in to_create[:25])
-        more = f"\n…and {len(to_create) - 25} more" if len(to_create) > 25 else ""
-        head = (f"✅ Created **{len(to_create)}** twin(s):" if apply
-                else f"🔎 **{len(to_create)}** twin(s) would be created (preview — run with `apply:True`):")
-        await interaction.followup.send(f"{head}\n{preview}{more}", **ephemeral_kwargs(interaction))
+    # /fix_stacks and /pair_items removed 2026-07-15 — one-time catalog cleanup tools.
+    # _detect_stack_size and the twin-pairing logic (_sync_twin_price) still live in core for
+    # the normal add/price paths; restore these two commands from git history if a bulk
+    # re-scan is ever needed again.
 
     @app_commands.command(name="item_info", description="Look up the price and stock of an item")
     @app_commands.describe(item="Item name to look up")

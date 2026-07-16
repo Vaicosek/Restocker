@@ -28,6 +28,8 @@ _market_autocomplete = core._market_autocomplete
 _market_loyalty_cfg = core._market_loyalty_cfg
 _set_market_loyalty = core._set_market_loyalty
 _markets_owned_by = core._markets_owned_by
+_vtech_group_markets = core._vtech_group_markets
+_set_vtech_group_markets = core._set_vtech_group_markets
 _recompute_share_price = core._recompute_share_price
 _remove_market_item = core._remove_market_item
 _save_markets = core._save_markets
@@ -90,6 +92,53 @@ class MarketCog(commands.Cog):
         await interaction.response.send_message(
             f"✅ **{mname}** (`{market_id}`) now grants {reward} to restockers.\n"
             f"Applies when a manager approves an order tagged to this market.", ephemeral=True)
+
+    @market.command(name="vtech_group",
+                    description="(Manager) View/add/remove markets in the V Tech group (shared loyalty pool)")
+    @app_commands.describe(
+        action="view the group, or add/remove one market",
+        market_id="Market to add/remove (ignored for 'view')",
+    )
+    @app_commands.choices(action=[
+        app_commands.Choice(name="view", value="view"),
+        app_commands.Choice(name="add", value="add"),
+        app_commands.Choice(name="remove", value="remove"),
+    ])
+    @app_commands.autocomplete(market_id=_market_autocomplete)
+    async def market_vtech_group(self, interaction: discord.Interaction, action: str,
+                                 market_id: Optional[str] = None):
+        """V Tech-owned markets (Greyhames, Bank, Dragonmart, ...) share ONE loyalty pool:
+        working any of them credits the FULL point award to the shared V Tech ledger, instead
+        of the smaller slice every other market's orders contribute. Configurable here since
+        the group can grow — see VTECH_SLICE_PCT for the non-member slice."""
+        if not is_manager(interaction):
+            return await interaction.response.send_message(
+                "⛔ Managers only — this is a V Tech-wide setting, not a single market's.", ephemeral=True)
+        current = _vtech_group_markets()
+        if action == "view":
+            if not current:
+                return await interaction.response.send_message(
+                    "🏭 V Tech group is empty — no market gets the full-credit slice yet.", ephemeral=True)
+            lines = [f"• **{(_get_market(mid) or {}).get('name', mid)}** (`{mid}`)" for mid in sorted(current)]
+            return await interaction.response.send_message(
+                "🏭 **V Tech group** (shared loyalty pool):\n" + "\n".join(lines), ephemeral=True)
+        if not market_id:
+            return await interaction.response.send_message(
+                "❌ Provide a market_id to add or remove.", ephemeral=True)
+        if not _get_market(market_id):
+            return await interaction.response.send_message(
+                f"❌ Market `{market_id}` not found. See `/market list`.", ephemeral=True)
+        if action == "add":
+            current.add(market_id)
+            _set_vtech_group_markets(current)
+            return await interaction.response.send_message(
+                f"✅ Added `{market_id}` to the V Tech group — its orders now credit the shared pool in full.",
+                ephemeral=True)
+        current.discard(market_id)
+        _set_vtech_group_markets(current)
+        await interaction.response.send_message(
+            f"✅ Removed `{market_id}` from the V Tech group — its orders now credit only a slice.",
+            ephemeral=True)
 
     @market.command(name="add", description="(Manager) Register a new market")
     @app_commands.describe(

@@ -505,51 +505,9 @@ class OrdersCog(commands.Cog):
         msg += f"\n\n⏱️ Cards post to the worker channel in ~{ANNOUNCE_DELAY_MINUTES} min."
         await interaction.followup.send(msg[:1950], **ephemeral_kwargs(interaction))
 
-    @app_commands.command(
-        name="order_from_stock",
-        description="(Managers / market owners) Draft restock orders from the latest stock scan — refill low items")
-    @app_commands.describe(
-        market_id="Which market's stock to restock from",
-        target_percent="Refill each item up to this % of capacity (default 80).",
-    )
-    @app_commands.autocomplete(market_id=core._market_autocomplete)
-    async def order_from_stock(self, interaction: discord.Interaction,
-                               market_id: str, target_percent: int = 80):
-        _is_mgr = is_manager(interaction)
-        _owned = _markets_owned_by(interaction.user.id)
-        if not _is_mgr and market_id not in _owned:
-            return await interaction.response.send_message(
-                "⛔ You need the @Managers role, or to own this market, to restock it.",
-                **ephemeral_kwargs(interaction))
-        if not _get_market(market_id):
-            return await interaction.response.send_message(
-                f"❌ Market `{market_id}` not found. See `/market list`.", **ephemeral_kwargs(interaction))
-        if target_percent <= 0 or target_percent > 100:
-            return await interaction.response.send_message(
-                "❌ target_percent must be between 1 and 100.", **ephemeral_kwargs(interaction))
-        await interaction.response.defer(**ephemeral_kwargs(interaction), thinking=True)
-
-        to_order, skipped_active, at_target = _build_stock_refill_plan(market_id, float(target_percent))
-        if not to_order:
-            return await interaction.followup.send(
-                f"✅ Nothing to restock for `{market_id}` at {target_percent}% — "
-                f"{at_target} item(s) already at/above target"
-                + (f", {skipped_active} already have an active order." if skipped_active else "."),
-                **ephemeral_kwargs(interaction))
-
-        total_pieces = sum(n for _, n, _ in to_order)
-        preview = "\n".join(f"🔸 **{it}** × `{need:,}` pcs" for it, need, _ in to_order[:20])
-        if len(to_order) > 20:
-            preview += f"\n…and **{len(to_order) - 20}** more"
-        mname = (_get_market(market_id) or {}).get("name", market_id)
-        body = (
-            f"📋 **Restock plan — {mname}** (refill to {target_percent}%)\n"
-            f"{len(to_order)} item(s) · ≈ **{total_pieces:,}** pieces total"
-            + (f" · {skipped_active} skipped (active order)" if skipped_active else "")
-            + f"\n\n{preview}\n\nCreate these orders?"
-        )
-        view = _StockRefillConfirmView(to_order, market_id, interaction.user.id, float(target_percent))
-        await interaction.followup.send(body[:1950], view=view, **ephemeral_kwargs(interaction))
+    # /order_from_stock removed 2026-07-15 — superseded by the website "My Market" order
+    # builder (Stage 2) and /inventory restock_deficit. _build_stock_refill_plan /
+    # _StockRefillConfirmView remain defined but unused; restore from git history if wanted.
 
     @app_commands.command(name="ping_unclaimed", description="(Managers) Ping the Workers about unclaimed orders.")
 
@@ -657,11 +615,9 @@ class OrdersCog(commands.Cog):
             title="🛠️ Manager Panel",
             description=(
                 "Use the buttons below:\n"
-                "• **View Orders** → private list\n"
-                "• **Prune Fulfilled/Cancelled** → removes closed orders\n"
-                "• **Hive pickup status / clear** → hive pickup cleanup\n"
-                "• **Set coin price** → edit item coin prices (**PER PIECE**)\n"
-                "• **Funds report / Interest** → finance tools\n"
+                "• **View Orders** → full order list (same as `/orders`)\n"
+                "• **Escalate order…** → repost/bump an order to workers\n"
+                "• **Prune Fulfilled/Cancelled** → removes closed orders"
             ),
             color=discord.Color.gold()
         )

@@ -205,6 +205,12 @@ LOYALTY_TIERS = [
     {"tier": 5, "name": "Elite",   "min_pts": 40000,   "interest_weekly_pct": 0.50, "payout_bonus_pct": 12},
 ]
 
+# Stage 4: what fraction of a market-scaled point award ALSO flows into the shared V Tech
+# pool (the global `loyalty` table) when that order's market is NOT itself a V Tech-owned
+# market. V Tech-owned markets (see _is_vtech_market) credit the pool in FULL — working one
+# of them IS working for V Tech. Configurable via env since this is a business-model knob.
+VTECH_SLICE_PCT = _env_float("VTECH_SLICE_PCT", 25.0)
+
 LOYALTY_EMPLOYEE_ROLES = {
     "Employee", "amazoniaEmployee", "mardurakCitizen", "BNLEmployee",
     "GreyhamesSiteOwner", "AmazoniaSiteOwner", "ToolshopOwner",
@@ -1396,6 +1402,122 @@ def _get_shop(data, shop_name: str):
     return next((s for s in data.get("shops", []) if (s.get("name","").lower()==shop_name.lower())), None)
 
 
+# ── Item categories ──────────────────────────────────────────────────────────
+# Groups the shop catalog into sections a market owner actually thinks in ("I need to
+# restock armour"). Order matters: the FIRST matching rule wins, so put narrower rules
+# above broader ones — "Diamond Sword" must land in Swords, not Tools, even though both
+# could plausibly match a gear item.
+ITEM_CATEGORIES = ["Swords", "Tools", "Armor", "Bows", "Brews", "Food",
+                   "Materials", "Blocks", "Nature", "Misc"]
+
+_CATEGORY_RULES = [
+    ("Swords", ("sword", "blade", "katana", "cutlass")),
+    ("Bows",   ("bow", "crossbow", "arrow", "quiver", "trident")),
+    ("Armor",  ("helmet", "chestplate", "leggings", "boots", "shield", "elytra", "cap",
+                "tunic", "pants", "chainmail", "turtle shell", "horse armor")),
+    ("Tools",  ("pickaxe", "axe", "shovel", "spade", "hoe", "shears", "flint and steel",
+                "fishing rod", "brush", "bucket", "compass", "clock", "spyglass")),
+    ("Brews",  ("potion", "brew", "elixir", "tonic", "draught", "bottle o")),
+    ("Food",   ("apple", "bread", "steak", "porkchop", "carrot", "potato", "melon",
+                "cookie", "cake", "stew", "soup", "beef", "chicken", "mutton", "berries",
+                "beetroot", "pumpkin pie", "rabbit", "cod", "salmon", "kelp", "honey bottle",
+                "milk", "egg", "sugar", "wheat", "mushroom")),
+    ("Nature", ("sapling", "leaves", "flower", "allium", "azalea", "bamboo", "vine",
+                "moss", "fern", "grass", "seeds", "lily", "tulip", "orchid", "dandelion",
+                "poppy", "cornflower", "bluet", "rose", "dripleaf", "cactus", "coral",
+                "spore", "propagule", "roots", "fungus", "sponge")),
+    ("Materials", ("ingot", "nugget", "dust", "rod", "powder", "pearl", "string",
+                   "leather", "feather", "bone", "gunpowder", "redstone", "slime",
+                   "ink", "dye", "shard", "scute", "netherite scrap", "clay ball",
+                   "stick", "paper", "book", "emerald", "diamond", "quartz", "coal",
+                   "charcoal", "flint", "wax", "honeycomb", "debris", "star", "eye of")),
+    ("Blocks", ("block", "ore", "plank", "log", "stone", "brick", "glass", "wool",
+                "terracotta", "concrete", "sand", "dirt", "obsidian", "gravel",
+                "prismarine", "amethyst", "andesite", "basalt", "deepslate", "tuff",
+                "calcite", "granite", "diorite", "netherrack", "end stone", "wood",
+                "slab", "stairs", "fence", "wall", "door", "anvil", "beacon", "chest",
+                "furnace", "hopper", "rail", "torch", "lantern", "carpet", "pane",
+                "shulker", "barrel", "table", "cauldron", "campfire", "sign", "pot")),
+]
+
+
+def _is_known_brew(name) -> bool:
+    """True if `name` matches a curated brew, tolerating the suffixes the catalog adds.
+
+    The shop lists 'Blood Of Mardurak (Fire Res + Regen)' while the map keys on
+    'Blood Of Mardurak', so an exact fold match misses. Compare on WORD boundaries, which
+    keeps short keys honest — 'Nos' matches the standalone word, never 'Nostalgia'."""
+    try:
+        mp = _load_manual_brew_effects()
+        if not mp:
+            return False
+        folded = _fold_brew_name(name)
+        if not folded:
+            return False
+        if folded in mp:
+            return True
+        padded = f" {folded} "
+        for key in mp:
+            if key and (folded.startswith(key + " ") or f" {key} " in padded):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _classify_item(name: str) -> str:
+    """Best-guess category for an item name. Never returns empty — unmatched items land in
+    'Misc' so nothing silently vanishes from the owner's catalog view.
+
+    Custom brews are checked FIRST against the curated brew map: 'Blood Of Mardurak' is a
+    potion but contains none of the obvious words, so name-matching alone would bury it in
+    Misc. Order matters after that — narrower rules sit above broader ones so 'Diamond Sword'
+    lands in Swords, not Tools."""
+    clean = _strip_item_code(name)
+    n = clean.lower()
+    if not n:
+        return "Misc"
+    # A curated brew (Schizo Juice, Blood Of Mardurak, Fisherman's Friend…) is a brew even
+    # though its name says nothing of the sort.
+    if _is_known_brew(clean):
+        return "Brews"
+    for category, needles in _CATEGORY_RULES:
+        for needle in needles:
+            if needle in n:
+                return category
+    return "Misc"
+
+
+def _item_category(name: str, info: dict = None) -> str:
+    """The item's stored category, falling back to the auto-classifier. Lets an owner
+    override a bad guess (via the DB/command) without the guess overwriting them later."""
+    if isinstance(info, dict):
+        stored = str(info.get("category") or "").strip()
+        if stored:
+            return stored
+    return _classify_item(name)
+
+
+def _backfill_item_categories() -> int:
+    """Tag every uncategorised catalog item using the classifier. Idempotent — only fills
+    NULLs, so a manual override is never clobbered. Returns how many were tagged."""
+    try:
+        import Restocker_db as _db
+        items = _db.get_items() or {}
+        n = 0
+        for name, info in items.items():
+            if str((info or {}).get("category") or "").strip():
+                continue
+            _db.set_item_category(name, _classify_item(name))
+            n += 1
+        if n:
+            log.info("[items] auto-categorised %d item(s)", n)
+        return n
+    except Exception as e:
+        log.warning("[items] category backfill failed: %s", e)
+        return 0
+
+
 def _get_coin_price(shops_data: dict, item_name: str) -> float:
     """Coin price PER PIECE for an item, looked up tolerantly.
 
@@ -1982,6 +2104,47 @@ def _set_market_loyalty(market_id, pts_mult: float, coin_bonus: int) -> None:
     _db.set_config(
         f"market_loyalty:{market_id}",
         _json.dumps({"pts_mult": float(pts_mult), "coin_bonus": int(coin_bonus)}))
+
+
+# ── V Tech group (Stage 4) ────────────────────────────────────────────────────────────
+def _vtech_group_markets() -> set:
+    """Market IDs V Tech itself owns (Greyhames, Bank, Dragonmart, ...) — configurable via
+    /market vtech_group instead of hardcoded, since the group can grow. These markets'
+    workers get the FULL point award credited to the shared V Tech pool (today's global
+    `loyalty` table), because working a V Tech market IS working for V Tech."""
+    try:
+        import json as _json, Restocker_db as _db
+        raw = _db.get_config("vtech_group_markets")
+        ids = _json.loads(raw) if raw else []
+        return {str(x) for x in ids if x}
+    except Exception:
+        return set()
+
+
+def _set_vtech_group_markets(market_ids) -> None:
+    import json as _json, Restocker_db as _db
+    _db.set_config("vtech_group_markets", _json.dumps(sorted({str(x) for x in market_ids if x})))
+
+
+def _is_vtech_market(market_id) -> bool:
+    return bool(market_id) and str(market_id) in _vtech_group_markets()
+
+
+def _award_market_loyalty_points(user_id: int, market_id: str, points: float, reason: str = "") -> float:
+    """Award points to a user's PER-MARKET ledger — that market owner's own reward
+    currency, independent of the shared V Tech pool. Best-effort: never raises, so a
+    ledger-write hiccup can never block an order payout."""
+    if not market_id:
+        return 0.0
+    try:
+        import Restocker_db as _db_mloy
+        new_total = _db_mloy.add_market_loyalty_points(str(user_id), str(market_id), float(points))
+        log.info("[loyalty] User %s +%.0f market pts @ %s (%s) -> %.0f total",
+                 user_id, points, market_id, reason or "order", new_total)
+        return new_total
+    except Exception as e:
+        log.warning("[loyalty] award_market_points failed: %s", e)
+        return 0.0
 
 
 def _award_loyalty_points(user_id: int, points: int, reason: str = "") -> tuple[float, dict, dict]:
@@ -3215,7 +3378,7 @@ async def _process_csn_attachment(attachment: discord.Attachment, report_channel
         await report_channel.send(
             f"🆕 Added {len(newly_tagged)} new item(s) to the **{market_name or effective_market_id}** "
             f"price catalog from this report: {names}{more}\n"
-            f"Starter prices were estimated from this report's sales — check them with `/set_price` if they look off."
+            f"Starter prices were estimated from this report's sales — check them with `/item_set_price` if they look off."
         )
 
 
@@ -3601,62 +3764,10 @@ async def _assign_customer_role(member: discord.Member, *, reason: str = "Auto-r
 
 
 
-def build_orders_pages():
-    data = load_orders()
-    orders = data.get("orders", [])
-    if not orders:
-        return []
-
-    pages, per_page = [], 5
-    total_pages = math.ceil(len(orders) / per_page)
-
-    for i in range(total_pages):
-        chunk = orders[i * per_page:(i + 1) * per_page]
-        lines = []
-
-        for o in chunk:
-            req = int(o.get("requested", o.get("amount", 0)) or 0)
-            pro = int(o.get("produced", 0) or 0)
-            rem = max(0, req - pro)
-
-            created_dt = parse_iso(o.get("created_at", utcnow_iso()))
-            claims = o.get("claims", []) or []
-            assigned = sum(int(c.get("qty", 0) or 0) for c in claims)
-
-            if claims:
-                first_claim_dt = min(parse_iso(c.get("claimed_at", utcnow_iso())) for c in claims)
-                phase = f"In progress: {human_duration_since(first_claim_dt)}"
-            else:
-                phase = f"Unclaimed: {human_duration_since(created_dt)}"
-
-            claim_lines = []
-            for c in claims[:6]:
-                tag = c.get("user_tag") or f"<@{c.get('user_id')}>"
-                qty = int(c.get("qty", 0) or 0)
-                since = human_duration_since(parse_iso(c.get("claimed_at", utcnow_iso())))
-                claim_lines.append(f"    • {tag} — {qty} (since {since})")
-            if len(claims) > 6:
-                claim_lines.append(f"    • …and {len(claims) - 6} more")
-
-            header = (
-                f"**#{o['id']} | {o.get('item','')}**\n"
-                f"   req {req}, prod {pro}, **rem {rem}**  ·  "
-                f"assigned {assigned}  ·  Status: **{str(o.get('status','open')).capitalize()}**  ·  {phase}"
-            )
-
-            if claim_lines:
-                lines.append(header + "\n" + "   **Claims:**\n" + "\n".join(claim_lines))
-            else:
-                lines.append(header + "\n" + "   **Claims:** _none_")
-
-        embed = Embed(
-            title=f"📋 Orders (Page {i + 1}/{total_pages})",
-            description="\n\n".join(lines) or "—",
-            color=discord.Color.blurple()
-        )
-        pages.append(embed)
-
-    return pages
+# build_orders_pages() and OrdersPaginator were retired 2026-07-15: the manager panel's
+# "View Orders" now reuses orders_cmd() below (the same renderer as /orders) so there's one
+# consistent order UI. The per-order paginated embed builder they used lives on in git
+# history if the detailed-claims layout is ever wanted again.
 
 
 
@@ -5974,11 +6085,19 @@ def _create_restock_orders(to_order: list, market_id=None) -> int:
     return created
 
 
-def _stock_refill_plan(market_id: str, target_pct: float = 80.0):
+def _stock_refill_plan(market_id: str, target_pct: float = 80.0, item_targets: dict = None):
     """Draft restock orders that top every under-target item in a market's stock back up
     to target_pct of capacity. Returns (to_order, skipped_active, at_target) where to_order
     is [(item, need_pieces, info)]. Skips Future variants and items with an active order,
-    so it never double-orders. Shared by the /order_from_stock command and the web button."""
+    so it never double-orders. Shared by the /order_from_stock command and the web button.
+
+    item_targets, when given, is the per-item {'target_pct', 'tracked'} map from
+    market_item_targets (Restocker_db.get_market_item_targets). When present, ONLY items
+    that appear in the map AND have tracked=True are considered, each refilled to its own
+    target_pct — this is what powers the ticked-item order builder ("My Market" tab).
+    Pass None (the default) to keep the old blanket behaviour used by /order_from_stock and
+    the legacy generate_orders endpoint: every under-target item in stock is refilled to the
+    single target_pct, regardless of any tracked flag."""
     import math as _math
     import Restocker_db as _db
     known = (_load_items().get("items") or {})
@@ -5994,11 +6113,18 @@ def _stock_refill_plan(market_id: str, target_pct: float = 80.0):
         item = str(row.get("item") or "").strip()
         if not item or _is_future_item(item):
             continue
+        if item_targets is not None:
+            t = item_targets.get(item)
+            if not t or not t.get("tracked"):
+                continue
+            item_target_pct = float(t.get("target_pct") or 80.0)
+        else:
+            item_target_pct = float(target_pct)
         cap = int(row.get("capacity") or 0)
         cur = int(row.get("stock") or 0)
         if cap <= 0:
             continue
-        need = int(_math.ceil(cap * float(target_pct) / 100.0)) - cur
+        need = int(_math.ceil(cap * item_target_pct / 100.0)) - cur
         if need <= 0:
             at_target += 1
             continue
@@ -6010,6 +6136,36 @@ def _stock_refill_plan(market_id: str, target_pct: float = 80.0):
         to_order.append((item, need, known[item]))
     to_order.sort(key=lambda t: -t[1])
     return to_order, skipped_active, at_target
+
+
+def _market_catalog_by_category(market_id: str) -> dict:
+    """Items grouped by category for the owner's order-builder UI ('My Market' tab):
+    stock, capacity, and this market's per-item target %/tracked flag from
+    market_item_targets. Auto-classifies any item still missing a stored category for
+    display purposes only — it does not write the guess back (_backfill_item_categories
+    does that), so a category never silently reassigns itself. Only items with a live
+    stock-scan row for this market are included; categories with no rows are omitted."""
+    import Restocker_db as _db
+    items = _db.get_items() or {}
+    stock = _db.get_market_stock(market_id) or {}
+    targets = _db.get_market_item_targets(market_id) or {}
+    by_cat: dict = {}
+    for name, row in stock.items():
+        if not name or _is_future_item(name):
+            continue
+        info = items.get(name) or {}
+        cat = _item_category(name, info)
+        t = targets.get(name) or {}
+        by_cat.setdefault(cat, []).append({
+            "item": name,
+            "stock": int(row.get("stock") or 0),
+            "capacity": int(row.get("capacity") or 0),
+            "target_pct": float(t.get("target_pct", 80.0)),
+            "tracked": bool(t.get("tracked", False)),
+        })
+    for cat in by_cat:
+        by_cat[cat].sort(key=lambda r: r["item"].lower())
+    return by_cat
 
 
 async def _market_autocomplete(interaction: discord.Interaction, current: str):
@@ -6227,19 +6383,46 @@ def _get_market(market_id: str) -> dict | None:
         for mid, info in markets.items():
             if str(mid).strip().lower() == tgt:
                 return info
+
+
+def _market_owner_id(market_id: str) -> int | None:
+    """Discord user id of the market that REQUESTED an order (owner_id, falling back to
+    leader_discord_id) — the counterparty who supplies/receives the goods, not a bystander.
+    Used to ping + grant ticket access when their order is fulfilled. Returns None if the
+    order has no market_id (legacy orders) or the market has no owner on file."""
+    if not market_id:
+        return None
+    m = _get_market(market_id)
+    if not isinstance(m, dict):
+        return None
+    raw = m.get("owner_id") or m.get("leader_discord_id")
+    try:
+        return int(raw) if raw else None
+    except (TypeError, ValueError):
+        return None
     return None
 
 
 def _markets_owned_by(user_id) -> set:
     """Market IDs this user owns or leads (owner_id or leader_discord_id match).
     Used to let a market owner create restock orders for their OWN market without
-    needing the global @Managers role."""
+    needing the global @Managers role.
+
+    Global bot admins (MANAGER_DM_IDS) get EVERY market, matching
+    _owner_markets_for_user — the Discord-side gate and the website panel must agree, or
+    you'd see a market on the site but be refused when acting on it."""
     try:
         uid = str(int(user_id))
     except Exception:
         return set()
+    markets = _load_markets().get("markets", {}) or {}
+    try:
+        if int(user_id) in MANAGER_DM_IDS:
+            return set(markets.keys())
+    except (TypeError, ValueError):
+        pass
     out = set()
-    for mid, m in (_load_markets().get("markets", {}) or {}).items():
+    for mid, m in markets.items():
         if not isinstance(m, dict):
             continue
         owner  = m.get("owner_id")
@@ -6674,18 +6857,28 @@ def _apply_trade_impact(market_id: str, side: str, shares: float, listing: dict 
 
 
 def _owner_markets_for_user(user_id) -> list:
-    """Market IDs this Discord user owns or co-manages (for the website panel)."""
-    out = []
-    uid = str(user_id)
+    """Market IDs this Discord user owns or co-manages (for the website panel).
+
+    Global bot admins (MANAGER_DM_IDS) get EVERY market. As the operator you have to be able
+    to open and fix any market's panel without first adding yourself as its owner — otherwise
+    a market whose owner goes inactive becomes unmanageable."""
     data = _load_markets()
-    for mid, m in (data.get("markets", {}) or {}).items():
+    markets = data.get("markets", {}) or {}
+    try:
+        if int(user_id) in MANAGER_DM_IDS:
+            return list(markets.keys())
+    except (TypeError, ValueError):
+        pass
+    uid = str(user_id)
+    out = []
+    for mid, m in markets.items():
         if not isinstance(m, dict):
             continue
         owner = str(m.get("owner_id") or "")
         mgrs = [str(x) for x in (m.get("manager_ids") or [])]
         if uid == owner or uid in mgrs:
             out.append(mid)
-    return [mid for mid in out if mid != DEFAULT_MARKET_ID or True]
+    return out
 
 
 def _current_month_key() -> str:
@@ -7915,7 +8108,7 @@ AVAILABLE SLASH COMMANDS (share these when asked):
 
 Orders & Workers:
 - /orders — Show open production requests
-- /order — (Managers) Order an existing catalog item from workers. Leave the worker field blank to ask ALL workers (batched ping); set a worker to assign it directly to ONE person via DM with no mass ping. Item must exist (/add_item) and have a price (/set_price).
+- /order — (Managers) Order an existing catalog item from workers. Leave the worker field blank to ask ALL workers (batched ping); set a worker to assign it directly to ONE person via DM with no mass ping. Item must exist (/add_item) and have a price (/item_set_price).
 - /cancel_order — (Managers) Cancel a restock order by ID
 - /ping_unclaimed — (Managers) Ping workers about unclaimed orders
 - /orders_clear_all — (Managers) Delete ALL orders (testing only)
@@ -7967,18 +8160,14 @@ Stock Exchange (/stock subcommands) — the server's stakeholder system; trades 
 individual markets that opt in via /market go_public, priced off their own real CSN net profit,
 using the same server coin balance as everything else:
 - /stock list — See every market currently listed on the stock exchange
-- /stock price — Check a market's current share price and recent pricing history
+- /stock price — a market's share price, recent pricing history, and how well it's backed
 - /stock buy — Buy shares of a public market with your coins
 - /stock sell — Sell shares of a public market back for coins
 - /stock portfolio — See your holdings and unrealized profit/loss (Managers can view others')
-- /stock holders — (Manager/Owner) List who owns shares of a market
 - /stock set_params — (Managers) Tune a market's shares outstanding / P-E multiplier
-- /stock limit_buy / /stock limit_sell — trigger orders (buy when price falls to your max; sell when it rises to your min)
-- /stock limit_list / /stock limit_cancel — view or cancel your open trigger orders
 - /stock dividends — view a market's shareholder dividend rate (Managers/Owners can set it)
 - /stock panel — open an interactive live buy/sell trading panel for a market
 - /stock dashboard — (Managers) post a live, auto-updating market dashboard in this channel
-- /stock backing — how well a stock is backed (treasury + inventory + central exchange fund)
 - /stock delist — (Manager/Owner) bankrupt + delist a market, paying shareholders from its backing
 - /stock invest_index / /stock sell_index / /stock index_fund — invest coins into the ABX Index fund (the whole market basket by weight), redeem units, or view the fund
 - /market treasury / /market treasury_withdraw — (Manager/Owner) view a market's treasury / withdraw its excess
@@ -8008,18 +8197,17 @@ Brew & Tool Codes (/brew and /tool subcommands — shared name store):
 Loyalty (/loyalty subcommands):
 - /loyalty stats — your loyalty points, tier, interest rate, and payout bonus
 - /loyalty leaderboard — top loyalty point holders
-- /loyalty register_ign — register your exact Minecraft username
+- /loyalty register_ign — register your exact Minecraft username (run again to add alt accounts — all your IGNs pool into one account)
 - /loyalty set_points / /loyalty add_points — (Managers) set or add a user's loyalty points
 
 Inventory & Stock Alarms (/inventory subcommands — live barrel fullness from CSN stock scans):
 - /inventory stock — live shop stock / barrel fullness for a market (lowest first)
-- /inventory set_capacity — (Manager/Owner) set an item's "full" capacity
 - /inventory restock_deficit — (Managers) create restock orders from the real shortfall (capacity − current stock)
-- /inventory set_alarm / /inventory alarms / /inventory clear_alarm — (Manager/Owner) low-stock alarms that DM the owner + prep a restock
+  (Barrel capacity and low-stock alarms are managed on the dashboard website.)
 
 Items & Setup:
 - /add_item — Create a new item and set its coin price
-- /set_price — (Managers) Set an item's coin price (per piece or per stack of 64)
+- /item_set_price — (Managers) Set an item's coin price (per piece or per stack of 64)
 - /item_info — Look up an item's price, stock, and market
 - /shop_rename_item — Rename an item (updates all open orders too)
 - /manager_panel — (Managers) Open the Manager control panel
@@ -9805,7 +9993,7 @@ async def _main():
 
 # ── Extracted view classes (re-imported so main/on_ready/cogs resolve them) ──
 from views.hive import HiveAccessModal, JoinHarvesterView, HivePickupView
-from views.orders import ClaimPartModal, ManagerReviewView, OrderView, OrdersBrowser, PartialFulfillModal, CoinPriceModal, CoinPriceSearchModal, EscalateModal, EscalatePickView, ItemPricePickerView, ManagerPanelView, OrdersPaginator, RemindByIdModal, FillMissingPricesModal, ReleaseClaimModal, RemindModal, WorkerView, CloseTicketView
+from views.orders import ClaimPartModal, ManagerReviewView, OrderView, OrdersBrowser, PartialFulfillModal, CoinPriceModal, CoinPriceSearchModal, EscalateModal, EscalatePickView, ItemPricePickerView, ManagerPanelView, RemindByIdModal, FillMissingPricesModal, ReleaseClaimModal, RemindModal, WorkerView, CloseTicketView
 from views.stock import StockTradeModal, StockPanelView, StockAlarmView
 from views.web import FuturesOrderView, WebOrderView, PayoutReviewView, InvestorWithdrawApprovalView
 # __VIEW_IMPORTS__

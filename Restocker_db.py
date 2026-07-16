@@ -212,6 +212,11 @@ CREATE TABLE IF NOT EXISTS notes (
 );
 
 -- ── Loyalty System ──────────────────────────────────────────────────────────
+-- This is the shared "V Tech" pool: one balance per user, drives tiers/interest/payout
+-- bonus. Stage 4 (per-market loyalty) layers market_loyalty_ledger on TOP of this table
+-- rather than replacing it — every order still credits this pool (in full for V Tech-owned
+-- markets, a configurable slice otherwise), so existing tiers/interest/redemptions are
+-- untouched by the change.
 CREATE TABLE IF NOT EXISTS loyalty (
     user_id         TEXT PRIMARY KEY,
     points          REAL NOT NULL DEFAULT 0,
@@ -220,13 +225,34 @@ CREATE TABLE IF NOT EXISTS loyalty (
     updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Per-(user, market) loyalty ledger. Each market owner sets and pays their own rewards
+-- from their market's own balance — separate from the shared V Tech pool above. Two
+-- markets stocking via the same worker want independent point balances, same rationale
+-- as market_item_targets being per-market.
+CREATE TABLE IF NOT EXISTS market_loyalty_ledger (
+    user_id         TEXT NOT NULL,
+    market_id       TEXT NOT NULL,
+    points          REAL NOT NULL DEFAULT 0,
+    total_earned    REAL NOT NULL DEFAULT 0,
+    last_activity   TEXT,
+    updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (user_id, market_id)
+);
+CREATE INDEX IF NOT EXISTS idx_mll_market ON market_loyalty_ledger(market_id);
+CREATE INDEX IF NOT EXISTS idx_mll_user   ON market_loyalty_ledger(user_id);
+
+-- One Discord user may register MANY in-game names (a main + alt accounts) — several
+-- people run 8+ alts. So the row is keyed on `ign` (each in-game name belongs to exactly
+-- ONE user, case-insensitive), NOT on user_id. The "primary" IGN for display is simply the
+-- earliest-registered row for that user. CSN attribution keys off ign→user_id, so every alt
+-- an owner registers automatically pools its sales/loyalty into their one Discord account.
 CREATE TABLE IF NOT EXISTS ign_registry (
-    user_id         TEXT PRIMARY KEY,
-    ign             TEXT NOT NULL UNIQUE,
+    ign             TEXT PRIMARY KEY COLLATE NOCASE,
+    user_id         TEXT NOT NULL,
     registered_at   TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
-CREATE INDEX IF NOT EXISTS idx_ign_registry_ign ON ign_registry(ign);
+CREATE INDEX IF NOT EXISTS idx_ign_registry_user ON ign_registry(user_id);
 
 CREATE TABLE IF NOT EXISTS ign_pending (
     user_id         TEXT PRIMARY KEY,
@@ -448,6 +474,21 @@ CREATE TABLE IF NOT EXISTS market_index_log (
     index_value REAL NOT NULL DEFAULT 0,
     markets     INTEGER NOT NULL DEFAULT 0
 );
+
+-- ── Per-market, per-item restock targets ─────────────────────────────────────
+-- How full a market owner wants to keep each item, as a % of barrel capacity, plus
+-- whether that item is "tracked" (ticked) in their restock builder. Per-market by design:
+-- two markets stocking the same item can want very different depths of it.
+-- No row = not tracked; the market's default target applies if it's ordered anyway.
+CREATE TABLE IF NOT EXISTS market_item_targets (
+    market_id   TEXT NOT NULL,
+    item        TEXT NOT NULL,
+    target_pct  REAL NOT NULL DEFAULT 80,
+    tracked     INTEGER NOT NULL DEFAULT 1,
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (market_id, item)
+);
+CREATE INDEX IF NOT EXISTS idx_mit_market ON market_item_targets(market_id);
 """
 
 
@@ -470,6 +511,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
         # Which market an order belongs to — drives per-market reward payouts and the
         # website Orders board. Older orders (pre-column) stay NULL and read as 'main'.
         "ALTER TABLE orders ADD COLUMN market_id TEXT",
+        # Item category (armor / tools / swords / brews / …) — groups the shop catalog so a
+        # market owner can browse and restock by section. NULL = uncategorised; the auto-
+        # classifier fills these in from the item name on demand.
+        "ALTER TABLE items ADD COLUMN category TEXT",
     ]
     for sql in migrations:
         try:
@@ -495,6 +540,29 @@ def _migrate(conn: sqlite3.Connection) -> None:
                 "SELECT 'main', month, label, income, spent, net FROM _csn_history_legacy"
             )
             conn.execute("DROP TABLE _csn_history_legacy")
+    except sqlite3.OperationalError:
+        pass
+
+    # IGN registry: upgrade the legacy one-IGN-per-user table (user_id PRIMARY KEY) to the
+    # multi-IGN shape (ign PRIMARY KEY, user_id a plain indexed column) so one Discord user
+    # can own several in-game names (main + alts). Each old row — a user's single IGN —
+    # carries over unchanged and stays that user's primary (earliest-registered).
+    try:
+        info = conn.execute("PRAGMA table_info(ign_registry)").fetchall()
+        user_id_is_pk = any(r[1] == "user_id" and r[5] == 1 for r in info)
+        if info and user_id_is_pk:
+            conn.execute("ALTER TABLE ign_registry RENAME TO _ign_registry_legacy")
+            conn.execute(
+                "CREATE TABLE ign_registry ("
+                "ign TEXT PRIMARY KEY COLLATE NOCASE, user_id TEXT NOT NULL, "
+                "registered_at TEXT NOT NULL DEFAULT (datetime('now')))"
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO ign_registry (ign, user_id, registered_at) "
+                "SELECT ign, user_id, registered_at FROM _ign_registry_legacy"
+            )
+            conn.execute("DROP TABLE _ign_registry_legacy")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_ign_registry_user ON ign_registry(user_id)")
     except sqlite3.OperationalError:
         pass
 
@@ -661,6 +729,50 @@ def get_item(name: str) -> Optional[dict]:
     with db() as conn:
         row = conn.execute("SELECT * FROM items WHERE name=?", (name,)).fetchone()
         return dict(row) if row else None
+
+
+def set_item_category(name: str, category: str) -> None:
+    """Tag an item with a category (armor / tools / swords / …)."""
+    with db() as conn:
+        conn.execute("UPDATE items SET category=? WHERE name=?",
+                     ((category or "").strip() or None, str(name)))
+
+
+def get_market_item_targets(market_id: str) -> dict:
+    """{item: {'target_pct': float, 'tracked': bool}} for one market. Empty = nothing set up."""
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT item, target_pct, tracked FROM market_item_targets WHERE market_id=?",
+            (str(market_id),)).fetchall()
+        return {r["item"]: {"target_pct": float(r["target_pct"] or 0),
+                            "tracked": bool(r["tracked"])} for r in rows}
+
+
+def set_market_item_target(market_id: str, item: str, target_pct: float = None,
+                           tracked: bool = None) -> None:
+    """Upsert one item's restock target for a market. Either field may be omitted to leave
+    it untouched — ticking a box shouldn't silently reset a % the owner already tuned."""
+    with db() as conn:
+        cur = conn.execute(
+            "SELECT target_pct, tracked FROM market_item_targets WHERE market_id=? AND item=?",
+            (str(market_id), str(item))).fetchone()
+        old_pct = float(cur["target_pct"]) if cur else 80.0
+        old_trk = bool(cur["tracked"]) if cur else True
+        new_pct = old_pct if target_pct is None else max(0.0, min(100.0, float(target_pct)))
+        new_trk = old_trk if tracked is None else bool(tracked)
+        conn.execute("""
+            INSERT INTO market_item_targets (market_id, item, target_pct, tracked, updated_at)
+            VALUES (?,?,?,?, datetime('now'))
+            ON CONFLICT(market_id, item) DO UPDATE SET
+                target_pct=excluded.target_pct, tracked=excluded.tracked,
+                updated_at=datetime('now')
+        """, (str(market_id), str(item), new_pct, int(new_trk)))
+
+
+def clear_market_item_target(market_id: str, item: str) -> None:
+    with db() as conn:
+        conn.execute("DELETE FROM market_item_targets WHERE market_id=? AND item=?",
+                     (str(market_id), str(item)))
 
 
 def upsert_item(name: str, coin: float, stock: int, **kwargs):
@@ -1546,30 +1658,140 @@ def update_loyalty_points_bulk(updates: list[tuple]):
         conn.executemany("UPDATE loyalty SET points=?, updated_at=datetime('now') WHERE user_id=?", updates)
 
 
+# ── Per-market loyalty ledger (Stage 4) ───────────────────────────────────────────────
+def get_market_loyalty(user_id: str, market_id: str) -> dict:
+    with db() as conn:
+        row = conn.execute(
+            "SELECT * FROM market_loyalty_ledger WHERE user_id=? AND market_id=?",
+            (str(user_id), str(market_id))).fetchone()
+        if row:
+            return dict(row)
+        return {"user_id": str(user_id), "market_id": str(market_id),
+                "points": 0.0, "total_earned": 0.0, "last_activity": None}
+
+
+def add_market_loyalty_points(user_id: str, market_id: str, points: float,
+                              *, update_activity: bool = True) -> float:
+    """Add points to a user's ledger for ONE market — each market owner's own reward
+    currency, independent of every other market and of the shared V Tech pool (the
+    `loyalty` table). Returns the new point total for that (user, market) pair."""
+    now = datetime.now(timezone.utc).isoformat()
+    with db() as conn:
+        conn.execute("""
+            INSERT INTO market_loyalty_ledger (user_id, market_id, points, total_earned, last_activity, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, market_id) DO UPDATE SET
+                points        = points + excluded.points,
+                total_earned  = total_earned + excluded.points,
+                last_activity = CASE WHEN ? THEN excluded.last_activity ELSE last_activity END,
+                updated_at    = excluded.updated_at
+        """, (str(user_id), str(market_id), points, points,
+              now if update_activity else None, now, int(update_activity)))
+        row = conn.execute(
+            "SELECT points FROM market_loyalty_ledger WHERE user_id=? AND market_id=?",
+            (str(user_id), str(market_id))).fetchone()
+        return row["points"] if row else points
+
+
+def set_market_loyalty_points(user_id: str, market_id: str, points: float) -> float:
+    now = datetime.now(timezone.utc).isoformat()
+    with db() as conn:
+        conn.execute("""
+            INSERT INTO market_loyalty_ledger (user_id, market_id, points, total_earned, last_activity, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, market_id) DO UPDATE SET
+                points=excluded.points, updated_at=excluded.updated_at
+        """, (str(user_id), str(market_id), max(0.0, points), max(0.0, points), now, now))
+        return max(0.0, points)
+
+
+def get_market_loyalty_leaderboard(market_id: str, limit: int = 20) -> list:
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT user_id, points, total_earned, last_activity FROM market_loyalty_ledger "
+            "WHERE market_id=? ORDER BY points DESC LIMIT ?", (str(market_id), int(limit))).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_all_market_loyalty_for_user(user_id: str) -> list:
+    """Every market ledger this user has a nonzero balance or history in, richest first —
+    powers the per-market breakdown on /loyalty stats."""
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM market_loyalty_ledger WHERE user_id=? AND (points > 0 OR total_earned > 0) "
+            "ORDER BY points DESC", (str(user_id),)).fetchall()
+        return [dict(r) for r in rows]
+
+
 
 def get_ign(user_id: str) -> Optional[str]:
+    """The user's PRIMARY in-game name (earliest registered) — what displays everywhere a
+    single IGN is shown. Use get_igns() for the full main+alts list."""
     with db() as conn:
-        row = conn.execute("SELECT ign FROM ign_registry WHERE user_id=?", (str(user_id),)).fetchone()
+        row = conn.execute(
+            "SELECT ign FROM ign_registry WHERE user_id=? ORDER BY registered_at ASC, ign ASC LIMIT 1",
+            (str(user_id),)).fetchone()
         return row["ign"] if row else None
+
+
+def get_igns(user_id: str) -> list:
+    """Every in-game name this user has registered (main + alts), primary/earliest first."""
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT ign FROM ign_registry WHERE user_id=? ORDER BY registered_at ASC, ign ASC",
+            (str(user_id),)).fetchall()
+        return [r["ign"] for r in rows]
+
+
+def count_igns(user_id: str) -> int:
+    with db() as conn:
+        row = conn.execute("SELECT COUNT(*) AS c FROM ign_registry WHERE user_id=?",
+                           (str(user_id),)).fetchone()
+        return int(row["c"] if row else 0)
 
 
 def get_user_id_by_ign(ign: str) -> Optional[str]:
     with db() as conn:
-        row = conn.execute("SELECT user_id FROM ign_registry WHERE LOWER(ign)=LOWER(?)", (ign,)).fetchone()
+        row = conn.execute("SELECT user_id FROM ign_registry WHERE ign=? COLLATE NOCASE", (str(ign).strip(),)).fetchone()
         return row["user_id"] if row else None
 
 
-def set_ign(user_id: str, ign: str):
+def add_ign(user_id: str, ign: str) -> str:
+    """Register one in-game name for a user (main or alt). Returns:
+      'added'  — newly linked to this user
+      'exists' — this user already had that IGN (idempotent no-op)
+      'taken'  — the IGN belongs to a DIFFERENT user (caller should refuse)
+    Does NOT enforce the per-user count cap — that's a command-layer policy check."""
+    ign = str(ign).strip()
+    owner = get_user_id_by_ign(ign)
+    if owner is not None:
+        return "exists" if str(owner) == str(user_id) else "taken"
     now = datetime.now(timezone.utc).isoformat()
     with db() as conn:
-        conn.execute("""
-            INSERT INTO ign_registry (user_id, ign, registered_at)
-            VALUES (?, ?, ?)
-            ON CONFLICT(user_id) DO UPDATE SET ign=excluded.ign, registered_at=excluded.registered_at
-        """, (str(user_id), ign.strip(), now))
+        conn.execute(
+            "INSERT INTO ign_registry (ign, user_id, registered_at) VALUES (?, ?, ?)",
+            (ign, str(user_id), now))
+    return "added"
+
+
+def set_ign(user_id: str, ign: str) -> str:
+    """Back-compat shim: registration paths call this to link an IGN. Now ADDS (alts are
+    allowed) rather than replacing the user's single IGN. Returns add_ign()'s status."""
+    return add_ign(user_id, ign)
+
+
+def remove_ign(user_id: str, ign: str) -> bool:
+    """Remove ONE specific IGN from a user (e.g. a mistyped alt). Returns True if a row was
+    deleted. The user keeps their other IGNs; primary falls through to the next-earliest."""
+    with db() as conn:
+        cur = conn.execute(
+            "DELETE FROM ign_registry WHERE user_id=? AND ign=? COLLATE NOCASE",
+            (str(user_id), str(ign).strip()))
+        return cur.rowcount > 0
 
 
 def delete_ign(user_id: str):
+    """Remove ALL of a user's IGNs (full unlink)."""
     with db() as conn:
         conn.execute("DELETE FROM ign_registry WHERE user_id=?", (str(user_id),))
 

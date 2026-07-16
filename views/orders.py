@@ -11,6 +11,9 @@ TICKETS_CATEGORY_ID = core.TICKETS_CATEGORY_ID
 WORKER_CHANNEL_ID = core.WORKER_CHANNEL_ID
 _apply_claim = core._apply_claim
 _award_loyalty_points = core._award_loyalty_points
+_award_market_loyalty_points = core._award_market_loyalty_points
+_is_vtech_market = core._is_vtech_market
+VTECH_SLICE_PCT = core.VTECH_SLICE_PCT
 _channel_link = core._channel_link
 _clear_all_hive_pickups = core._clear_all_hive_pickups
 _close_ui_in_place = core._close_ui_in_place
@@ -25,6 +28,7 @@ _load_items = core._load_items
 _loyalty_payout_bonus_pct = core._loyalty_payout_bonus_pct
 _loyalty_points_for_order = core._loyalty_points_for_order
 _market_loyalty_cfg = core._market_loyalty_cfg
+_market_owner_id = core._market_owner_id
 _mutate_order = core._mutate_order
 _open_assist_ticket = core._open_assist_ticket
 _order_is_claimed_closed = core._order_is_claimed_closed
@@ -42,7 +46,7 @@ _log_team_event = core._log_team_event
 _team_live = core._team_live
 apply_weekly_interest = core.apply_weekly_interest
 build_order_embed = core.build_order_embed
-build_orders_pages = core.build_orders_pages
+orders_cmd = core.orders_cmd
 cleanup_batch_dms_for_closed_order = core.cleanup_batch_dms_for_closed_order
 dm_claimants = core.dm_claimants
 ephemeral_kwargs = core.ephemeral_kwargs
@@ -520,7 +524,16 @@ class ManagerReviewView(View):
             lp_scaled = max(1, int(lp * qty / max(1, int(order.get("requested", 1) or 1))))
             if _mkt_mult != 1.0:
                 lp_scaled = max(1, int(lp_scaled * _mkt_mult))
-            new_pts, old_tier, new_tier = _award_loyalty_points(uid, lp_scaled, reason=f"order#{order['id']}")
+            # Stage 4: the order's market gets its OWN ledger credited in full (that
+            # market owner's own reward currency), and the shared V Tech pool (today's
+            # global `loyalty` table — still what drives tiers/interest/payout bonus) gets
+            # either the full amount (V Tech-owned market) or a configurable slice.
+            order_mid = order.get("market_id")
+            market_pts = 0.0
+            if order_mid:
+                market_pts = _award_market_loyalty_points(uid, order_mid, lp_scaled, reason=f"order#{order['id']}")
+            vtech_pts = lp_scaled if _is_vtech_market(order_mid) else max(1, int(lp_scaled * VTECH_SLICE_PCT / 100.0))
+            new_pts, old_tier, new_tier = _award_loyalty_points(uid, vtech_pts, reason=f"order#{order['id']}")
             try:
                 _mgr_id, _ov = _pay_manager_override(uid, total_payout, f"order#{order['id']}")
             except Exception:
@@ -557,13 +570,16 @@ class ManagerReviewView(View):
                 pass
             tier_up_msg = (f"\n🏆 Tier up! You're now **{new_tier['name']}**!"
                            if new_tier["tier"] > old_tier["tier"] else "")
+            market_pts_line = (f"\n🏪 Market loyalty: **+{lp_scaled} pts** → {market_pts:.0f} total"
+                               if order_mid else "")
             try:
                 user_obj = await interaction.client.fetch_user(uid)
                 await user_obj.send(
                     f"✅ Your claim on **Order #{order['id']} — {order.get('item', '')}** was approved.\n"
                     f"💰 Paid: **{total_payout} coins**{bonus_str} (for {fmt_qty(order, qty)}).\n"
                     f"New balance: **{new_bal}**.\n"
-                    f"⭐ Loyalty: **+{lp_scaled} pts** → {new_pts:.0f} total ({new_tier['name']}){tier_up_msg}"
+                    f"⭐ V Tech loyalty: **+{vtech_pts} pts** → {new_pts:.0f} total ({new_tier['name']}){tier_up_msg}"
+                    f"{market_pts_line}"
                 )
             except Exception:
                 pass
@@ -596,10 +612,24 @@ class ManagerReviewView(View):
             # Loud, actionable — this is the failure mode that quietly cost Dr 6 orders.
             msg += ("\n\n🚨 **Some workers were NOT paid** — the item has no catalog price, so the "
                     "payout computed to 0:\n" + "\n".join(unpaid_lines[:10]) +
-                    f"\n\nFix the price with `/set_price item:{order.get('item','?')} coin:<amount>` "
+                    f"\n\nFix the price with `/item_set_price item:{order.get('item','?')} coin:<amount>` "
                     f"then run `/admin repair_payouts` to pay them retroactively.")
         try:
             await interaction.followup.send(msg, ephemeral=True)
+        except Exception:
+            pass
+
+        # Ping the requesting market's owner — they're the counterparty (they supply/receive
+        # the goods), not a bystander, so they should hear the moment their order clears even
+        # though the ticket channel itself is about to be deleted below.
+        try:
+            owner_id = _market_owner_id(order.get("market_id"))
+            if owner_id:
+                owner_obj = await interaction.client.fetch_user(owner_id)
+                await owner_obj.send(
+                    f"✅ Your market's **Order #{order['id']} — {order.get('item', '')}** was "
+                    f"fulfilled ({fmt_qty(order, int(order.get('produced', 0) or 0))})."
+                )
         except Exception:
             pass
 
@@ -1191,6 +1221,21 @@ class OrderView(View):
             overwrites[mgr_role] = discord.PermissionOverwrite(
                 view_channel=True, send_messages=True, read_message_history=True, manage_messages=True
             )
+        # The requesting market's owner is the counterparty on this order (they supply/
+        # receive the goods) — not a bystander. Give them read access to the verification
+        # ticket like a manager would have, view-only (no send_messages), so they can watch
+        # proof come in without needing the global Managers role. Skip if they're already the
+        # worker (already has full access above) or unresolvable (legacy order, no owner set).
+        try:
+            owner_id = _market_owner_id(order.get("market_id"))
+        except Exception:
+            owner_id = None
+        if owner_id and owner_id != interaction.user.id:
+            owner_member = guild.get_member(owner_id)
+            if owner_member:
+                overwrites[owner_member] = discord.PermissionOverwrite(
+                    view_channel=True, read_message_history=True
+                )
         name = f"order-{order['id']}-verify"
 
         try:
@@ -1754,44 +1799,6 @@ class OrdersBrowser(View):
         return await interaction.response.send_message("🧾 **Your claims:**\n" + "\n".join(lines), ephemeral=True)
 
 
-class OrdersPaginator(View):
-    def __init__(self, pages):
-        super().__init__(timeout=120)
-        self.pages = pages
-        self.index = 0
-
-    async def update(self, interaction):
-        await interaction.response.edit_message(embed=self.pages[self.index], view=self)
-
-    @discord.ui.button(label="⏪", style=discord.ButtonStyle.secondary)
-    async def first(self, interaction, button):
-        self.index = 0
-        await self.update(interaction)
-
-    @discord.ui.button(label="◀️", style=discord.ButtonStyle.primary)
-    async def prev(self, interaction, button):
-        if self.index > 0:
-            self.index -= 1
-            await self.update(interaction)
-
-    @discord.ui.button(label="▶️", style=discord.ButtonStyle.primary)
-    async def next(self, interaction, button):
-        if self.index < len(self.pages) - 1:
-            self.index += 1
-            await self.update(interaction)
-
-    @discord.ui.button(label="⏩", style=discord.ButtonStyle.secondary)
-    async def last(self, interaction, button):
-        self.index = len(self.pages) - 1
-        await self.update(interaction)
-
-    @discord.ui.button(label="🔔 Remind…", style=discord.ButtonStyle.gray)
-    async def remind(self, interaction: discord.Interaction, button: Button):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", **ephemeral_kwargs(interaction))
-        await interaction.response.send_modal(RemindByIdModal())
-
-
 class ManagerPanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=300)
@@ -1800,12 +1807,10 @@ class ManagerPanelView(discord.ui.View):
     async def view_orders(self, interaction: discord.Interaction, button: Button):
         if not is_manager(interaction):
             return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
-
-        pages = build_orders_pages()
-        if not pages:
-            return await interaction.response.send_message("📭 No orders found.", ephemeral=True)
-
-        await interaction.response.send_message(embed=pages[0], view=OrdersPaginator(pages), ephemeral=True)
+        # Reuse the exact /orders renderer so the manager sees ONE consistent order UI
+        # everywhere (the "All Orders" list + OrdersBrowser dropdown), instead of the old
+        # bespoke paginated embed this panel used to build.
+        await orders_cmd(interaction)
 
     @discord.ui.button(label="🚨 Escalate order…", style=discord.ButtonStyle.danger)
     async def escalate_order_btn(self, interaction: discord.Interaction, button: Button):
@@ -1848,95 +1853,10 @@ class ManagerPanelView(discord.ui.View):
             ephemeral=True
         )
 
-    @discord.ui.button(label="🐝 Hive pickup status", style=discord.ButtonStyle.secondary)
-    async def hive_status_btn(self, interaction: discord.Interaction, button: Button):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
-
-        bid, batch = _get_latest_batch()
-        if not batch:
-            return await interaction.response.send_message("📭 No active hive pickup batch.", ephemeral=True)
-
-        lines = []
-        for site, info in (batch.get("sites") or {}).items():
-            if info:
-                lines.append(f"• **{site}** → {info.get('user_tag', 'unknown')}")
-            else:
-                lines.append(f"• **{site}** → ❌ unclaimed")
-
-        embed = discord.Embed(
-            title=f"📦 Hive Pickup Status — Batch #{bid}",
-            description="\n".join(lines) if lines else "—",
-            color=discord.Color.orange()
-        )
-        return await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    @discord.ui.button(label="🧹 Clear hive pickups", style=discord.ButtonStyle.danger)
-    async def hive_clear_btn(self, interaction: discord.Interaction, button: Button):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
-
-        _clear_all_hive_pickups()
-        try:
-            interaction.client._active_hive_batch = None
-        except Exception:
-            pass
-
-        return await interaction.response.send_message(
-            "🧹 All hive pickup batches and claims have been cleared.",
-            ephemeral=True
-        )
-
-    @discord.ui.button(label="💲 Set coin price", style=discord.ButtonStyle.primary)
-    async def set_coin_price_btn(self, interaction: discord.Interaction, button: Button):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
-
-        v = ItemPricePickerView()
-
-        try:
-            v._rebuild_options()
-        except Exception:
-            pass
-
-        embed = discord.Embed(
-            title="💲 Set coin price",
-            description="Pick an item from the dropdown to edit it (opens a pre-filled form).",
-            color=discord.Color.gold()
-        )
-        await interaction.response.send_message(embed=embed, view=v, ephemeral=True)
-
-    @discord.ui.button(label="📩 Funds report now", style=discord.ButtonStyle.secondary)
-    async def funds_report_now_btn(self, interaction: discord.Interaction, button: Button):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
-
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        try:
-            ok = await _send_funds_report(interaction.client)
-            total = _total_funds_coins()
-            await interaction.followup.send(
-                ("✅ Report sent." if ok else "⚠️ Failed to send report.")
-                + f" Total funds: **{total} coins**.",
-                ephemeral=True
-            )
-        except Exception as e:
-            await interaction.followup.send(f"❌ Funds report failed: {e}", ephemeral=True)
-
-    @discord.ui.button(label="💰 Apply interest now", style=discord.ButtonStyle.secondary)
-    async def interest_now_btn(self, interaction: discord.Interaction, button: Button):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
-
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        try:
-            applied_users, total_paid = apply_weekly_interest(force=True)
-            await interaction.followup.send(
-                f"✅ Interest applied. Users credited: **{applied_users}** · Total paid: **{total_paid} coins**.",
-                ephemeral=True
-            )
-        except Exception as e:
-            await interaction.followup.send(f"❌ Interest failed: {e}", ephemeral=True)
+    # Removed from the panel (2026-07-15): Hive pickup status, Clear hive pickups, Set coin
+    # price, Funds report now, Apply interest now. Interest & funds still run automatically on
+    # their weekly loops (cogs/loops.py); pricing is handled on the website + /item_set_price. The
+    # panel is now just the three order-management actions above.
 
 
 class FillMissingPricesModal(discord.ui.Modal):

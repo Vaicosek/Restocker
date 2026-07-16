@@ -1286,6 +1286,15 @@ _PAGE = """<!DOCTYPE html>
       <div style="font-size:11.5px;color:var(--faint);margin-top:8px">Applies when a manager approves an order tagged to this market. 1× = normal, no bonus. Same setting as <code>/market loyalty</code> in Discord — each market is independent.</div>
     </div>
     <div class="chart-card">
+      <div class="chart-title">Order builder <span style="color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0">— tick what you restock, tune each item's target %, then build the order</span></div>
+      <div id="ob-cats"></div>
+      <div class="empty" id="ob-empty" style="display:none">No stock scan on file for this market yet.</div>
+      <div style="display:flex;gap:12px;align-items:center;margin-top:12px">
+        <button class="auth-btn" id="ob-build">Build order</button>
+        <span id="ob-msg" style="font-size:12px;color:var(--muted)"></span>
+      </div>
+    </div>
+    <div class="chart-card">
       <div class="chart-title">Log manual restock <span style="color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0">— stock you added by hand (bought via /pay)</span></div>
       <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end">
         <div><div class="lblmini">Item</div><input id="rs-item" class="ownin" placeholder="Item name" list="owner-itemlist" style="width:200px"></div>
@@ -2469,9 +2478,84 @@ document.querySelectorAll(".nav-tab").forEach(tab => {
       if (r && r.ok) { mult.value = r.pts_mult; bonus.value = r.coin_bonus; }
     } catch (e) {}
   }
+  let obSaveTimer = null;
+  async function loadOrderBuilder(mid) {
+    const catsEl = document.getElementById("ob-cats");
+    const emptyEl = document.getElementById("ob-empty");
+    const buildBtn = document.getElementById("ob-build");
+    const msgEl = document.getElementById("ob-msg");
+    if (!catsEl) return;
+    catsEl.innerHTML = ""; if (msgEl) msgEl.textContent = "";
+    let r;
+    try { r = await fetch("/api/owner/catalog?market_id=" + encodeURIComponent(mid)).then(x => x.json()); }
+    catch (e) { r = { ok: false }; }
+    if (!r || !r.ok) { if (emptyEl) emptyEl.style.display = ""; return; }
+    const cats = r.categories || {};
+    const names = Object.keys(cats);
+    if (emptyEl) emptyEl.style.display = names.length ? "none" : "";
+    function scheduleSave(item, patch) {
+      clearTimeout(obSaveTimer);
+      obSaveTimer = setTimeout(() => {
+        post("/api/owner/set_target", Object.assign({ market_id: mid, item: item }, patch));
+      }, 500);
+    }
+    names.forEach(cat => {
+      const rows = cats[cat] || [];
+      if (!rows.length) return;
+      const wrap = document.createElement("div");
+      wrap.style.marginBottom = "14px";
+      const title = document.createElement("div");
+      title.style.cssText = "font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin:10px 0 6px";
+      title.textContent = cat + " (" + rows.length + ")";
+      wrap.appendChild(title);
+      rows.forEach(row => {
+        const line = document.createElement("div");
+        line.style.cssText = "display:flex;align-items:center;gap:10px;padding:5px 0;border-bottom:1px solid var(--border)";
+        const cb = document.createElement("input");
+        cb.type = "checkbox"; cb.checked = !!row.tracked;
+        cb.title = "Track this item in the order builder";
+        cb.onchange = () => scheduleSave(row.item, { tracked: cb.checked });
+        const name = document.createElement("span");
+        name.textContent = row.item; name.style.cssText = "flex:1;min-width:0";
+        const stockSpan = document.createElement("span");
+        stockSpan.style.cssText = "color:var(--muted);font-size:11.5px;min-width:90px;text-align:right";
+        stockSpan.textContent = num(row.stock) + " / " + num(row.capacity);
+        const pctIn = document.createElement("input");
+        pctIn.type = "number"; pctIn.min = 0; pctIn.max = 100;
+        pctIn.value = Math.round(row.target_pct); pctIn.className = "ownin"; pctIn.style.width = "64px";
+        pctIn.oninput = () => scheduleSave(row.item, { target_pct: Number(pctIn.value) });
+        const pctLbl = document.createElement("span");
+        pctLbl.textContent = "%"; pctLbl.style.color = "var(--muted)";
+        line.appendChild(cb); line.appendChild(name); line.appendChild(stockSpan);
+        line.appendChild(pctIn); line.appendChild(pctLbl);
+        wrap.appendChild(line);
+      });
+      catsEl.appendChild(wrap);
+    });
+    if (buildBtn) {
+      buildBtn.onclick = async () => {
+        buildBtn.disabled = true; if (msgEl) msgEl.textContent = "Checking…";
+        let prev;
+        try { prev = await post("/api/owner/build_order", { market_id: mid, apply: false }); }
+        catch (e) { prev = { ok: false, error: "network" }; }
+        if (!prev || !prev.ok) { buildBtn.disabled = false; if (msgEl) msgEl.textContent = (prev && prev.error) || "Failed."; return; }
+        if (!prev.count) { buildBtn.disabled = false; if (msgEl) msgEl.textContent = "Nothing to restock — every ticked item is at or above its target."; return; }
+        if (!confirm(`Create ${prev.count} restock order(s) for your ticked items?`)) {
+          buildBtn.disabled = false; if (msgEl) msgEl.textContent = ""; return;
+        }
+        if (msgEl) msgEl.textContent = "Creating…";
+        let res;
+        try { res = await post("/api/owner/build_order", { market_id: mid, apply: true }); }
+        catch (e) { res = { ok: false, error: "network" }; }
+        buildBtn.disabled = false;
+        if (msgEl) msgEl.textContent = (res && res.ok) ? `✅ Created ${res.created} order(s) — see the Orders tab.` : ((res && res.error) || "Failed.");
+      };
+    }
+  }
   async function loadInv(mid) {
     curMid = mid;
     loadLoyalty(mid);
+    loadOrderBuilder(mid);
     [...document.getElementById("owner-market-tabs").children].forEach(b => b.classList.toggle("active", b.dataset.mid === mid));
     const tb = document.getElementById("owner-tbody");
     const dl = document.getElementById("owner-itemlist");
@@ -3291,6 +3375,85 @@ async def _handle_owner_generate_orders(request):
     return web.json_response({"ok": True, "created": int(created), "items": preview})
 
 
+async def _handle_owner_catalog(request):
+    """Items grouped by category for the order-builder ('My Market' tab): stock, capacity,
+    target %, tracked — powers the ticked-item restock builder."""
+    mid = (request.query.get("market_id") or "").strip()
+    if not mid or not _require_owner(request, mid):
+        return web.json_response({"ok": False, "error": "Not authorized for this market."}, status=403)
+    import Restocker_main as m
+    try:
+        by_cat = m._market_catalog_by_category(mid)
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=500)
+    return web.json_response({"ok": True, "market_id": mid, "categories": by_cat})
+
+
+async def _handle_owner_set_target(request):
+    """Set (or partially update) one item's per-market restock target %/tracked flag.
+    Either field may be omitted so ticking a box doesn't reset a tuned %."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    mid = str(body.get("market_id") or "").strip()
+    item = str(body.get("item") or "").strip()
+    if not _csrf_ok(request):
+        return web.json_response({"ok": False, "error": "Bad or missing CSRF token."}, status=403)
+    if not _require_owner(request, mid):
+        return web.json_response({"ok": False, "error": "Not authorized."}, status=403)
+    if not item:
+        return web.json_response({"ok": False, "error": "Missing item."}, status=400)
+    raw_pct = body.get("target_pct")
+    try:
+        target_pct = None if raw_pct is None else max(0.0, min(100.0, float(raw_pct)))
+    except (TypeError, ValueError):
+        return web.json_response({"ok": False, "error": "target_pct must be a number."}, status=400)
+    raw_trk = body.get("tracked")
+    tracked = None if raw_trk is None else bool(raw_trk)
+    import Restocker_db as db
+    try:
+        db.set_market_item_target(mid, item, target_pct=target_pct, tracked=tracked)
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=500)
+    _CACHE.clear()
+    return web.json_response({"ok": True})
+
+
+async def _handle_owner_build_order(request):
+    """Build restock orders from this market's ticked items, each refilled to its own tuned
+    target %. apply=false returns a preview (same shape as generate_orders) without creating
+    orders."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    mid = str(body.get("market_id") or "").strip()
+    if not _csrf_ok(request):
+        return web.json_response({"ok": False, "error": "Bad or missing CSRF token."}, status=403)
+    if not _require_owner(request, mid):
+        return web.json_response({"ok": False, "error": "Not authorized."}, status=403)
+    import Restocker_main as m, Restocker_db as db
+    try:
+        targets = db.get_market_item_targets(mid) or {}
+        to_order, skipped_active, at_target = m._stock_refill_plan(mid, item_targets=targets)
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=500)
+    preview = [{"item": it, "qty": int(q)} for it, q, _ in to_order[:50]]
+    if not bool(body.get("apply", False)):
+        return web.json_response({"ok": True, "preview": True, "count": len(to_order),
+                                  "skipped_active": skipped_active, "at_target": at_target,
+                                  "items": preview})
+    if not to_order:
+        return web.json_response({"ok": True, "created": 0, "items": []})
+    try:
+        created = await m.run_on_bot_loop(m._create_restock_orders, to_order, mid)
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=500)
+    _CACHE.clear()
+    return web.json_response({"ok": True, "created": int(created), "items": preview})
+
+
 async def _handle_api_order(request):
     """A logged-in customer places an order from the website (catalog items only, multi-item
     cart). Saved to web_orders and posted to the web-orders Discord channel for the normal
@@ -3484,6 +3647,9 @@ async def start_webserver(port: int = 8080):
     app.router.add_get("/api/owner/loyalty",       _handle_owner_get_loyalty)
     app.router.add_post("/api/owner/set_loyalty",  _handle_owner_set_loyalty)
     app.router.add_post("/api/owner/generate_orders", _handle_owner_generate_orders)
+    app.router.add_get("/api/owner/catalog",       _handle_owner_catalog)
+    app.router.add_post("/api/owner/set_target",   _handle_owner_set_target)
+    app.router.add_post("/api/owner/build_order",  _handle_owner_build_order)
     app.router.add_post("/api/order",    _handle_api_order)
     app.router.add_get("/api/network/orders", _handle_network_orders)
     app.router.add_post("/api/network/claim", _handle_network_claim)

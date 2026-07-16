@@ -77,6 +77,16 @@ class StockCog(commands.Cog):
         embed.add_field(name="Shares Outstanding", value=f"`{listing['shares_outstanding']:,.0f}`", inline=True)
         embed.add_field(name="P/E Multiplier", value=f"`{listing['pe_multiplier']:,.1f}x`", inline=True)
         embed.add_field(name="Last Priced", value=str(listing.get("last_priced_month") or "—"), inline=True)
+        # Backing summary folded in here (the standalone /stock backing command was retired
+        # 2026-07-15). _market_backing() still powers /stock delist.
+        try:
+            b = _market_backing(market_id)
+            backed = f"**{b['total_pct']:.1f}%** of cap (target {b['target_pct']:.0f}%)"
+            if not b["ok"]:
+                backed += " · ⚠ under-backed"
+            embed.add_field(name="Backed", value=backed, inline=False)
+        except Exception:
+            pass
         if history:
             lines = [f"`{h['price']:,.2f}` 🪙 — {h['reason'] or '?'} ({h['logged_at']})" for h in history]
             embed.add_field(name="Recent Price Changes", value="\n".join(lines), inline=False)
@@ -169,31 +179,8 @@ class StockCog(commands.Cog):
         embed.add_field(name="Unrealized P/L", value=f"`{(total_value - total_cost):+,.0f}` 🪙", inline=True)
         await interaction.response.send_message(embed=embed, ephemeral=(target.id == interaction.user.id))
 
-    @stock.command(name="holders", description="(Manager/Owner) List who owns shares of a market")
-    @app_commands.describe(market_id="The market to check")
-    @app_commands.autocomplete(market_id=_public_market_autocomplete)
-    async def stock_holders(self, interaction: discord.Interaction, market_id: str):
-        if not _is_market_manager(interaction, market_id):
-            return await interaction.response.send_message(
-                "⛔ Managers or this market's owner/managers only.", ephemeral=True
-            )
-
-        import Restocker_db as _db
-        holders = _db.get_holders(market_id)
-        if not holders:
-            return await interaction.response.send_message(f"📭 Nobody holds shares of `{market_id}` yet.", ephemeral=True)
-
-        lines = []
-        for h in holders:
-            try:
-                member = interaction.guild.get_member(int(h["user_id"])) if interaction.guild else None
-            except Exception:
-                member = None
-            label = member.mention if member else f"`{h['user_id']}`"
-            lines.append(f"{label} — `{h['shares']:,.0f}` shares (cost basis `{h['cost_basis']:,.0f}` 🪙)")
-
-        embed = discord.Embed(title=f"👥 Holders of `{market_id}`", description="\n".join(lines[:25]), color=0x9B59B6)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+    # /stock holders removed 2026-07-15 (economy not advanced enough yet). The DB helper
+    # get_holders() stays — set_params still uses it. Restore the command from git history.
 
     @stock.command(
         name="set_params",
@@ -233,79 +220,11 @@ class StockCog(commands.Cog):
         shown_price = price if price is not None else listing["share_price"]
         await interaction.response.send_message(f"✅ `{market_id}` updated. New share price: `{shown_price:,.2f}` 🪙.")
 
-    @stock.command(name="limit_buy", description="Place a trigger order: buy when the price falls to or below your max")
-    @app_commands.describe(market_id="Public market", shares="How many shares", max_price="Fill when price is at or below this")
-    @app_commands.autocomplete(market_id=_public_market_autocomplete)
-    async def stock_limit_buy(self, interaction: discord.Interaction, market_id: str,
-                              shares: app_commands.Range[int, 1, 1_000_000],
-                              max_price: app_commands.Range[float, 0.01, 100_000_000.0]):
-        if not STOCK_LIMIT_ORDERS_ENABLED:
-            return await interaction.response.send_message("❌ Limit orders are disabled.", ephemeral=True)
-        import Restocker_db as _db
-        listing = _db.get_market_shares(market_id)
-        if not listing or not listing.get("active"):
-            return await interaction.response.send_message(f"❌ `{market_id}` isn't public.", ephemeral=True)
-        oid = _db.add_limit_order(interaction.user.id, market_id, "buy", int(shares), float(max_price))
-        _remember_holder_name(interaction.user.id, interaction.user.display_name)
-        _check_limit_orders(market_id)
-        o = _db.get_limit_order(oid)
-        if o and o.get("status") == "filled":
-            return await interaction.response.send_message(
-                f"✅ Limit buy #{oid} filled instantly at `{float(o['fill_price']):,.2f}` 🪙/share.", ephemeral=True)
-        await interaction.response.send_message(
-            f"🧾 Limit **buy** #{oid}: `{int(shares):,}` shares of `{market_id}` when price ≤ `{float(max_price):,.2f}` 🪙. "
-            f"You need the coins in your wallet when it triggers, or it's cancelled. "
-            f"Cancel anytime with `/stock limit_cancel order_id:{oid}`.", ephemeral=True)
-
-    @stock.command(name="limit_sell", description="Place a trigger order: sell when the price rises to or above your min")
-    @app_commands.describe(market_id="Public market", shares="How many shares", min_price="Fill when price is at or above this")
-    @app_commands.autocomplete(market_id=_public_market_autocomplete)
-    async def stock_limit_sell(self, interaction: discord.Interaction, market_id: str,
-                               shares: app_commands.Range[int, 1, 1_000_000],
-                               min_price: app_commands.Range[float, 0.01, 100_000_000.0]):
-        if not STOCK_LIMIT_ORDERS_ENABLED:
-            return await interaction.response.send_message("❌ Limit orders are disabled.", ephemeral=True)
-        import Restocker_db as _db
-        listing = _db.get_market_shares(market_id)
-        if not listing or not listing.get("active"):
-            return await interaction.response.send_message(f"❌ `{market_id}` isn't public.", ephemeral=True)
-        oid = _db.add_limit_order(interaction.user.id, market_id, "sell", int(shares), float(min_price))
-        _remember_holder_name(interaction.user.id, interaction.user.display_name)
-        _check_limit_orders(market_id)
-        o = _db.get_limit_order(oid)
-        if o and o.get("status") == "filled":
-            return await interaction.response.send_message(
-                f"✅ Limit sell #{oid} filled instantly at `{float(o['fill_price']):,.2f}` 🪙/share.", ephemeral=True)
-        await interaction.response.send_message(
-            f"🧾 Limit **sell** #{oid}: `{int(shares):,}` shares of `{market_id}` when price ≥ `{float(min_price):,.2f}` 🪙. "
-            f"You need the shares when it triggers, or it's cancelled. "
-            f"Cancel anytime with `/stock limit_cancel order_id:{oid}`.", ephemeral=True)
-
-    @stock.command(name="limit_list", description="See your open limit / trigger orders")
-    async def stock_limit_list(self, interaction: discord.Interaction):
-        import Restocker_db as _db
-        orders = _db.get_user_limit_orders(interaction.user.id, include_resolved=False)
-        if not orders:
-            return await interaction.response.send_message("📭 You have no open limit orders.", ephemeral=True)
-        lines = []
-        for o in orders:
-            cond = "≤" if o["side"] == "buy" else "≥"
-            lines.append(f"#{o['id']} · **{o['side']}** `{int(o['shares']):,}` `{o['market_id']}` "
-                         f"when price {cond} `{float(o['limit_price']):,.2f}` 🪙")
-        embed = discord.Embed(title="🧾 Your open limit orders", description="\n".join(lines), color=0x3498DB)
-        embed.set_footer(text="Cancel one with /stock limit_cancel order_id:<id>")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    @stock.command(name="limit_cancel", description="Cancel one of your open limit / trigger orders")
-    @app_commands.describe(order_id="The order # from /stock limit_list")
-    async def stock_limit_cancel(self, interaction: discord.Interaction, order_id: int):
-        import Restocker_db as _db
-        ok = _db.cancel_limit_order(int(order_id), user_id=interaction.user.id, reason="cancelled_by_user")
-        if ok:
-            await interaction.response.send_message(f"✅ Cancelled limit order #{order_id}.", ephemeral=True)
-        else:
-            await interaction.response.send_message(
-                f"❌ Couldn't cancel #{order_id} — it isn't open, or isn't yours.", ephemeral=True)
+    # /stock limit_buy, limit_sell, limit_list, limit_cancel removed 2026-07-15 — limit/trigger
+    # orders are more than this economy needs yet ("we're not that far"). The engine is left
+    # intact (STOCK_LIMIT_ORDERS_ENABLED flag, _db.add_limit_order / get_limit_order /
+    # get_user_limit_orders / cancel_limit_order, _check_limit_orders), so restoring the four
+    # commands later is just a git revert of this block.
 
     @stock.command(name="dividends", description="Show (or set) a market's shareholder dividend payout")
     @app_commands.describe(market_id="Public market",
@@ -378,28 +297,9 @@ class StockCog(commands.Cog):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-    @stock.command(name="backing", description="How well a stock is backed (cash + assets + exchange fund)")
-    @app_commands.describe(market_id="The public market")
-    @app_commands.autocomplete(market_id=_public_market_autocomplete)
-    async def backing(self, interaction: discord.Interaction, market_id: str):
-        b = _market_backing(market_id)
-        m = _get_market(market_id) or {}
-        color = 0x22FF7A if b["ok"] else 0xE5A13A
-        embed = discord.Embed(title=f"🛡️ Backing — {m.get('name', market_id)}", color=color)
-        embed.add_field(name="Cash (treasury)",
-                        value=f"`{int(b['cash']):,}` · {b['cash_pct']:.1f}% / {STOCK_BACK_CASH_PCT:g}%", inline=True)
-        embed.add_field(name="Assets (inventory)",
-                        value=f"`{int(b['assets']):,}` · {b['asset_pct']:.1f}% / {STOCK_BACK_ASSET_PCT:g}%", inline=True)
-        embed.add_field(name="Exchange fund",
-                        value=f"`{int(b['fund_share']):,}` · {b['fund_pct']:.1f}% / {STOCK_BACK_FUND_PCT:g}%", inline=True)
-        embed.add_field(name="Total backed",
-                        value=f"**{b['total_pct']:.1f}%** of `{int(b['mcap']):,}` cap (target {b['target_pct']:.0f}%)",
-                        inline=False)
-        if not b["ok"]:
-            embed.add_field(name="⚠ Under-backed",
-                            value="Below target — higher loss for shareholders if it goes bankrupt.", inline=False)
-        embed.set_footer(text=f"Central exchange insurance fund: {int(_get_insurance_fund()):,} coins")
-        await interaction.response.send_message(embed=embed)
+    # /stock backing removed 2026-07-15 — its headline number (total backed % vs target) now
+    # shows inside /stock price. _market_backing() stays (delist still uses it); restore the
+    # full breakdown command from git history if the detail is wanted again.
 
     @stock.command(name="delist",
                    description="(Manager/Owner) Bankrupt + delist a market, paying shareholders from its backing")

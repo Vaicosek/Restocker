@@ -24,6 +24,14 @@ LOYALTY_EMPLOYEE_ROLES = core.LOYALTY_EMPLOYEE_ROLES
 LOYALTY_IGN_DEADLINE_DAYS = getattr(core, "LOYALTY_IGN_DEADLINE_DAYS", 3)
 MANAGER_DM_IDS         = getattr(core, "MANAGER_DM_IDS", set())
 log                    = getattr(core, "log", None)
+_market_autocomplete   = core._market_autocomplete
+_markets_owned_by      = core._markets_owned_by
+_get_market            = core._get_market
+_award_market_loyalty_points = core._award_market_loyalty_points
+
+# How many in-game names (main + alts) one Discord user may register. Generous by design —
+# several owners run 8+ alts. Env-overridable via core if ever needed.
+MAX_IGNS_PER_USER = int(getattr(core, "MAX_IGNS_PER_USER", 12))
 
 
 # ── Loyalty reward redemptions (points → real reward) ─────────────────────────
@@ -77,7 +85,12 @@ class LoyaltyCog(commands.Cog):
         total = float(rec.get("total_earned", 0))
         tier = _loyalty_tier(pts)
         next_tier = next((t for t in LOYALTY_TIERS if t["min_pts"] > pts), None)
-        ign = _db_ls.get_ign(str(target.id)) or "*Not registered*"
+        igns = _db_ls.get_igns(str(target.id))
+        if igns:
+            # Primary (earliest) first with a ★; alts after. All pool into this one account.
+            ign_val = ", ".join((f"`{g}` ★" if i == 0 else f"`{g}`") for i, g in enumerate(igns))
+        else:
+            ign_val = "*Not registered*"
 
         embed = discord.Embed(
             title=f"{TIER_EMOJIS.get(tier['tier'], '⭐')} {target.display_name} — {tier['name']}",
@@ -85,7 +98,8 @@ class LoyaltyCog(commands.Cog):
         )
         embed.add_field(name="Points", value=f"`{pts:,.0f}`", inline=True)
         embed.add_field(name="All-time Earned", value=f"`{total:,.0f}`", inline=True)
-        embed.add_field(name="IGN", value=f"`{ign}`", inline=True)
+        embed.add_field(name=(f"IGNs ({len(igns)})" if len(igns) > 1 else "IGN"),
+                        value=ign_val, inline=(len(igns) <= 1))
         embed.add_field(name="Interest Rate", value=f"`{tier['interest_weekly_pct']}%/week`", inline=True)
         embed.add_field(name="Payout Bonus", value=f"`+{tier['payout_bonus_pct']}%`", inline=True)
         if next_tier:
@@ -101,6 +115,19 @@ class LoyaltyCog(commands.Cog):
             for t in LOYALTY_TIERS
         )
         embed.add_field(name="All Tiers", value=tiers_str, inline=False)
+
+        # Per-market ledgers (Stage 4) — each market's OWN reward currency, separate from
+        # the shared V Tech pool above.
+        mkt_rows = _db_ls.get_all_market_loyalty_for_user(str(target.id))
+        if mkt_rows:
+            lines = []
+            for r in mkt_rows[:8]:
+                mname = (_get_market(r["market_id"]) or {}).get("name", r["market_id"])
+                lines.append(f"• **{mname}** — `{float(r.get('points', 0) or 0):,.0f}` pts")
+            if len(mkt_rows) > 8:
+                lines.append(f"… and {len(mkt_rows) - 8} more")
+            embed.add_field(name="🏪 Market Points", value="\n".join(lines), inline=False)
+
         await interaction.response.send_message(embed=embed)
 
     @loyalty.command(name="leaderboard", description="Top loyalty point holders")
@@ -120,20 +147,38 @@ class LoyaltyCog(commands.Cog):
         embed = discord.Embed(title="🏆 Loyalty Leaderboard", description="\n".join(lines), color=0xF1C40F)
         await interaction.response.send_message(embed=embed)
 
-    @loyalty.command(name="register_ign", description="Register your Minecraft in-game username")
-    @app_commands.describe(ign="Your Minecraft username (exact, case-sensitive)")
+    @loyalty.command(name="register_ign",
+                     description="Register a Minecraft in-game name — run again to add alt accounts")
+    @app_commands.describe(ign="Your Minecraft username (a main or an alt — alts pool into your one account)")
     async def loyalty_register_ign(self, interaction: discord.Interaction, ign: str):
         import re as _re2, Restocker_db as _db_ri
+        ign = ign.strip()
         if not _re2.match(r"^[A-Za-z0-9_]{3,16}$", ign):
             return await interaction.response.send_message(
                 "❌ Invalid IGN. Must be 3-16 characters: letters, numbers, underscores.", ephemeral=True)
+        uid = str(interaction.user.id)
         existing = _db_ri.get_user_id_by_ign(ign)
-        if existing and existing != str(interaction.user.id):
+        if existing and existing != uid:
             return await interaction.response.send_message(
                 f"❌ `{ign}` is already registered to someone else.", ephemeral=True)
-        _db_ri.set_ign(str(interaction.user.id), ign)
-        _db_ri.delete_ign_pending(str(interaction.user.id))
-        await interaction.response.send_message(f"✅ IGN **{ign}** registered! You're all set.", ephemeral=True)
+        if existing == uid:
+            have = _db_ri.get_igns(uid)
+            return await interaction.response.send_message(
+                f"ℹ️ You've already got `{ign}` registered. Your IGNs: "
+                + ", ".join(f"`{g}`" for g in have), ephemeral=True)
+        if _db_ri.count_igns(uid) >= MAX_IGNS_PER_USER:
+            return await interaction.response.send_message(
+                f"❌ You've hit the max of **{MAX_IGNS_PER_USER}** in-game names. "
+                f"Ask a manager to `/loyalty unlink` one you no longer use first.", ephemeral=True)
+        _db_ri.add_ign(uid, ign)
+        _db_ri.delete_ign_pending(uid)
+        igns = _db_ri.get_igns(uid)
+        if len(igns) == 1:
+            msg = f"✅ IGN **{ign}** registered! You're all set."
+        else:
+            msg = (f"✅ Added alt **{ign}**. You now have **{len(igns)}** in-game names, all "
+                   f"pooling into this one account:\n" + ", ".join(f"`{g}`" for g in igns))
+        await interaction.response.send_message(msg, ephemeral=True)
 
     @loyalty.command(name="unlinked", description="(Manager) List employees who haven't linked their Minecraft IGN")
     async def loyalty_unlinked(self, interaction: discord.Interaction):
@@ -281,8 +326,8 @@ class LoyaltyCog(commands.Cog):
                     + "\nThose need `/loyalty link <user> <ign>` manually.")
         await interaction.followup.send(msg[:1900], ephemeral=True)
 
-    @loyalty.command(name="link", description="(Manager) Link a member to their Minecraft IGN")
-    @app_commands.describe(user="The Discord member", ign="Their EXACT Minecraft username (case-sensitive)")
+    @loyalty.command(name="link", description="(Manager) Link a member to a Minecraft IGN — run again to add their alts")
+    @app_commands.describe(user="The Discord member", ign="An EXACT Minecraft username of theirs (main or alt)")
     async def loyalty_link(self, interaction: discord.Interaction, user: discord.Member, ign: str):
         if not is_manager(interaction):
             return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
@@ -294,27 +339,48 @@ class LoyaltyCog(commands.Cog):
         owner = _db_lk.get_user_id_by_ign(ign)
         if owner and owner != str(user.id):
             return await interaction.response.send_message(
-                f"❌ `{ign}` is already linked to <@{owner}>. Unlink them first if this is a mistake.",
+                f"❌ `{ign}` is already linked to <@{owner}>. Unlink it from them first if this is a mistake.",
                 ephemeral=True)
-        old = _db_lk.get_ign(str(user.id))
-        _db_lk.set_ign(str(user.id), ign)
+        if owner == str(user.id):
+            return await interaction.response.send_message(
+                f"ℹ️ {user.mention} already has `{ign}` linked.", ephemeral=True)
+        if _db_lk.count_igns(str(user.id)) >= MAX_IGNS_PER_USER:
+            return await interaction.response.send_message(
+                f"❌ {user.mention} already has the max of **{MAX_IGNS_PER_USER}** IGNs. "
+                f"Unlink one first.", ephemeral=True)
+        _db_lk.add_ign(str(user.id), ign)
         _db_lk.delete_ign_pending(str(user.id))
-        note = f" (was `{old}`)" if old and old != ign else ""
+        igns = _db_lk.get_igns(str(user.id))
+        extra = (f" They now have **{len(igns)}**: " + ", ".join(f"`{g}`" for g in igns)) if len(igns) > 1 else ""
         await interaction.response.send_message(
-            f"🔗 Linked {user.mention} → **{ign}**{note}. Their CSN sales now credit them.")
+            f"🔗 Linked {user.mention} → **{ign}**. Their CSN sales now credit them.{extra}")
 
-    @loyalty.command(name="unlink", description="(Manager) Remove a member's IGN link")
-    @app_commands.describe(user="The Discord member to unlink")
-    async def loyalty_unlink(self, interaction: discord.Interaction, user: discord.Member):
+    @loyalty.command(name="unlink", description="(Manager) Remove a member's IGN — one specific alt, or all of them")
+    @app_commands.describe(user="The Discord member to unlink",
+                           ign="(Optional) remove just this one IGN. Leave blank to remove ALL of theirs.")
+    async def loyalty_unlink(self, interaction: discord.Interaction, user: discord.Member,
+                             ign: Optional[str] = None):
         if not is_manager(interaction):
             return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
         import Restocker_db as _db_ulk
-        old = _db_ulk.get_ign(str(user.id))
-        if not old:
+        current = _db_ulk.get_igns(str(user.id))
+        if not current:
             return await interaction.response.send_message(
                 f"{user.mention} has no IGN linked.", ephemeral=True)
+        if ign:
+            ign = ign.strip()
+            if _db_ulk.remove_ign(str(user.id), ign):
+                left = _db_ulk.get_igns(str(user.id))
+                left_txt = ", ".join(f"`{g}`" for g in left) if left else "*none left*"
+                return await interaction.response.send_message(
+                    f"🔓 Removed `{ign}` from {user.mention}. Remaining: {left_txt}.")
+            return await interaction.response.send_message(
+                f"❌ {user.mention} has no IGN `{ign}`. They have: "
+                + ", ".join(f"`{g}`" for g in current), ephemeral=True)
         _db_ulk.delete_ign(str(user.id))
-        await interaction.response.send_message(f"🔓 Unlinked {user.mention} (was `{old}`).")
+        await interaction.response.send_message(
+            f"🔓 Unlinked {user.mention} — removed all **{len(current)}** IGN(s) "
+            f"(was: {', '.join(f'`{g}`' for g in current)}).")
 
     @loyalty.command(name="set_points", description="(Manager) Manually set a user's loyalty points")
     @app_commands.describe(user="The user", points="New point total")
@@ -340,9 +406,12 @@ class LoyaltyCog(commands.Cog):
         )
 
 
-    @loyalty.command(name="redeem", description="Redeem your loyalty points for a reward (a manager pays it out)")
-    @app_commands.describe(points="How many points to redeem", reward="What you want (e.g. '5000 coins', 'a diamond block')")
-    async def loyalty_redeem(self, interaction: discord.Interaction, points: int, reward: str):
+    @loyalty.command(name="redeem", description="Redeem your loyalty points for a reward (a manager or market owner pays it out)")
+    @app_commands.describe(points="How many points to redeem", reward="What you want (e.g. '5000 coins', 'a diamond block')",
+                           market="Redeem from a specific market's own points instead of the shared V Tech pool")
+    @app_commands.autocomplete(market=_market_autocomplete)
+    async def loyalty_redeem(self, interaction: discord.Interaction, points: int, reward: str,
+                             market: Optional[str] = None):
         import Restocker_db as _db
         from datetime import datetime, timezone
         if points <= 0:
@@ -350,34 +419,54 @@ class LoyaltyCog(commands.Cog):
         reward = (reward or "").strip()
         if not reward:
             return await interaction.response.send_message("❌ Say what you'd like to redeem for.", ephemeral=True)
-        have = float(_db.get_loyalty(str(interaction.user.id)).get("points", 0) or 0)
+        if market and not _get_market(market):
+            return await interaction.response.send_message(
+                f"❌ Market `{market}` not found. See `/market list`.", ephemeral=True)
+        if market:
+            have = float(_db.get_market_loyalty(str(interaction.user.id), market).get("points", 0) or 0)
+        else:
+            have = float(_db.get_loyalty(str(interaction.user.id)).get("points", 0) or 0)
+        pool_name = (_get_market(market) or {}).get("name", market) if market else "V Tech pool"
         if have < points:
             return await interaction.response.send_message(
-                f"❌ You only have **{have:,.0f}** points — can't redeem **{points:,}**.", ephemeral=True)
-        # Guard against stacking pending requests beyond your balance.
+                f"❌ You only have **{have:,.0f}** points in **{pool_name}** — can't redeem **{points:,}**.", ephemeral=True)
+        # Guard against stacking pending requests beyond your balance, per pool.
         reds = _load_redemptions()
         pending_pts = sum(int(r.get("points", 0)) for r in reds.values()
-                          if str(r.get("user_id")) == str(interaction.user.id) and r.get("status") == "pending")
+                          if str(r.get("user_id")) == str(interaction.user.id) and r.get("status") == "pending"
+                          and str(r.get("market_id") or "") == str(market or ""))
         if pending_pts + points > have:
             return await interaction.response.send_message(
-                f"❌ You already have **{pending_pts:,}** points in pending redemptions. "
+                f"❌ You already have **{pending_pts:,}** points in pending redemptions from **{pool_name}**. "
                 f"That plus **{points:,}** exceeds your **{have:,.0f}**.", ephemeral=True)
         rid = _next_redemption_id(reds)
         reds[str(rid)] = {
             "id": rid, "user_id": str(interaction.user.id), "user_tag": str(interaction.user),
             "points": int(points), "reward": reward, "status": "pending",
+            "market_id": market or None,
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
         _save_redemptions(reds)
+        payer = "This market's owner" if market else "A manager"
         await interaction.response.send_message(
-            f"🎟️ **Redemption #{rid}** submitted — **{points:,}** pts for *{reward}*.\n"
-            f"A manager will pay it out and approve it here; your points are deducted on approval.",
+            f"🎟️ **Redemption #{rid}** submitted — **{points:,}** pts from **{pool_name}** for *{reward}*.\n"
+            f"{payer} will pay it out and approve it here; your points are deducted on approval.",
             ephemeral=True)
-        # Notify managers so someone actions it.
-        note = (f"🎟️ **New loyalty redemption #{rid}**\n"
+        # Notify: the market's own owner if this is a market-scoped redemption (they're the
+        # one who pays it — "each market owner ... handles their own loyalty rewards"),
+        # otherwise every global manager as before.
+        note = (f"🎟️ **New loyalty redemption #{rid}**{f' — {pool_name}' if market else ''}\n"
                 f"{interaction.user.mention} wants **{points:,}** pts → *{reward}*\n"
                 f"Pay them, then run `/loyalty approve id:{rid}` (or `/loyalty deny id:{rid}`).")
-        for mid in MANAGER_DM_IDS:
+        notify_ids = set(MANAGER_DM_IDS)
+        if market:
+            owner_id = (_get_market(market) or {}).get("owner_id")
+            if owner_id:
+                try:
+                    notify_ids.add(int(owner_id))
+                except (TypeError, ValueError):
+                    pass
+        for mid in notify_ids:
             try:
                 u = await interaction.client.fetch_user(int(mid))
                 await u.send(note)
@@ -389,62 +478,84 @@ class LoyaltyCog(commands.Cog):
         except Exception:
             pass
 
-    @loyalty.command(name="redemptions", description="(Manager) List pending loyalty redemptions")
+    def _can_action_redemption(self, interaction: discord.Interaction, r: dict) -> bool:
+        """A global manager can action any redemption. A market-scoped redemption can ALSO
+        be actioned by that market's own owner/manager — "each market owner ... handles
+        their own loyalty rewards" (Stage 4)."""
+        if is_manager(interaction):
+            return True
+        mid = r.get("market_id")
+        return bool(mid) and mid in _markets_owned_by(interaction.user.id)
+
+    @loyalty.command(name="redemptions", description="List pending loyalty redemptions (managers see all; owners see their market's)")
     async def loyalty_redemptions(self, interaction: discord.Interaction):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
         reds = _load_redemptions()
         pending = [r for r in reds.values() if r.get("status") == "pending"]
+        if not is_manager(interaction):
+            owned = _markets_owned_by(interaction.user.id)
+            pending = [r for r in pending if r.get("market_id") and r["market_id"] in owned]
+            if not pending:
+                return await interaction.response.send_message(
+                    "⛔ Managers only, or the owner of the market a redemption is scoped to.", ephemeral=True)
         pending.sort(key=lambda r: int(r.get("id", 0)))
         if not pending:
             return await interaction.response.send_message("✅ No pending redemptions.", ephemeral=True)
-        lines = [f"**#{r['id']}** — <@{r['user_id']}> · **{int(r['points']):,}** pts → *{r['reward']}*"
-                 for r in pending[:25]]
+        lines = []
+        for r in pending[:25]:
+            mid = r.get("market_id")
+            tag = f" · {(_get_market(mid) or {}).get('name', mid)}" if mid else " · V Tech pool"
+            lines.append(f"**#{r['id']}** — <@{r['user_id']}> · **{int(r['points']):,}** pts → *{r['reward']}*{tag}")
         await interaction.response.send_message(
             "🎟️ **Pending redemptions**\n" + "\n".join(lines) +
             "\n\nApprove with `/loyalty approve id:<#>` (deducts points) or `/loyalty deny id:<#>`.",
             ephemeral=True)
 
-    @loyalty.command(name="approve", description="(Manager) Approve a redemption — deducts the points")
+    @loyalty.command(name="approve", description="(Manager/market owner) Approve a redemption — deducts the points")
     @app_commands.describe(id="Redemption ID from /loyalty redemptions")
     async def loyalty_approve(self, interaction: discord.Interaction, id: int):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
         import Restocker_db as _db
         reds = _load_redemptions()
         r = reds.get(str(id))
         if not r:
             return await interaction.response.send_message(f"❌ No redemption #{id}.", ephemeral=True)
+        if not self._can_action_redemption(interaction, r):
+            return await interaction.response.send_message(
+                "⛔ Managers only, or the owner of the market this redemption is scoped to.", ephemeral=True)
         if r.get("status") != "pending":
             return await interaction.response.send_message(
                 f"⚠️ Redemption #{id} is already **{r.get('status')}**.", ephemeral=True)
-        uid = str(r["user_id"]); pts = int(r["points"])
-        have = float(_db.get_loyalty(uid).get("points", 0) or 0)
+        uid = str(r["user_id"]); pts = int(r["points"]); mid = r.get("market_id")
+        pool_name = (_get_market(mid) or {}).get("name", mid) if mid else "V Tech pool"
+        have = (float(_db.get_market_loyalty(uid, mid).get("points", 0) or 0) if mid
+                else float(_db.get_loyalty(uid).get("points", 0) or 0))
         if have < pts:
             return await interaction.response.send_message(
-                f"❌ <@{uid}> now only has **{have:,.0f}** pts — can't deduct **{pts:,}**. "
+                f"❌ <@{uid}> now only has **{have:,.0f}** pts in **{pool_name}** — can't deduct **{pts:,}**. "
                 f"Deny it or ask them to re-submit.", ephemeral=True)
-        new_total = _db.add_loyalty_points(uid, -pts, update_activity=False)
+        new_total = (_db.add_market_loyalty_points(uid, mid, -pts, update_activity=False) if mid
+                    else _db.add_loyalty_points(uid, -pts, update_activity=False))
         r["status"] = "approved"; r["approved_by"] = str(interaction.user.id)
         _save_redemptions(reds)
         await interaction.response.send_message(
-            f"✅ Approved **#{id}** — deducted **{pts:,}** pts from <@{uid}> (now `{new_total:,.0f}`).", ephemeral=True)
+            f"✅ Approved **#{id}** — deducted **{pts:,}** pts from <@{uid}>'s **{pool_name}** balance "
+            f"(now `{new_total:,.0f}`).", ephemeral=True)
         try:
             u = await interaction.client.fetch_user(int(uid))
             await u.send(f"✅ Your redemption **#{id}** (*{r['reward']}*) was approved — "
-                         f"**{pts:,}** points deducted. Enjoy your reward!")
+                         f"**{pts:,}** points deducted from **{pool_name}**. Enjoy your reward!")
         except Exception:
             pass
 
-    @loyalty.command(name="deny", description="(Manager) Deny a redemption (no points deducted)")
+    @loyalty.command(name="deny", description="(Manager/market owner) Deny a redemption (no points deducted)")
     @app_commands.describe(id="Redemption ID", reason="Optional reason shown to the user")
     async def loyalty_deny(self, interaction: discord.Interaction, id: int, reason: str = ""):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
         reds = _load_redemptions()
         r = reds.get(str(id))
         if not r:
             return await interaction.response.send_message(f"❌ No redemption #{id}.", ephemeral=True)
+        if not self._can_action_redemption(interaction, r):
+            return await interaction.response.send_message(
+                "⛔ Managers only, or the owner of the market this redemption is scoped to.", ephemeral=True)
         if r.get("status") != "pending":
             return await interaction.response.send_message(
                 f"⚠️ Redemption #{id} is already **{r.get('status')}**.", ephemeral=True)
