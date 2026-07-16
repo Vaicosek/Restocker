@@ -6555,6 +6555,68 @@ def _add_platform_fee(amount: int, *, market_id: str, month: str, note: str = ""
     return data["balance"]
 
 
+# ── Platform fees — canonical charge path (dormant until switched on) ───────────────────
+def _fees_active() -> bool:
+    """Are platform fees live? Runtime override (bot_config 'fees_active', set by
+    /fees toggle) wins; falls back to the PLATFORM_FEE_ACTIVE env default. Fees stay OFF
+    until explicitly enabled, so every charge point below is a no-op today."""
+    try:
+        import Restocker_db as _db
+        raw = _db.get_config("fees_active")
+        if raw is not None and str(raw).strip() != "":
+            return str(raw).strip().lower() in ("1", "true", "yes", "on")
+    except Exception:
+        pass
+    return PLATFORM_FEE_ACTIVE
+
+
+def _credit_platform_balance(amount: int, *, market_id: str = "", note: str = "",
+                             month: str = None) -> int:
+    """Credit the platform's fee balance: DB store (durable, logged) + the legacy YAML
+    mirror (_load_platform_balance readers). ALL fee money must flow through here so the
+    two stores can never drift apart again."""
+    amt = int(amount or 0)
+    if amt <= 0:
+        return 0
+    mk = month or _current_month_key()
+    try:
+        import Restocker_db as _db
+        _db.set_platform_balance(_db.get_platform_balance() + amt)
+        _db.add_platform_balance_log(mk, market_id or "", float(amt), note or "")
+    except Exception as e:
+        log.warning("[fees] DB credit failed (%s) — YAML mirror still updated", e)
+    try:
+        _add_platform_fee(amt, market_id=market_id or "", month=mk, note=note or "")
+    except Exception as e:
+        log.warning("[fees] YAML mirror credit failed: %s", e)
+    return amt
+
+
+def _charge_platform_fee(base_amount, *, market_id: str = None, note: str = "",
+                         month: str = None, force: bool = False) -> int:
+    """Charge the platform fee on a base amount: fee = base × the market's platform_fee_pct
+    (falling back to the global default). Returns the fee actually credited, or 0 when fees
+    are inactive (the normal state today) — callers can wire this in now and it stays inert
+    until /fees toggle flips it live. force=True bypasses the switch for explicit manual
+    charges. NOTE: this only LEDGERS the fee — deducting the coins from whoever owes it is
+    the caller's business (e.g. netting it out of a payout, or /fees charge)."""
+    try:
+        base = float(base_amount or 0)
+    except (TypeError, ValueError):
+        return 0
+    if base <= 0 or not (force or _fees_active()):
+        return 0
+    m = _get_market(market_id) if market_id else None
+    try:
+        pct = float((m or {}).get("platform_fee_pct", PLATFORM_FEE_PCT) or PLATFORM_FEE_PCT)
+    except (TypeError, ValueError):
+        pct = PLATFORM_FEE_PCT
+    fee = int(round(base * pct / 100.0))
+    if fee <= 0:
+        return 0
+    return _credit_platform_balance(fee, market_id=market_id or "", note=note, month=month)
+
+
 
 def _load_markets() -> dict:
     try:
@@ -6809,6 +6871,22 @@ def _record_to_market_history(market_id: str, month_key: str, label: str, source
                                 float(history["months"][month_key].get("net", 0.0)))
     except Exception as _e:
         log.warning("[dividends] payout failed for %s: %s", market_id, _e)
+    # Platform fee on the month's positive net — DORMANT until /fees toggle turns fees on
+    # (_charge_platform_fee returns 0 while inactive). Idempotent per (market, month): a
+    # re-ingested CSN month must never charge twice. This only ledgers V Tech's cut; how
+    # it's collected from the market owner is a business step, not automated here.
+    try:
+        _net = float(history["months"][month_key].get("net", 0.0) or 0.0)
+        if _net > 0 and _fees_active():
+            import Restocker_db as _db_fee
+            if not _db_fee.platform_fee_exists(month_key, market_id, "csn_net"):
+                _fee = _charge_platform_fee(_net, market_id=market_id,
+                                            note="csn_net", month=month_key)
+                if _fee:
+                    log.info("[fees] %s %s: platform fee %d on net %.0f",
+                             market_id, month_key, _fee, _net)
+    except Exception as _e:
+        log.warning("[fees] csn fee failed for %s %s: %s", market_id, month_key, _e)
 
 
 

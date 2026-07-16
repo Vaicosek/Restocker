@@ -1624,6 +1624,16 @@ def add_platform_balance_log(month: str, market_id: str, amount: float, note: st
         """, (month, market_id, amount, note))
 
 
+def platform_fee_exists(month: str, market_id: str, note: str) -> bool:
+    """True if a fee with this exact (month, market, note) is already on the platform log.
+    Makes recurring charges idempotent — e.g. re-ingesting a CSN month must not re-charge
+    that month's platform fee."""
+    with db() as conn:
+        return conn.execute(
+            "SELECT 1 FROM platform_balance_log WHERE month=? AND market_id=? AND note=? LIMIT 1",
+            (str(month), str(market_id), str(note))).fetchone() is not None
+
+
 def get_platform_balance_log(limit: int = 10) -> list[dict]:
     with db() as conn:
         rows = conn.execute(

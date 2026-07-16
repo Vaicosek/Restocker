@@ -171,6 +171,88 @@ class MoneyCog(commands.Cog):
             customer_id=customer.id, customer_name=customer.display_name,
             market_id=market_id or "", created_by=interaction.user.id))
 
+    # ── Platform fees (/fees ...) — infrastructure is live, charging is OFF by default ──
+    fees = app_commands.Group(
+        name="fees",
+        description="(Managers) Platform fees — status, on/off switch, manual charges",
+        default_permissions=discord.Permissions(manage_guild=True))
+
+    @fees.command(name="status", description="Are fees on? Balance, default rate, recent charges")
+    async def fees_status(self, interaction: discord.Interaction):
+        if not is_manager(interaction):
+            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
+        import Restocker_db as _db
+        active = core._fees_active()
+        try:
+            raw = _db.get_config("fees_active")
+            source = "runtime (/fees toggle)" if (raw is not None and str(raw).strip() != "") else "env default"
+        except Exception:
+            source = "env default"
+        bal = 0.0
+        try:
+            bal = float(_db.get_platform_balance() or 0)
+        except Exception:
+            pass
+        embed = discord.Embed(
+            title="🏦 Platform fees",
+            color=discord.Color.green() if active else discord.Color.dark_grey())
+        embed.add_field(name="Charging", value=("🟢 ACTIVE" if active else "⚫ OFF (dormant)")
+                        + f" · via {source}", inline=False)
+        embed.add_field(name="Default rate", value=f"`{core.PLATFORM_FEE_PCT:g}%` "
+                        f"(per-market override: `/market edit fee_pct:`)", inline=True)
+        embed.add_field(name="Balance collected", value=f"`{bal:,.0f}` 🪙", inline=True)
+        try:
+            rows = _db.get_platform_balance_log(5)
+        except Exception:
+            rows = []
+        if rows:
+            embed.add_field(name="Recent charges", value="\n".join(
+                f"• `{r.get('month','?')}` {r.get('market_id') or '—'} · "
+                f"**{float(r.get('amount') or 0):,.0f}** · {r.get('note') or ''}"
+                for r in rows)[:1000], inline=False)
+        embed.set_footer(text="Charge points wired (all no-ops while OFF): monthly CSN net · "
+                              "futures margin collections · /fees charge (manual, e.g. tool rental)")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @fees.command(name="toggle", description="Turn platform-fee charging ON or OFF (runtime — no restart)")
+    @app_commands.describe(active="True = start charging at each wired point; False = fully dormant")
+    async def fees_toggle(self, interaction: discord.Interaction, active: bool):
+        if not is_manager(interaction):
+            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
+        import Restocker_db as _db
+        _db.set_config("fees_active", "1" if active else "0")
+        if active:
+            msg = ("🟢 **Platform fees are now LIVE.** From now on: each market's monthly CSN net "
+                   f"is charged its fee_pct (default {core.PLATFORM_FEE_PCT:g}%), and futures margin "
+                   "collections are charged on `/futures pay`. Past months are NOT charged retroactively.")
+        else:
+            msg = "⚫ Platform fees switched **off** — all charge points are dormant again."
+        await interaction.response.send_message(msg, ephemeral=True)
+
+    @fees.command(name="charge", description="Manually charge a user a fee (e.g. tool/factory rental) into the platform balance")
+    @app_commands.describe(user="Who pays", amount="Coins to charge", reason="What it's for (shows on the ledger)")
+    async def fees_charge(self, interaction: discord.Interaction, user: discord.Member,
+                          amount: app_commands.Range[int, 1, 1_000_000_000], reason: str):
+        if not is_manager(interaction):
+            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
+        if user.bot:
+            return await interaction.response.send_message("❌ Pick a real user.", ephemeral=True)
+        import Restocker_db as _db
+        bal = int(_db.get_balance(str(user.id)).get("coins") or 0)
+        if bal < amount:
+            return await interaction.response.send_message(
+                f"❌ {user.mention} only has `{bal:,}` coins — can't charge `{amount:,}`. "
+                f"(No partial charges; agree a smaller amount.)", ephemeral=True)
+        reason = (reason or "").strip()[:120]
+        core.deduct_coins(user.id, int(amount), reason=f"fee:{reason}")
+        core._credit_platform_balance(int(amount), market_id="", note=f"manual:{reason} <@{user.id}>")
+        await interaction.response.send_message(
+            f"🏦 Charged {user.mention} **{amount:,}** 🪙 → platform balance (*{reason}*).", ephemeral=True)
+        try:
+            await user.send(f"🏦 You were charged **{amount:,}** coins by V Tech: *{reason}*.")
+        except Exception:
+            pass
+
     # ── Consignment futures management (/futures ...) ───────────────────────────────────
     futures = app_commands.Group(
         name="futures",
@@ -375,9 +457,14 @@ class MoneyCog(commands.Cog):
             return await interaction.response.send_message(why, ephemeral=True)
         new_paid = _db.record_futures_bulk_payment(deal_id, amount)
         o = core._futures_bulk_owed(_db.get_futures_bulk(deal_id))
+        # Platform fee on collected consignment margin — dormant until /fees toggle (returns
+        # 0 while fees are off). Ledgers V Tech's cut of the margin actually collected.
+        _fee = core._charge_platform_fee(amount, market_id=bulk.get("market_id"),
+                                         note=f"futures:deal#{deal_id}")
         await interaction.response.send_message(
             f"💰 Recorded **{amount:,}** 🪙 on deal #{deal_id}. "
-            f"Paid total **{new_paid:.0f}** · remaining **{o['remaining']:.0f}**.", ephemeral=True)
+            f"Paid total **{new_paid:.0f}** · remaining **{o['remaining']:.0f}**."
+            + (f"\n🏦 Platform fee ledgered: **{_fee:,}** 🪙." if _fee else ""), ephemeral=True)
 
     @app_commands.command(name="my_futures_orders", description="Check the status of your submitted futures orders")
     async def my_futures_orders(self, interaction: discord.Interaction):
