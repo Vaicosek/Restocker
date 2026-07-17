@@ -7530,6 +7530,15 @@ def _fundamental_for_market(market_id):
     if not months:
         return None
     keys = sorted(months.keys())
+    # The current calendar month is still being earned — half-filled, it reads like a
+    # crashed month (July at 130k next to June's millions) and both the trailing average
+    # and the growth P/E would price that as real news. Earnings are news when the month
+    # CLOSES; until then the valuation stands on completed months only. (If somehow only
+    # the in-progress month exists, fall back to using it rather than returning nothing.)
+    _cur_key = datetime.now(timezone.utc).strftime("%Y-%m")
+    _closed = [k for k in keys if k < _cur_key]
+    if _closed:
+        keys = _closed
     window = keys[-max(1, STOCK_PRICE_TRAILING_MONTHS):]
     nets = [float(months[k].get("net", 0.0)) for k in window]
     # Optional winsorize: cap any month that dwarfs the window median (e.g. a CSN
@@ -7546,6 +7555,21 @@ def _fundamental_for_market(market_id):
         return None
     pe = _auto_pe([float(months[k].get("net", 0.0)) for k in keys])
     fundamental = max(MIN_SHARE_PRICE, (avg_net / shares_out) * pe)
+    # Book-value floor: a company is worth at least its productive assets plus cash on
+    # hand (config asset_value:<mid>, set via /stock set_params assets:). V Tech's hive
+    # fleet is real infrastructure with a build cost — earnings can price the stock
+    # ABOVE book value, but a slow earnings month can't price the company below the
+    # replacement value of what it owns.
+    try:
+        _assets = float(_db.get_config(f"asset_value:{market_id}") or 0.0)
+    except Exception:
+        _assets = 0.0
+    if _assets > 0:
+        try:
+            _cash = float(_db.get_treasury(market_id) or 0.0)
+        except Exception:
+            _cash = 0.0
+        fundamental = max(fundamental, (_assets + _cash) / shares_out)
     return fundamental, pe, keys[-1]
 
 
@@ -7573,11 +7597,14 @@ def _value_market_calc(monthly_profit, growth_pct=None, shares=None):
     return pe, round(value, 2), price, shares
 
 
-def _recompute_share_price(market_id, reason="csn_report"):
+def _recompute_share_price(market_id, reason="csn_report", full_move=False):
     """Re-derive a public market's share price from a trailing average of real CSN
     net profit, blended with the current trade-driven price and clamped so a
     single re-anchor can't whipsaw the quote. try/except-wrapped so a pricing
-    hiccup can never break CSN recording."""
+    hiccup can never break CSN recording.
+    full_move=True (deliberate management actions like /stock set_params) skips the
+    blend + per-event clamp and re-anchors straight onto the fundamental — without
+    it, a big book-value change would take a dozen report events to phase in."""
     try:
         import Restocker_db as _db
         f = _fundamental_for_market(market_id)
@@ -7586,7 +7613,11 @@ def _recompute_share_price(market_id, reason="csn_report"):
         fundamental, pe_multiplier, latest_month = f
         listing = _db.get_market_shares(market_id)
         current = float(listing.get("share_price") or 0.0)
-        if current > 0:
+        if full_move:
+            price = round(max(MIN_SHARE_PRICE, fundamental), 2)
+            if current > 0 and abs(price - current) / current < 0.005:
+                return current
+        elif current > 0:
             target = STOCK_CSN_WEIGHT * fundamental + (1.0 - STOCK_CSN_WEIGHT) * current
             hi = current * (1.0 + STOCK_MAX_REANCHOR_MOVE)
             lo = current * (1.0 - STOCK_MAX_REANCHOR_MOVE)

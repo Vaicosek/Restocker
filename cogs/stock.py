@@ -87,6 +87,15 @@ class StockCog(commands.Cog):
             embed.add_field(name="Backed", value=backed, inline=False)
         except Exception:
             pass
+        try:
+            _assets = float(_db.get_config(f"asset_value:{market_id}") or 0.0)
+        except Exception:
+            _assets = 0.0
+        if _assets > 0:
+            _floor = (_assets + float(_db.get_treasury(market_id) or 0.0)) / max(1.0, float(listing.get("shares_outstanding") or 1.0))
+            embed.add_field(name="Book Value",
+                            value=f"assets `{int(_assets):,}` 🪙 → price floor `{_floor:,.2f}` 🪙/share",
+                            inline=False)
         if history:
             lines = [f"`{h['price']:,.2f}` 🪙 — {h['reason'] or '?'} ({h['logged_at']})" for h in history]
             embed.add_field(name="Recent Price Changes", value="\n".join(lines), inline=False)
@@ -191,6 +200,7 @@ class StockCog(commands.Cog):
         shares_outstanding="New total shares outstanding",
         pe_multiplier="New price multiplier applied to monthly net profit per share",
         treasury="Company cash on hand (e.g. the Lands balance) — shows as Treasury and backs the shares",
+        assets="Book value of company assets (hive fleet, factories). Price floor = (assets + treasury) ÷ shares. 0 clears.",
     )
     @app_commands.autocomplete(market_id=_public_market_autocomplete)
     async def stock_set_params(self,
@@ -199,6 +209,7 @@ class StockCog(commands.Cog):
         shares_outstanding: Optional[app_commands.Range[float, 1.0, 100_000_000.0]] = None,
         pe_multiplier: Optional[app_commands.Range[float, 0.1, 1000.0]] = None,
         treasury: Optional[app_commands.Range[float, 0.0, 1_000_000_000_000.0]] = None,
+        assets: Optional[app_commands.Range[float, 0.0, 1_000_000_000_000.0]] = None,
     ):
         if not is_manager(interaction):
             return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
@@ -208,14 +219,31 @@ class StockCog(commands.Cog):
             return await interaction.response.send_message(f"❌ `{market_id}` has never been public.", ephemeral=True)
         if treasury is not None:
             _db.upsert_market_shares(market_id, treasury_coins=float(treasury))
-        if shares_outstanding is None and pe_multiplier is None and treasury is not None:
-            return await interaction.response.send_message(
-                f"✅ `{market_id}` treasury set to **{int(treasury):,}** 🪙 — shows on the exchange "
-                f"and counts as cash backing for the shares.", ephemeral=True)
+        if assets is not None:
+            if float(assets) > 0:
+                _db.set_config(f"asset_value:{market_id}", str(float(assets)))
+            else:
+                _db.delete_config(f"asset_value:{market_id}")
         if shares_outstanding is None and pe_multiplier is None:
-            return await interaction.response.send_message(
-                "❌ Provide at least one of `shares_outstanding` or `pe_multiplier`.", ephemeral=True
-            )
+            if treasury is None and assets is None:
+                return await interaction.response.send_message(
+                    "❌ Provide at least one of `shares_outstanding`, `pe_multiplier`, `treasury`, or `assets`.",
+                    ephemeral=True)
+            # Treasury / book value changed — deliberate management action, so re-anchor
+            # the price fully onto the new fundamental (no per-event clamp).
+            price = _recompute_share_price(market_id, reason="params_changed", full_move=True)
+            bits = []
+            if treasury is not None:
+                bits.append(f"treasury **{int(treasury):,}** 🪙")
+            if assets is not None:
+                bits.append(f"asset book value **{int(assets):,}** 🪙" if float(assets) > 0
+                            else "asset book value **cleared**")
+            msg = f"✅ `{market_id}` updated: " + " · ".join(bits)
+            if assets is not None and float(assets) > 0:
+                msg += "\nPrice floor = (assets + treasury) ÷ shares outstanding."
+            if price is not None:
+                msg += f"\nShare price after re-anchor: `{price:,.2f}` 🪙"
+            return await interaction.response.send_message(msg)
         if shares_outstanding is not None:
             held = sum(float(h.get("shares") or 0) for h in _db.get_holders(market_id))
             if float(shares_outstanding) < held:
