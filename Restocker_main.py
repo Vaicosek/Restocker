@@ -180,7 +180,7 @@ AUTOROLE_CREATE_IF_MISSING = _env_str("AUTOROLE_CREATE_IF_MISSING", "1")
 COIN_PRICE_BASIS_DEFAULT = _env_str("COIN_PRICE_BASIS_DEFAULT", "piece")
 MANAGER_OVERRIDE_ORDER_PCT = _env_float("MANAGER_OVERRIDE_ORDER_PCT", 5.0)  # manager's cut of a team worker's order payout
 AI_COOLDOWN_SEC = _env_int("AI_COOLDOWN_SEC", 15)  # per-user cooldown on @mention AI calls
-DB_BACKUP_KEEP = _env_int("DB_BACKUP_KEEP", 14)  # daily DB snapshots to retain
+DB_BACKUP_KEEP = _env_int("DB_BACKUP_KEEP", 56)  # 3-hourly DB snapshots to retain (≈ 1 week)
 MANAGER_OVERRIDE_POINTS_PCT = _env_float("MANAGER_OVERRIDE_POINTS_PCT", MANAGER_OVERRIDE_ORDER_PCT)  # manager's cut of a team worker's loyalty POINTS
 MANAGER_OVERRIDE_SALES_PCT = _env_float("MANAGER_OVERRIDE_SALES_PCT", 0.0)  # coins: manager % of a worker's chest-shop net (OFF by default; net is large)
 MANAGER_OVERRIDE_SALES_POINTS_PER_1K = _env_float("MANAGER_OVERRIDE_SALES_POINTS_PER_1K", 0.0)  # loyalty pts per 1,000 net coins of worker sales (OFF by default)
@@ -2325,8 +2325,10 @@ def _rollup_children(parent_market_id) -> list:
 
 def _rollup_combined_months(parent_market_id) -> dict:
     """Combined monthly net that prices parent_market_id's stock: the parent's OWN net (100%)
-    plus each child's net × its share. {month_key: summed_net}. For a market with no children
-    this is just its own months — so ordinary markets are unaffected."""
+    plus each child's net × its share. Each market's net = CSN months + its hive-ledger months
+    (the hive engine books honey value there, since the chest shops buy at 0 coins).
+    {month_key: summed_net}. For a market with no children this is just its own months — so
+    ordinary markets are unaffected."""
     combined: dict = {}
 
     def _add(mid, share):
@@ -2336,11 +2338,118 @@ def _rollup_combined_months(parent_market_id) -> dict:
         for mk, md in months.items():
             if isinstance(md, dict):
                 combined[mk] = combined.get(mk, 0.0) + float(md.get("net", 0.0) or 0.0) * share
+        try:
+            import Restocker_db as _db
+            for mk, net in (_db.get_hive_months(mid) or {}).items():
+                combined[mk] = combined.get(mk, 0.0) + float(net or 0.0) * share
+        except Exception:
+            pass
 
     _add(parent_market_id, 1.0)                       # the company's own production, full
     for child_mid, child_share in _rollup_children(parent_market_id):
         _add(child_mid, child_share)                  # each rolled-up market, at its share
     return combined
+
+
+# ── Hive engine: honey value, feed parsing, monthly booking ──────────────────
+# The hive chest shops buy honey/comb at 0 coins, so CSN records nothing. The real
+# economics live here: each "X sold you Nx Honey Block" feed line is valued at the
+# configured hive price, harvesters get a % in cash, a partner owner may get a cut,
+# and V Tech's remainder is booked to the market's hive ledger — which the stock
+# roll-up reads on top of CSN months.
+
+_HIVE_DEFAULT_VALUES = {"honey block": 350.0, "honeycomb block": 300.0}
+
+
+def _hive_item_value(item) -> float:
+    """Per-piece value of a hive product. Config 'hive_value:<item>' (lowercased) wins;
+    defaults: Honey Block 350, Honeycomb Block 300; anything unknown = 0 (not a hive item)."""
+    key = re.sub(r"\s+", " ", str(item or "").strip().lower())
+    if not key:
+        return 0.0
+    try:
+        import Restocker_db as _db
+        raw = _db.get_config(f"hive_value:{key}")
+        if raw is not None and str(raw).strip() != "":
+            return max(0.0, float(raw))
+    except Exception:
+        pass
+    return float(_HIVE_DEFAULT_VALUES.get(key, 0.0))
+
+
+def _hive_harvester_pct() -> float:
+    """The harvesters' cash cut of harvested value (default 20%)."""
+    try:
+        import Restocker_db as _db
+        raw = _db.get_config("hive_harvester_pct")
+        if raw is not None and str(raw).strip() != "":
+            return max(0.0, min(100.0, float(raw)))
+    except Exception:
+        pass
+    return 20.0
+
+
+def _hive_owner_pct(market_id) -> float:
+    """Partner-owner's cut of harvested value on this market (0 on V Tech's own hives;
+    e.g. 32 for a 60/40-after-harvesters partner). Config 'hive_owner_pct:<mid>'."""
+    try:
+        import Restocker_db as _db
+        raw = _db.get_config(f"hive_owner_pct:{market_id}")
+        if raw is not None and str(raw).strip() != "":
+            return max(0.0, min(100.0, float(raw)))
+    except Exception:
+        pass
+    return 0.0
+
+
+_HIVE_LINE_RX = re.compile(
+    r"^\W*(?P<ign>[A-Za-z0-9_\.]{2,20})\s+sold\s+you\s+(?P<qty>[\d,]+)\s*x\s*(?P<rest>.+)$",
+    re.IGNORECASE)
+
+
+def _parse_hive_feed(text: str) -> list:
+    """Parse ChestShop-Notifier-style lines into [(ign, qty, item)]. Handles the formats
+    seen in game / on the webhook: 'JesseNapoleon sold you 276xHoney Block 3d10h45m ago
+    (-0 Coins)', 'guithecoldbird sold you 56x Honey Block ...'. Trailing age ('3d10h45m
+    ago') and coin suffixes are stripped from the item name; unparseable lines are skipped."""
+    out = []
+    for raw in (text or "").splitlines():
+        m = _HIVE_LINE_RX.match(raw.strip())
+        if not m:
+            continue
+        try:
+            qty = int(m.group("qty").replace(",", ""))
+        except ValueError:
+            continue
+        if qty <= 0:
+            continue
+        item = m.group("rest").strip()
+        item = re.sub(r"\s*\(.*?Coins?.*?\)\s*$", "", item, flags=re.IGNORECASE)   # "(-0 Coins)"
+        item = re.sub(r"\s+\d[\ddhms]*\s+ago\b.*$", "", item, flags=re.IGNORECASE)  # "3d10h45m ago"
+        item = re.sub(r"\s+", " ", item).strip(" -·•")
+        if not item:
+            continue
+        out.append((m.group("ign"), qty, item))
+    return out
+
+
+def _book_hive_month(market_id, value, harvester_pay, owner_pay, month_key=None) -> dict:
+    """Accumulate one payout run into the market's hive ledger and reprice the stock it
+    feeds (the market's own listing, if any, plus its roll-up parent)."""
+    import Restocker_db as _db
+    mk = month_key or datetime.now(timezone.utc).strftime("%Y-%m")
+    row = _db.add_hive_booking(market_id, mk, value, harvester_pay, owner_pay)
+    try:
+        _recompute_share_price(market_id, reason="hive_booking")
+    except Exception:
+        pass
+    try:
+        _parent = _market_rollup_parent(market_id)
+        if _parent:
+            _recompute_share_price(_parent, reason="hive_rollup")
+    except Exception as _e:
+        log.warning("[hive] parent reprice failed for %s: %s", market_id, _e)
+    return row
 
 
 def _award_market_loyalty_points(user_id: int, market_id: str, points: float, reason: str = "") -> float:
@@ -3510,7 +3619,9 @@ async def _process_csn_attachment(attachment: discord.Attachment, report_channel
     if market_name:
         extra.append(("🏪 Market", market_name, True))
 
-    embed, overflow = _build_csn_embed(title, items, income, spent, filename, extra)
+    embed = _build_csn_compact_embed(title, items, income, spent,
+                                     effective_market_id, month_key, extra)
+    overflow = None   # compact card never overflows — the website carries the detail
     footer = f"Auto-report from CSN mod  •  {filename}"
     if market_name:
         footer += f"  •  {market_name}"
@@ -3629,6 +3740,7 @@ async def on_ready():
         bot.add_view(FuturesBulkView())
         bot.add_view(StockPanelView())
         bot.add_view(StockAlarmView())
+        bot.add_view(PayoutReviewView())   # withdrawal Approve/Reject must survive restarts
         print("🧩 Persistent views registered.")
     except Exception as e:
         print(f"⚠️ Persistent view registration failed: {e}")
@@ -5924,6 +6036,31 @@ def _generate_charts(items: dict, title_suffix: str = "", history_months: list |
     plt.close(fig)
     buf.seek(0)
     return [buf.read()]
+
+
+def _build_csn_compact_embed(title, items, income, spent, market_id, month_key,
+                             extra_fields=None) -> discord.Embed:
+    """Compact CSN report card: the headline numbers + a link to the full sortable web
+    report. Replaces the old wall-of-fields embed + attached .html (which Discord
+    'previewed' as a giant code block) — the website IS the report."""
+    items = _apply_brew_aliases(items)
+    net = float(income) - float(spent)
+    sold_units = sum(int(v.get("sold_qty", 0) or 0) for v in items.values())
+    top = sorted(items.items(), key=lambda kv: -float(kv[1].get("net_coins", 0) or 0))[:3]
+    top_str = " · ".join(f"**{_pretty_item_name(n)}** +{int(v.get('net_coins', 0)):,}"
+                         for n, v in top if float(v.get("net_coins", 0) or 0) > 0)
+    sign = "+" if net >= 0 else ""
+    desc = (f"⚡ **{int(income):,}** in · 🌾 **{int(spent):,}** out · "
+            f"📈 **{sign}{int(net):,} net**\n"
+            f"📦 {sold_units:,} items · {len(items)} SKUs"
+            + (f"\n🥇 {top_str}" if top_str else "")
+            + f"\n\n📊 **[Open the full report]"
+              f"(https://dashboard.vaicosmarket.com/report/{market_id}/{month_key})**")
+    embed = discord.Embed(title=title, description=desc,
+                          color=0x3FB950 if net >= 0 else 0xF85149)
+    for name, value, inline in (extra_fields or []):
+        embed.add_field(name=name, value=value, inline=inline)
+    return embed
 
 
 def _build_csn_embed(
@@ -10596,7 +10733,7 @@ async def _main():
     for _ext in ("cogs.loyalty", "cogs.brew", "cogs.admin", "cogs.market", "cogs.stock",
                  "cogs.shop", "cogs.orders", "cogs.money", "cogs.reports", "cogs.misc",
                  "cogs.loops", "cogs.events", "cogs.config", "cogs.team", "cogs.inventory", "cogs.projects", "cogs.tool",
-                 "cogs.devassist"):
+                 "cogs.devassist", "cogs.hive"):
         try:
             await bot.load_extension(_ext)
         except Exception as e:

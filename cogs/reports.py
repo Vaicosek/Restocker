@@ -426,53 +426,13 @@ class ReportsCog(commands.Cog):
                         False,
                     ))
 
-        embed, overflow = _build_csn_embed(title, items, income, spent, source_label, extra_fields)
-
-        files = []
-        if charts:
-            if not _MATPLOTLIB_OK:
-                embed.set_footer(text=(embed.footer.text or "") + "  •  📊 charts on dashboard.vaicosmarket.com")
-            else:
-                try:
-                    _hist = _load_csn_for_market(market_id).get("months", {}) or {}
-                    _hist_months = [_hist[k] for k in sorted(_hist.keys())]
-                except Exception:
-                    _hist_months = None
-                chart_data = _generate_charts(items, title_suffix, _hist_months)
-                files = [discord.File(io.BytesIO(c), filename=f"csn_chart_{i+1}.png") for i, c in enumerate(chart_data)]
-                if files:
-                    embed.set_image(url="attachment://csn_chart_1.png")
-
-        # Link to the full web report (same data, sortable, nothing to download) —
-        # people can open and go through the entire month there.
-        try:
-            embed.add_field(
-                name="📊 Full report",
-                value=(f"[Open the complete sortable report]"
-                       f"(https://dashboard.vaicosmarket.com/report/{market_id}/{month_key})"
-                       f"  ·  or open the attached `.html`"),
-                inline=False)
-        except Exception:
-            pass
-
-        # Attach the COMPLETE report as a self-contained, sortable HTML file so people
-        # can open and go through the whole month (the embed only shows the top rows).
-        try:
-            _mkt_name = (_get_market(market_id) or {}).get("name", market_id)
-            _report_html = _render_full_report_html(title, _mkt_name, month_label, items, income, spent)
-            files.append(discord.File(
-                io.BytesIO(_report_html.encode("utf-8")),
-                filename=f"report_{market_id}_{month_key}.html"))
-        except Exception as _e:
-            log.warning("[csn] full-report html failed: %s", _e)
-
-        await interaction.followup.send(embed=embed, files=files)
-
-        if overflow:
-            extra = "\n".join(overflow)
-            if len(extra) > 1900:
-                extra = extra[:1900] + "\n…(truncated)"
-            await interaction.followup.send(f"📋 **…continued**\n{extra}")
+        # Compact card + link — the full sortable report lives on the website, so no
+        # wall-of-fields embed and no attached .html (Discord previewed it as a giant
+        # code block). Restock preview/actions still ride along as fields.
+        embed = core._build_csn_compact_embed(title, items, income, spent,
+                                              market_id, month_key, extra_fields)
+        embed.set_footer(text=source_label)
+        await interaction.followup.send(embed=embed)
 
     @app_commands.command(
         name="csn_history",

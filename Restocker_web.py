@@ -3216,12 +3216,14 @@ def _load_teams_data(days: int = 7) -> dict:
                                  "orders": 0, "futures_qty": 0, "workers": {}})
         if k == "order":
             t["order_coins"] += c; t["orders"] += 1
-        elif k == "sales":
+        elif k in ("sales", "project"):
+            # "project" covers perpetual-project pay (hive harvesting, manager project pay) —
+            # counted with chest-shop sales so it shows in the team totals.
             t["sales_coins"] += c
         elif k == "futures":
             t["futures_qty"] += q
         w = t["workers"].setdefault(wid, {"id": wid, "coins": 0.0})
-        if k in ("order", "sales"):
+        if k in ("order", "sales", "project"):
             w["coins"] += c
     # Include every team that has members, even with no activity yet, so new teams show up.
     try:

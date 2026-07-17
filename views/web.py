@@ -703,73 +703,102 @@ class InvestorSyncModal(discord.ui.Modal, title="Sync investors — paste GEX.PR
 
 
 class PayoutReviewView(discord.ui.View):
-    def __init__(self, user_id: int, amount: int, channel_id: int):
+    """Withdrawal Approve/Reject. RESTART-PERSISTENT: registered with bot.add_view and
+    stable custom_ids, so buttons on old tickets keep working after redeploys. A fresh
+    process recovers the requester/amount from the ticket message itself ('Requester:
+    <@id>', 'Amount: **N coins**'); the ticket channel is where the click happens."""
+
+    _inflight: set = set()          # message ids being processed — blocks double-click double-pay
+
+    def __init__(self, user_id: int = 0, amount: int = 0, channel_id: int = 0):
         super().__init__(timeout=None)
-        self.user_id = int(user_id)
-        self.amount = int(amount)
-        self.channel_id = int(channel_id)
+        self.user_id = int(user_id or 0)
+        self.amount = int(amount or 0)
+        self.channel_id = int(channel_id or 0)
 
-    async def _load(self, interaction: discord.Interaction):
-        data = _load_balances()
-        u = _get_user_bal(data["users"], self.user_id)
-        chan = interaction.client.get_channel(self.channel_id)
-        return data, u, chan
+    def _resolve(self, interaction: discord.Interaction):
+        """(user_id, amount, channel) — live instance fields, else parsed from the message."""
+        uid, amt = self.user_id, self.amount
+        if not uid or not amt:
+            import re as _re
+            txt = (interaction.message.content if interaction.message else "") or ""
+            m_u = _re.search(r"Requester:\s*<@!?(\d+)>", txt)
+            m_a = _re.search(r"Amount:\s*\*\*([\d,]+)\s*coins", txt)
+            if m_u:
+                uid = int(m_u.group(1))
+            if m_a:
+                amt = int(m_a.group(1).replace(",", ""))
+        chan = None
+        if self.channel_id:
+            chan = interaction.client.get_channel(self.channel_id)
+        if chan is None:
+            chan = interaction.channel      # the review message lives inside the ticket channel
+        return uid, amt, chan
 
-    @discord.ui.button(label="✅ Approve & mark paid", style=discord.ButtonStyle.green)
+    @discord.ui.button(label="✅ Approve & mark paid", style=discord.ButtonStyle.green,
+                       custom_id="payout_review:approve")
     async def approve(self, interaction: discord.Interaction, button: Button):
         if not is_manager(interaction):
             return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
-
-
-        data, u, chan = await self._load(interaction)
-        if u["coins"] < self.amount:
+        mid = int(interaction.message.id) if interaction.message else 0
+        if mid in type(self)._inflight:
             return await interaction.response.send_message(
-                f"❌ User has only **{u['coins']}** coins; requested **{self.amount}**.", ephemeral=True
-            )
-
-
-        coins, principal = deduct_coins(self.user_id, self.amount, reduce_principal=True)
-        u["coins"] = coins
-        u["principal"] = principal
-
-
+                "⏳ Already being processed by another manager.", ephemeral=True)
+        type(self)._inflight.add(mid)
         try:
-            user = await interaction.client.fetch_user(self.user_id)
-            await user.send(
-                f"💳 Your withdrawal of **{self.amount} coins** has been **paid**. "
-                f"New coin balance: **{coins}**."
-            )
-        except Exception:
-            pass
+            # Ack within the 3s window FIRST — balance load + DM + channel ops can exceed it.
+            await interaction.response.defer(ephemeral=True, thinking=True)
+            uid, amount, chan = self._resolve(interaction)
+            if not uid or amount <= 0:
+                return await interaction.followup.send(
+                    "❌ Couldn't read the requester/amount from this ticket — pay manually and "
+                    "close the channel.", ephemeral=True)
+            data = _load_balances()
+            u = _get_user_bal(data["users"], uid)
+            if u["coins"] < amount:
+                return await interaction.followup.send(
+                    f"❌ User has only **{u['coins']}** coins; requested **{amount}**.", ephemeral=True)
 
-        await interaction.response.send_message(
-            f"✅ Marked **{self.amount} coins** as paid and deducted from balance.", ephemeral=True
-        )
+            coins, principal = deduct_coins(uid, amount, reduce_principal=True)
 
+            try:
+                user = await interaction.client.fetch_user(uid)
+                await user.send(
+                    f"💳 Your withdrawal of **{amount} coins** has been **paid**. "
+                    f"New coin balance: **{coins}**.")
+            except Exception:
+                pass
 
-        try:
-            if chan:
-                await chan.send("✅ Payment marked complete. Closing this ticket…")
-                await chan.delete(reason="Payout approved")
-        except Exception:
-            pass
+            await interaction.followup.send(
+                f"✅ Marked **{amount} coins** as paid and deducted from balance.", ephemeral=True)
 
-    @discord.ui.button(label="❌ Reject", style=discord.ButtonStyle.danger)
+            try:
+                if chan:
+                    await chan.send("✅ Payment marked complete. Closing this ticket…")
+                    await chan.delete(reason="Payout approved")
+            except Exception:
+                pass
+        finally:
+            type(self)._inflight.discard(mid)
+
+    @discord.ui.button(label="❌ Reject", style=discord.ButtonStyle.danger,
+                       custom_id="payout_review:reject")
     async def reject(self, interaction: discord.Interaction, button: Button):
         if not is_manager(interaction):
             return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
-
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        uid, _amount, chan = self._resolve(interaction)
 
         try:
-            user = await interaction.client.fetch_user(self.user_id)
-            await user.send("❌ Your coins withdrawal request was **rejected** by managers.")
+            if uid:
+                user = await interaction.client.fetch_user(uid)
+                await user.send("❌ Your coins withdrawal request was **rejected** by managers.")
         except Exception:
             pass
 
-        await interaction.response.send_message("❌ Rejected. Ticket will be closed.", ephemeral=True)
+        await interaction.followup.send("❌ Rejected. Ticket will be closed.", ephemeral=True)
 
         try:
-            chan = interaction.client.get_channel(self.channel_id)
             if chan:
                 await chan.send("❌ Rejected by managers. Closing…")
                 await chan.delete(reason="Payout rejected")

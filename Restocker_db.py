@@ -338,6 +338,39 @@ CREATE INDEX IF NOT EXISTS idx_futures_bulk_status ON futures_bulk(status);
 CREATE INDEX IF NOT EXISTS idx_futures_bulk_customer ON futures_bulk(customer_id);
 CREATE INDEX IF NOT EXISTS idx_fbl_bulk ON futures_bulk_lines(bulk_id);
 
+-- ── Hive engine: per-player harvest feed + monthly value bookings ───────────
+-- hive_harvests: one row per parsed "X sold you Nx Item" feed line. The chest shops buy
+-- honey at 0 coins, so the REAL value is assigned here (unit_value snapshot) and paid out
+-- by /hive payout. UNIQUE(msg_id, line_no) makes re-ingesting a Discord message a no-op.
+CREATE TABLE IF NOT EXISTS hive_harvests (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    market_id   TEXT NOT NULL,
+    ign         TEXT NOT NULL,
+    user_id     TEXT,                                  -- resolved from ign_registry, NULL if unregistered
+    item        TEXT NOT NULL,
+    qty         INTEGER NOT NULL,
+    unit_value  REAL NOT NULL DEFAULT 0,
+    msg_id      TEXT NOT NULL,
+    line_no     INTEGER NOT NULL DEFAULT 0,
+    recorded_at TEXT NOT NULL DEFAULT (datetime('now')),
+    paid        INTEGER NOT NULL DEFAULT 0,
+    paid_at     TEXT,
+    UNIQUE(msg_id, line_no)
+);
+CREATE INDEX IF NOT EXISTS idx_hive_unpaid ON hive_harvests(market_id, paid);
+-- hive_ledger: accumulated monthly hive economics per market. net = value − harvester pay
+-- − owner cut = V Tech's gain; the stock roll-up reads this on top of CSN months.
+CREATE TABLE IF NOT EXISTS hive_ledger (
+    market_id     TEXT NOT NULL,
+    month         TEXT NOT NULL,                       -- YYYY-MM
+    value         REAL NOT NULL DEFAULT 0,
+    harvester_pay REAL NOT NULL DEFAULT 0,
+    owner_pay     REAL NOT NULL DEFAULT 0,
+    net           REAL NOT NULL DEFAULT 0,
+    updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (market_id, month)
+);
+
 -- ── Stock Exchange (markets that go public, traded with server currency) ────
 CREATE TABLE IF NOT EXISTS market_shares (
     market_id           TEXT PRIMARY KEY REFERENCES markets(market_id),
@@ -2187,6 +2220,99 @@ def set_item_worker_cost(name: str, worker_cost) -> None:
     with db() as conn:
         conn.execute("UPDATE items SET worker_cost=? WHERE name=?",
                      (None if worker_cost is None else float(worker_cost), str(name)))
+
+
+# ── Hive engine ──────────────────────────────────────────────────────────────
+
+def add_hive_harvest(market_id: str, ign: str, user_id, item: str, qty: int,
+                     unit_value: float, msg_id: str, line_no: int):
+    """Record one parsed harvest line. Returns the new row id if it was NEW, else None
+    (idempotent per message+line, so re-ingesting the same Discord message never
+    double-counts). The id lets auto-payout settle exactly the rows it just created."""
+    with db() as conn:
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO hive_harvests "
+            "(market_id, ign, user_id, item, qty, unit_value, msg_id, line_no) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (str(market_id), str(ign), (str(user_id) if user_id else None), str(item),
+             int(qty), float(unit_value or 0), str(msg_id), int(line_no)))
+        return int(cur.lastrowid) if cur.rowcount > 0 else None
+
+
+def get_hive_harvests_by_ids(ids: list) -> list:
+    if not ids:
+        return []
+    with db() as conn:
+        q = ",".join("?" * len(ids))
+        rows = conn.execute(f"SELECT * FROM hive_harvests WHERE id IN ({q}) ORDER BY id",
+                            [int(i) for i in ids]).fetchall()
+        return [dict(r) for r in rows]
+
+
+def hive_lines_for_msg(msg_id: str) -> int:
+    """How many lines of a message are already ingested (edit-reingest support)."""
+    with db() as conn:
+        row = conn.execute("SELECT COUNT(*) AS c FROM hive_harvests WHERE msg_id=?",
+                           (str(msg_id),)).fetchone()
+        return int(row["c"] if row else 0)
+
+
+def get_unpaid_hive_harvests(market_id: str) -> list:
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM hive_harvests WHERE market_id=? AND paid=0 ORDER BY id",
+            (str(market_id),)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def mark_hive_harvests_paid(ids: list) -> int:
+    if not ids:
+        return 0
+    with db() as conn:
+        q = ",".join("?" * len(ids))
+        cur = conn.execute(
+            f"UPDATE hive_harvests SET paid=1, paid_at=datetime('now') "
+            f"WHERE id IN ({q}) AND paid=0", [int(i) for i in ids])
+        return cur.rowcount
+
+
+def set_hive_harvest_user(ign: str, user_id: str) -> int:
+    """Attach a user to any UNPAID rows for an IGN that was unregistered at ingest time —
+    run when someone registers late so their back-harvests become payable."""
+    with db() as conn:
+        cur = conn.execute(
+            "UPDATE hive_harvests SET user_id=? WHERE ign=? COLLATE NOCASE "
+            "AND user_id IS NULL AND paid=0", (str(user_id), str(ign).strip()))
+        return cur.rowcount
+
+
+def add_hive_booking(market_id: str, month: str, value: float,
+                     harvester_pay: float, owner_pay: float) -> dict:
+    """Accumulate one payout run's economics into the market's monthly hive ledger.
+    net (V Tech's gain) = value − harvester pay − owner cut."""
+    net = float(value) - float(harvester_pay) - float(owner_pay)
+    with db() as conn:
+        conn.execute("""
+            INSERT INTO hive_ledger (market_id, month, value, harvester_pay, owner_pay, net)
+            VALUES (?,?,?,?,?,?)
+            ON CONFLICT(market_id, month) DO UPDATE SET
+                value=value+excluded.value, harvester_pay=harvester_pay+excluded.harvester_pay,
+                owner_pay=owner_pay+excluded.owner_pay, net=net+excluded.net,
+                updated_at=datetime('now')
+        """, (str(market_id), str(month), float(value), float(harvester_pay),
+              float(owner_pay), net))
+        row = conn.execute("SELECT * FROM hive_ledger WHERE market_id=? AND month=?",
+                           (str(market_id), str(month))).fetchone()
+        return dict(row) if row else {}
+
+
+def get_hive_months(market_id: str) -> dict:
+    """{month: net} — the hive engine's monthly V Tech gain, added on top of CSN months
+    by the stock roll-up."""
+    with db() as conn:
+        rows = conn.execute("SELECT month, net FROM hive_ledger WHERE market_id=?",
+                            (str(market_id),)).fetchall()
+        return {r["month"]: float(r["net"] or 0) for r in rows}
 
 
 def delete_note(note_id: int):
