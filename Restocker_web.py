@@ -670,7 +670,7 @@ def _load_stock_data() -> dict:
             price  = float(listing.get("share_price") or 0)
             shares = float(listing.get("shares_outstanding") or 0)
             pe     = float(listing.get("pe_multiplier") or 0)
-            rows   = db.get_price_history(mid, limit=60)
+            rows   = db.get_price_history(mid, limit=5000)  # deep history so the chart's 1M/1Y ranges have data
             hist   = [{"t": r.get("logged_at"), "price": float(r.get("price") or 0)}
                       for r in reversed(rows)]
             prev   = hist[-2]["price"] if len(hist) > 1 else price
@@ -736,7 +736,7 @@ def _load_stock_data() -> dict:
         _m["backing_pct"] = round(100.0 * (_m["treasury"] + _assets + _fs) / _mc, 1)
     index = None
     try:
-        hist = db.get_market_index_history(200)
+        hist = db.get_market_index_history(5000)
         if hist:
             cur = float(hist[-1]["index_value"])
             prev = float(hist[-2]["index_value"]) if len(hist) > 1 else cur
@@ -1285,6 +1285,7 @@ _PAGE = """<!DOCTYPE html>
         <span id="index-change" class="t-chg"></span>
         <span style="font-family:var(--font-data);font-size:11px;color:var(--muted)"><span id="index-mcap"></span> total cap &middot; <span id="index-markets"></span> markets</span>
       </div>
+      <div class="market-tabs" id="index-range" style="margin-bottom:8px"></div>
       <div class="chart-box" style="height:220px"><canvas id="index-chart"></canvas></div>
     </div>
     <div class="ticker" id="stock-ticker"></div>
@@ -1303,6 +1304,7 @@ _PAGE = """<!DOCTYPE html>
     </div>
     <div class="chart-card">
       <div class="chart-title" id="stock-chart-title">Share price history</div>
+      <div class="market-tabs" id="stock-range" style="margin-bottom:8px"></div>
       <div class="chart-box"><canvas id="stock-chart"></canvas></div>
     </div>
     <div class="chart-card" id="ct-card" style="display:none">
@@ -2357,7 +2359,47 @@ document.querySelectorAll(".nav-tab").forEach(tab => {
   const markets = (STOCKS && STOCKS.markets) || [];
 
   // ── Abexilas Market Index ──
-  (function renderIndex() {
+  // \u2500\u2500 chart time ranges: Hour / Day / Week / Month / Year / All \u2500\u2500
+  const RANGES = [["1H","h"],["1D","d"],["1W","w"],["1M","mo"],["1Y","y"],["All","all"]];
+  const RANGE_MS = { h: 3600e3, d: 86400e3, w: 604800e3, mo: 2592000e3, y: 31536000e3 };
+  function tsOf(s) {
+    if (!s) return NaN;
+    const iso = (s.includes("Z") || s.includes("+")) ? s : s + "Z";   // logged_at is UTC
+    return Date.parse(iso.replace(" ", "T"));
+  }
+  function rangeFilter(hist, range) {
+    if (!hist) return [];
+    if (range === "all") return hist;
+    const cut = Date.now() - RANGE_MS[range];
+    const out = hist.filter(p => { const t = tsOf(p.t); return !isNaN(t) && t >= cut; });
+    return out.length > 1 ? out : hist.slice(-2);   // quiet range \u2192 show the last move, never a blank chart
+  }
+  function downsample(a, max) {
+    max = max || 300;
+    if (a.length <= max) return a;
+    const s = Math.ceil(a.length / max);
+    return a.filter((_, i) => i % s === 0 || i === a.length - 1);
+  }
+  function rangeLabel(t, range) {
+    const s = (t || "").replace("T", " ");
+    if (range === "y" || range === "all") return s.slice(0, 7);   // YYYY-MM
+    if (range === "w" || range === "mo") return s.slice(5, 10);   // MM-DD
+    return s.slice(5, 16);                                        // MM-DD HH:MM
+  }
+  function buildRangeButtons(el, current, onPick) {
+    if (!el) return;
+    el.innerHTML = "";
+    RANGES.forEach(([lab, key]) => {
+      const b = document.createElement("div");
+      b.className = "market-tab" + (key === current ? " active" : "");
+      b.textContent = lab;
+      b.addEventListener("click", () => onPick(key));
+      el.appendChild(b);
+    });
+  }
+
+  let idxChart = null, idxRange = "d";
+  function renderIndex() {
     const idx = STOCKS && STOCKS.index;
     const card = document.getElementById("index-card");
     if (!card) return;
@@ -2370,14 +2412,18 @@ document.querySelectorAll(".nav-tab").forEach(tab => {
     chg.className = "t-chg " + (up ? "up" : "down");
     document.getElementById("index-mcap").textContent = num(idx.total_mcap) + " \u00A2";
     document.getElementById("index-markets").textContent = idx.markets;
+    buildRangeButtons(document.getElementById("index-range"), idxRange,
+                      k => { idxRange = k; renderIndex(); });
+    const ihist = downsample(rangeFilter(idx.history, idxRange));
     const ctx = document.getElementById("index-chart");
+    if (idxChart) idxChart.destroy();
     const grad = ctx.getContext("2d").createLinearGradient(0, 0, 0, 220);
     grad.addColorStop(0, "rgba(34,255,122,.2)");
     grad.addColorStop(1, "rgba(34,255,122,0)");
-    new Chart(ctx, {
+    idxChart = new Chart(ctx, {
       type: "line",
-      data: { labels: idx.history.map(h => (h.t || "").slice(5, 16).replace("T", " ")),
-        datasets: [{ label: "Index", data: idx.history.map(h => h.v),
+      data: { labels: ihist.map(h => rangeLabel(h.t, idxRange)),
+        datasets: [{ label: "Index", data: ihist.map(h => h.v),
           borderColor: "#22FF7A", backgroundColor: grad, fill: true,
           borderWidth: 1.5, tension: 0.35, pointRadius: 0, pointHoverRadius: 3,
           pointHoverBackgroundColor: "#22FF7A", pointHoverBorderColor: "#0A0A0A", pointHoverBorderWidth: 2 }] },
@@ -2390,7 +2436,8 @@ document.querySelectorAll(".nav-tab").forEach(tab => {
         scales: { x: { ticks: { color: "#666666", maxTicksLimit: 8 }, grid: { display: false }, border: { display: false } },
           y: { ticks: { color: "#666666", callback: v => Number(v).toLocaleString() }, grid: { color: "rgba(255,255,255,.05)" }, border: { display: false } } } },
     });
-  })();
+  }
+  renderIndex();
 
   function divCell(m) {
     if (!m.div_pct) return "—";
@@ -2556,16 +2603,20 @@ document.querySelectorAll(".nav-tab").forEach(tab => {
       `Investors receive ${r.pool_pct}% of each V Tech market's monthly net, split by share — paid automatically when monthly results record.`;
   })();
 
-  let chart = null;
+  let chart = null, stockRange = "d", curMid = null;
   function select(mid) {
     const m = markets.find(x => x.mid === mid);
     if (!m) return;
+    curMid = mid;
     [...tabsEl.children].forEach(b => b.classList.toggle("active", b.textContent === m.name));
     loadCapTable(mid);
     document.getElementById("stock-chart-title").textContent = "Share price history — " + m.name;
+    buildRangeButtons(document.getElementById("stock-range"), stockRange,
+                      k => { stockRange = k; if (curMid) select(curMid); });
+    const shist = downsample(rangeFilter(m.history, stockRange));
     const ctx = document.getElementById("stock-chart");
     if (chart) chart.destroy();
-    const labels = m.history.map(h => (h.t || "").slice(5, 16).replace("T", " "));
+    const labels = shist.map(h => rangeLabel(h.t, stockRange));
     const cctx = ctx.getContext("2d");
     const grad = cctx.createLinearGradient(0, 0, 0, 300);
     grad.addColorStop(0, "rgba(34,255,122,.22)");
@@ -2573,7 +2624,7 @@ document.querySelectorAll(".nav-tab").forEach(tab => {
     chart = new Chart(ctx, {
       type: "line",
       data: { labels, datasets: [{
-        label: "Price", data: m.history.map(h => h.price),
+        label: "Price", data: shist.map(h => h.price),
         borderColor: "#22FF7A", backgroundColor: grad, fill: true,
         borderWidth: 1.5, tension: 0.35, pointRadius: 0, pointHoverRadius: 3,
         pointHoverBackgroundColor: "#22FF7A", pointHoverBorderColor: "#0A0A0A", pointHoverBorderWidth: 2,
