@@ -2247,6 +2247,83 @@ def _is_vtech_market(market_id) -> bool:
     return bool(market_id) and str(market_id) in _vtech_group_markets()
 
 
+# ── Stock roll-up: ANY market can be a parent stock that other markets roll into ──────
+# A market owner with several markets designates one as the tradeable stock, then points
+# the others at it (each at a profit-share %). The parent stock's valuation = its own net
+# plus every child's net × that child's share. Fully general — every company gets its own
+# holding stock, not just V Tech. Config per child: rollup_parent:<mid>, rollup_share:<mid>.
+
+def _market_rollup_parent(market_id):
+    """The parent stock market this market rolls its profit into, or None if independent."""
+    try:
+        import Restocker_db as _db
+        v = str(_db.get_config(f"rollup_parent:{market_id}") or "").strip()
+        return v or None
+    except Exception:
+        return None
+
+
+def _market_rollup_share(market_id) -> float:
+    """Fraction 0..1 of a child market's net that rolls up to its parent (the parent company's
+    cut). Own markets = 100%; a partner market where the company keeps 60% = 0.60. Config
+    'rollup_share:<mid>' (percent); default 100%."""
+    try:
+        import Restocker_db as _db
+        raw = _db.get_config(f"rollup_share:{market_id}")
+        if raw is not None and str(raw).strip() != "":
+            return max(0.0, min(1.0, float(raw) / 100.0))
+    except Exception:
+        pass
+    return 1.0
+
+
+def _set_market_rollup(child_market_id, parent_market_id, share_pct=100.0) -> None:
+    """Point child_market_id at parent_market_id (its holding stock) at share_pct. Pass
+    parent_market_id None/'' to detach (child becomes independent again)."""
+    import Restocker_db as _db
+    if parent_market_id:
+        _db.set_config(f"rollup_parent:{child_market_id}", str(parent_market_id))
+        _db.set_config(f"rollup_share:{child_market_id}", str(max(0.0, min(100.0, float(share_pct)))))
+    else:
+        _db.delete_config(f"rollup_parent:{child_market_id}")
+        _db.delete_config(f"rollup_share:{child_market_id}")
+
+
+def _rollup_children(parent_market_id) -> list:
+    """[(child_mid, share_fraction)] for every market that rolls into parent_market_id."""
+    out = []
+    try:
+        markets = (_load_markets() or {}).get("markets", {}) or {}
+        for mid in markets:
+            if str(mid) == str(parent_market_id):
+                continue
+            if _market_rollup_parent(mid) == str(parent_market_id):
+                out.append((str(mid), _market_rollup_share(mid)))
+    except Exception:
+        pass
+    return out
+
+
+def _rollup_combined_months(parent_market_id) -> dict:
+    """Combined monthly net that prices parent_market_id's stock: the parent's OWN net (100%)
+    plus each child's net × its share. {month_key: summed_net}. For a market with no children
+    this is just its own months — so ordinary markets are unaffected."""
+    combined: dict = {}
+
+    def _add(mid, share):
+        if share <= 0:
+            return
+        months = (_load_csn_for_market(mid) or {}).get("months", {}) or {}
+        for mk, md in months.items():
+            if isinstance(md, dict):
+                combined[mk] = combined.get(mk, 0.0) + float(md.get("net", 0.0) or 0.0) * share
+
+    _add(parent_market_id, 1.0)                       # the company's own production, full
+    for child_mid, child_share in _rollup_children(parent_market_id):
+        _add(child_mid, child_share)                  # each rolled-up market, at its share
+    return combined
+
+
 def _award_market_loyalty_points(user_id: int, market_id: str, points: float, reason: str = "") -> float:
     """Award points to a user's PER-MARKET ledger — that market owner's own reward
     currency, independent of the shared V Tech pool. Best-effort: never raises, so a
@@ -7276,8 +7353,11 @@ def _fundamental_for_market(market_id):
     listing = _db.get_market_shares(market_id)
     if not listing or not listing.get("active"):
         return None
-    history = _load_csn_for_market(market_id)
-    months = history.get("months", {})
+    # Roll-up: a stock's valuation = its own net PLUS every market rolled into it (each × its
+    # share). For a market with no children this returns just its own months, so ordinary
+    # single-market stocks behave exactly as before.
+    combined = _rollup_combined_months(market_id)
+    months = {k: {"net": v} for k, v in combined.items()}
     if not months:
         return None
     keys = sorted(months.keys())

@@ -884,6 +884,46 @@ class MarketCog(commands.Cog):
             f"deliver to `{loc}`. It shows on their order cards, `/orders`, and the website.",
             ephemeral=True)
 
+    @app_commands.command(
+        name="market_rollup",
+        description="(Manager/Owner) Roll one market's profit into another market's stock (holding company)",
+    )
+    @app_commands.describe(
+        child_market="The market whose profit rolls UP",
+        parent_stock="The stock market it rolls INTO (leave blank to detach and make it independent)",
+        share_pct="% of the child's profit that rolls up (default 100; use 60 for a partner market you keep 60% of)",
+    )
+    @app_commands.autocomplete(child_market=_market_autocomplete, parent_stock=_market_autocomplete)
+    async def market_rollup(self, interaction: discord.Interaction, child_market: str,
+                            parent_stock: Optional[str] = None,
+                            share_pct: Optional[app_commands.Range[float, 0.0, 100.0]] = None):
+        if not (is_manager(interaction) or _is_market_manager(interaction, child_market)):
+            return await interaction.response.send_message(
+                "⛔ Managers or this market's owner only.", ephemeral=True)
+        markets = (_load_markets() or {}).get("markets") or {}
+        if child_market not in markets:
+            return await interaction.response.send_message(
+                f"❌ Market `{child_market}` not found.", ephemeral=True)
+        parent = (parent_stock or "").strip()
+        if not parent:
+            core._set_market_rollup(child_market, None)
+            return await interaction.response.send_message(
+                f"✅ **{markets[child_market].get('name', child_market)}** detached — it now prices its own "
+                f"stock off its own profit again.", ephemeral=True)
+        if parent not in markets:
+            return await interaction.response.send_message(
+                f"❌ Parent market `{parent}` not found.", ephemeral=True)
+        if parent == child_market:
+            return await interaction.response.send_message(
+                "❌ A market can't roll into itself.", ephemeral=True)
+        pct = 100.0 if share_pct is None else float(share_pct)
+        core._set_market_rollup(child_market, parent, pct)
+        await interaction.response.send_message(
+            f"✅ **{markets[child_market].get('name', child_market)}**'s profit now rolls into "
+            f"**{markets[parent].get('name', parent)}**'s stock at **{pct:g}%**. "
+            f"That stock's price is now driven by its own net plus this (and any other rolled-in market).",
+            ephemeral=True)
+
     @market.command(
         name="go_public",
         description="(Manager/Owner) List a market on the stock exchange so its shares can be traded",
