@@ -306,6 +306,32 @@ class StockCog(commands.Cog):
     # golive_gex.py in git history). Post-merger the bot's book is authoritative, so a
     # raw Crimson re-import would clobber the converted holdings — deliberately gone.
 
+    @stock.command(name="set_label",
+                   description="(Manager) Name the COMPANY a stock represents — shown on the exchange instead of the market name")
+    @app_commands.describe(
+        market_id="The market the stock lives on (e.g. main)",
+        label="Company name shown for the stock, e.g. 'V Tech'. Leave blank to reset to the market's name.")
+    @app_commands.autocomplete(market_id=_public_market_autocomplete)
+    async def stock_set_label(self, interaction: discord.Interaction, market_id: str,
+                              label: Optional[str] = None):
+        if not is_manager(interaction):
+            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
+        import Restocker_db as _db
+        if not _db.get_market_shares(market_id):
+            return await interaction.response.send_message(
+                f"❌ `{market_id}` isn't a listed stock.", ephemeral=True)
+        text = (label or "").strip()[:60]
+        if not text:
+            _db.delete_config(f"stock_label:{market_id}")
+            return await interaction.response.send_message(
+                f"✅ Stock label cleared — the exchange shows `{market_id}`'s own market name again.",
+                ephemeral=True)
+        _db.set_config(f"stock_label:{market_id}", text)
+        await interaction.response.send_message(
+            f"✅ The stock on `{market_id}` now displays as **{text}** on the exchange, cap table "
+            f"and index — the market itself keeps its own name in the ledger and reports.",
+            ephemeral=True)
+
     @stock.command(name="apply_roles",
                    description="(Manager) Give every current shareholder of a market a role")
     @app_commands.describe(market_id="The listed market (import its cap table first)",

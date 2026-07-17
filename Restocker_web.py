@@ -558,6 +558,15 @@ def _load_stock_data() -> dict:
             names[mid] = (info.get("name") if isinstance(info, dict) else None) or mid
     except Exception:
         pass
+    # A stock can carry a COMPANY label distinct from its host market's name (the V Tech
+    # stock lives on the Greyhames market) — the exchange shows the company.
+    for mid in public:
+        try:
+            lbl = str(db.get_config(f"stock_label:{mid}") or "").strip()
+            if lbl:
+                names[mid] = lbl
+        except Exception:
+            pass
 
     holder_names = {}
     if _YAML_AVAILABLE:
@@ -3986,6 +3995,12 @@ async def _handle_exchange_captable(request):
         info = raw.get(mid)
         if isinstance(info, dict):
             mname = info.get("name") or mid
+    except Exception:
+        pass
+    try:  # company label wins on the cap table — the stock is the company, not the shop
+        lbl = str(db.get_config(f"stock_label:{mid}") or "").strip()
+        if lbl:
+            mname = lbl
     except Exception:
         pass
     return web.json_response({"ok": True, "market_id": mid, "name": mname,

@@ -2253,6 +2253,25 @@ def _is_vtech_market(market_id) -> bool:
 # plus every child's net × that child's share. Fully general — every company gets its own
 # holding stock, not just V Tech. Config per child: rollup_parent:<mid>, rollup_share:<mid>.
 
+def _market_stock_label(market_id) -> str:
+    """Display name for the STOCK listed on this market — the company, not the shop. A stock
+    can live on one market (the merger put V Tech's shares on `main`/Greyhames) while the
+    company brand is something else; this label is what the exchange, cap table and index
+    show. Config 'stock_label:<mid>'; falls back to the market's own name."""
+    try:
+        import Restocker_db as _db
+        v = str(_db.get_config(f"stock_label:{market_id}") or "").strip()
+        if v:
+            return v
+    except Exception:
+        pass
+    try:
+        m = _get_market(market_id) or {}
+        return str(m.get("name") or market_id)
+    except Exception:
+        return str(market_id)
+
+
 def _market_rollup_parent(market_id):
     """The parent stock market this market rolls its profit into, or None if independent."""
     try:
@@ -7169,6 +7188,14 @@ def _record_to_market_history(market_id: str, month_key: str, label: str, source
     }
     _save_csn_for_market(market_id, history)
     _recompute_share_price(market_id, reason="csn_report")
+    # If this market rolls its profit up into a parent stock, that parent's valuation just
+    # changed too — reprice it. (The child usually has no stock listing of its own.)
+    try:
+        _parent = _market_rollup_parent(market_id)
+        if _parent:
+            _recompute_share_price(_parent, reason="csn_rollup")
+    except Exception as _e:
+        log.warning("[rollup] parent reprice failed for %s: %s", market_id, _e)
     try:
         _payout_share_dividends(market_id, month_key,
                                 float(history["months"][month_key].get("net", 0.0)))
