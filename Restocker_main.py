@@ -133,7 +133,10 @@ STOCK_LOW_PCT = _env_float("STOCK_LOW_PCT", 20.0)  # live-stock alert: warn when
 # still DM them when items drop to/under this % of capacity on a scan. Set 0 to only
 # alert on explicitly-configured alarms (the old behavior).
 STOCK_ALARM_DEFAULT_PCT = _env_float("STOCK_ALARM_DEFAULT_PCT", 20.0)
-STOCK_REVERT_DAILY = _env_float("STOCK_REVERT_DAILY", 0.05)
+# 0 = prices move ONLY on events (earnings/CSN reports, hive bookings, trades) — like a
+# real market, no drift on no-news days. Set >0 (e.g. 0.05) to re-enable a daily pull
+# toward fundamental if trade-pumped prices ever need deflating.
+STOCK_REVERT_DAILY = _env_float("STOCK_REVERT_DAILY", 0.0)
 STOCK_DIVIDEND_PCT = _env_float("STOCK_DIVIDEND_PCT", 0.0)
 # Restock-order sanity guards (protect the website "Build order" / refill scan): never
 # auto-create an order for an item with no sell price (0-coin, pointless) or one whose
@@ -7588,6 +7591,12 @@ def _recompute_share_price(market_id, reason="csn_report"):
             hi = current * (1.0 + STOCK_MAX_REANCHOR_MOVE)
             lo = current * (1.0 - STOCK_MAX_REANCHOR_MOVE)
             price = round(max(MIN_SHARE_PRICE, min(hi, max(lo, target))), 2)
+            # Event-driven market: once the price has converged on the fundamental, a
+            # re-upload of the SAME month's data is not news — don't move or log. (The
+            # CSN mod posts cumulative updates several times a day; without this guard
+            # every repost nudged the price and the chart staircased on no-news days.)
+            if abs(price - current) / current < 0.005:
+                return current
         else:
             price = round(fundamental, 2)
         _db.upsert_market_shares(
