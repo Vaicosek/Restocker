@@ -2358,7 +2358,9 @@ def _rollup_combined_months(parent_market_id) -> dict:
 # and V Tech's remainder is booked to the market's hive ledger — which the stock
 # roll-up reads on top of CSN months.
 
-_HIVE_DEFAULT_VALUES = {"honey block": 350.0, "honeycomb block": 300.0}
+# Prices are quoted PER STACK of 64 (350/stack honey, 300/stack comb — the owner's
+# numbers); feed lines count PIECES, so store per-piece: 350/64 and 300/64.
+_HIVE_DEFAULT_VALUES = {"honey block": 350.0 / 64.0, "honeycomb block": 300.0 / 64.0}
 
 
 def _hive_item_value(item) -> float:
@@ -2378,7 +2380,7 @@ def _hive_item_value(item) -> float:
 
 
 def _hive_harvester_pct() -> float:
-    """The harvesters' cash cut of harvested value (default 20%)."""
+    """The harvesters' cash cut of harvested value (default 17%; /hive set_wage changes it)."""
     try:
         import Restocker_db as _db
         raw = _db.get_config("hive_harvester_pct")
@@ -2386,7 +2388,7 @@ def _hive_harvester_pct() -> float:
             return max(0.0, min(100.0, float(raw)))
     except Exception:
         pass
-    return 20.0
+    return 17.0
 
 
 def _hive_owner_pct(market_id) -> float:

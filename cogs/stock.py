@@ -184,12 +184,13 @@ class StockCog(commands.Cog):
 
     @stock.command(
         name="set_params",
-        description="(Manager) Tune a public market's shares outstanding / P-E multiplier",
+        description="(Manager) Tune a public market's shares outstanding / P-E / treasury",
     )
     @app_commands.describe(
         market_id="The market to tune",
         shares_outstanding="New total shares outstanding",
         pe_multiplier="New price multiplier applied to monthly net profit per share",
+        treasury="Company cash on hand (e.g. the Lands balance) — shows as Treasury and backs the shares",
     )
     @app_commands.autocomplete(market_id=_public_market_autocomplete)
     async def stock_set_params(self,
@@ -197,6 +198,7 @@ class StockCog(commands.Cog):
         market_id: str,
         shares_outstanding: Optional[app_commands.Range[float, 1.0, 100_000_000.0]] = None,
         pe_multiplier: Optional[app_commands.Range[float, 0.1, 1000.0]] = None,
+        treasury: Optional[app_commands.Range[float, 0.0, 1_000_000_000_000.0]] = None,
     ):
         if not is_manager(interaction):
             return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
@@ -204,6 +206,12 @@ class StockCog(commands.Cog):
         listing = _db.get_market_shares(market_id)
         if not listing:
             return await interaction.response.send_message(f"❌ `{market_id}` has never been public.", ephemeral=True)
+        if treasury is not None:
+            _db.upsert_market_shares(market_id, treasury_coins=float(treasury))
+        if shares_outstanding is None and pe_multiplier is None and treasury is not None:
+            return await interaction.response.send_message(
+                f"✅ `{market_id}` treasury set to **{int(treasury):,}** 🪙 — shows on the exchange "
+                f"and counts as cash backing for the shares.", ephemeral=True)
         if shares_outstanding is None and pe_multiplier is None:
             return await interaction.response.send_message(
                 "❌ Provide at least one of `shares_outstanding` or `pe_multiplier`.", ephemeral=True

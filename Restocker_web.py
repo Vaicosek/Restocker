@@ -354,6 +354,85 @@ def _load_all_earnings() -> dict:
         if rows:
             result[mid] = rows
 
+    # ── Hive-ledger overlay: honey economics (value in, wages + owner cut out) live in
+    # hive_ledger, not CSN (the hive shops buy at 0 coins) — merge them per market so the
+    # money view is complete. Display-only; stock pricing reads hive_ledger separately.
+    if db is not None:
+        for mid, rows in list(result.items()):
+            try:
+                hl = db.get_hive_ledger_months(mid)
+            except Exception:
+                hl = {}
+            if not hl:
+                continue
+            by_month = {r["month"]: r for r in rows}
+            for mk, h in hl.items():
+                r = by_month.get(mk)
+                if r is None:
+                    r = {"month": mk, "label": mk, "income": 0, "spent": 0, "net": 0, "items": {}}
+                    rows.append(r)
+                    by_month[mk] = r
+                r["income"] += int(round(h["value"]))
+                r["spent"]  += int(round(h["harvester_pay"] + h["owner_pay"]))
+                r["net"]    += int(round(h["net"]))
+                e = r["items"].setdefault("Hive harvest (honey value)",
+                                          {"sold": 0, "bought": 0, "net": 0})
+                e["net"] += int(round(h["net"]))
+            rows.sort(key=lambda x: x["month"])
+
+    # ── Company tabs: a parent stock + every market rolled into it appears as ONE
+    # combined "<label> · all" ledger (listed first); members stay browsable on their
+    # own tabs. Child months are weighted by their roll-up share (partner markets
+    # contribute only the company's cut).
+    if db is not None:
+        groups: dict = {}
+        for mid in list(result.keys()):
+            try:
+                parent = str(db.get_config(f"rollup_parent:{mid}") or "").strip()
+            except Exception:
+                parent = ""
+            if not parent:
+                continue
+            try:
+                share = float(db.get_config(f"rollup_share:{mid}") or 100.0) / 100.0
+            except Exception:
+                share = 1.0
+            groups.setdefault(parent, []).append((mid, max(0.0, min(1.0, share))))
+        combined_entries: dict = {}
+        for parent, members in groups.items():
+            label = ""
+            try:
+                label = str(db.get_config(f"stock_label:{parent}") or "").strip()
+            except Exception:
+                pass
+            if not label:
+                label = (markets.get(parent) or {}).get("name") or parent
+            merged: dict = {}
+
+            def _mix(rows, share, _m=merged):
+                for r in rows:
+                    t = _m.setdefault(r["month"], {"month": r["month"], "label": r["label"],
+                                                   "income": 0, "spent": 0, "net": 0, "items": {}})
+                    t["income"] += int(round(r["income"] * share))
+                    t["spent"]  += int(round(r["spent"] * share))
+                    t["net"]    += int(round(r["net"] * share))
+                    for iname, iv in (r.get("items") or {}).items():
+                        e = t["items"].setdefault(iname, {"sold": 0, "bought": 0, "net": 0})
+                        e["sold"] += iv.get("sold", 0)
+                        e["bought"] += iv.get("bought", 0)
+                        e["net"] += int(round(iv.get("net", 0) * share))
+
+            _mix(result.get(parent) or [], 1.0)
+            for cmid, cshare in members:
+                _mix(result.get(cmid) or [], cshare)
+            if merged:
+                key = f"{label} · all"
+                if key in result or key in combined_entries:
+                    key = f"{label} · all ({parent})"
+                combined_entries[key] = sorted(merged.values(), key=lambda x: x["month"])
+        if combined_entries:
+            result = {**combined_entries, **result}
+
     result.setdefault("main", [])
     for _hid in _earnings_hidden_markets():
         result.pop(_hid, None)

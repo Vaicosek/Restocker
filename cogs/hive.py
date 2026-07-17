@@ -342,6 +342,18 @@ class HiveCog(commands.Cog):
         await interaction.response.send_message(
             f"✅ **{item.strip()}** now valued at **{value:g}**/pc for harvests.", ephemeral=True)
 
+    @hive.command(name="set_wage", description="Set the harvesters' wage — their % of harvested value (default 17)")
+    @app_commands.describe(pct="0–100 — e.g. 17 means a harvester gets 17% of the value they bring in")
+    async def hive_set_wage(self, interaction: discord.Interaction,
+                            pct: app_commands.Range[float, 0.0, 100.0]):
+        if not is_manager(interaction):
+            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
+        import Restocker_db as _db
+        _db.set_config("hive_harvester_pct", str(float(pct)))
+        await interaction.response.send_message(
+            f"✅ Harvester wage set to **{pct:g}%** of harvested value. Applies to every payout "
+            f"from now on (never retroactive).", ephemeral=True)
+
     @hive.command(name="set_split", description="Set a partner owner's cut of harvested value on a market (V Tech's own hives = 0)")
     @app_commands.describe(market_id="The hive market",
                            owner_pct="% of harvested VALUE the market owner gets (e.g. 32 for 60/40 after the harvester cut)")
@@ -367,14 +379,15 @@ class HiveCog(commands.Cog):
 
     # ── backlog + manual sweep ───────────────────────────────────────────────
     @hive.command(name="settle",
-                  description="Mark unpaid harvests as ALREADY handled (paid by hand pre-engine) — no coins, no booking")
+                  description="Mark unpaid harvests as ALREADY paid by hand — optionally still BOOK their value to the company")
     @app_commands.describe(
         market_id="The hive market",
         ign="Only this player's rows (blank = everyone's unpaid backlog)",
-        apply="False (default) = preview. True = mark settled — they will NOT be paid.")
+        book="True = no coins move, but the harvest VALUE + hand-paid wage cost are booked to the ledger/stock (the honey was real!)",
+        apply="False (default) = preview. True = execute.")
     @app_commands.autocomplete(market_id=_market_autocomplete)
     async def hive_settle(self, interaction: discord.Interaction, market_id: str,
-                          ign: Optional[str] = None, apply: bool = False):
+                          ign: Optional[str] = None, book: bool = False, apply: bool = False):
         if not is_manager(interaction):
             return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
         await interaction.response.defer(ephemeral=True, thinking=True)
@@ -393,20 +406,34 @@ class HiveCog(commands.Cog):
             p = per.setdefault(str(r.get("ign")), {"qty": 0, "value": 0.0})
             p["qty"] += int(r.get("qty") or 0)
             p["value"] += v
+        pct = core._hive_harvester_pct()
+        opct = core._hive_owner_pct(market_id)
+        wage_cost = int(round(total_v * pct / 100.0))
+        owner_cost = int(round(total_v * opct / 100.0)) if opct > 0 else 0
+        net_gain = int(round(total_v)) - wage_cost - owner_cost
         lines = [f"• {i} — {_fmt(p['qty'])} pcs · value {_fmt(p['value'])}"
                  for i, p in sorted(per.items(), key=lambda kv: -kv[1]["value"])[:20]]
+        book_line = (f"\n📒 With `book:True`: value **{_fmt(total_v)}** in · hand-paid wages "
+                     f"**{_fmt(wage_cost)}** out"
+                     + (f" · owner **{_fmt(owner_cost)}**" if owner_cost else "")
+                     + f" → **{_fmt(net_gain)} net** booked to the ledger + stock.")
         if not apply:
             return await interaction.followup.send(
-                f"🧾 **Settle preview — `{market_id}`**: {len(rows)} row(s), value {_fmt(total_v)} "
-                f"would be marked **already handled** (no coins, nothing booked):\n"
-                + "\n".join(lines)
-                + "\n\nUse once after binding to clear the pre-engine backlog you already paid "
-                  "by hand. Re-run with `apply:True` to confirm.",
+                f"🧾 **Settle preview — `{market_id}`**: {len(rows)} row(s), value {_fmt(total_v)}. "
+                f"No coins would move (already paid by hand):\n" + "\n".join(lines)
+                + (book_line if book else "\n(Not booking — add `book:True` to also record the "
+                                          "economics to the ledger/stock.)")
+                + "\n\nRe-run with `apply:True` to confirm.",
                 ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
         n = _db.mark_hive_harvests_paid([int(r["id"]) for r in rows])
+        booked_note = ""
+        if book and total_v > 0:
+            booked = core._book_hive_month(market_id, float(total_v), float(wage_cost), float(owner_cost))
+            booked_note = (f"\n📒 Booked to {booked.get('month', 'current')}: value {_fmt(total_v)}, "
+                           f"costs {_fmt(wage_cost + owner_cost)} → **{_fmt(net_gain)} net** — "
+                           f"ledger + stock updated.")
         await interaction.followup.send(
-            f"🧾 Settled **{n}** row(s) ({_fmt(total_v)} value) — no coins paid, nothing booked. "
-            f"Now `/hive autopay market_id:{market_id} enabled:True` and it runs itself.",
+            f"🧾 Settled **{n}** row(s) ({_fmt(total_v)} value) — no coins paid.{booked_note}",
             ephemeral=True)
 
     @hive.command(name="status", description="Unpaid harvests for a market — who's owed what")

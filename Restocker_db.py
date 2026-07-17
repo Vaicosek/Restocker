@@ -2306,6 +2306,19 @@ def add_hive_booking(market_id: str, month: str, value: float,
         return dict(row) if row else {}
 
 
+def get_hive_ledger_months(market_id: str) -> dict:
+    """{month: {value, harvester_pay, owner_pay, net}} — full hive economics for the
+    website ledger (CSN shows 0 for hive shops, so the money view merges this in)."""
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT month, value, harvester_pay, owner_pay, net FROM hive_ledger "
+            "WHERE market_id=?", (str(market_id),)).fetchall()
+        return {r["month"]: {"value": float(r["value"] or 0),
+                             "harvester_pay": float(r["harvester_pay"] or 0),
+                             "owner_pay": float(r["owner_pay"] or 0),
+                             "net": float(r["net"] or 0)} for r in rows}
+
+
 def get_hive_months(market_id: str) -> dict:
     """{month: net} — the hive engine's monthly V Tech gain, added on top of CSN months
     by the stock roll-up."""
