@@ -142,8 +142,10 @@ class HiveCog(commands.Cog):
         opct = core._hive_owner_pct(market_id)
         mkt_mult, _mb, _mp = _market_loyalty_cfg(market_id)
         value_total = sum(g["value"] for g in groups.values())
+        # Partner-site share ("rent"): the site keeps this slice of the honey IN KIND —
+        # V Tech owes nobody coins for it. It is only BOOKED, so the ledger shows V Tech
+        # earning its 60% of production instead of the whole harvest.
         owner_pay = int(round(value_total * opct / 100.0)) if opct > 0 else 0
-        owner_id = _market_owner_id(market_id) if owner_pay > 0 else None
 
         paid_lines, harv_total = [], 0
         for uid, g in sorted(groups.items(), key=lambda kv: -kv[1]["value"]):
@@ -195,20 +197,14 @@ class HiveCog(commands.Cog):
             await _aio.sleep(0.35)
 
         owner_line = ""
-        if owner_id and owner_pay > 0:
-            try:
-                add_coins(int(owner_id), int(owner_pay), counts_as_principal=False,
-                          reason=f"hive_owner:{market_id}:{batch}")
-                owner_line = f"🏠 Owner cut: <@{owner_id}> +**{_fmt(owner_pay)}**"
-            except Exception as e:
-                owner_line = f"⚠ Owner cut failed: {e}"
-                owner_pay = 0
+        if owner_pay > 0:
+            owner_line = (f"🏠 Site share ({opct:g}%): **{_fmt(owner_pay)}** kept by the site "
+                          f"in kind — no coins paid")
 
-        booked = core._book_hive_month(market_id, value_total, harv_total,
-                                       owner_pay if owner_id else 0)
+        booked = core._book_hive_month(market_id, value_total, harv_total, owner_pay)
         return {"paid_lines": paid_lines, "value_total": value_total,
                 "harv_total": harv_total, "owner_line": owner_line,
-                "net": value_total - harv_total - (owner_pay if owner_id else 0),
+                "net": value_total - harv_total - owner_pay,
                 "month": booked.get("month", "current")}
 
     # ── feed listeners: record, and (autopay) pay on the spot ────────────────
