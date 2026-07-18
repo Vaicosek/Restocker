@@ -385,6 +385,73 @@ class LoopsCog(commands.Cog):
     async def _before_employee_batch_dispatch_loop(self, ):
         await bot.wait_until_ready()
 
+    @tasks.loop(seconds=60)
+    async def dividend_report_flush_loop(self, ):
+        """Post queued payout events (GEX.PR pool + shareholder dividends) to
+        #dividend-reports. The payout engines run in sync code and can only queue;
+        this loop is the async half. Empties the queue on success, keeps it on failure."""
+        try:
+            import json as _json
+            import Restocker_db as _db
+            raw = _db.get_config("pending_dividend_posts")
+            if not raw:
+                return
+            try:
+                q = _json.loads(raw)
+            except Exception:
+                _db.set_config("pending_dividend_posts", "[]")
+                return
+            if not isinstance(q, list) or not q:
+                return
+            ch_id = int(getattr(core, "DIVIDEND_REPORTS_CHANNEL_ID", 0) or 0)
+            channel = bot.get_channel(ch_id) if ch_id else None
+            if channel is None:
+                return                      # channel not visible yet — keep the queue
+            markets = core._load_markets().get("markets", {}) or {}
+            remaining = []
+            for entry in q:
+                try:
+                    mid = str(entry.get("market_id") or "")
+                    label = None
+                    try:
+                        import Restocker_db as _db2
+                        label = _db2.get_config(f"stock_label:{mid}")
+                    except Exception:
+                        pass
+                    mname = label or (markets.get(mid) or {}).get("name", mid)
+                    month = entry.get("month", "?")
+                    if entry.get("type") == "investor_pool":
+                        lines = [f"Net profit `{float(entry.get('net') or 0):,.0f}` 🪙 · "
+                                 f"pool **{float(entry.get('pool_pct') or 0):g}%** = "
+                                 f"`{float(entry.get('pool') or 0):,.0f}` 🪙"]
+                        for uid, amt in (entry.get("paid") or [])[:20]:
+                            lines.append(f"• <@{uid}> — **{int(amt):,}** 🪙")
+                        emb = discord.Embed(
+                            title=f"💰 GEX.PR profit share — {mname} · {month}",
+                            description="\n".join(lines)[:4000],
+                            color=discord.Color.gold())
+                        emb.set_footer(text="Paid automatically when monthly results record")
+                    else:
+                        emb = discord.Embed(
+                            title=f"📈 Shareholder dividend — {mname} · {month}",
+                            description=(f"Total **{int(entry.get('total') or 0):,}** 🪙 · "
+                                         f"`{float(entry.get('per_share') or 0):,.4f}`/share · "
+                                         f"{int(entry.get('holders') or 0)} holder(s)"),
+                            color=discord.Color.green())
+                        emb.set_footer(text="Paid from the market treasury to all common shareholders")
+                    await channel.send(embed=emb)
+                    await asyncio.sleep(0.5)
+                except Exception as _pe:
+                    remaining.append(entry)
+                    log.warning("[dividend_flush] post failed: %s", _pe)
+            _db.set_config("pending_dividend_posts", _json.dumps(remaining))
+        except Exception as e:
+            log.warning("[dividend_flush] loop error: %s", e)
+
+    @dividend_report_flush_loop.before_loop
+    async def _before_dividend_report_flush_loop(self, ):
+        await bot.wait_until_ready()
+
     @tasks.loop(hours=24)
     async def weekly_interest_loop(self, ):
         try:
@@ -688,6 +755,7 @@ class LoopsCog(commands.Cog):
 
     def _all_loops(self):
         return (self.worker_announce_loop, self.claimed_dm_cleanup_loop, self.employee_batch_dispatch_loop,
+                self.dividend_report_flush_loop,
                 self.weekly_interest_loop, self.weekly_funds_report_loop, self.loyalty_decay_loop,
                 self.ign_deadline_loop, self.stock_reversion_loop, self.stock_dashboard_loop,
                 self.team_digest_loop, self.db_backup_loop, self.instance_heartbeat_loop)

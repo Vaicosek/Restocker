@@ -148,6 +148,11 @@ ORDER_MAX_AUTO_PAYOUT = _env_float("ORDER_MAX_AUTO_PAYOUT", 1_000_000.0)
 # grouped board instead of a card per order — a full-market refill (100+ items) must
 # not flood the channel with a hundred embeds. Workers claim via /orders or the site.
 ORDER_BULK_CARD_THRESHOLD = _env_int("ORDER_BULK_CARD_THRESHOLD", 12)
+# Investor channels (INVESTORS category 1500543242670964908): payout engines queue
+# reports here and a loop posts them — the payouts themselves are sync code, so they
+# can't await a channel.send directly.
+DIVIDEND_REPORTS_CHANNEL_ID = _env_int("DIVIDEND_REPORTS_CHANNEL_ID", 1500543246718206002)
+INVESTOR_CHAT_CHANNEL_ID    = _env_int("INVESTOR_CHAT_CHANNEL_ID",    1500543251202052218)
 STOCK_LIMIT_ORDERS_ENABLED = _env_bool("STOCK_LIMIT_ORDERS_ENABLED", True)
 
 FUNDS_REPORT_GUILD_ID = _env_int("FUNDS_REPORT_GUILD_ID", 1447833151329009726)
@@ -7192,6 +7197,26 @@ def _investor_pool_pct() -> float:
     return _env_float("INVESTOR_POOL_PCT", 10.0)
 
 
+def _queue_dividend_post(entry: dict) -> None:
+    """Append a payout event to the pending-posts queue (bot_config JSON). The
+    dividend_report_flush loop turns these into #dividend-reports embeds. Sync-safe:
+    payout code runs outside the event loop (web imports, CSN ingest paths)."""
+    try:
+        import Restocker_db as _db
+        import json as _json
+        try:
+            q = _json.loads(_db.get_config("pending_dividend_posts") or "[]")
+            if not isinstance(q, list):
+                q = []
+        except Exception:
+            q = []
+        entry["ts"] = utcnow_iso()
+        q.append(entry)
+        _db.set_config("pending_dividend_posts", _json.dumps(q[-50:], ensure_ascii=False))
+    except Exception as _e:
+        log.warning("[dividends] queue post failed: %s", _e)
+
+
 def _liquidated_holders() -> dict:
     """{discord_id: note} of shareholders/investors marked for liquidation — people who
     left the server for good (quit, banned, vanished). Their equity goes BACK TO THE
@@ -7278,6 +7303,11 @@ def _distribute_investor_profit(market_id: str, month_key: str, net: float) -> l
         if paid:
             log.info("[investors] %s %s: pool %.0f (%.1f%% of %.0f net) → %d investor(s)",
                      market_id, month_key, pool, pool_pct, net, len(paid))
+            _queue_dividend_post({
+                "type": "investor_pool", "market_id": market_id, "month": month_key,
+                "net": float(net), "pool_pct": float(pool_pct), "pool": float(pool),
+                "paid": [[str(u), int(a)] for u, a in paid],
+            })
         return paid
     except Exception as e:
         log.warning("[investors] distribution failed for %s %s: %s", market_id, month_key, e)
@@ -9015,6 +9045,11 @@ def _payout_share_dividends(market_id, month_key, net_profit):
         _db.log_dividend(market_id, month_key, paid, per_share, len(holders))
     except Exception:
         pass
+    if paid > 0:
+        _queue_dividend_post({
+            "type": "share_dividend", "market_id": market_id, "month": month_key,
+            "total": int(paid), "per_share": float(per_share), "holders": len(holders),
+        })
     return {"paid": paid, "per_share": per_share, "holders": len(holders), "month": month_key}
 
 

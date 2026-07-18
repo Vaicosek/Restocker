@@ -346,6 +346,62 @@ class MoneyCog(commands.Cog):
         except Exception:
             pass
 
+    @investor.command(name="apply_roles",
+                      description="(Manager) Give every registered GEX.PR investor the canonical Investor role")
+    @app_commands.describe(role="Role to assign (default: the canonical/most-populated 'Investor' role)")
+    async def investor_apply_roles(self, interaction: discord.Interaction,
+                                   role: Optional[discord.Role] = None):
+        if not is_manager(interaction):
+            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
+        guild = interaction.guild
+        if guild is None:
+            return await interaction.response.send_message("Run this in the server.", ephemeral=True)
+        import Restocker_db as _db
+        invs = _db.get_investors() or {}
+        if not invs:
+            return await interaction.response.send_message("No investors registered.", ephemeral=True)
+        if role is None:
+            try:
+                _rid = int(_db.get_config("canonical_role:investor") or 0)
+                role = guild.get_role(_rid) if _rid else None
+            except Exception:
+                role = None
+            if role is None:
+                cands = [r for r in guild.roles if "investor" in r.name.lower()]
+                role = max(cands, key=lambda r: len(r.members)) if cands else None
+            if role is None:
+                try:
+                    role = await guild.create_role(name="Investor", reason="GEX.PR investors")
+                except Exception as e:
+                    return await interaction.response.send_message(f"❌ Couldn't create the role: {e}", ephemeral=True)
+        _db.set_config("canonical_role:investor", str(role.id))
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        import asyncio as _aio
+        added, had, absent = [], [], []
+        for uid in invs.keys():
+            member = guild.get_member(int(uid))
+            if member is None:
+                try:
+                    member = await guild.fetch_member(int(uid))
+                except Exception:
+                    member = None
+            if member is None:
+                absent.append(uid)
+                continue
+            if role in member.roles:
+                had.append(member)
+                continue
+            try:
+                await member.add_roles(role, reason="GEX.PR investor register")
+                added.append(member)
+            except Exception:
+                absent.append(uid)
+            await _aio.sleep(0.3)
+        await interaction.followup.send(
+            f"✅ {role.mention}: +{len(added)} added · {len(had)} already had it · "
+            f"{len(absent)} not in server / failed.", ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none())
+
     @investor.command(name="liquidate",
                       description="Mark a gone-for-good holder for liquidation — their equity returns to the company")
     @app_commands.describe(

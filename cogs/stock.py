@@ -461,12 +461,24 @@ class StockCog(commands.Cog):
                 ephemeral=True)
         await interaction.response.defer(ephemeral=True, thinking=True)
         if role is None:
-            role = discord.utils.get(guild.roles, name="Shareholder")
+            # Canonical role first (set by /stock merge_roles) — name lookups are
+            # ambiguous once duplicate roles exist.
+            try:
+                _rid = int(_db.get_config("canonical_role:shareholder") or 0)
+                role = guild.get_role(_rid) if _rid else None
+            except Exception:
+                role = None
+            if role is None:
+                role = discord.utils.get(guild.roles, name="Shareholder")
             if role is None:
                 try:
                     role = await guild.create_role(name="Shareholder", reason=f"{market_id} shareholders")
                 except Exception as e:
                     return await interaction.followup.send(f"❌ Couldn't create the role: {e}", ephemeral=True)
+            try:
+                _db.set_config("canonical_role:shareholder", str(role.id))
+            except Exception:
+                pass
         import asyncio as _aio
         added, had, absent, failed = [], [], [], []
         for h in holders:
@@ -498,6 +510,62 @@ class StockCog(commands.Cog):
             msg += (f"\n• ⚠ Couldn't assign to {len(failed)} (move the bot's role above {role.mention}): "
                     + ", ".join(m.mention for m in failed[:10]))
         await interaction.followup.send(msg[:1900], ephemeral=True,
+                                        allowed_mentions=discord.AllowedMentions.none())
+
+    @stock.command(name="merge_roles",
+                   description="(Manager) Merge duplicate roles ('📈 Investor' vs 'Investor') into one canonical role")
+    @app_commands.describe(
+        name="The concept, e.g. 'Investor' or 'Shareholder' — matches role names ignoring emoji/case",
+        keep="Which role survives (default: the matching role with the most members)")
+    async def stock_merge_roles(self, interaction: discord.Interaction, name: str,
+                                keep: Optional[discord.Role] = None):
+        if not is_manager(interaction):
+            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
+        guild = interaction.guild
+        if guild is None:
+            return await interaction.response.send_message("Run this in the server.", ephemeral=True)
+        import re as _re
+        import Restocker_db as _db
+
+        def _norm(s):
+            return _re.sub(r"[^a-z0-9]+", "", (s or "").lower())
+
+        want = _norm(name)
+        if not want:
+            return await interaction.response.send_message("❌ Give a role name to merge.", ephemeral=True)
+        matches = [r for r in guild.roles if _norm(r.name) == want]
+        if len(matches) < 2 and keep is None:
+            return await interaction.response.send_message(
+                f"Found {len(matches)} role(s) matching **{name}** — nothing to merge.", ephemeral=True)
+        if keep is None:
+            keep = max(matches, key=lambda r: len(r.members))
+        elif _norm(keep.name) != want:
+            matches.append(keep)   # allow keeping a differently-decorated role on purpose
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        import asyncio as _aio
+        moved, failed = 0, 0
+        emptied = []
+        for r in matches:
+            if r.id == keep.id:
+                continue
+            for m in list(r.members):
+                try:
+                    if keep not in m.roles:
+                        await m.add_roles(keep, reason=f"merge_roles {name}")
+                        moved += 1
+                    await m.remove_roles(r, reason=f"merge_roles {name}")
+                except Exception:
+                    failed += 1
+                await _aio.sleep(0.3)
+            emptied.append(r)
+        _db.set_config(f"canonical_role:{want}", str(keep.id))
+        lines = [f"✅ Canonical **{name}** role: {keep.mention} ({len(keep.members)} member(s)).",
+                 f"Moved **{moved}** member(s)" + (f" · {failed} failed" if failed else "") + "."]
+        if emptied:
+            lines.append("Now-empty duplicates — delete them in Server Settings when you're ready: "
+                         + ", ".join(r.mention for r in emptied))
+        lines.append("The bot remembers this choice — apply_roles and investor syncs use it from now on.")
+        await interaction.followup.send("\n".join(lines), ephemeral=True,
                                         allowed_mentions=discord.AllowedMentions.none())
 
     @stock.command(name="delist",
