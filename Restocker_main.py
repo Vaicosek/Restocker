@@ -7823,11 +7823,10 @@ def _fundamental_for_market(market_id):
     except Exception:
         _assets = 0.0
     if _assets > 0:
-        try:
-            _cash = float(_db.get_treasury(market_id) or 0.0)
-        except Exception:
-            _cash = 0.0
-        fundamental = max(fundamental, (_assets + _cash) / shares_out)
+        # OWNER'S RULE: the book value IS the valuation — cap pins to assets alone.
+        # Treasury cash, sellables and inventory are BACKING (quality of the cap,
+        # shown as Backed % and the rating), never additive to the price.
+        fundamental = max(fundamental, _assets / shares_out)
     return fundamental, pe, keys[-1]
 
 

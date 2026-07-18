@@ -39,3 +39,9 @@ venv/
 *.swp
 .DS_Store
 Thumbs.db
+
+# working files (Claude)
+*.xlsx
+deploy.bat
+deploy_log.txt
+.fuse_hidden*
