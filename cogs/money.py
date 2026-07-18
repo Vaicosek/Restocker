@@ -267,65 +267,6 @@ class MoneyCog(commands.Cog):
             f"✅ Investor pool set to **{pct:g}%** of each V Tech market's monthly net. "
             f"Applies to distributions from now on (never retroactive).", ephemeral=True)
 
-    @investor.command(name="apply_roles",
-                      description="Give every synced investor the Investor role on THIS server")
-    @app_commands.describe(role="Role to assign (default: find or create an 'Investor' role)")
-    async def investor_apply_roles(self, interaction: discord.Interaction,
-                                   role: Optional[discord.Role] = None):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
-        guild = interaction.guild
-        if guild is None:
-            return await interaction.response.send_message("Run this in the server.", ephemeral=True)
-        import Restocker_db as _db
-        invs = [i for i in (_db.get_investors() or {}).values()
-                if float(i.get("share_pct") or 0) > 0]
-        if not invs:
-            return await interaction.response.send_message(
-                "❌ Investor register is empty — run `/investor sync` first.", ephemeral=True)
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        if role is None:
-            role = discord.utils.get(guild.roles, name="Investor")
-            if role is None:
-                try:
-                    role = await guild.create_role(name="Investor", reason="V Tech investor register")
-                except Exception as e:
-                    return await interaction.followup.send(f"❌ Couldn't create the Investor role: {e}",
-                                                           ephemeral=True)
-        import asyncio as _aio
-        added, had, absent, failed = [], [], [], []
-        for inv in invs:
-            uid = int(inv["user_id"])
-            member = guild.get_member(uid)
-            if member is None:
-                try:
-                    member = await guild.fetch_member(uid)
-                except Exception:
-                    member = None
-            if member is None:
-                absent.append(inv)          # not on the V Tech discord (yet)
-                continue
-            if role in member.roles:
-                had.append(member)
-                continue
-            try:
-                await member.add_roles(role, reason="GEX.PR investor")
-                added.append(member)
-            except Exception:
-                failed.append(member)       # usually role hierarchy — move the bot's role up
-            await _aio.sleep(0.4)
-        msg = (f"🏷️ **{role.mention}** applied.\n"
-               f"• Added: **{len(added)}**" + (" — " + ", ".join(m.mention for m in added) if added else "") +
-               f"\n• Already had it: **{len(had)}**")
-        if absent:
-            msg += ("\n• Not on this server: **%d** — " % len(absent)
-                    + ", ".join(f"{i.get('name') or '?'} (<@{i['user_id']}>)" for i in absent))
-        if failed:
-            msg += (f"\n• ⚠ Couldn't assign to {len(failed)} (role hierarchy? move the bot's role "
-                    f"above {role.mention}): " + ", ".join(m.mention for m in failed))
-        await interaction.followup.send(msg[:1900], ephemeral=True,
-                                        allowed_mentions=discord.AllowedMentions.none())
-
     @investor.command(name="payout", description="Manual extra payout to one investor (straight to their coins)")
     @app_commands.describe(user="The investor", amount="Coins to credit", reason="Shows on the log")
     async def investor_payout(self, interaction: discord.Interaction, user: discord.Member,
