@@ -36,6 +36,57 @@ STOCK_BACK_ASSET_PCT = core.STOCK_BACK_ASSET_PCT
 STOCK_BACK_FUND_PCT = core.STOCK_BACK_FUND_PCT
 save_yaml = core.save_yaml
 
+
+async def _shares_amount_autocomplete(interaction: discord.Interaction, current: str):
+    """Suggest share amounts for /stock buy & sell: your MAX (affordable coins capped by
+    free float on buy; your whole holding on sell) plus round sizes with their cost."""
+    import Restocker_db as _db
+    out = []
+    price = 0.0
+    try:
+        market_id = str(getattr(interaction.namespace, "market_id", "") or "")
+        uid = str(interaction.user.id)
+        cmd = interaction.command.name if interaction.command else ""
+        listing = _db.get_market_shares(market_id) if market_id else None
+        price = float((listing or {}).get("share_price") or 0)
+        if cmd == "sell":
+            cap = int(float((_db.get_holding(uid, market_id) or {}).get("shares") or 0))
+            tag = "your whole holding"
+        else:
+            bal = float((_db.get_balance(uid) or {}).get("coins") or 0)
+            so = float((listing or {}).get("shares_outstanding") or 0)
+            held = sum(float(h.get("shares") or 0) for h in _db.get_holders(market_id)) if market_id else 0.0
+            flt = max(0, int(so - held))
+            afford = int(bal // price) if price > 0 else 0
+            cap = min(afford, flt) if flt else afford
+            tag = f"your max (float {flt:,} · afford {afford:,})"
+        if current.strip().isdigit() and int(current) > 0:
+            n = int(current)
+            out.append(app_commands.Choice(
+                name=(f"{n:,}" + (f" ≈ {int(n * price):,} ¢" if price > 0 else ""))[:100], value=n))
+        if cap >= 1 and (not current or str(cap).startswith(current.strip())
+                         or not current.strip().isdigit()):
+            out.append(app_commands.Choice(
+                name=(f"{cap:,} — {tag}" + (f" ≈ {int(cap * price):,} ¢" if price > 0 else ""))[:100],
+                value=cap))
+        for n in (1, 5, 10, 25, 50, 100, 250, 500, 1000, 5000):
+            if n >= (cap or 10**9):
+                break
+            if current and current.strip().isdigit() and not str(n).startswith(current.strip()):
+                continue
+            out.append(app_commands.Choice(
+                name=(f"{n:,}" + (f" ≈ {int(n * price):,} ¢" if price > 0 else ""))[:100], value=n))
+    except Exception:
+        pass
+    # de-dup by value, keep order
+    seen, uniq = set(), []
+    for c in out:
+        if c.value not in seen:
+            seen.add(c.value)
+            uniq.append(c)
+    return uniq[:25]
+
+
 class StockCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -102,8 +153,9 @@ class StockCog(commands.Cog):
         await interaction.response.send_message(embed=embed)
 
     @stock.command(name="buy", description="Buy shares of a public market using your server currency")
-    @app_commands.describe(market_id="The public market to invest in", shares="How many shares to buy")
-    @app_commands.autocomplete(market_id=_public_market_autocomplete)
+    @app_commands.describe(market_id="The public market to invest in",
+                           shares="How many shares to buy (suggestions show your max and the cost)")
+    @app_commands.autocomplete(market_id=_public_market_autocomplete, shares=_shares_amount_autocomplete)
     async def stock_buy(self,
         interaction: discord.Interaction,
         market_id: str,
@@ -113,8 +165,9 @@ class StockCog(commands.Cog):
         await interaction.response.send_message(msg, ephemeral=not ok)
 
     @stock.command(name="sell", description="Sell shares of a public market back for server currency")
-    @app_commands.describe(market_id="The market you hold shares in", shares="How many shares to sell")
-    @app_commands.autocomplete(market_id=_public_market_autocomplete)
+    @app_commands.describe(market_id="The market you hold shares in",
+                           shares="How many shares to sell (suggestions show your holding)")
+    @app_commands.autocomplete(market_id=_public_market_autocomplete, shares=_shares_amount_autocomplete)
     async def stock_sell(self,
         interaction: discord.Interaction,
         market_id: str,

@@ -45,6 +45,17 @@ async def _liquidate_target_autocomplete(interaction: discord.Interaction, curre
             seen[str(uid)] = str(inv.get("name") or seen.get(str(uid)) or uid)
     except Exception:
         pass
+    # ACTUAL shareholders too — the reclaim keys off the ID that holds the shares, and a
+    # holder missing from stock_names.yml would otherwise be unpickable (an @mention of
+    # their Discord account can be a different ID than the one on the cap table).
+    try:
+        for mid in (_db.get_public_markets() or {}):
+            for h in _db.get_holders(mid):
+                huid = str(h.get("user_id"))
+                label = seen.get(huid) or f"holder …{huid[-4:]}"
+                seen[huid] = f"{label} · {float(h.get('shares') or 0):,.0f} sh {mid}"
+    except Exception:
+        pass
     cur = (current or "").lower()
     out = []
     for uid, name in sorted(seen.items(), key=lambda kv: kv[1].lower()):
@@ -454,6 +465,11 @@ class MoneyCog(commands.Cog):
             common_note = ("\n🧹 Reclaimed now: "
                            + ", ".join(f"`{mid}` **{sh:,.0f}** sh" for mid, sh, _cb in reclaimed)
                            + " — returned to the company (free float).")
+        elif not pref_snap:
+            common_note = ("\n⚠ **Nothing to reclaim under this ID** (`" + uid + "`) — no shares, no "
+                           "GEX.PR stake. If they're on the cap table, their shares sit under a "
+                           "DIFFERENT account: pick the entry from this command's autocomplete list "
+                           "(it shows real holders with their share counts) instead of @mentioning.")
         await interaction.response.send_message(
             f"🧹 <@{uid}> marked for liquidation" + (f" (*{note}*)" if note else "") + "."
             + common_note + pref_note +
