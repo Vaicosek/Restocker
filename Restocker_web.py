@@ -731,9 +731,23 @@ def _load_stock_data() -> dict:
                         _assets += float(_x.get("stock") or 0) * float(_px)
             except Exception:
                 pass
+        _sell = 0.0
+        if _dbk is not None:
+            try:
+                _sell = float(_dbk.get_config(f"sellable_assets:{_m['mid']}") or 0.0)
+            except Exception:
+                _sell = 0.0
         _fs = _fund * (_m["mcap"] / _tot_mcap)
         _mc = _m["mcap"] or 1.0
-        _m["backing_pct"] = round(100.0 * (_m["treasury"] + _assets + _fs) / _mc, 1)
+        _m["backing_pct"] = round(100.0 * (_m["treasury"] + _assets + _sell + _fs) / _mc, 1)
+        # Rating — same house rule as the bot's _backing_rating (grade vs target %)
+        _target = (float(os.getenv("STOCK_BACK_CASH_PCT", "10") or 10)
+                   + float(os.getenv("STOCK_BACK_ASSET_PCT", "10") or 10)
+                   + float(os.getenv("STOCK_BACK_FUND_PCT", "5") or 5))
+        _ratio = (_m["backing_pct"] / _target) if _target else 0.0
+        _m["backing_target"] = _target
+        _m["rating"] = ("AAA" if _ratio >= 1.5 else "AA" if _ratio >= 1.0 else "A" if _ratio >= 0.75
+                        else "BBB" if _ratio >= 0.5 else "BB" if _ratio >= 0.25 else "C")
     index = None
     try:
         hist = db.get_market_index_history(5000)
@@ -2462,9 +2476,9 @@ document.querySelectorAll(".nav-tab").forEach(tab => {
     const arrow = m.change >= 0 ? "▲" : "▼";
     const d = document.createElement("div");
     d.className = "tick";
-    d.innerHTML = `<div class="t-name">${esc(m.ticker)} · ${esc(m.name)}</div>
+    d.innerHTML = `<div class="t-name">${esc(m.ticker)} · ${esc(m.name)} <span class="badge market-tag">${esc(m.rating||"C")}</span></div>
       <div class="t-price">${num(m.price.toFixed(2))} ¢</div>
-      <div class="t-chg ${cls}">${arrow} ${m.pct.toFixed(2)}%</div>`;
+      <div class="t-chg ${cls}">${arrow} ${m.pct.toFixed(2)}% · ${(m.backing_pct||0).toFixed(0)}% backed</div>`;
     ticker.appendChild(d);
   });
 
@@ -2502,7 +2516,7 @@ document.querySelectorAll(".nav-tab").forEach(tab => {
       <td>${m.pe.toFixed(1)}x</td>
       <td>${divCell(m)}</td>
       <td>${m.treasury ? num(Math.round(m.treasury)) + " ¢" : "—"}</td>
-      <td><span class="${(m.backing_pct||0) >= 25 ? "up" : "down"}">${(m.backing_pct||0).toFixed(0)}%</span></td>
+      <td><span class="badge market-tag" style="margin-right:6px">${esc(m.rating||"C")}</span><span class="${(m.backing_pct||0) >= (m.backing_target||25) ? "up" : "down"}">${(m.backing_pct||0).toFixed(0)}%</span></td>
       <td>${m.holders_count}</td>`;
     tr.addEventListener("click", () => select(m.mid));
     tbody.appendChild(tr);
