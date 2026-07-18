@@ -467,6 +467,33 @@ CREATE TABLE IF NOT EXISTS stock_limit_orders (
 CREATE INDEX IF NOT EXISTS idx_limit_orders_market ON stock_limit_orders(market_id, status);
 CREATE INDEX IF NOT EXISTS idx_limit_orders_user ON stock_limit_orders(user_id, status);
 
+-- ── Corporate bonds (item-collateralized debt) ──────────────────────────────
+CREATE TABLE IF NOT EXISTS bonds (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    market_id         TEXT NOT NULL,
+    name              TEXT NOT NULL DEFAULT '',
+    face_total        REAL NOT NULL,
+    unit_price        REAL NOT NULL DEFAULT 100,
+    units_total       INTEGER NOT NULL,
+    units_sold        REAL NOT NULL DEFAULT 0,
+    coupon_pct        REAL NOT NULL,
+    term_months       INTEGER NOT NULL,
+    issued_at         TEXT NOT NULL DEFAULT (datetime('now')),
+    matures_at        TEXT,
+    status            TEXT NOT NULL DEFAULT 'open',
+    last_coupon_month TEXT,
+    missed_coupons    INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_bonds_market ON bonds(market_id, status);
+CREATE TABLE IF NOT EXISTS bond_holdings (
+    bond_id   INTEGER NOT NULL,
+    user_id   TEXT NOT NULL,
+    units     REAL NOT NULL DEFAULT 0,
+    invested  REAL NOT NULL DEFAULT 0,
+    name      TEXT,
+    PRIMARY KEY (bond_id, user_id)
+);
+
 -- ── Dividend payout log ─────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS stock_dividend_log (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1344,6 +1371,88 @@ def get_config(key, default=None):
     with db() as conn:
         row = conn.execute("SELECT value FROM bot_config WHERE key=?", (str(key),)).fetchone()
         return row["value"] if row and row["value"] is not None else default
+
+
+# ── Bonds ────────────────────────────────────────────────────────────────────
+
+def create_bond(market_id: str, name: str, face_total: float, unit_price: float,
+                coupon_pct: float, term_months: int, matures_at: str) -> int:
+    units_total = int(face_total // unit_price)
+    with db() as conn:
+        cur = conn.execute(
+            "INSERT INTO bonds (market_id, name, face_total, unit_price, units_total, "
+            "coupon_pct, term_months, matures_at) VALUES (?,?,?,?,?,?,?,?)",
+            (str(market_id), str(name or ""), float(face_total), float(unit_price),
+             units_total, float(coupon_pct), int(term_months), str(matures_at)))
+        return int(cur.lastrowid)
+
+
+def get_bond(bond_id: int):
+    with db() as conn:
+        row = conn.execute("SELECT * FROM bonds WHERE id=?", (int(bond_id),)).fetchone()
+        return dict(row) if row else None
+
+
+def list_bonds(market_id: str = None, status: str = None) -> list[dict]:
+    q, args = "SELECT * FROM bonds", []
+    conds = []
+    if market_id:
+        conds.append("market_id=?"); args.append(str(market_id))
+    if status:
+        conds.append("status=?"); args.append(str(status))
+    if conds:
+        q += " WHERE " + " AND ".join(conds)
+    q += " ORDER BY id DESC"
+    with db() as conn:
+        return [dict(r) for r in conn.execute(q, args).fetchall()]
+
+
+def update_bond(bond_id: int, **fields) -> None:
+    if not fields:
+        return
+    cols = ", ".join(f"{k}=?" for k in fields)
+    with db() as conn:
+        conn.execute(f"UPDATE bonds SET {cols} WHERE id=?",
+                     (*fields.values(), int(bond_id)))
+
+
+def adjust_bond_holding(bond_id: int, user_id: str, d_units: float, d_invested: float,
+                        name: str = None) -> None:
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO bond_holdings (bond_id, user_id, units, invested, name) "
+            "VALUES (?,?,?,?,?) "
+            "ON CONFLICT(bond_id, user_id) DO UPDATE SET "
+            "units=units+excluded.units, invested=invested+excluded.invested, "
+            "name=COALESCE(excluded.name, bond_holdings.name)",
+            (int(bond_id), str(user_id), float(d_units), float(d_invested), name))
+        conn.execute("UPDATE bonds SET units_sold=units_sold+? WHERE id=?",
+                     (float(d_units), int(bond_id)))
+
+
+def get_bond_holders(bond_id: int) -> list[dict]:
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM bond_holdings WHERE bond_id=? AND units > 0",
+            (int(bond_id),)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_user_bonds(user_id: str) -> list[dict]:
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT h.*, b.market_id, b.name AS bond_name, b.coupon_pct, b.unit_price, "
+            "b.status, b.matures_at FROM bond_holdings h JOIN bonds b ON b.id=h.bond_id "
+            "WHERE h.user_id=? AND h.units > 0", (str(user_id),)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_config_prefix(prefix: str) -> dict:
+    """All bot_config rows whose key starts with prefix → {key: value}."""
+    with db() as conn:
+        rows = conn.execute("SELECT key, value FROM bot_config WHERE key LIKE ?",
+                            (str(prefix) + "%",)).fetchall()
+        return {r["key"]: r["value"] for r in rows}
 
 
 def set_config(key, value) -> None:

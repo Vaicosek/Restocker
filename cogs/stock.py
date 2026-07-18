@@ -146,6 +146,20 @@ class StockCog(commands.Cog):
             embed.add_field(name="Backed", value=backed, inline=False)
         except Exception:
             pass
+        # Full quality picture — the same composite that drives the rating, the
+        # index weight, the earnings multiple and the ABX fund's allocation.
+        try:
+            q = core._market_quality(market_id)
+            embed.add_field(
+                name="Quality Score",
+                value=(f"**{q['score']*100:.0f}/100** — "
+                       f"🚶 traffic `{q['visitors_month']:,}` visits/mo · "
+                       f"📦 orders `{q['order_value_30d']:,}` 🪙 filled/30d "
+                       f"({q['orders_done_30d']}/{q['orders_total_30d']}) · "
+                       f"📜 history `{q['history_months']}` mo of reports"),
+                inline=False)
+        except Exception:
+            pass
         try:
             _assets = float(_db.get_config(f"asset_value:{market_id}") or 0.0)
         except Exception:

@@ -740,12 +740,23 @@ def _load_stock_data() -> dict:
         _fs = _fund * (_m["mcap"] / _tot_mcap)
         _mc = _m["mcap"] or 1.0
         _m["backing_pct"] = round(100.0 * (_m["treasury"] + _assets + _sell + _fs) / _mc, 1)
-        # Rating — same house rule as the bot's _backing_rating (grade vs target %)
+        # Rating — prefer the bot's cached composite quality (backing + tp-fee traffic
+        # + order flow + report history, bot_config quality:<mid>); fall back to a
+        # backing-only grade if the bot hasn't computed quality yet.
         _target = (float(os.getenv("STOCK_BACK_CASH_PCT", "10") or 10)
                    + float(os.getenv("STOCK_BACK_ASSET_PCT", "10") or 10)
                    + float(os.getenv("STOCK_BACK_FUND_PCT", "5") or 5))
-        _ratio = (_m["backing_pct"] / _target) if _target else 0.0
         _m["backing_target"] = _target
+        _ratio = (_m["backing_pct"] / _target) if _target else 0.0
+        if _dbk is not None:
+            try:
+                _qraw = _dbk.get_config(f"quality:{_m['mid']}")
+                if _qraw:
+                    _q = json.loads(_qraw)
+                    _m["quality"] = _q
+                    _ratio = float(_q.get("score") or 0.0) / 0.60
+            except Exception:
+                pass
         _m["rating"] = ("AAA" if _ratio >= 1.5 else "AA" if _ratio >= 1.0 else "A" if _ratio >= 0.75
                         else "BBB" if _ratio >= 0.5 else "BB" if _ratio >= 0.25 else "C")
     index = None
@@ -2516,7 +2527,7 @@ document.querySelectorAll(".nav-tab").forEach(tab => {
       <td>${m.pe.toFixed(1)}x</td>
       <td>${divCell(m)}</td>
       <td>${m.treasury ? num(Math.round(m.treasury)) + " ¢" : "—"}</td>
-      <td><span class="badge market-tag" style="margin-right:6px">${esc(m.rating||"C")}</span><span class="${(m.backing_pct||0) >= (m.backing_target||25) ? "up" : "down"}">${(m.backing_pct||0).toFixed(0)}%</span></td>
+      <td title="${m.quality ? `quality ${Math.round((m.quality.score||0)*100)}/100 · ${num(m.quality.visitors_month||0)} visits/mo · ${num(m.quality.order_value_30d||0)} ¢ orders filled/30d · ${m.quality.history_months||0} mo of reports` : "backing only"}"><span class="badge market-tag" style="margin-right:6px">${esc(m.rating||"C")}</span><span class="${(m.backing_pct||0) >= (m.backing_target||25) ? "up" : "down"}">${(m.backing_pct||0).toFixed(0)}%</span></td>
       <td>${m.holders_count}</td>`;
     tr.addEventListener("click", () => select(m.mid));
     tbody.appendChild(tr);

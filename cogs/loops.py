@@ -420,7 +420,13 @@ class LoopsCog(commands.Cog):
                         pass
                     mname = label or (markets.get(mid) or {}).get("name", mid)
                     month = entry.get("month", "?")
-                    if entry.get("type") == "investor_pool":
+                    if entry.get("type") == "bond_event":
+                        emb = discord.Embed(
+                            title=str(entry.get("title") or "🪙 Bond event"),
+                            description="\n".join(entry.get("lines") or [])[:4000],
+                            color=discord.Color.red() if entry.get("bad") else discord.Color.teal())
+                        emb.set_footer(text="Item-collateralized corporate bond")
+                    elif entry.get("type") == "investor_pool":
                         lines = [f"Net profit `{float(entry.get('net') or 0):,.0f}` 🪙 · "
                                  f"pool **{float(entry.get('pool_pct') or 0):g}%** = "
                                  f"`{float(entry.get('pool') or 0):,.0f}` 🪙"]
@@ -450,6 +456,20 @@ class LoopsCog(commands.Cog):
 
     @dividend_report_flush_loop.before_loop
     async def _before_dividend_report_flush_loop(self, ):
+        await bot.wait_until_ready()
+
+    @tasks.loop(minutes=30)
+    async def bond_service_loop(self, ):
+        """Monthly bond coupons + maturities (item-collateralized corporate bonds).
+        All real work is sync in core._service_bonds(); announcements ride the
+        dividend-report queue."""
+        try:
+            core._service_bonds()
+        except Exception as e:
+            log.warning("[bonds] service loop error: %s", e)
+
+    @bond_service_loop.before_loop
+    async def _before_bond_service_loop(self, ):
         await bot.wait_until_ready()
 
     @tasks.loop(hours=24)
@@ -755,7 +775,7 @@ class LoopsCog(commands.Cog):
 
     def _all_loops(self):
         return (self.worker_announce_loop, self.claimed_dm_cleanup_loop, self.employee_batch_dispatch_loop,
-                self.dividend_report_flush_loop,
+                self.dividend_report_flush_loop, self.bond_service_loop,
                 self.weekly_interest_loop, self.weekly_funds_report_loop, self.loyalty_decay_loop,
                 self.ign_deadline_loop, self.stock_reversion_loop, self.stock_dashboard_loop,
                 self.team_digest_loop, self.db_backup_loop, self.instance_heartbeat_loop)

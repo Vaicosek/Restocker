@@ -126,6 +126,16 @@ STOCK_BACK_CASH_PCT = _env_float("STOCK_BACK_CASH_PCT", 10.0)  # target cash (tr
 STOCK_BACK_ASSET_PCT = _env_float("STOCK_BACK_ASSET_PCT", 10.0)  # target asset (inventory) backing
 STOCK_BACK_FUND_PCT = _env_float("STOCK_BACK_FUND_PCT", 5.0)   # target exchange-fund backing
 STOCK_PRICE_TRAILING_MONTHS = _env_int("STOCK_PRICE_TRAILING_MONTHS", 3)
+# ---- Market quality model: traffic · order flow · backing · report history ----
+# Teleport fees are 100 coins/visit, so land fees ÷ 100 = real foot traffic.
+QUALITY_TRAFFIC_TARGET = _env_int("QUALITY_TRAFFIC_TARGET", 10_000)   # visitors/month = full marks (~1M coins tp fees)
+QUALITY_ORDER_TARGET = _env_int("QUALITY_ORDER_TARGET", 500_000)      # fulfilled order coins / 30d = full marks
+QUALITY_HISTORY_TARGET = _env_int("QUALITY_HISTORY_TARGET", 12)       # closed earnings months = full marks (a year of reports)
+QUALITY_PE_SWING = _env_float("QUALITY_PE_SWING", 0.20)               # composite quality swings the earnings multiple ±20%
+QUALITY_W_BACKING = _env_float("QUALITY_W_BACKING", 0.35)
+QUALITY_W_TRAFFIC = _env_float("QUALITY_W_TRAFFIC", 0.25)
+QUALITY_W_ORDERS = _env_float("QUALITY_W_ORDERS", 0.25)
+QUALITY_W_HISTORY = _env_float("QUALITY_W_HISTORY", 0.15)
 STOCK_MAX_REANCHOR_MOVE = _env_float("STOCK_MAX_REANCHOR_MOVE", 0.40)
 STOCK_OUTLIER_CAP_FACTOR = _env_float("STOCK_OUTLIER_CAP_FACTOR", 0.0)  # >0: cap each month's net at N x median before averaging (winsorize outliers); 0=off
 STOCK_LOW_PCT = _env_float("STOCK_LOW_PCT", 20.0)  # live-stock alert: warn when an item is at/under this % of capacity
@@ -7812,6 +7822,15 @@ def _fundamental_for_market(market_id):
     if shares_out <= 0:
         return None
     pe = _auto_pe([float(months[k].get("net", 0.0)) for k in keys])
+    # Quality-adjusted multiple: traffic (tp-fee visitors), order flow, backing and
+    # report-history depth swing the earnings multiple ±QUALITY_PE_SWING. A busy,
+    # well-backed market with a year of reports earns a richer multiple on the SAME
+    # earnings; price still only MOVES on earnings events — this scales the multiple.
+    try:
+        _qs = float(_market_quality(market_id)["score"])
+        pe = pe * (1.0 - QUALITY_PE_SWING + 2.0 * QUALITY_PE_SWING * _qs)
+    except Exception:
+        pass
     fundamental = max(MIN_SHARE_PRICE, (avg_net / shares_out) * pe)
     # Book-value floor: a company is worth at least its productive assets plus cash on
     # hand (config asset_value:<mid>, set via /stock set_params assets:). V Tech's hive
@@ -8427,11 +8446,19 @@ def _backing_rating(market_id):
     an unbacked one only INDEX_BACKING_BASE of it. More real backing → better rating →
     bigger slice of the index."""
     try:
-        b = _market_backing(market_id)
-        ratio = (b["total_pct"] / b["target_pct"]) if b.get("target_pct") else 0.0
-        backed_pct, target_pct = b["total_pct"], b["target_pct"]
+        q = _market_quality(market_id)
+        # Composite quality drives the grade: 0.60 composite = "meets the bar" (AA),
+        # mirroring the old backing-only ratio semantics. Pillars: backing, traffic
+        # (tp-fee visitors), order flow, report-history depth.
+        ratio = q["score"] / 0.60
+        backed_pct, target_pct = q["backed_pct"], q["target_pct"]
     except Exception:
-        ratio, backed_pct, target_pct = 0.0, 0.0, 0.0
+        try:
+            b = _market_backing(market_id)
+            ratio = (b["total_pct"] / b["target_pct"]) if b.get("target_pct") else 0.0
+            backed_pct, target_pct = b["total_pct"], b["target_pct"]
+        except Exception:
+            ratio, backed_pct, target_pct = 0.0, 0.0, 0.0
     grade = ("AAA" if ratio >= 1.5 else "AA" if ratio >= 1.0 else "A" if ratio >= 0.75
              else "BBB" if ratio >= 0.5 else "BB" if ratio >= 0.25 else "C")
     weight = min(1.0, INDEX_BACKING_BASE + (1.0 - INDEX_BACKING_BASE) * min(1.0, ratio))
@@ -8595,6 +8622,221 @@ def _market_backing(market_id) -> dict:
             "ok": total_pct >= target}
 
 
+# ── Corporate bonds — item-collateralized debt ──────────────────────────────
+BOND_MIN_ITEM_COVER = _env_float("BOND_MIN_ITEM_COVER", 80.0)  # % of outstanding face that ITEMS must cover
+
+
+def _bond_collateral(market_id) -> float:
+    """COMPANY-WIDE item collateral — coins don't count. Bonds are issued by
+    companies (the listed stock), so the collateral pool is the parent listing's
+    items PLUS every rolled-up market's items at the company's share: inventory
+    valued at shop prices + off-market assets listed for sale. This is what
+    bondholders claim when a company defaults (and what wars get fought over)."""
+    import Restocker_db as _db
+
+    def _one(mid):
+        inv = _market_asset_value(mid)
+        try:
+            sell = float(_db.get_config(f"sellable_assets:{mid}") or 0.0)
+        except Exception:
+            sell = 0.0
+        return inv + sell
+
+    total = _one(market_id)
+    try:
+        for _child, _share in _rollup_children(market_id):
+            total += _one(_child) * float(_share)
+    except Exception:
+        pass
+    return total
+
+
+def _bond_sold_face(b) -> float:
+    return float(b.get("unit_price") or 0) * float(b.get("units_sold") or 0)
+
+
+def _bond_coverage(market_id, extra_face: float = 0.0):
+    """(coverage_pct, item_collateral, outstanding_face). Coverage counts every
+    open/active bond of the market plus extra_face (a proposed new issue/buy)."""
+    import Restocker_db as _db
+    face = float(extra_face or 0)
+    for b in _db.list_bonds(market_id):
+        if b.get("status") in ("open", "active"):
+            face += _bond_sold_face(b)
+    col = _bond_collateral(market_id)
+    pct = (100.0 * col / face) if face > 0 else float("inf")
+    return pct, col, face
+
+
+def _service_bonds() -> None:
+    """Monthly coupons + maturity, run from the bond loop. Coupons come out of the
+    market treasury; a treasury that can't pay logs a MISSED coupon; at maturity a
+    treasury that can't repay principal marks the bond DEFAULTED and the report
+    channel announces the bondholders' claim on the item collateral."""
+    import Restocker_db as _db
+    now = datetime.now(timezone.utc)
+    cur_month = now.strftime("%Y-%m")
+    today = now.strftime("%Y-%m-%d")
+    for b in _db.list_bonds():
+        if b.get("status") not in ("open", "active"):
+            continue
+        bid, mid = int(b["id"]), str(b["market_id"])
+        label = b.get("name") or f"bond #{bid}"
+        sold_face = _bond_sold_face(b)
+        holders = _db.get_bond_holders(bid)
+        # ---- maturity ----
+        mat = str(b.get("matures_at") or "")
+        if mat and today >= mat[:10]:
+            due = sold_face
+            tre = float(_db.get_treasury(mid) or 0)
+            if not holders or due <= 0:
+                _db.update_bond(bid, status="repaid")
+                continue
+            if tre >= due:
+                for h in holders:
+                    amt = int(round(float(h["units"]) * float(b["unit_price"])))
+                    if amt > 0:
+                        add_coins(h["user_id"], amt, counts_as_principal=False,
+                                  reason=f"bond:{bid}:principal")
+                _db.adjust_treasury(mid, -due)
+                _db.update_bond(bid, status="repaid")
+                _queue_dividend_post({"type": "bond_event", "market_id": mid,
+                    "title": f"🪙 Bond repaid — {label}",
+                    "lines": [f"Principal `{int(due):,}` 🪙 returned to {len(holders)} holder(s) at maturity."]})
+            else:
+                _db.update_bond(bid, status="defaulted")
+                pct, col, _f = _bond_coverage(mid)
+                _queue_dividend_post({"type": "bond_event", "bad": True, "market_id": mid,
+                    "title": f"⚠️ BOND DEFAULT — {label} ({mid})",
+                    "lines": [f"Treasury `{int(tre):,}` 🪙 can't cover principal `{int(due):,}` 🪙.",
+                              f"Bondholders hold FIRST CLAIM on the market's items — "
+                              f"collateral `{int(col):,}` 🪙 on record."]})
+            continue
+        # ---- monthly coupon ----
+        issued_month = str(b.get("issued_at") or "")[:7]
+        if sold_face > 0 and holders and b.get("last_coupon_month") != cur_month and issued_month < cur_month:
+            coupon = sold_face * float(b["coupon_pct"]) / 100.0
+            tre = float(_db.get_treasury(mid) or 0)
+            if coupon <= 0:
+                _db.update_bond(bid, last_coupon_month=cur_month)
+                continue
+            if tre >= coupon:
+                for h in holders:
+                    amt = int(round(float(h["units"]) * float(b["unit_price"])
+                                    * float(b["coupon_pct"]) / 100.0))
+                    if amt > 0:
+                        add_coins(h["user_id"], amt, counts_as_principal=False,
+                                  reason=f"bond:{bid}:coupon:{cur_month}")
+                _db.adjust_treasury(mid, -coupon)
+                _db.update_bond(bid, last_coupon_month=cur_month)
+                _queue_dividend_post({"type": "bond_event", "market_id": mid,
+                    "title": f"🪙 Bond coupon — {label} · {cur_month}",
+                    "lines": [f"`{int(coupon):,}` 🪙 ({float(b['coupon_pct']):g}%/mo on "
+                              f"`{int(sold_face):,}` face) paid to {len(holders)} holder(s) "
+                              f"from the {mid} treasury."]})
+            else:
+                missed = int(b.get("missed_coupons") or 0) + 1
+                _db.update_bond(bid, last_coupon_month=cur_month, missed_coupons=missed)
+                _queue_dividend_post({"type": "bond_event", "bad": True, "market_id": mid,
+                    "title": f"⚠️ Missed bond coupon — {label} · {cur_month}",
+                    "lines": [f"{mid} treasury `{int(tre):,}` 🪙 < coupon `{int(coupon):,}` 🪙 "
+                              f"(missed payment #{missed})."]})
+
+
+def _market_quality(market_id) -> dict:
+    """Composite quality score (0..1) for a public market — the full picture behind
+    the rating, the index weight, the earnings multiple and the ABX fund's buying:
+
+      traffic  — teleport-fee visitors/month on lands bound to this market
+                 (fees ÷ 100 coins/visit; from the CSN lands engine)
+      orders   — fulfilled order value over the trailing 30 days + fulfillment rate
+      backing  — cash + inventory + for-sale assets + fund share vs target
+      history  — depth of CLOSED earnings months on record (a year of week-by-week
+                 reports reads as a robust, established company)
+
+    The result is also cached to bot_config quality:<mid> so the web dashboard can
+    show the same numbers without recomputing."""
+    import Restocker_db as _db
+    mid = str(market_id)
+    # -- traffic (visitors/month from bound lands) --
+    visitors_month = 0.0
+    try:
+        bound = [k.split(":", 1)[1] for k, v in (_db.get_config_prefix("land_map:") or {}).items()
+                 if str(v) == mid]
+        _cur = datetime.now(timezone.utc).strftime("%Y-%m")
+        cur_fees = prev_fees = 0.0
+        for land in bound:
+            fees = _db.get_land_fees(land) or {}
+            months = sorted(fees.keys())
+            cur_fees += float(fees.get(_cur) or 0.0)
+            prior = [m for m in months if m < _cur]
+            if prior:
+                prev_fees += float(fees.get(prior[-1]) or 0.0)
+        # a fresh month shouldn't zero the score: take the better of last full month
+        # and the month in progress
+        visitors_month = max(cur_fees, prev_fees) / 100.0
+    except Exception:
+        pass
+    traffic_score = min(1.0, visitors_month / QUALITY_TRAFFIC_TARGET) if QUALITY_TRAFFIC_TARGET else 0.0
+    # -- order flow (trailing 30d) --
+    order_value = 0.0
+    orders_total = orders_done = 0
+    try:
+        from datetime import timedelta as _td
+        cutoff = (datetime.now(timezone.utc) - _td(days=30)).strftime("%Y-%m-%d")
+        for o in (_db.load_orders() or []):
+            if str(o.get("market_id") or "") != mid:
+                continue
+            ts = str(o.get("updated_at") or o.get("created_at") or "")
+            if ts[:10] < cutoff:
+                continue
+            orders_total += 1
+            st = str(o.get("status") or "").lower()
+            cpp = float(o.get("coin_per_piece") or 0.0)
+            if st == "fulfilled":
+                orders_done += 1
+                order_value += cpp * float(o.get("produced") or o.get("requested") or 0)
+    except Exception:
+        pass
+    fulfil_rate = (orders_done / orders_total) if orders_total else 0.0
+    flow_score = min(1.0, order_value / QUALITY_ORDER_TARGET) if QUALITY_ORDER_TARGET else 0.0
+    # completed work is what counts, but chronic unfulfilled queues drag the pillar
+    orders_score = flow_score * (0.7 + 0.3 * fulfil_rate) if orders_total else flow_score
+    # -- backing --
+    try:
+        b = _market_backing(mid)
+        backing_score = min(1.0, (b["total_pct"] / b["target_pct"])) if b.get("target_pct") else 0.0
+        backed_pct, target_pct = b["total_pct"], b["target_pct"]
+    except Exception:
+        backing_score, backed_pct, target_pct = 0.0, 0.0, 0.0
+    # -- report history depth --
+    hist_months = 0
+    try:
+        _curk = datetime.now(timezone.utc).strftime("%Y-%m")
+        hist_months = len([k for k in (_rollup_combined_months(mid) or {}) if k < _curk])
+    except Exception:
+        pass
+    history_score = min(1.0, hist_months / QUALITY_HISTORY_TARGET) if QUALITY_HISTORY_TARGET else 0.0
+    # -- composite --
+    _wsum = (QUALITY_W_BACKING + QUALITY_W_TRAFFIC + QUALITY_W_ORDERS + QUALITY_W_HISTORY) or 1.0
+    score = (QUALITY_W_BACKING * backing_score + QUALITY_W_TRAFFIC * traffic_score
+             + QUALITY_W_ORDERS * orders_score + QUALITY_W_HISTORY * history_score) / _wsum
+    out = {"score": round(score, 4),
+           "traffic_score": round(traffic_score, 4), "visitors_month": round(visitors_month),
+           "orders_score": round(orders_score, 4), "order_value_30d": round(order_value),
+           "orders_total_30d": orders_total, "orders_done_30d": orders_done,
+           "fulfil_rate": round(fulfil_rate, 3),
+           "backing_score": round(backing_score, 4), "backed_pct": round(backed_pct, 1),
+           "target_pct": round(target_pct, 1),
+           "history_score": round(history_score, 4), "history_months": hist_months}
+    try:
+        import json as _json
+        _db.set_config(f"quality:{mid}", _json.dumps(out))
+    except Exception:
+        pass
+    return out
+
+
 def _do_stock_trade(side, user_id, market_id, shares, name=None):
     """Core buy/sell engine shared by the slash commands, the panel, limit-order
     fills and the bank API. Returns a structured dict:
@@ -8718,8 +8960,38 @@ def _exec_stock_sell(user_id, market_id, shares, seller_name=None):
 
 
 # ── ABX Index Fund (investable ETF: physical replication, real market impact) ──
+ETF_MIN_GRADE = (os.getenv("ETF_MIN_GRADE", "BBB") or "BBB").strip().upper()
+_GRADE_RANK = {"C": 0, "BB": 1, "BBB": 2, "A": 3, "AA": 4, "AAA": 5}
+
+
+def _etf_defensive_weight(mid) -> float:
+    """Cap-agnostic allocation weight for the ABX fund. HOUSE RULE: on this server
+    market cap means nothing — companies go broke, scam, or never pay a dividend.
+    The fund weighs only what can't be faked:
+      35% cash backing      (treasury coins vs cap — full marks at 15%)
+      35% hard assets       (market inventory value + for-sale assets — full at 25%)
+      20% foot traffic      (teleport-fee visitors on bound lands)
+      10% stability         (fulfilled order flow + years of earnings reports)"""
+    try:
+        b = _market_backing(mid)
+        cash_s = min(1.0, float(b.get("cash_pct") or 0) / 15.0)
+        hard_s = min(1.0, (float(b.get("asset_pct") or 0) + float(b.get("sellable_pct") or 0)) / 25.0)
+    except Exception:
+        cash_s = hard_s = 0.0
+    try:
+        q = _market_quality(mid)
+        traf_s = float(q.get("traffic_score") or 0)
+        stab_s = 0.5 * float(q.get("orders_score") or 0) + 0.5 * float(q.get("history_score") or 0)
+    except Exception:
+        traf_s = stab_s = 0.0
+    return 0.35 * cash_s + 0.35 * hard_s + 0.20 * traf_s + 0.10 * stab_s
+
+
 def _etf_constituents():
-    """Active public markets eligible for the index, with price/float/mcap."""
+    """Active public markets the fund will actually touch. Junk-rated listings
+    (below ETF_MIN_GRADE, default BBB) are excluded outright — the fund would
+    rather hold cash than a scam; rebalance liquidates any holding that slips
+    below the bar. Allocation weight (qmcap) is the DEFENSIVE score, not cap."""
     import Restocker_db as _db
     out = []
     for mid, lst in _db.get_public_markets().items():
@@ -8727,9 +8999,17 @@ def _etf_constituents():
         so = float(lst.get("shares_outstanding") or 0)
         if price <= 0 or so <= 0:
             continue
+        try:
+            grade, _, _, _ = _backing_rating(mid)
+        except Exception:
+            grade = "C"
+        if _GRADE_RANK.get(grade, 0) < _GRADE_RANK.get(ETF_MIN_GRADE, 2):
+            continue  # below investment grade — the index fund won't touch it
         held = sum(float(h.get("shares") or 0) for h in _db.get_holders(mid))
+        qw = max(0.01, _etf_defensive_weight(mid))
         out.append({"mid": mid, "price": price, "shares_out": so,
-                    "mcap": price * so, "held": held, "available": max(0.0, so - held)})
+                    "mcap": price * so, "qmcap": qw, "grade": grade,
+                    "held": held, "available": max(0.0, so - held)})
     return out
 
 
@@ -8781,7 +9061,7 @@ def _etf_invest(user_id, coins, name=None):
     cons = _etf_constituents()
     if not cons:
         return {**res, "msg": "No public markets to invest in yet."}
-    total_mcap = sum(c["mcap"] for c in cons)
+    total_mcap = sum(c.get("qmcap", c["mcap"]) for c in cons)
     if total_mcap <= 0:
         return {**res, "msg": "The index has no market cap yet."}
     bal = int(_db.get_balance(str(user_id)).get("coins") or 0)
@@ -8793,7 +9073,7 @@ def _etf_invest(user_id, coins, name=None):
     spent = 0
     bought = []
     for c in cons:
-        target = coins * (c["mcap"] / total_mcap)
+        target = coins * (c.get("qmcap", c["mcap"]) / total_mcap)
         if target <= 0 or c["price"] <= 0:
             continue
         shares = int(target // c["price"])
@@ -8893,13 +9173,13 @@ def _etf_rebalance(reason="composition_change"):
                 changes.append(("liquidate", mid, -int(sh), int(r["total"])))
     nav = _etf_nav()
     total_basket = nav["assets"]
-    total_mcap = sum(c["mcap"] for c in active.values()) or 1.0
+    total_mcap = sum(c.get("qmcap", c["mcap"]) for c in active.values()) or 1.0
     if total_basket > 0:
         drift_floor = ETF_REBAL_DRIFT_PCT / 100.0
         for mid, c in active.items():
             cur_sh = float(nav["holdings"].get(mid, 0))
             cur_val = cur_sh * c["price"]
-            target_val = total_basket * (c["mcap"] / total_mcap)
+            target_val = total_basket * (c.get("qmcap", c["mcap"]) / total_mcap)
             diff = target_val - cur_val
             if abs(diff) < drift_floor * total_basket:
                 continue
@@ -8930,21 +9210,21 @@ def _etf_info_embed():
     """Public ETF info: NAV, size, and top constituents by target weight."""
     nav = _etf_nav()
     cons = _etf_constituents()
-    total_mcap = sum(c["mcap"] for c in cons) or 1.0
+    total_mcap = sum(c.get("qmcap", c["mcap"]) for c in cons) or 1.0
     embed = discord.Embed(
         title="ABX Index Fund",
         color=0x22FF7A,
         description=(f"NAV **{nav['nav']:,.2f}** coins/unit  ·  {nav['units']:,.2f} units outstanding\n"
                      f"Assets `{nav['assets']:,.0f}` + cash `{nav['cash']:,.0f}` = `{nav['total']:,.0f}` coins"))
-    rows = sorted(cons, key=lambda c: c["mcap"], reverse=True)[:15]
+    rows = sorted(cons, key=lambda c: c.get("qmcap", c["mcap"]), reverse=True)[:15]
     lines = []
     for c in rows:
-        w = 100.0 * c["mcap"] / total_mcap
+        w = 100.0 * c.get("qmcap", c["mcap"]) / total_mcap
         fund_sh = float(nav["holdings"].get(c["mid"], 0))
         m = _get_market(c["mid"]) or {}
         lines.append(f"`{w:5.1f}%` {m.get('name', c['mid'])} — fund holds {fund_sh:,.0f} sh")
     if lines:
-        embed.add_field(name="Target weights (cap-weighted)", value="\n".join(lines), inline=False)
+        embed.add_field(name="Target weights (quality-weighted cap)", value="\n".join(lines), inline=False)
     embed.set_footer(text="Invest: /stock invest_index  ·  Redeem: /stock sell_index")
     return embed
 
@@ -11075,7 +11355,7 @@ async def _main():
     for _ext in ("cogs.loyalty", "cogs.brew", "cogs.admin", "cogs.market", "cogs.stock",
                  "cogs.shop", "cogs.orders", "cogs.money", "cogs.reports", "cogs.misc",
                  "cogs.loops", "cogs.events", "cogs.config", "cogs.team", "cogs.inventory", "cogs.projects", "cogs.tool",
-                 "cogs.devassist", "cogs.hive", "cogs.lands"):
+                 "cogs.devassist", "cogs.hive", "cogs.lands", "cogs.bonds"):
         try:
             await bot.load_extension(_ext)
         except Exception as e:
