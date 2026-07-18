@@ -8160,6 +8160,27 @@ def _persist_price(market_id, price, reason):
 _LAST_INDEX_SNAP = 0.0
 
 
+INDEX_BACKING_BASE = _env_float("INDEX_BACKING_BASE", 0.5)
+
+
+def _backing_rating(market_id):
+    """(grade, weight, backed_pct, target_pct). House rule of this exchange: backing
+    RATES a listing. The grade (AAA…C) shows on /stock price, and `weight` scales the
+    market's share of the Abexilas index — a fully-backed market counts its whole cap,
+    an unbacked one only INDEX_BACKING_BASE of it. More real backing → better rating →
+    bigger slice of the index."""
+    try:
+        b = _market_backing(market_id)
+        ratio = (b["total_pct"] / b["target_pct"]) if b.get("target_pct") else 0.0
+        backed_pct, target_pct = b["total_pct"], b["target_pct"]
+    except Exception:
+        ratio, backed_pct, target_pct = 0.0, 0.0, 0.0
+    grade = ("AAA" if ratio >= 1.5 else "AA" if ratio >= 1.0 else "A" if ratio >= 0.75
+             else "BBB" if ratio >= 0.5 else "BB" if ratio >= 0.25 else "C")
+    weight = min(1.0, INDEX_BACKING_BASE + (1.0 - INDEX_BACKING_BASE) * min(1.0, ratio))
+    return grade, weight, backed_pct, target_pct
+
+
 def _snapshot_market_index(force: bool = False) -> None:
     """Record a point on the Abexilas Market Index — a market-cap-weighted index of
     all active public markets, run S&P-500 style with a DIVISOR:
@@ -8184,14 +8205,22 @@ def _snapshot_market_index(force: bool = False) -> None:
             p = float(_L.get("share_price") or 0)
             s = float(_L.get("shares_outstanding") or 0)
             if p > 0 and s > 0:
-                consts.append((_mid, s))
-                total += p * s
+                # Backing-weighted cap: a well-backed market carries its full cap into
+                # the index; a poorly backed one carries less (see _backing_rating).
+                try:
+                    _g, _w, _bp, _tp = _backing_rating(_mid)
+                except Exception:
+                    _w = 1.0
+                consts.append((_mid, s, round(_w, 2)))
+                total += p * s * _w
         n = len(consts)
         if total <= 0:
             _LAST_INDEX_SNAP = _t.time()
             return  # nothing public yet — don't record empty points
-        # Composition fingerprint (independent of price): markets + their share counts.
-        sig = ";".join(f"{m}:{round(sh, 4)}" for m, sh in sorted(consts))
+        # Composition fingerprint (independent of price): markets, share counts, AND
+        # backing weights — a weight change re-bases the divisor (continuous index),
+        # while still reallocating each market's relative slice of the index.
+        sig = ";".join(f"{m}:{round(sh, 4)}:{w}" for m, sh, w in sorted(consts))
         _dv = _db.get_config("index_divisor")
         divisor = float(_dv) if _dv not in (None, "") else None
         last_sig = _db.get_config("index_composition")
@@ -8285,15 +8314,24 @@ def _market_backing(market_id) -> dict:
     mcap = price * so
     cash = float(_db.get_treasury(market_id) or 0)
     assets = _market_asset_value(market_id)
+    # Off-market assets currently FOR SALE (hive batches, land claims) — liquid backing,
+    # set via /stock set_params sellable:. Deliberately separate from asset_value:<mid>
+    # (the book-value price floor): the fleet's book value is a VALUATION, not backing —
+    # only things that can actually be turned into coins back the shares.
+    try:
+        sellable = float(_db.get_config(f"sellable_assets:{market_id}") or 0.0)
+    except Exception:
+        sellable = 0.0
     total_mcap = _total_public_mcap() or 1.0
     fund = _get_insurance_fund()
     fund_share = fund * (mcap / total_mcap) if mcap > 0 else 0.0
     def pct(v):
         return (100.0 * v / mcap) if mcap > 0 else 0.0
-    cash_pct, asset_pct, fund_pct = pct(cash), pct(assets), pct(fund_share)
-    total_pct = cash_pct + asset_pct + fund_pct
+    cash_pct, asset_pct, fund_pct, sell_pct = pct(cash), pct(assets), pct(fund_share), pct(sellable)
+    total_pct = cash_pct + asset_pct + fund_pct + sell_pct
     target = STOCK_BACK_CASH_PCT + STOCK_BACK_ASSET_PCT + STOCK_BACK_FUND_PCT
     return {"mcap": mcap, "cash": cash, "assets": assets, "fund_share": fund_share,
+            "sellable": sellable, "sellable_pct": sell_pct,
             "cash_pct": cash_pct, "asset_pct": asset_pct, "fund_pct": fund_pct,
             "total_pct": total_pct, "target_pct": target,
             "cashable": cash + fund_share,  # real coins available on a delist payout
@@ -10775,7 +10813,7 @@ async def _main():
     for _ext in ("cogs.loyalty", "cogs.brew", "cogs.admin", "cogs.market", "cogs.stock",
                  "cogs.shop", "cogs.orders", "cogs.money", "cogs.reports", "cogs.misc",
                  "cogs.loops", "cogs.events", "cogs.config", "cogs.team", "cogs.inventory", "cogs.projects", "cogs.tool",
-                 "cogs.devassist", "cogs.hive"):
+                 "cogs.devassist", "cogs.hive", "cogs.lands"):
         try:
             await bot.load_extension(_ext)
         except Exception as e:

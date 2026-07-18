@@ -132,9 +132,17 @@ class StockCog(commands.Cog):
         # 2026-07-15). _market_backing() still powers /stock delist.
         try:
             b = _market_backing(market_id)
-            backed = f"**{b['total_pct']:.1f}%** of cap (target {b['target_pct']:.0f}%)"
+            grade, weight, _bp, _tp = core._backing_rating(market_id)
+            backed = (f"Rating **{grade}** · **{b['total_pct']:.1f}%** of cap backed "
+                      f"(target {b['target_pct']:.0f}%) · index weight **{weight*100:.0f}%**")
             if not b["ok"]:
                 backed += " · ⚠ under-backed"
+            parts = [f"cash `{int(b['cash']):,}`", f"inventory `{int(b['assets']):,}`"]
+            if b.get("sellable"):
+                parts.append(f"for-sale assets `{int(b['sellable']):,}`")
+            if b.get("fund_share"):
+                parts.append(f"fund `{int(b['fund_share']):,}`")
+            backed += "\n" + " · ".join(parts)
             embed.add_field(name="Backed", value=backed, inline=False)
         except Exception:
             pass
@@ -254,6 +262,7 @@ class StockCog(commands.Cog):
         pe_multiplier="New price multiplier applied to monthly net profit per share",
         treasury="Company cash on hand (e.g. the Lands balance) — shows as Treasury and backs the shares",
         assets="Book value of company assets (hive fleet, factories). Price floor = (assets + treasury) ÷ shares. 0 clears.",
+        sellable="Assets currently FOR SALE (hive batches, claims) — counts as liquid backing, not valuation. 0 clears.",
     )
     @app_commands.autocomplete(market_id=_public_market_autocomplete)
     async def stock_set_params(self,
@@ -263,6 +272,7 @@ class StockCog(commands.Cog):
         pe_multiplier: Optional[app_commands.Range[float, 0.1, 1000.0]] = None,
         treasury: Optional[app_commands.Range[float, 0.0, 1_000_000_000_000.0]] = None,
         assets: Optional[app_commands.Range[float, 0.0, 1_000_000_000_000.0]] = None,
+        sellable: Optional[app_commands.Range[float, 0.0, 1_000_000_000_000.0]] = None,
     ):
         if not is_manager(interaction):
             return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
@@ -277,10 +287,16 @@ class StockCog(commands.Cog):
                 _db.set_config(f"asset_value:{market_id}", str(float(assets)))
             else:
                 _db.delete_config(f"asset_value:{market_id}")
+        if sellable is not None:
+            if float(sellable) > 0:
+                _db.set_config(f"sellable_assets:{market_id}", str(float(sellable)))
+            else:
+                _db.delete_config(f"sellable_assets:{market_id}")
         if shares_outstanding is None and pe_multiplier is None:
-            if treasury is None and assets is None:
+            if treasury is None and assets is None and sellable is None:
                 return await interaction.response.send_message(
-                    "❌ Provide at least one of `shares_outstanding`, `pe_multiplier`, `treasury`, or `assets`.",
+                    "❌ Provide at least one of `shares_outstanding`, `pe_multiplier`, `treasury`, "
+                    "`assets`, or `sellable`.",
                     ephemeral=True)
             # Treasury / book value changed — deliberate management action, so re-anchor
             # the price fully onto the new fundamental (no per-event clamp).
@@ -291,6 +307,9 @@ class StockCog(commands.Cog):
             if assets is not None:
                 bits.append(f"asset book value **{int(assets):,}** 🪙" if float(assets) > 0
                             else "asset book value **cleared**")
+            if sellable is not None:
+                bits.append(f"sellable (for-sale) assets **{int(sellable):,}** 🪙 → liquid backing"
+                            if float(sellable) > 0 else "sellable assets **cleared**")
             msg = f"✅ `{market_id}` updated: " + " · ".join(bits)
             if assets is not None and float(assets) > 0:
                 msg += "\nPrice floor = (assets + treasury) ÷ shares outstanding."

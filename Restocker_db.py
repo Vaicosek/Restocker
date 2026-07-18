@@ -371,6 +371,38 @@ CREATE TABLE IF NOT EXISTS hive_ledger (
     PRIMARY KEY (market_id, month)
 );
 
+-- ── Lands (claims) ledger: entries forwarded by the CSN mod's LandTracker ──
+-- Every land-inbox entry (deposit/withdraw/taxes/membership) with the balance it
+-- left behind. Teleport fees never appear as entries — they are INFERRED as the
+-- unexplained gap between consecutive balances (see cogs/lands.py).
+CREATE TABLE IF NOT EXISTS land_ledger (
+    land        TEXT NOT NULL,
+    entry_no    INTEGER NOT NULL,
+    ts          TEXT NOT NULL,                          -- MM/DD/YYYY HH:MM as shown in-game
+    kind        TEXT NOT NULL,                          -- deposit / withdraw / taxes / other
+    amount      REAL NOT NULL DEFAULT 0,                -- signed effect on the balance
+    new_balance REAL,                                   -- balance after this entry (NULL if not shown)
+    body        TEXT,
+    recorded_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (land, entry_no, ts)
+);
+
+CREATE TABLE IF NOT EXISTS land_balances (
+    land       TEXT PRIMARY KEY,
+    balance    REAL NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Inferred teleport-fee income per land per month (recomputed idempotently from
+-- land_ledger + balance snapshots — safe to rebuild any time).
+CREATE TABLE IF NOT EXISTS land_fees (
+    land       TEXT NOT NULL,
+    month      TEXT NOT NULL,                           -- YYYY-MM
+    fees       REAL NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (land, month)
+);
+
 -- ── Stock Exchange (markets that go public, traded with server currency) ────
 CREATE TABLE IF NOT EXISTS market_shares (
     market_id           TEXT PRIMARY KEY REFERENCES markets(market_id),
@@ -2326,6 +2358,62 @@ def get_hive_months(market_id: str) -> dict:
         rows = conn.execute("SELECT month, net FROM hive_ledger WHERE market_id=?",
                             (str(market_id),)).fetchall()
         return {r["month"]: float(r["net"] or 0) for r in rows}
+
+
+def add_land_entry(land: str, entry_no: int, ts: str, kind: str,
+                   amount: float, new_balance, body: str) -> bool:
+    """Store one land-inbox entry. Returns True if it was NEW (dedup by PK)."""
+    with db() as conn:
+        cur = conn.execute("""
+            INSERT OR IGNORE INTO land_ledger (land, entry_no, ts, kind, amount, new_balance, body)
+            VALUES (?,?,?,?,?,?,?)
+        """, (str(land), int(entry_no), str(ts), str(kind), float(amount),
+              None if new_balance is None else float(new_balance), str(body or "")[:300]))
+        return cur.rowcount > 0
+
+
+def get_land_entries(land: str) -> list[dict]:
+    with db() as conn:
+        rows = conn.execute("SELECT * FROM land_ledger WHERE land=? ORDER BY entry_no",
+                            (str(land),)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def set_land_balance(land: str, balance: float) -> None:
+    with db() as conn:
+        conn.execute("""
+            INSERT INTO land_balances (land, balance, updated_at) VALUES (?,?,datetime('now'))
+            ON CONFLICT(land) DO UPDATE SET balance=excluded.balance, updated_at=datetime('now')
+        """, (str(land), float(balance)))
+
+
+def get_land_balance(land: str):
+    with db() as conn:
+        row = conn.execute("SELECT * FROM land_balances WHERE land=?", (str(land),)).fetchone()
+        return dict(row) if row else None
+
+
+def replace_land_fees(land: str, by_month: dict) -> None:
+    """Replace the land's whole inferred-fee table (recomputed from scratch each
+    ingest — idempotent, so re-scans and backfills can never double-count)."""
+    with db() as conn:
+        conn.execute("DELETE FROM land_fees WHERE land=?", (str(land),))
+        for month, fees in (by_month or {}).items():
+            conn.execute("INSERT INTO land_fees (land, month, fees) VALUES (?,?,?)",
+                         (str(land), str(month), float(fees)))
+
+
+def get_land_fees(land: str) -> dict:
+    with db() as conn:
+        rows = conn.execute("SELECT month, fees FROM land_fees WHERE land=?",
+                            (str(land),)).fetchall()
+        return {r["month"]: float(r["fees"] or 0) for r in rows}
+
+
+def get_all_land_fees() -> list[dict]:
+    with db() as conn:
+        rows = conn.execute("SELECT land, month, fees FROM land_fees").fetchall()
+        return [dict(r) for r in rows]
 
 
 def delete_note(note_id: int):
