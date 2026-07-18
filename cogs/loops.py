@@ -121,11 +121,21 @@ class LoopsCog(commands.Cog):
                         o["worker_announced"] = False
                     return
 
-                for o in ready:
+                bulk_threshold = int(getattr(core, "ORDER_BULK_CARD_THRESHOLD", 12) or 12)
+                if len(ready) > bulk_threshold:
+                    # BULK MODE — a full-market refill (100+ orders) posts ONE grouped
+                    # board instead of a hundred rate-limited embeds. Claims run through
+                    # /orders and the website; cards for these orders are never posted.
                     try:
-                        await update_order_messages(bot, o, allow_post=True)
-                    except Exception:
-                        pass
+                        await core._post_bulk_order_board(bot, channel, ready)
+                    except Exception as _be:
+                        print(f"[worker_announce_loop] bulk board failed: {_be}")
+                else:
+                    for o in ready:
+                        try:
+                            await update_order_messages(bot, o, allow_post=True)
+                        except Exception:
+                            pass
 
                 # After all order cards are posted, fan the whole open-order set out to the SW
                 # Trade Network as ONE consolidated thread. Self-throttled (≤ every

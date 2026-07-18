@@ -144,6 +144,10 @@ STOCK_DIVIDEND_PCT = _env_float("STOCK_DIVIDEND_PCT", 0.0)
 # clear mistake, not a real bulk buy). Items over the cap are skipped and reported so the
 # owner can order them deliberately. Set ORDER_MAX_AUTO_PAYOUT=0 to disable the cap.
 ORDER_MAX_AUTO_PAYOUT = _env_float("ORDER_MAX_AUTO_PAYOUT", 1_000_000.0)
+# When one restock build creates more orders than this, the announce loop posts ONE
+# grouped board instead of a card per order — a full-market refill (100+ items) must
+# not flood the channel with a hundred embeds. Workers claim via /orders or the site.
+ORDER_BULK_CARD_THRESHOLD = _env_int("ORDER_BULK_CARD_THRESHOLD", 12)
 STOCK_LIMIT_ORDERS_ENABLED = _env_bool("STOCK_LIMIT_ORDERS_ENABLED", True)
 
 FUNDS_REPORT_GUILD_ID = _env_int("FUNDS_REPORT_GUILD_ID", 1447833151329009726)
@@ -372,11 +376,20 @@ async def _edit_or_delete_order_dm_messages(
             dm = user.dm_channel or await user.create_dm()
 
             if closed:
+                # Anti-clutter invariant: a worker's DM count stays CONSTANT no matter
+                # how many orders complete. The per-order card is deleted and the
+                # completion becomes one line on the worker's single ROLLING receipt
+                # message ("✅ Completed orders") — 100 fulfilled orders = still 1 DM.
                 try:
                     msg = await dm.fetch_message(mid)
                     await msg.delete()
                 except Exception:
                     pass
+                if str(order.get("status", "")).lower() == "fulfilled":
+                    try:
+                        await _upsert_worker_receipt(client, uid, order)
+                    except Exception:
+                        pass
                 dms.pop(uid_str, None)
                 changed = True
             else:
@@ -424,11 +437,53 @@ def _track_batch_dm_message(data: dict, user_id: int, message_id: int) -> None:
     mid = int(message_id)
     store[k] = [mid]
 
+async def _upsert_worker_receipt(client: discord.Client, uid: int, order: dict) -> None:
+    """ONE rolling '✅ Completed orders' DM per worker. Every fulfilled order the worker
+    was involved in adds a line (newest at the bottom, capped at 15); the message is
+    edited in place. This is how employees KNOW an order is done without their DMs
+    turning into a receipt graveyard."""
+    try:
+        user = client.get_user(int(uid)) or await client.fetch_user(int(uid))
+        if not user:
+            return
+        dm = user.dm_channel or await user.create_dm()
+        stamp = datetime.now(timezone.utc).strftime("%m-%d %H:%M")
+        line = f"✅ **#{order.get('id')} {order.get('item','')}** — completed {stamp} UTC"
+        data = load_orders()
+        store = (data.get("ui", {}) or {}).get("receipt_dm_messages", {}) or {}
+        prev_id = store.get(str(int(uid)))
+        msg = None
+        lines = [line]
+        if prev_id:
+            try:
+                msg = await dm.fetch_message(int(prev_id))
+                if msg.embeds and msg.embeds[0].description:
+                    old = [l for l in msg.embeds[0].description.splitlines() if l.strip()]
+                    old = [l for l in old if l != line]        # re-close of the same order: no dupe line
+                    lines = (old + [line])[-15:]
+            except Exception:
+                msg = None
+        emb = discord.Embed(title="✅ Completed orders",
+                            description="\n".join(lines)[:4000],
+                            color=discord.Color.green())
+        emb.set_footer(text="Rolling receipt — newest at the bottom · payouts are in /balance")
+        if msg is not None:
+            await msg.edit(embed=emb)
+        else:
+            m2 = await dm.send(embed=emb)
+            fresh = load_orders()
+            fresh.setdefault("ui", {}).setdefault("receipt_dm_messages", {})[str(int(uid))] = int(m2.id)
+            save_orders(fresh)
+    except Exception:
+        pass
+
+
 async def _refresh_or_delete_one_batch_dm(
     client: discord.Client,
     user: discord.abc.User,
     msg_id: int,
-    orders_map: dict[int, dict]
+    orders_map: dict[int, dict],
+    completed_note: str = ""
 ) -> bool:
 
     try:
@@ -489,10 +544,19 @@ async def _refresh_or_delete_one_batch_dm(
         kept_orders.append(o)
 
     if not kept_orders:
+        # Every order from this digest is done — say so instead of vanishing.
         try:
-            await msg.delete()
+            done = discord.Embed(
+                title="✅ Production batch complete",
+                description=(completed_note + "\n" if completed_note else "")
+                            + "Every order from this batch is fulfilled. Thanks for producing!",
+                color=discord.Color.green())
+            await msg.edit(embed=done, view=None)
         except Exception:
-            pass
+            try:
+                await msg.delete()
+            except Exception:
+                pass
         return False
 
     try:
@@ -511,9 +575,12 @@ async def _refresh_or_delete_one_batch_dm(
             f"rem {fmt_qty(o, rem)} · {fmt_coin(price_piece)}c/piece · {fmt_coin(price_barrel)}c/barrel · ≈ {fmt_coin(total_rem)}c"
         )
 
+    desc = "\n".join(lines)
+    if completed_note:
+        desc += f"\n\n{completed_note}"
     new_embed = discord.Embed(
         title="📦 New Production Requests (batch)",
-        description="\n".join(lines),
+        description=desc[:4000],
         color=discord.Color.orange()
     )
 
@@ -530,6 +597,16 @@ async def cleanup_batch_dms_for_closed_order(client: discord.Client, closed_orde
     store = (data.get("ui", {}) or {}).get("batch_dm_messages", {}) or {}
     if not isinstance(store, dict) or not store:
         return
+    # A visible completion line for the digests: employees should SEE the order close,
+    # not just watch its row silently disappear.
+    completed_note = ""
+    try:
+        _co = next((o for o in (data.get("orders", []) or [])
+                    if int(o.get("id", 0) or 0) == int(closed_order_id)), None)
+        if _co and str(_co.get("status", "")).lower() == "fulfilled":
+            completed_note = f"✅ **#{closed_order_id} {_co.get('item','')}** — completed"
+    except Exception:
+        completed_note = ""
 
     orders_map = {
         int(o.get("id", 0) or 0): o
@@ -567,7 +644,8 @@ async def cleanup_batch_dms_for_closed_order(client: discord.Client, closed_orde
                 changed = True
                 continue
 
-            kept = await _refresh_or_delete_one_batch_dm(client, user, mid_i, orders_map)
+            kept = await _refresh_or_delete_one_batch_dm(client, user, mid_i, orders_map,
+                                                        completed_note=completed_note)
             if kept:
                 new_list.append(mid_i)
             else:
@@ -4571,6 +4649,11 @@ async def update_order_messages(client: discord.Client, order: dict, *, allow_po
             except Exception:
                 pass
 
+            try:
+                await _network_mark_order_done(client, order)
+            except Exception:
+                pass
+
             return
 
 
@@ -5042,6 +5125,9 @@ async def _notify_network_claim(order_id, worker_id, worker_name, source_guild_i
 
 _NETWORK_LAST_TS_KEY  = "network_last_post_ts"
 _NETWORK_LAST_SIG_KEY = "network_last_post_sig"
+_NETWORK_LAST_THREAD_KEY = "network_last_thread_id"
+_NETWORK_DONE_PENDING_KEY = "network_done_pending"
+_NETWORK_DONE_TS_KEY = "network_done_ts"
 
 
 async def _post_orders_batch_to_network(client, force=False):
@@ -5127,9 +5213,20 @@ async def _post_orders_batch_to_network(client, force=False):
                         applied = [t]
             except Exception:
                 applied = []
-            await ch.create_thread(name=title[:96], content=body, embed=embed, applied_tags=applied)
+            _twm = await ch.create_thread(name=title[:96], content=body, embed=embed, applied_tags=applied)
+            # Remember the thread so order completions can update the post in place
+            # (an edit doesn't count against the network's 3-posts/hour cap).
+            try:
+                _thread = getattr(_twm, "thread", _twm)
+                _db.set_config(_NETWORK_LAST_THREAD_KEY, str(int(_thread.id)))
+            except Exception:
+                pass
         else:
-            await ch.send(content="\n".join(claim)[:400], embed=embed)
+            _msg = await ch.send(content="\n".join(claim)[:400], embed=embed)
+            try:
+                _db.set_config(_NETWORK_LAST_THREAD_KEY, str(int(_msg.id)))
+            except Exception:
+                pass
 
         try:
             _db.set_config(_NETWORK_LAST_SIG_KEY, sig)
@@ -5152,6 +5249,86 @@ async def _post_orders_batch_to_network(client, force=False):
 
 
 
+
+
+async def _network_mark_order_done(client, order: dict) -> None:
+    """When an order completes, tell the trade network: drop a short ✅ reply into the
+    last consolidated thread and refresh its embed to the current open set. Edits and
+    thread replies don't count against the forum's 3-posts/hour cap, so completions
+    propagate instantly while new posts stay throttled. Best-effort — never raises."""
+    try:
+        if not NETWORK_FORUM_CHANNEL_ID:
+            return
+        import Restocker_db as _db
+        raw = _db.get_config(_NETWORK_LAST_THREAD_KEY)
+        if not raw:
+            return
+        thread = client.get_channel(int(raw))
+        if thread is None:
+            try:
+                thread = await client.fetch_channel(int(raw))
+            except Exception:
+                return
+        oid = int(order.get("id", 0) or 0)
+        if str(order.get("status", "")).lower() == "fulfilled":
+            note = f"✅ **#{oid} {order.get('item','')}** — completed"
+        else:
+            note = f"🚫 **#{oid} {order.get('item','')}** — withdrawn"
+        # Anti-clutter: completions are BATCHED into one digest reply per 10-minute
+        # window (or every 8 completions), instead of one reply per order. The starter
+        # post is edited on every close, so the listing itself is always current.
+        try:
+            import json as _json
+            import time as _t
+            try:
+                pend = _json.loads(_db.get_config(_NETWORK_DONE_PENDING_KEY) or "[]")
+                if not isinstance(pend, list):
+                    pend = []
+            except Exception:
+                pend = []
+            if note not in pend:
+                pend.append(note)
+            last_ts = int(_db.get_config(_NETWORK_DONE_TS_KEY) or 0)
+            now_ts = int(_t.time())
+            if pend and (now_ts - last_ts >= 600 or len(pend) >= 8):
+                await thread.send("\n".join(pend[-15:])[:1900])
+                _db.set_config(_NETWORK_DONE_TS_KEY, str(now_ts))
+                pend = []
+            _db.set_config(_NETWORK_DONE_PENDING_KEY, _json.dumps(pend[-30:]))
+        except Exception:
+            pass
+        # Refresh the starter message body to the live open set so the listing never lies.
+        try:
+            data = load_orders()
+            open_lines = []
+            items_map = _load_items().get("items", {}) or {}
+            markets = _load_markets().get("markets", {}) or {}
+            for o in (data.get("orders", []) or []):
+                if not isinstance(o, dict) or _order_is_claimed_closed(o):
+                    continue
+                rem = remaining_to_assign(o)
+                if rem <= 0:
+                    continue
+                info = items_map.get(str(o.get("item", "") or ""), {})
+                mid = info.get("market_id", "main")
+                mkt_name = ((markets.get(mid) or {}).get("name")) or str(mid).capitalize()
+                open_lines.append(f"• {_pretty_item_name(str(o.get('item','')))} ×{rem} [{mkt_name}]")
+            starter = None
+            try:
+                starter = await thread.fetch_message(int(thread.id))   # forum starter shares the thread id
+            except Exception:
+                starter = None
+            if starter is not None:
+                if open_lines:
+                    body = ("**We're hiring workers to fulfil these orders:**\n"
+                            + "\n".join(open_lines[:40]))
+                else:
+                    body = "✅ **All posted orders have been filled — thanks, everyone!**"
+                await starter.edit(content=body[:1900])
+        except Exception:
+            pass
+    except Exception as _e:
+        log.debug("[network] mark-done skipped: %s", _e)
 
 
 async def _open_payout_ticket(interaction: discord.Interaction, member: discord.Member, amount: int, note: str | None) -> int | None:
@@ -6461,6 +6638,57 @@ def _create_restock_orders(to_order: list, market_id=None) -> int:
         created += 1
     save_orders(data_orders)
     return created
+
+
+async def _post_bulk_order_board(bot, channel, orders: list) -> None:
+    """ONE grouped board message for a bulk restock batch (instead of a card per
+    order). Grouped by market, biggest orders first, hard-capped to stay inside
+    Discord's embed limits; the tail is summarized. Claiming happens through
+    /orders or the website Orders tab — the per-order cards are simply never
+    posted for a bulk batch (update_order_messages keeps working for claims/DMs)."""
+    import discord as _d
+    by_market: dict = {}
+    items_data = (_load_items().get("items") or {})
+    markets = (_load_markets().get("markets") or {})
+    for o in orders:
+        mid = o.get("market_id") or (items_data.get(str(o.get("item") or "")) or {}).get("market_id") or "main"
+        by_market.setdefault(mid, []).append(o)
+    total_orders = len(orders)
+    total_payout = 0.0
+    for o in orders:
+        price = float((items_data.get(str(o.get("item") or "")) or {}).get("coin", 0) or 0)
+        total_payout += price * int(o.get("requested") or 0)
+    desc_parts = []
+    used = 0
+    for mid, group in sorted(by_market.items(), key=lambda kv: -len(kv[1])):
+        group.sort(key=lambda o: -int(o.get("requested") or 0))
+        mname = (markets.get(mid) or {}).get("name", mid)
+        loc = _market_sell_location(mid)
+        head = f"**{mname}** — {len(group)} order(s)" + (f" · deliver to `{loc}`" if loc else "")
+        lines = [head]
+        shown = 0
+        for o in group:
+            line = f"• `#{o.get('id')}` {o.get('item')} × {int(o.get('requested') or 0):,}"
+            if used + len(line) > 3600:
+                break
+            lines.append(line)
+            used += len(line)
+            shown += 1
+        if shown < len(group):
+            lines.append(f"…and **{len(group) - shown}** more for {mname}")
+        desc_parts.append("\n".join(lines))
+    embed = _d.Embed(
+        title=f"📦 Bulk restock — {total_orders} orders",
+        description="\n\n".join(desc_parts)[:4000],
+        color=0xF1C40F,
+    )
+    embed.add_field(
+        name="How to claim",
+        value=(f"`/orders` in Discord, or the website Orders tab — total payout on offer "
+               f"≈ **{int(total_payout):,}** 🪙. First come, first served."),
+        inline=False)
+    embed.set_footer(text="Bulk batch — individual order cards are skipped to keep the channel readable.")
+    await channel.send(embed=embed)
 
 
 def _parse_futures_bulk_text(text: str) -> list:
