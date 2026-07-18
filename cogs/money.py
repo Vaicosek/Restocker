@@ -365,21 +365,100 @@ class MoneyCog(commands.Cog):
         if not uid:
             return await interaction.response.send_message(
                 "❌ Pick a holder from the list (or paste their Discord ID).", ephemeral=True)
+        _db = __import__("Restocker_db")
+        import json as _json
         if action == "remove":
             if uid not in cur:
                 return await interaction.response.send_message(f"<@{uid}> wasn't marked.", ephemeral=True,
                                                                allowed_mentions=discord.AllowedMentions.none())
             core._set_liquidated_holder(uid, remove=True)
+            # Full undo: if this liquidation reclaimed equity, give it back from the snapshot.
+            restored_note = ""
+            try:
+                raw = _db.get_config(f"liq_snapshot:{uid}")
+                if raw:
+                    snap = _json.loads(raw)
+                    back = []
+                    for mid, sh, cb in snap.get("holdings", []):
+                        _db.adjust_holding(uid, mid, float(sh), float(cb))
+                        try:
+                            _db.log_stock_trade(uid, mid, "unliquidated", float(sh), 0.0, 0.0)
+                        except Exception:
+                            pass
+                        back.append(f"`{mid}` **{float(sh):,.0f}** sh")
+                    pref = snap.get("pref")
+                    if pref:
+                        invs = _db.get_investors() or {}
+                        pct_sum = sum(float(v.get("share_pct") or 0) for v in invs.values())
+                        pref_sum = sum(float(v.get("pref_shares") or 0) for v in invs.values())
+                        # pcts still derive from the pre-drop total, so this recovers it exactly
+                        full_total = (pref_sum / (pct_sum / 100.0)) if pct_sum > 0 else None
+                        rows = [(k, (v.get("name") or ""), float(v.get("pref_shares") or 0))
+                                for k, v in invs.items()]
+                        rows.append((uid, str(pref[0] or ""), float(pref[1] or 0)))
+                        _db.replace_investors(rows, total_shares=full_total)
+                        back.append(f"GEX.PR **{float(pref[1] or 0):,.0f}** pref")
+                    _db.delete_config(f"liq_snapshot:{uid}")
+                    if back:
+                        restored_note = "\n↩️ Restored: " + ", ".join(back)
+            except Exception as e:
+                restored_note = f"\n⚠ Snapshot restore failed: {e}"
             return await interaction.response.send_message(
-                f"✅ <@{uid}> unmarked — future imports treat their shares normally again.",
+                f"✅ <@{uid}> unmarked — future imports treat their shares normally again." + restored_note,
                 ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
         core._set_liquidated_holder(uid, note)
+        # Apply IMMEDIATELY — an inactive holder loses their equity now, not on some
+        # future cap-table re-import (which is no longer a routine operation). Everything
+        # taken is snapshotted so action:remove is a full undo.
+        reclaimed = []
+        try:
+            for h in _db.get_portfolio(uid):
+                sh = float(h.get("shares") or 0)
+                if sh <= 0:
+                    continue
+                cb = float(h.get("cost_basis") or 0.0)
+                _db.adjust_holding(uid, h["market_id"], -sh, -cb)
+                try:
+                    _db.log_stock_trade(uid, h["market_id"], "liquidated", sh, 0.0, 0.0)
+                except Exception:
+                    pass
+                reclaimed.append((h["market_id"], sh, cb))
+        except Exception:
+            pass
+        pref_note = ""
+        pref_snap = None
+        try:
+            invs = _db.get_investors() or {}
+            if str(uid) in invs:
+                pct_sum = sum(float(v.get("share_pct") or 0) for v in invs.values())
+                pref_sum = sum(float(v.get("pref_shares") or 0) for v in invs.values())
+                full_total = (pref_sum / (pct_sum / 100.0)) if pct_sum > 0 else (pref_sum or 1.0)
+                gone = invs[str(uid)]
+                pref_snap = [gone.get("name") or "", float(gone.get("pref_shares") or 0)]
+                rows = [(k, (v.get("name") or ""), float(v.get("pref_shares") or 0))
+                        for k, v in invs.items() if k != str(uid)]
+                _db.replace_investors(rows, total_shares=full_total)
+                pref_note = (f"\n📜 GEX.PR: dropped **{pref_snap[1]:,.0f}** preferred "
+                             f"shares ({float(gone.get('share_pct') or 0):.1f}%) — the company keeps that "
+                             f"payout slice (other investors' % unchanged).")
+        except Exception:
+            pref_snap = None
+        if reclaimed or pref_snap:
+            try:
+                _db.set_config(f"liq_snapshot:{uid}", _json.dumps(
+                    {"holdings": [[m, s, c] for m, s, c in reclaimed], "pref": pref_snap}))
+            except Exception:
+                pass
+        common_note = ""
+        if reclaimed:
+            common_note = ("\n🧹 Reclaimed now: "
+                           + ", ".join(f"`{mid}` **{sh:,.0f}** sh" for mid, sh, _cb in reclaimed)
+                           + " — returned to the company (free float).")
         await interaction.response.send_message(
-            f"🧹 <@{uid}> marked for liquidation" + (f" (*{note}*)" if note else "") + ".\n"
-            "From now on: cap-table imports send their **common shares to the market owner**, "
-            "and investor syncs drop them while the **company keeps their payout slice** "
-            "(other investors' % doesn't inflate). Already-imported holdings aren't touched — "
-            "re-run the import/sync to apply.",
+            f"🧹 <@{uid}> marked for liquidation" + (f" (*{note}*)" if note else "") + "."
+            + common_note + pref_note +
+            "\nFuture cap-table imports and investor syncs will keep them out automatically. "
+            "Mistake? `action:remove` restores everything taken here.",
             ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
 
     # ── Platform fees (/fees ...) — infrastructure is live, charging is OFF by default ──
