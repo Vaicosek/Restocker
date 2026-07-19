@@ -79,26 +79,30 @@ def gather_and_value(market_id: str) -> dict:
     months = (_load_csn_for_market(market_id) or {}).get("months", {}) or {}
     cur_key = datetime.now(timezone.utc).strftime("%Y-%m")
     closed = sorted(k for k in months if isinstance(months.get(k), dict) and k < cur_key)
-    nets = [_num(months[k].get("net")) for k in closed]
+    anomalies = []
+    nets = []                     # self-healed nets used for the valuation
+    for k in closed:
+        row_net = _num(months[k].get("net"))
+        use = row_net
+        raw = _db.get_config(f"csn_meta:{market_id}:{k}")
+        if raw:
+            try:
+                meta_net = _num(json.loads(raw).get("net"))
+            except Exception:
+                meta_net = 0.0
+            # a stored month far below its csn_meta fingerprint = a stub re-import that
+            # overwrote the full month. Trust the fuller fingerprint for the valuation,
+            # but flag it — the LIVE engine still reads the corrupt row until re-imported.
+            if meta_net and abs(meta_net - row_net) > max(10000.0, 0.10 * abs(meta_net)):
+                use = meta_net
+                anomalies.append(
+                    f"CRITICAL: month {k} csn_history net {row_net:,.0f} disagrees with its "
+                    f"csn_meta fingerprint {meta_net:,.0f}. Used the csn_meta figure here, but the "
+                    f"live pricing engine still reads {row_net:,.0f} — RE-IMPORT the real month or "
+                    f"the quote will drift after listing.")
+        nets.append(use)
     window = nets[-3:] if nets else []
     avg_net = sum(window) / len(window) if window else 0.0
-
-    anomalies = []
-    # anomaly: a stored month whose net disagrees with its csn_meta fingerprint
-    for k in closed:
-        raw = _db.get_config(f"csn_meta:{market_id}:{k}")
-        if not raw:
-            continue
-        try:
-            meta_net = _num(json.loads(raw).get("net"))
-        except Exception:
-            continue
-        row_net = _num(months[k].get("net"))
-        if meta_net and abs(meta_net - row_net) > max(10000.0, 0.10 * abs(meta_net)):
-            anomalies.append(
-                f"CRITICAL: month {k} stored net {row_net:,.0f} disagrees with its "
-                f"csn_meta fingerprint {meta_net:,.0f} — the month was likely overwritten "
-                f"by a partial/stub re-import. Re-import the real month before pricing.")
 
     # ── hive income (config-driven production; worker valuation) ─────────────
     honey_r = pm("honey_per_render")
@@ -330,6 +334,78 @@ class ValuationCog(commands.Cog):
                 file=discord.File(buf, filename=f"valuation_{market_id}_{stamp}.json"))
         except Exception:
             pass
+
+
+    @app_commands.command(
+        name="list_public",
+        description="(Manager) Value a market, set its params from the model, and list it on the exchange")
+    @app_commands.describe(
+        market_id="Market to take public",
+        force="Re-run even if it's already listed (re-sets params & price)")
+    @app_commands.autocomplete(market_id=_market_autocomplete)
+    async def list_public(self, interaction: discord.Interaction, market_id: str, force: bool = False):
+        # Listing is consequential on a scam-heavy server — full server managers only.
+        if not is_manager(interaction):
+            return await interaction.response.send_message(
+                "⛔ Server managers only — listing a company is consequential.", ephemeral=True)
+        market_id = (market_id or "").strip()
+        if not _get_market(market_id):
+            return await interaction.response.send_message(f"❌ Market `{market_id}` not found.", ephemeral=True)
+
+        import Restocker_db as _db
+        await interaction.response.defer(thinking=True)
+        try:
+            data = await asyncio.to_thread(gather_and_value, market_id)
+        except Exception as e:
+            log.exception("list_public: gather failed")
+            return await interaction.followup.send(f"⚠️ Valuation failed: `{type(e).__name__}: {e}`")
+
+        try:
+            listing = _db.get_market_shares(market_id)
+        except Exception:
+            listing = None
+        if listing and listing.get("active") and not force:
+            return await interaction.followup.send(
+                f"❌ `{market_id}` is already public at `{float(listing.get('share_price') or 0):,.2f}`/share. "
+                f"Pass `force:true` to re-set its params and price from the model.")
+
+        v, b, h = data["valuation"], data["backing"], data["hive"]
+        shares = float(v.get("shares") or 1000.0)
+        price = v.get("share_price") or (v["market_cap"] / shares if shares else 0.0)
+        sellable = float(b["hive_fleet_at_haircut"]) + float(b["barrels_at_haircut"])  # liquid backing
+        try:
+            # book-value floor = hive fleet; sellable = liquid backing; treasury = model cash
+            _db.set_config(f"asset_value:{market_id}", str(float(h["fleet_asset"])))
+            _db.set_config(f"sellable_assets:{market_id}", str(sellable))
+            _db.upsert_market_shares(
+                market_id, active=1, shares_outstanding=shares, pe_multiplier=12.0,
+                treasury_coins=float(b["cash"]), share_price=round(float(price), 2),
+                last_priced_at=core.utcnow_iso())
+            _db.log_stock_price(market_id, round(float(price), 2), "ipo_model")
+        except Exception as e:
+            log.exception("list_public: write failed")
+            return await interaction.followup.send(f"⚠️ Listing writes failed: `{type(e).__name__}: {e}`")
+
+        embed = discord.Embed(
+            title=f"📈 {data['market_name']} — now on the exchange",
+            description=(f"Listed at **`{float(price):,.0f}`**/share · {shares:,.0f} shares · "
+                        f"cap **`{v['market_cap']:,.0f}`** 🪙 · **Grade {b['grade']}** "
+                        f"({b['pct_of_cap']:.0f}% backed)"),
+            color=0x2ECC71)
+        embed.add_field(name="Set from the model",
+                        value=(f"asset_value `{h['fleet_asset']:,.0f}`\n"
+                               f"sellable `{sellable:,.0f}`\n"
+                               f"treasury `{b['cash']:,.0f}`"), inline=True)
+        embed.add_field(name="Earnings /mo",
+                        value=(f"CSN `{data['earnings']['csn_trailing_avg']:,.0f}`\n"
+                               f"hive `{data['earnings']['hive_income_site_net']:,.0f}`\n"
+                               f"tp `{data['earnings']['tp_fee_income']:,.0f}`"), inline=True)
+        crit = [a for a in data["anomalies"] if a.startswith("CRITICAL")]
+        if crit:
+            embed.add_field(name="⚠️ Must fix (or the quote drifts)",
+                            value="\n".join(f"• {a[len('CRITICAL: '):]}" for a in crit)[:1000], inline=False)
+        embed.set_footer(text=f"/stock buy market_id:{market_id} · /market go_private to delist")
+        await interaction.followup.send(embed=embed)
 
 
 async def setup(bot):
