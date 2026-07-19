@@ -77,15 +77,36 @@ class ProjectsCog(commands.Cog):
         deduct_coins(payer.id, int(amount), reason=f"project pay -> {worker.id}")
         add_coins(worker.id, int(amount), counts_as_principal=True,
                   reason=f"project pay from {payer.id}" + (f": {note}" if note else ""))
-        pts = max(1, int(amount) // 100)
+        # AUDIT FIX (high): coin ping-pong — two accounts managing EACH OTHER bounced
+        # the same coins back and forth, minting unlimited loyalty points and
+        # leaderboard credit. Coins still move freely (they're conserved); it's the
+        # REWARDS that were mintable. Rules now: (1) circular manager pairs earn no
+        # points/credit; (2) points + leaderboard credit are capped per payer→worker
+        # per day (PROJECT_PAY_POINTS_DAILY_CAP, default 500).
+        from datetime import datetime as _dt, timezone as _tz
+        _circular = str(db.get_manager_of(str(payer.id)) or "") == str(worker.id)
+        _cap = int(getattr(core, "PROJECT_PAY_POINTS_DAILY_CAP", 500) or 500)
+        _day = _dt.now(_tz.utc).strftime("%Y-%m-%d")
+        _key = f"projpts:{payer.id}:{worker.id}:{_day}"
         try:
-            _award_loyalty_points(worker.id, pts, reason="project pay")
+            _used = int(float(db.get_config(_key) or 0))
         except Exception:
-            pass
-        try:
-            db.record_team_perf(str(payer.id), str(worker.id), "project", coins=int(amount), points=pts)
-        except Exception:
-            pass
+            _used = 0
+        pts = 0 if _circular else max(0, min(max(1, int(amount) // 100), _cap - _used))
+        if pts > 0:
+            try:
+                db.set_config(_key, str(_used + pts))
+            except Exception:
+                pass
+            try:
+                _award_loyalty_points(worker.id, pts, reason="project pay")
+            except Exception:
+                pass
+            try:
+                db.record_team_perf(str(payer.id), str(worker.id), "project",
+                                    coins=int(amount), points=pts)
+            except Exception:
+                pass
         await interaction.response.send_message(
             f"💸 Paid {worker.mention} **{amount:,}** coins (+{pts} pts)." + (f" — {note}" if note else ""),
             ephemeral=True)

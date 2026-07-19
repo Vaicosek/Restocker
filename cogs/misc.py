@@ -184,12 +184,24 @@ class MiscCog(commands.Cog):
                 code_owner = member            # ambiguous fallback: the invoking manager
                 identified = False
 
-        # Don't clobber an existing leader on the ambiguous fallback: leader_discord_id gates
-        # market-ownership rights (_markets_owned_by → redemption approvals etc.), so blindly
-        # assigning it silently transferred those rights to whoever fetched a code.
+        # AUDIT FIX (high): leader_discord_id gates market-OWNERSHIP rights
+        # (_markets_owned_by → owner panel, restock orders, approvals). Previously any
+        # leader-role holder could run /market_code and silently seize those rights
+        # from the recorded leader. Rule now: once a leader is on record, ONLY a
+        # manager explicitly naming `leader:` can transfer it — everyone else just
+        # rotates the code without touching ownership.
         existing_leader = (m_info.get("leader_discord_id") or "").strip()
-        if identified or not existing_leader:
+        _explicit_transfer = bool(leader and mgr)
+        if not existing_leader:
+            if identified:
+                all_markets[chosen]["leader_discord_id"] = str(code_owner.id)
+        elif _explicit_transfer and existing_leader != str(code_owner.id):
             all_markets[chosen]["leader_discord_id"] = str(code_owner.id)
+            try:
+                core.log.info("[market_code] leader of %s transferred %s -> %s by manager %s",
+                              chosen, existing_leader, code_owner.id, member.id)
+            except Exception:
+                pass
         all_markets[chosen]["leader_code"] = code
         _save_markets(markets_data)
 

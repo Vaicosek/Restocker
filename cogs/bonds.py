@@ -217,5 +217,97 @@ class BondsCog(commands.Cog):
         await interaction.response.send_message(embed=emb, ephemeral=True)
 
 
+async def _escrow_autocomplete(interaction: discord.Interaction, current: str):
+    import Restocker_db as _db
+    out = []
+    for e in (_db.list_escrows() or [])[:50]:
+        label = f"#{e['id']} [{e['status']}] {e['party']} — {int(e['value']):,}¢ ({e['kind']})"
+        if current and current.lower() not in label.lower():
+            continue
+        out.append(app_commands.Choice(name=label[:100], value=str(e["id"])))
+    return out[:25]
+
+
+class EscrowCog(commands.Cog):
+    """Listing escrow — V Tech as the clearing house. Outside companies that want
+    to list on the exchange deposit collateral (coins or items at an agreed
+    valuation) with V Tech first. Rug your investors → forfeit the deposit."""
+
+    def __init__(self, bot):
+        self.bot = bot
+
+    escrow = app_commands.Group(name="escrow",
+                                description="Listing collateral held by V Tech as clearing house")
+
+    @escrow.command(name="hold", description="(Manager) Record a collateral deposit from a listing company")
+    @app_commands.describe(party="Who deposited (company/player)",
+                           value="Coin value (items at the agreed valuation)",
+                           kind="What was deposited",
+                           note="Terms, e.g. 'lists NetherCo stock; held 90 days'")
+    @app_commands.choices(kind=[
+        app_commands.Choice(name="coins", value="coins"),
+        app_commands.Choice(name="items", value="items")])
+    async def escrow_hold(self, interaction: discord.Interaction, party: str,
+                          value: app_commands.Range[int, 1, 1_000_000_000],
+                          kind: str = "coins", note: Optional[str] = None):
+        if not is_manager(interaction):
+            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
+        import Restocker_db as _db
+        eid = _db.create_escrow(party.strip(), kind, float(value), note)
+        core._queue_dividend_post({"type": "bond_event",
+            "title": f"🏦 Escrow deposit #{eid} — {party.strip()}",
+            "lines": [f"`{int(value):,}` 🪙 in {kind} now held by V Tech as listing collateral."
+                      + (f"\nTerms: {note}" if note else "")]})
+        await interaction.response.send_message(
+            f"🏦 Escrow **#{eid}** recorded: {party.strip()} · `{int(value):,}` 🪙 ({kind}) — "
+            f"announced in reports.", ephemeral=True)
+
+    @escrow.command(name="resolve", description="(Manager) Release or forfeit a held deposit")
+    @app_commands.describe(deposit="Which deposit", outcome="Release back or forfeit to V Tech",
+                           note="Why (public)")
+    @app_commands.choices(outcome=[
+        app_commands.Choice(name="release — returned to the depositor", value="released"),
+        app_commands.Choice(name="forfeit — kept (they rugged)", value="forfeited")])
+    @app_commands.autocomplete(deposit=_escrow_autocomplete)
+    async def escrow_resolve(self, interaction: discord.Interaction, deposit: str,
+                             outcome: str, note: Optional[str] = None):
+        if not is_manager(interaction):
+            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
+        import Restocker_db as _db
+        try:
+            e = _db.get_escrow(int(deposit))
+        except (TypeError, ValueError):
+            e = None
+        if not e or e["status"] != "held":
+            return await interaction.response.send_message("❌ Not a held deposit.", ephemeral=True)
+        _db.update_escrow(e["id"], outcome, note)
+        icon = "✅" if outcome == "released" else "⚔️"
+        core._queue_dividend_post({"type": "bond_event", "bad": outcome == "forfeited",
+            "title": f"{icon} Escrow #{e['id']} {outcome} — {e['party']}",
+            "lines": [f"`{int(e['value']):,}` 🪙 ({e['kind']}) "
+                      + ("returned to the depositor." if outcome == "released"
+                         else "FORFEITED to V Tech — investor claims come first.")
+                      + (f"\n{note}" if note else "")]})
+        await interaction.response.send_message(f"{icon} Escrow #{e['id']} → **{outcome}**.", ephemeral=True)
+
+    @escrow.command(name="list", description="All escrow deposits and their status")
+    async def escrow_list(self, interaction: discord.Interaction):
+        import Restocker_db as _db
+        rows = _db.list_escrows()
+        if not rows:
+            return await interaction.response.send_message("No escrow deposits on record.", ephemeral=True)
+        icon = {"held": "🏦", "released": "✅", "forfeited": "⚔️"}
+        emb = discord.Embed(title="🏦 Listing escrow ledger", color=discord.Color.dark_teal(),
+                            description="\n".join(
+                                f"{icon.get(e['status'],'•')} **#{e['id']}** {e['party']} — "
+                                f"`{int(e['value']):,}` 🪙 ({e['kind']}) · `{e['status']}`"
+                                + (f" — {e['note']}" if e.get("note") else "")
+                                for e in rows[:20])[:4000])
+        held = sum(float(e["value"]) for e in rows if e["status"] == "held")
+        emb.set_footer(text=f"Currently held: {int(held):,} coins of collateral")
+        await interaction.response.send_message(embed=emb, ephemeral=True)
+
+
 async def setup(bot):
     await bot.add_cog(BondsCog(bot))
+    await bot.add_cog(EscrowCog(bot))

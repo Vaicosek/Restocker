@@ -144,6 +144,19 @@ class EventsCog(commands.Cog):
                         f"If this is a mistake, contact a manager."
                     )
                     return
+                # AUDIT FIX (high): an IGN with unpaid harvest coins waiting could be
+                # squatted by whoever DM'd it first — every future payout for that
+                # player would flow to the squatter. Money-bearing IGNs need a manager.
+                try:
+                    _pend_val = _db_ign2.ign_unpaid_value(ign)
+                except Exception:
+                    _pend_val = 0
+                if _pend_val > 0:
+                    await message.channel.send(
+                        f"⚠️ IGN `{ign}` has **{int(_pend_val):,}** coins of unpaid harvests "
+                        f"waiting, so it can't be self-claimed. Ask a manager to link it to "
+                        f"you (they'll verify it's really your account).")
+                    return
                 _db_ign2.set_ign(str(message.author.id), ign)
                 _db_ign2.delete_ign_pending(str(message.author.id))
                 await message.channel.send(
@@ -163,18 +176,38 @@ class EventsCog(commands.Cog):
         _is_bot_app = bool(getattr(message.author, "bot", False)) and message.author.id != _self_id
         if not (_is_webhook or _is_bot_app):
             return
-        # Optional allowlist (CSN_WEBHOOK_IDS): match either the webhook id or the bot
-        # author id. Empty allowlist = accept any webhook/bot. When a CSN-named CSV is
-        # dropped by the allowlist, log it so the skip isn't silent.
+        # AUDIT FIX (high): the allowlist used to default to accept-ANY-webhook, so a
+        # forged webhook could post fake earnings that re-anchor the stock and trigger
+        # payouts. Now: env CSN_WEBHOOK_IDS ∪ config csn_allowed_posters, with TRUST ON
+        # FIRST USE — the first webhook/bot that delivers a CSN CSV gets locked in
+        # automatically (your existing relay keeps working untouched); every different
+        # poster after that is rejected and logged until a manager adds its id to the
+        # csn_allowed_posters config (comma-separated).
         _poster_id = message.webhook_id if _is_webhook else message.author.id
-        if _CSN_ALLOWED_WEBHOOK_IDS and _poster_id not in _CSN_ALLOWED_WEBHOOK_IDS:
-            for _a in message.attachments:
-                _n = _a.filename.lower()
-                if _n.endswith(".csv") and ("csn_monthly" in _n or "csn_export" in _n or "csn_stock" in _n):
-                    log.warning("[csn] ignored CSN report from poster %s — not in CSN_WEBHOOK_IDS "
-                                "allowlist (add its id, or clear the allowlist to accept all).", _poster_id)
-                    break
-            return
+        _has_csn_csv = any(
+            _a.filename.lower().endswith(".csv")
+            and any(k in _a.filename.lower() for k in ("csn_monthly", "csn_export", "csn_stock"))
+            for _a in message.attachments)
+        if _has_csn_csv:
+            import Restocker_db as _dbw
+            _allowed = set(_CSN_ALLOWED_WEBHOOK_IDS)
+            try:
+                _cfg = str(_dbw.get_config("csn_allowed_posters") or "")
+                _allowed |= {int(x) for x in _cfg.replace(" ", "").split(",") if x.strip().isdigit()}
+            except Exception:
+                pass
+            if not _allowed:
+                # first ever CSN poster — lock it in
+                try:
+                    _dbw.set_config("csn_allowed_posters", str(_poster_id))
+                    log.info("[csn] TOFU: locked CSN ingest to poster %s", _poster_id)
+                except Exception:
+                    pass
+            elif _poster_id not in _allowed:
+                log.warning("[csn] REJECTED CSN report from unknown poster %s — add its id to "
+                            "the csn_allowed_posters config (or CSN_WEBHOOK_IDS env) to allow it.",
+                            _poster_id)
+                return
         for att in message.attachments:
             name = att.filename.lower()
             report_channel = (

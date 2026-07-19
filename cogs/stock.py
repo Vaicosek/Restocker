@@ -174,6 +174,50 @@ class StockCog(commands.Cog):
             embed.add_field(name="Recent Price Changes", value="\n".join(lines), inline=False)
         await interaction.response.send_message(embed=embed)
 
+    @stock.command(name="drip",
+                   description="Dividend reinvestment: auto-buy shares with your dividends instead of taking coins")
+    @app_commands.describe(enabled="On = dividends & GEX.PR payouts buy more shares automatically")
+    async def stock_drip(self, interaction: discord.Interaction, enabled: bool):
+        import Restocker_db as _db
+        uid = str(interaction.user.id)
+        if enabled:
+            _db.set_config(f"drip:{uid}", "1")
+            msg = ("🌱 **DRIP on** — from now on your dividends and GEX.PR payouts "
+                   "auto-buy shares at market (whole shares; remainder stays as coins). "
+                   "Compounding, the eighth wonder of Abexilas.")
+        else:
+            _db.delete_config(f"drip:{uid}")
+            msg = "💰 **DRIP off** — payouts arrive as coins again."
+        await interaction.response.send_message(msg, ephemeral=True)
+
+    @stock.command(name="buyback",
+                   description="(Manager) Retire free-float shares — fewer shares against the same cap raises the floor")
+    @app_commands.describe(market_id="Which listing", shares="How many unissued (free-float) shares to retire")
+    @app_commands.autocomplete(market_id=_public_market_autocomplete)
+    async def stock_buyback(self, interaction: discord.Interaction, market_id: str,
+                            shares: app_commands.Range[int, 1, 10_000_000]):
+        if not is_manager(interaction):
+            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
+        import Restocker_db as _db
+        listing = _db.get_market_shares(market_id)
+        if not listing or not listing.get("active"):
+            return await interaction.response.send_message("❌ Not a listed market.", ephemeral=True)
+        so = float(listing.get("shares_outstanding") or 0)
+        held = sum(float(h.get("shares") or 0) for h in _db.get_holders(market_id))
+        free_float = max(0.0, so - held)
+        if shares > free_float:
+            return await interaction.response.send_message(
+                f"❌ Only `{free_float:,.0f}` unissued share(s) in the float — holders' shares "
+                f"can't be retired (they'd have to sell first).", ephemeral=True)
+        old_price = float(listing.get("share_price") or 0)
+        _db.upsert_market_shares(market_id, shares_outstanding=so - shares)
+        new_price = _recompute_share_price(market_id, reason="buyback", full_move=True)
+        await interaction.response.send_message(
+            f"🔥 Retired `{shares:,}` share(s) of `{market_id}`: "
+            f"`{so:,.0f}` → `{so - shares:,.0f}` outstanding.\n"
+            f"Price floor per share: `{old_price:,.2f}` → `{new_price:,.2f}` 🪙 "
+            f"(same cap, fewer shares — every holder's slice got bigger).", ephemeral=False)
+
     @stock.command(name="buy", description="Buy shares of a public market using your server currency")
     @app_commands.describe(market_id="The public market to invest in",
                            shares="How many shares to buy (suggestions show your max and the cost)")
@@ -624,6 +668,16 @@ class StockCog(commands.Cog):
 
     async def _delist_payout(self, interaction, market_id, name, holders, total_shares, pool, b):
         import Restocker_db as _db
+        # AUDIT FIX (critical): (1) re-snapshot AFTER the defer — a sell timed into
+        # the defer window used to collect the sale AND the delist payout on shares
+        # it no longer held; (2) never int()-cast holder ids — the ABX index fund
+        # account ("ABX_INDEX_FUND") crashed the loop AFTER the treasury was drained,
+        # leaving a zombie active listing. The fund is paid like any holder; its
+        # payout becomes fund cash, and NAV carries it to unit holders.
+        holders = _db.get_holders(market_id)
+        total_shares = sum(float(h.get("shares") or 0) for h in holders)
+        b = _market_backing(market_id)
+        pool = int(b["cashable"])
         if total_shares <= 0 or pool <= 0:
             _db.upsert_market_shares(market_id, active=0)
             return await interaction.followup.send(
@@ -632,17 +686,26 @@ class StockCog(commands.Cog):
         failed = []
         for h in holders:
             sh = float(h.get("shares") or 0)
+            cb = float(h.get("cost_basis") or 0)
             amt = int(pool * (sh / total_shares))
+            uid = str(h.get("user_id"))
+            try:
+                # Claim-first: clear the holding, THEN pay — a concurrent sell can't
+                # double-dip. If the credit fails, the holding is restored.
+                _db.adjust_holding(uid, market_id, delta_shares=-sh, delta_cost_basis=-cb)
+            except Exception:
+                failed.append(uid)
+                continue
             try:
                 if amt > 0:
-                    add_coins(int(h["user_id"]), amt, counts_as_principal=True)
+                    add_coins(uid, amt, counts_as_principal=True)
                     paid += amt
-                # Only clear the holding AFTER the payout succeeded — a failed credit
-                # must never cost a shareholder their shares.
-                _db.adjust_holding(h["user_id"], market_id, delta_shares=-sh,
-                                   delta_cost_basis=-float(h.get("cost_basis") or 0))
             except Exception:
-                failed.append(str(h.get("user_id")))
+                try:
+                    _db.adjust_holding(uid, market_id, delta_shares=sh, delta_cost_basis=cb)
+                except Exception:
+                    pass
+                failed.append(uid)
         # remove exactly what we paid from the backing sources (treasury first, then fund)
         from_treasury = min(int(b["cash"]), paid)
         from_fund = paid - from_treasury

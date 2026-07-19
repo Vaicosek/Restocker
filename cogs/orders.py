@@ -328,7 +328,7 @@ class OrdersCog(commands.Cog):
         if unit not in ("pieces", "stacks", "barrels"):
             unit = "pieces"
 
-        requested_pieces = unit_to_pieces(int(amount), unit, stackable=stackable)
+        requested_pieces = unit_to_pieces(int(amount), unit, stackable=stackable, stack_size=stack_size)
 
         data_orders = load_orders()
         new_id = (max([o.get("id", 0) for o in data_orders.get("orders", [])] or [0]) + 1)
@@ -475,7 +475,7 @@ class OrdersCog(commands.Cog):
             if not _is_mgr and item_mid not in _owned_markets:
                 skipped_market.append(f"{name} (`{item_mid}`)")
                 continue
-            requested_pieces = unit_to_pieces(int(qty), unit, stackable=stackable)
+            requested_pieces = unit_to_pieces(int(qty), unit, stackable=stackable, stack_size=stack_size)
             base_id += 1
             data_orders.setdefault("orders", []).append({
                 "id": base_id, "shop": "", "item": name,

@@ -26,95 +26,9 @@ class ShopCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    @app_commands.command(name="shop_rename_item", description="Rename an item in items.yml (updates open orders).")
-
-
-    @app_commands.describe(item_key="Pick the item to rename (type to search)", new_name="New item name")
-
-
-    @app_commands.autocomplete(item_key=any_item_autocomplete)
-    @app_commands.default_permissions(manage_guild=True)
-    async def shop_rename_item(self, interaction: discord.Interaction, item_key: str, new_name: str):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", **ephemeral_kwargs(interaction))
-
-        old_name = (item_key or "").strip()
-        new_name = (new_name or "").strip()
-
-        if not old_name:
-            return await interaction.response.send_message("❌ Invalid item selection.", **ephemeral_kwargs(interaction))
-        if not new_name:
-            return await interaction.response.send_message("❌ New name can’t be empty.", **ephemeral_kwargs(interaction))
-
-
-        try:
-            data_items = _load_items()
-            items = data_items.setdefault("items", {})
-
-            if old_name not in items:
-                return await interaction.response.send_message(f"❌ `{old_name}` not found.", **ephemeral_kwargs(interaction))
-            if new_name in items and new_name != old_name:
-                return await interaction.response.send_message(f"❌ `{new_name}` already exists.", **ephemeral_kwargs(interaction))
-
-            # Capture DB-only columns first — _save_items' upsert doesn't write category or
-            # worker_cost, so a plain pop+save would lose them on the new name.
-            import Restocker_db as _db_rn
-            _old_row = _db_rn.get_item(old_name) or {}
-            items[new_name] = items.pop(old_name)
-            _save_items(data_items)
-            # _save_items only UPSERTS — the old-name sqlite row survives and would come back
-            # as a duplicate item (stale price, still in autocomplete). Remove it, and carry
-            # the DB-only columns over to the new row.
-            try:
-                if _old_row.get("category"):
-                    _db_rn.set_item_category(new_name, _old_row["category"])
-                if _old_row.get("worker_cost") is not None:
-                    _db_rn.set_item_worker_cost(new_name, _old_row["worker_cost"])
-                _db_rn.delete_item(old_name)
-            except Exception as _e_rn:
-                log.warning("[rename] old-row cleanup failed for %r: %s", old_name, _e_rn)
-        except Exception as e:
-            return await interaction.response.send_message(f"❌ Failed to update items.yml: {e}", **ephemeral_kwargs(interaction))
-
-
-        # Defer before touching orders: each matching open order triggers
-        # update_order_messages() (several Discord API calls), so a rename that hits a
-        # few orders can blow the 3s interaction window → "Unknown interaction" (10062).
-        await interaction.response.defer(**ephemeral_kwargs(interaction), thinking=True)
-
-        updated_orders = 0
-        try:
-            data = load_orders()
-
-            for o in data.get("orders", []):
-                if _order_is_claimed_closed(o):
-                    continue
-                if o.get("item") == old_name:
-                    o["item"] = new_name
-                    updated_orders += 1
-
-            save_orders(data)
-
-            for o in data.get("orders", []):
-                if _order_is_claimed_closed(o):
-                    continue
-                if o.get("item") == new_name:
-                    try:
-                        await update_order_messages(interaction.client, o)
-                    except Exception:
-                        pass
-
-        except Exception as e:
-            return await interaction.followup.send(
-                f"✅ Renamed in **items.yml**.\n⚠️ But updating orders failed: {e}",
-                **ephemeral_kwargs(interaction)
-            )
-
-        await interaction.followup.send(
-            f"✅ Renamed **{old_name}** → **{new_name}**.\n"
-            f"🔁 Updated **{updated_orders}** open order(s).",
-            **ephemeral_kwargs(interaction)
-        )
+    # /shop_rename_item was REMOVED (owner decision after the 2026-07 audit): renaming
+    # an item key orphaned its references in consignment deals, stock scans, restock
+    # targets and alarms. Delete + re-add under the new name instead.
 
     @app_commands.command(name="add_item", description="Create a new item and set its coin price")
     @app_commands.checks.has_any_role(MANAGER_ROLE_NAME)

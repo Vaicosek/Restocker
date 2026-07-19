@@ -759,6 +759,29 @@ def _load_stock_data() -> dict:
                 pass
         _m["rating"] = ("AAA" if _ratio >= 1.5 else "AA" if _ratio >= 1.0 else "A" if _ratio >= 0.75
                         else "BBB" if _ratio >= 0.5 else "BB" if _ratio >= 0.25 else "C")
+    bonds = []
+    try:
+        for b in (db.list_bonds() or []):
+            if b.get("status") not in ("open", "active", "defaulted"):
+                continue
+            cov = None
+            try:
+                cov = json.loads(db.get_config(f"bond_coverage:{b['market_id']}") or "null")
+            except Exception:
+                pass
+            bonds.append({
+                "id": b["id"], "name": b.get("name") or f"#{b['id']}",
+                "market_id": b["market_id"], "status": b["status"],
+                "coupon_pct": float(b.get("coupon_pct") or 0),
+                "unit_price": float(b.get("unit_price") or 0),
+                "units_left": max(0, int(float(b.get("units_total") or 0) - float(b.get("units_sold") or 0))),
+                "sold_face": round(float(b.get("unit_price") or 0) * float(b.get("units_sold") or 0)),
+                "matures_at": str(b.get("matures_at") or "")[:10],
+                "missed": int(b.get("missed_coupons") or 0),
+                "coverage": (cov or {}).get("pct"),
+            })
+    except Exception as e:
+        print(f"[bonds] board build failed: {e}")
     index = None
     try:
         hist = db.get_market_index_history(5000)
@@ -774,7 +797,7 @@ def _load_stock_data() -> dict:
             }
     except Exception:
         index = None
-    return {"markets": out, "index": index}
+    return {"markets": out, "index": index, "bonds": bonds}
 
 
 
@@ -1374,6 +1397,23 @@ _PAGE = """<!DOCTYPE html>
         <div class="big"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17l6-6 4 4 8-8"/><path d="M17 7h4v4"/></svg></div>No public markets yet — run <code>/market go_public</code> in Discord.
       </div>
     </div>
+    <div id="bond-board" style="margin-top:28px;display:none">
+      <div class="chart-title" style="margin-bottom:12px">Bond board — item-collateralized corporate debt</div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Series</th><th>Issuer</th><th>Coupon</th><th>Matures</th>
+              <th>Units left</th><th>Face sold</th><th>Item coverage</th><th>Status</th>
+            </tr>
+          </thead>
+          <tbody id="bonds-tbody"></tbody>
+        </table>
+      </div>
+      <div style="font-size:11.5px;color:var(--faint);margin-top:8px">
+        House rule: items on record must cover ≥80% of outstanding face — coins don't count as bond collateral. Buy with <code>/bond buy</code> in Discord.
+      </div>
+    </div>
     <div id="holders-section" style="margin-top:28px;display:none">
       <div class="chart-title" style="margin-bottom:12px">Top holders · <span id="holders-market-name"></span>
         <a id="captable-link" href="#" target="_blank" style="float:right;font-size:13px;color:var(--accent);text-decoration:none">Full cap table →</a></div>
@@ -1499,9 +1539,15 @@ _PAGE = """<!DOCTYPE html>
       </div>
       <datalist id="owner-itemlist"></datalist>
     </div>
+    <div id="bulk-bar" style="display:none;margin-bottom:10px;padding:10px 14px;border:1px solid var(--border);border-radius:8px;background:var(--card);align-items:center;gap:12px">
+      <span id="bulk-count" style="font-size:13px;color:var(--muted)">0 selected</span>
+      <button class="mini-btn danger" id="bulk-remove">Remove selected</button>
+      <button class="mini-btn" id="bulk-clear">Clear selection</button>
+      <span id="bulk-msg" style="font-size:12px;color:var(--muted)"></span>
+    </div>
     <div class="table-wrap">
       <table>
-        <thead><tr><th>Item</th><th>Stock</th><th>Your price</th><th>Sold</th><th>Optimal</th><th>Actions</th></tr></thead>
+        <thead><tr><th style="width:28px"></th><th>Item</th><th>Stock</th><th>Your price</th><th>Sold</th><th>Optimal</th><th>Actions</th></tr></thead>
         <tbody id="owner-tbody"></tbody>
       </table>
       <div class="empty" id="owner-empty" style="display:none">No items yet — log a restock or sell on the server to populate this.</div>
@@ -2497,10 +2543,12 @@ document.querySelectorAll(".nav-tab").forEach(tab => {
   const statsEl = document.getElementById("stats-stocks");
   const totalMcap = markets.reduce((s, m) => s + m.mcap, 0);
   const mover = markets.slice().sort((a, b) => Math.abs(b.pct) - Math.abs(a.pct))[0];
+  const totalVisitors = markets.reduce((s,m)=>s+((m.quality&&m.quality.visitors_month)||0),0);
   [
     [markets.length,                       "Public Markets"],
     [num(Math.round(totalMcap)) + " ¢",    "Total Market Cap"],
     [num(Math.round(markets.reduce((s,m)=>s+(m.treasury||0),0))) + " ¢", "Total Treasury"],
+    [num(totalVisitors),                   "Visitors / mo"],
     [mover ? `${mover.name} ${mover.pct >= 0 ? "+" : ""}${mover.pct.toFixed(1)}%` : "—", "Top Mover"],
   ].forEach(([v, l]) => {
     const d = document.createElement("div");
@@ -2532,6 +2580,30 @@ document.querySelectorAll(".nav-tab").forEach(tab => {
     tr.addEventListener("click", () => select(m.mid));
     tbody.appendChild(tr);
   });
+
+  // ── Bond board ──
+  const bonds = (STOCKS && STOCKS.bonds) || [];
+  const bondSec = document.getElementById("bond-board");
+  if (bondSec && bonds.length) {
+    bondSec.style.display = "";
+    const btb = document.getElementById("bonds-tbody");
+    btb.innerHTML = "";
+    bonds.forEach(b => {
+      const covOk = (b.coverage||0) >= 80;
+      const stIcon = b.status === "defaulted" ? "⚔️ defaulted" : (b.status === "active" ? "active" : "open — buyable");
+      const tr = document.createElement("tr");
+      tr.innerHTML = `
+        <td class="item-name">${esc(b.name)} <span class="badge market-tag">#${b.id}</span></td>
+        <td>${esc(b.market_id)}</td>
+        <td>${b.coupon_pct.toFixed(2)}% / mo</td>
+        <td>${esc(b.matures_at || "—")}</td>
+        <td>${num(b.units_left)} @ ${num(Math.round(b.unit_price))} ¢</td>
+        <td>${num(b.sold_face)} ¢</td>
+        <td><span class="${covOk ? "up" : "down"}">${b.coverage != null ? b.coverage.toFixed(0) + "%" : "—"}</span></td>
+        <td class="${b.status === "defaulted" || b.missed ? "down" : ""}">${stIcon}${b.missed ? " · " + b.missed + " missed" : ""}</td>`;
+      btb.appendChild(tr);
+    });
+  }
 
   // Market selector tabs
   const tabsEl = document.getElementById("stock-market-tabs");
@@ -3005,15 +3077,57 @@ document.querySelectorAll(".nav-tab").forEach(tab => {
       const c = it.category || "Misc";
       (groups[c] = groups[c] || []).push(it);
     });
+    // ── bulk-remove machinery: checkbox column, one confirm, NO page reload ──
+    const bulkBar = document.getElementById("bulk-bar");
+    const bulkCount = document.getElementById("bulk-count");
+    const bulkMsg = document.getElementById("bulk-msg");
+    function selectedBoxes() { return Array.from(tb.querySelectorAll("input.rm-sel:checked")); }
+    function refreshBulkBar() {
+      const n = selectedBoxes().length;
+      bulkBar.style.display = n ? "flex" : "none";
+      bulkCount.textContent = n + " selected";
+      bulkMsg.textContent = "";
+    }
+    document.getElementById("bulk-clear").onclick = () => {
+      tb.querySelectorAll("input.rm-sel").forEach(c => { c.checked = false; });
+      refreshBulkBar();
+    };
+    document.getElementById("bulk-remove").onclick = async () => {
+      const boxes = selectedBoxes();
+      if (!boxes.length) return;
+      if (!confirm(`Remove ${boxes.length} item(s) from this market?\n\nFull remove also adjusts historical net and your share price.`)) return;
+      let done = 0, fail = 0;
+      for (const box of boxes) {
+        bulkMsg.textContent = `Removing ${done + fail + 1}/${boxes.length}…`;
+        const res = await post("/api/owner/remove_item", { market_id: mid, item: box.dataset.item, mode: "full" });
+        if (res && res.ok) {
+          done++;
+          const row = box.closest("tr");
+          if (row) row.remove();
+        } else { fail++; }
+      }
+      bulkMsg.textContent = `Removed ${done}` + (fail ? ` · ${fail} failed` : "") + " ✓";
+      refreshBulkBar();
+      if (done) bulkBar.style.display = "flex";   // keep the result message visible
+    };
     Object.keys(groups).sort().forEach(cat => {
       const rows = groups[cat];
       const catId = "oc_" + cat.replace(/[^A-Za-z0-9]/g, "");
       const htr = document.createElement("tr");
       htr.style.cursor = "pointer"; htr.dataset.open = "0";
+      const hsel = document.createElement("td");
+      const selAll = document.createElement("input"); selAll.type = "checkbox";
+      selAll.title = "Select every item in this category";
+      selAll.onclick = (ev) => {
+        ev.stopPropagation();
+        tb.querySelectorAll('tr[data-cat="' + catId + '"] input.rm-sel').forEach(c => { c.checked = selAll.checked; });
+        refreshBulkBar();
+      };
+      hsel.appendChild(selAll);
       const htd = document.createElement("td"); htd.colSpan = 6;
       htd.style.cssText = "color:var(--muted);text-transform:uppercase;letter-spacing:.08em;font-size:11px;padding:9px 0;user-select:none";
       htd.innerHTML = '<span class="oc-caret" style="display:inline-block;width:14px">▸</span>' + esc(cat) + " (" + rows.length + ")";
-      htr.appendChild(htd);
+      htr.appendChild(hsel); htr.appendChild(htd);
       htr.onclick = () => {
         const open = htr.dataset.open === "1";
         htr.dataset.open = open ? "0" : "1";
@@ -3024,6 +3138,11 @@ document.querySelectorAll(".nav-tab").forEach(tab => {
       rows.forEach(it => {
         const tr = document.createElement("tr");
         tr.dataset.cat = catId; tr.style.display = "none";
+        const tdSel = document.createElement("td");
+        const selBox = document.createElement("input"); selBox.type = "checkbox"; selBox.className = "rm-sel";
+        selBox.dataset.item = it.item;
+        selBox.onclick = refreshBulkBar;
+        tdSel.appendChild(selBox);
         const tdName = document.createElement("td"); tdName.className = "item-name";
         tdName.textContent = it.display || it.item; tdName.title = it.item;   // cleaned name; raw is the save key
         const tdStock = document.createElement("td");
@@ -3049,11 +3168,13 @@ document.querySelectorAll(".nav-tab").forEach(tab => {
         const rmBtn = document.createElement("button"); rmBtn.className = "mini-btn danger"; rmBtn.textContent = "Remove"; rmBtn.style.marginLeft = "6px";
         rmBtn.onclick = async () => {
           if (!confirm(`Remove "${it.item}" from this market?\n\nFull remove also adjusts historical net and your share price.`)) return;
-          await post("/api/owner/remove_item", { market_id: mid, item: it.item, mode: "full" });
-          loadInv(mid);
+          rmBtn.textContent = "…";
+          const res = await post("/api/owner/remove_item", { market_id: mid, item: it.item, mode: "full" });
+          if (res && res.ok) { tr.remove(); refreshBulkBar(); }   // stay right here — no reload
+          else { rmBtn.textContent = "Err"; setTimeout(() => { rmBtn.textContent = "Remove"; }, 1500); }
         };
         tdAct.appendChild(saveBtn); tdAct.appendChild(rmBtn);
-        tr.appendChild(tdName); tr.appendChild(tdStock); tr.appendChild(tdPrice); tr.appendChild(tdSold); tr.appendChild(tdOpt); tr.appendChild(tdAct);
+        tr.appendChild(tdSel); tr.appendChild(tdName); tr.appendChild(tdStock); tr.appendChild(tdPrice); tr.appendChild(tdSold); tr.appendChild(tdOpt); tr.appendChild(tdAct);
         tb.appendChild(tr);
       });
     });

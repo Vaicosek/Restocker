@@ -494,6 +494,50 @@ CREATE TABLE IF NOT EXISTS bond_holdings (
     PRIMARY KEY (bond_id, user_id)
 );
 
+-- ── Listing escrow (outside companies deposit collateral to list) ───────────
+CREATE TABLE IF NOT EXISTS escrow_deposits (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    party       TEXT NOT NULL,               -- who deposited (company / player name)
+    kind        TEXT NOT NULL DEFAULT 'coins',  -- coins / items
+    value       REAL NOT NULL,               -- coin value (items at agreed valuation)
+    note        TEXT,
+    status      TEXT NOT NULL DEFAULT 'held',   -- held / released / forfeited
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- ── Shareholder voting (weight = shares + GEX.PR register share) ────────────
+CREATE TABLE IF NOT EXISTS vote_proposals (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    market_id   TEXT NOT NULL,
+    question    TEXT NOT NULL,
+    options     TEXT NOT NULL,               -- JSON array of choice labels
+    created_by  TEXT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    closes_at   TEXT NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'open' -- open / closed
+);
+CREATE TABLE IF NOT EXISTS vote_casts (
+    proposal_id INTEGER NOT NULL,
+    user_id     TEXT NOT NULL,
+    choice_idx  INTEGER NOT NULL,
+    weight      REAL NOT NULL DEFAULT 0,
+    name        TEXT,
+    cast_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (proposal_id, user_id)
+);
+CREATE TABLE IF NOT EXISTS investor_suggestions (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     TEXT NOT NULL,
+    name        TEXT,
+    weight      REAL NOT NULL DEFAULT 0,     -- submitter's stake at submission time
+    text        TEXT NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'new', -- new / planned / done / declined
+    response    TEXT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- ── Dividend payout log ─────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS stock_dividend_log (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1018,7 +1062,12 @@ def delete_market(market_id: str) -> dict:
     many rows were removed from each table, e.g. {'markets':1,'market_stock':0,...}."""
     counts = {}
     with db() as conn:
-        for tbl in ("market_stock", "stock_alarms", "market_shares"):
+        # AUDIT FIX: stock_holdings and stock_limit_orders used to survive deletion —
+        # stale holders inherited free shares of any future market reusing the id, and
+        # old limit orders stayed armed. (The delete COMMAND refuses to run while real
+        # holders exist — delist first — so by the time this runs these are remnants.)
+        for tbl in ("market_stock", "stock_alarms", "market_shares",
+                    "stock_holdings", "stock_limit_orders"):
             try:
                 cur = conn.execute(f"DELETE FROM {tbl} WHERE market_id=?", (str(market_id),))
                 counts[tbl] = cur.rowcount
@@ -1371,6 +1420,138 @@ def get_config(key, default=None):
     with db() as conn:
         row = conn.execute("SELECT value FROM bot_config WHERE key=?", (str(key),)).fetchone()
         return row["value"] if row and row["value"] is not None else default
+
+
+# ── Shareholder voting ──────────────────────────────────────────────────────
+
+def create_proposal(market_id: str, question: str, options: list, created_by: str,
+                    closes_at: str) -> int:
+    import json as _json
+    with db() as conn:
+        cur = conn.execute(
+            "INSERT INTO vote_proposals (market_id, question, options, created_by, closes_at) "
+            "VALUES (?,?,?,?,?)",
+            (str(market_id), str(question), _json.dumps(list(options)),
+             str(created_by), str(closes_at)))
+        return int(cur.lastrowid)
+
+
+def get_proposal(pid: int):
+    import json as _json
+    with db() as conn:
+        row = conn.execute("SELECT * FROM vote_proposals WHERE id=?", (int(pid),)).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        try:
+            d["options"] = _json.loads(d["options"])
+        except Exception:
+            d["options"] = []
+        return d
+
+
+def list_proposals(status: str = None) -> list[dict]:
+    import json as _json
+    q, args = "SELECT * FROM vote_proposals", []
+    if status:
+        q += " WHERE status=?"; args.append(str(status))
+    q += " ORDER BY id DESC"
+    with db() as conn:
+        out = []
+        for row in conn.execute(q, args).fetchall():
+            d = dict(row)
+            try:
+                d["options"] = _json.loads(d["options"])
+            except Exception:
+                d["options"] = []
+            out.append(d)
+        return out
+
+
+def cast_vote(pid: int, user_id: str, choice_idx: int, weight: float, name: str = None) -> None:
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO vote_casts (proposal_id, user_id, choice_idx, weight, name) "
+            "VALUES (?,?,?,?,?) "
+            "ON CONFLICT(proposal_id, user_id) DO UPDATE SET "
+            "choice_idx=excluded.choice_idx, weight=excluded.weight, "
+            "name=COALESCE(excluded.name, vote_casts.name), cast_at=datetime('now')",
+            (int(pid), str(user_id), int(choice_idx), float(weight), name))
+
+
+def get_votes(pid: int) -> list[dict]:
+    with db() as conn:
+        return [dict(r) for r in conn.execute(
+            "SELECT * FROM vote_casts WHERE proposal_id=?", (int(pid),)).fetchall()]
+
+
+def close_proposal(pid: int) -> None:
+    with db() as conn:
+        conn.execute("UPDATE vote_proposals SET status='closed' WHERE id=?", (int(pid),))
+
+
+def create_suggestion(user_id: str, name: str, weight: float, text: str) -> int:
+    with db() as conn:
+        cur = conn.execute(
+            "INSERT INTO investor_suggestions (user_id, name, weight, text) VALUES (?,?,?,?)",
+            (str(user_id), name, float(weight or 0), str(text)))
+        return int(cur.lastrowid)
+
+
+def get_suggestion(sid: int):
+    with db() as conn:
+        row = conn.execute("SELECT * FROM investor_suggestions WHERE id=?", (int(sid),)).fetchone()
+        return dict(row) if row else None
+
+
+def list_suggestions(status: str = None, limit: int = 30) -> list[dict]:
+    q, args = "SELECT * FROM investor_suggestions", []
+    if status:
+        q += " WHERE status=?"; args.append(str(status))
+    q += " ORDER BY id DESC LIMIT ?"; args.append(int(limit))
+    with db() as conn:
+        return [dict(r) for r in conn.execute(q, args).fetchall()]
+
+
+def update_suggestion(sid: int, status: str, response: str = None) -> None:
+    with db() as conn:
+        conn.execute(
+            "UPDATE investor_suggestions SET status=?, response=COALESCE(?, response), "
+            "updated_at=datetime('now') WHERE id=?",
+            (str(status), response, int(sid)))
+
+
+# ── Listing escrow ──────────────────────────────────────────────────────────
+
+def create_escrow(party: str, kind: str, value: float, note: str = None) -> int:
+    with db() as conn:
+        cur = conn.execute(
+            "INSERT INTO escrow_deposits (party, kind, value, note) VALUES (?,?,?,?)",
+            (str(party), str(kind), float(value), note))
+        return int(cur.lastrowid)
+
+
+def get_escrow(eid: int):
+    with db() as conn:
+        row = conn.execute("SELECT * FROM escrow_deposits WHERE id=?", (int(eid),)).fetchone()
+        return dict(row) if row else None
+
+
+def list_escrows(status: str = None) -> list[dict]:
+    q, args = "SELECT * FROM escrow_deposits", []
+    if status:
+        q += " WHERE status=?"; args.append(str(status))
+    q += " ORDER BY id DESC"
+    with db() as conn:
+        return [dict(r) for r in conn.execute(q, args).fetchall()]
+
+
+def update_escrow(eid: int, status: str, note: str = None) -> None:
+    with db() as conn:
+        conn.execute(
+            "UPDATE escrow_deposits SET status=?, note=COALESCE(?, note), "
+            "updated_at=datetime('now') WHERE id=?",
+            (str(status), note, int(eid)))
 
 
 # ── Bonds ────────────────────────────────────────────────────────────────────
@@ -2390,6 +2571,26 @@ def get_hive_harvests_by_ids(ids: list) -> list:
         return [dict(r) for r in rows]
 
 
+def ign_unpaid_value(ign: str) -> float:
+    """Coins of UNPAID, UNLINKED harvest value waiting on an IGN. Anti-squatting:
+    an IGN with money attached can't be self-claimed — a manager must link it."""
+    with db() as conn:
+        row = conn.execute(
+            "SELECT COALESCE(SUM(qty*unit_value),0) AS v FROM hive_harvests "
+            "WHERE lower(ign)=lower(?) AND paid=0 AND user_id IS NULL", (str(ign),)).fetchone()
+        return float(row["v"] or 0)
+
+
+def get_hive_msg_lines(msg_id: str) -> list:
+    """(ign, qty, item) for every row already ingested from one message —
+    content-multiset dedup for cumulative feeds that prepend or rewrite."""
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT ign, qty, item FROM hive_harvests WHERE msg_id=?",
+            (str(msg_id),)).fetchall()
+        return [(str(r["ign"]), int(r["qty"]), str(r["item"])) for r in rows]
+
+
 def hive_lines_for_msg(msg_id: str) -> int:
     """How many lines of a message are already ingested (edit-reingest support)."""
     with db() as conn:
@@ -2414,6 +2615,19 @@ def mark_hive_harvests_paid(ids: list) -> int:
         cur = conn.execute(
             f"UPDATE hive_harvests SET paid=1, paid_at=datetime('now') "
             f"WHERE id IN ({q}) AND paid=0", [int(i) for i in ids])
+        return cur.rowcount
+
+
+def unmark_hive_harvests_paid(ids: list) -> int:
+    """Release a claim taken by mark_hive_harvests_paid — used when the payment
+    that followed the claim failed, so the rows go back to payable."""
+    if not ids:
+        return 0
+    with db() as conn:
+        q = ",".join("?" * len(ids))
+        cur = conn.execute(
+            f"UPDATE hive_harvests SET paid=0, paid_at=NULL "
+            f"WHERE id IN ({q}) AND paid=1", [int(i) for i in ids])
         return cur.rowcount
 
 
@@ -2820,6 +3034,19 @@ def log_dividend(market_id: str, month: str, total_paid: float,
             "VALUES (?,?,?,?,?)",
             (market_id, month, float(total_paid), float(per_share), int(holders)),
         )
+
+
+def dividend_paid(market_id: str, month: str) -> bool:
+    """PERMANENT per-month idempotency for share dividends. The old guard was a
+    single last_dividend_month slot, so re-importing any OLD month (a routine
+    earnings-correction workflow) double-paid every shareholder. The dividend
+    log keeps one row per (market, month) forever — this is the authoritative
+    'was it paid' check."""
+    with db() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM stock_dividend_log WHERE market_id=? AND month=? LIMIT 1",
+            (str(market_id), str(month))).fetchone()
+        return row is not None
 
 
 def get_last_dividend(market_id: str):

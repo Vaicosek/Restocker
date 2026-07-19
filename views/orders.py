@@ -541,7 +541,7 @@ class ManagerReviewView(View):
             vtech_pts = lp_scaled if _is_vtech_market(order_mid) else max(1, int(lp_scaled * VTECH_SLICE_PCT / 100.0))
             new_pts, old_tier, new_tier = _award_loyalty_points(uid, vtech_pts, reason=f"order#{order['id']}")
             try:
-                _mgr_id, _ov = _pay_manager_override(uid, total_payout, f"order#{order['id']}")
+                _mgr_id, _ov = _pay_manager_override(uid, total_payout, f"order#{order['id']}", market_id=order_mid)
             except Exception:
                 _mgr_id, _ov = None, 0
             try:

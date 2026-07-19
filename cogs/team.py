@@ -54,6 +54,26 @@ class TeamCog(commands.Cog):
         if existing and str(existing) != str(manager.id):
             return await interaction.response.send_message(
                 f"You're already on <@{existing}>'s team - ask them to `/team remove` you first.", ephemeral=True)
+        # AUDIT FIX (high): money-bearing IGNs can't be self-claimed (anti-squatting).
+        try:
+            _pend_val = db.ign_unpaid_value(ign)
+        except Exception:
+            _pend_val = 0
+        if _pend_val > 0:
+            return await interaction.response.send_message(
+                f"⚠️ `{ign}` has **{int(_pend_val):,}** coins of unpaid harvests waiting, so it "
+                f"can't be self-claimed. Ask a manager to link it (they'll verify it's yours).",
+                ephemeral=True)
+        # AUDIT FIX (high): /team join bypassed the per-user IGN cap — re-running it
+        # with different names let one account squat hundreds of IGNs preemptively.
+        try:
+            _max = int(getattr(core, "MAX_IGNS_PER_USER", 12) or 12)
+            if db.count_igns(str(interaction.user.id)) >= _max and ign not in (db.get_igns(str(interaction.user.id)) or []):
+                return await interaction.response.send_message(
+                    f"❌ You've hit the max of **{_max}** in-game names. Ask a manager to "
+                    f"unlink one you no longer use first.", ephemeral=True)
+        except Exception:
+            pass
         db.set_ign(str(interaction.user.id), ign)
         db.delete_ign_pending(str(interaction.user.id))   # registered now → cancel any pending
         # role-strip deadline (every registration path must clear this, or the deadline loop

@@ -103,7 +103,12 @@ class LandsCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    # ── feed listener: any message starting with the LANDS FEED marker ───────
+    # ── feed listener: AUTHENTICATED LANDS FEED ingest ───────────────────────
+    # House rule: treasuries are hard data. A forged LANDS-BAL line would set a
+    # market's treasury (and thus dividends) to whatever an attacker types, so
+    # feed posts are only accepted from a WEBHOOK (regular members can't post as
+    # one without Manage Webhooks) and, when config `lands_feed_channel` is set,
+    # only in that channel. Lock it down with /land feed_channel.
     @commands.Cog.listener()
     async def on_message(self, message):
         try:
@@ -111,6 +116,20 @@ class LandsCog(commands.Cog):
             if "LANDS FEED" not in content.split("\n", 1)[0]:
                 return
             if message.author and self.bot.user and message.author.id == self.bot.user.id:
+                return
+            if message.webhook_id is None:
+                log.warning("[lands] REJECTED non-webhook LANDS FEED from user %s in #%s",
+                            getattr(message.author, "id", "?"),
+                            getattr(message.channel, "name", "?"))
+                return
+            import Restocker_db as _db
+            try:
+                _ch = int(_db.get_config("lands_feed_channel") or 0)
+            except Exception:
+                _ch = 0
+            if _ch and message.channel.id != _ch:
+                log.warning("[lands] REJECTED LANDS FEED in unauthorized channel %s",
+                            message.channel.id)
                 return
             await self._ingest(message, content)
         except Exception as e:
@@ -202,6 +221,19 @@ class LandsCog(commands.Cog):
             msg += f"\nTreasury synced now: `{float(snap['balance']):,.0f}` 🪙."
         msg += "\nEvery future LANDS FEED post keeps the treasury live and re-infers teleport fees."
         await interaction.response.send_message(msg, ephemeral=True)
+
+    @land.command(name="feed_channel",
+                  description="(Manager) Lock LANDS FEED ingest to one channel — spoof protection")
+    @app_commands.describe(channel="The only channel the mod's webhook posts land data in")
+    async def land_feed_channel(self, interaction: discord.Interaction,
+                                channel: discord.TextChannel):
+        if not is_manager(interaction):
+            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
+        import Restocker_db as _db
+        _db.set_config("lands_feed_channel", str(channel.id))
+        await interaction.response.send_message(
+            f"🔒 LANDS FEED now only accepted from **webhook posts in {channel.mention}**. "
+            f"Everything else is rejected and logged.", ephemeral=True)
 
     @land.command(name="status", description="Balances, bindings and inferred teleport fees per land")
     async def land_status(self, interaction: discord.Interaction):

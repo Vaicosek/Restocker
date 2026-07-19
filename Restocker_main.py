@@ -1351,12 +1351,17 @@ def _channel_link(guild_id: int, channel_id: int) -> str:
     return f"https://discord.com/channels/{guild_id}/{channel_id}"
 
 
-def unit_to_pieces(n: int, unit_type: str, *, stackable: bool = True) -> int:
+def unit_to_pieces(n: int, unit_type: str, *, stackable: bool = True, stack_size: int = 64) -> int:
     u = (unit_type or "pieces").lower()
     if u == "barrels":
-        return int(n) * 54
+        # AUDIT FIX (high): a barrel is 54 SLOTS. For stackable items that's
+        # 54 × stack_size pieces — the flat 54 the old code stored disagreed 64×
+        # with the per-barrel payout advertised by _coin_rates_for_order, so a
+        # worker who filled a real barrel delivered 3,456 items against an order
+        # that only wanted (and paid) 54.
+        return int(n) * int(BARREL_PIECES) * (max(1, int(stack_size)) if stackable else 1)
     if u == "stacks":
-        return int(n) * (64 if stackable else 1)
+        return int(n) * (max(1, int(stack_size)) if stackable else 1)
     return int(n)
 
 
@@ -2594,10 +2599,12 @@ def _loyalty_interest_factor(user_id: int) -> float:
         return LOYALTY_TIERS[0]["interest_weekly_pct"] / 100.0
 
 
-def _pay_manager_override(worker_id, base_amount, reason: str = ""):
-    """Pay a worker's team manager an override commission (minted bonus) on the
-    worker's earnings. Configurable %. Returns (manager_id:int, amount:int) or
-    (None, 0) if the worker has no manager / override disabled."""
+def _pay_manager_override(worker_id, base_amount, reason: str = "", market_id=None):
+    """Pay a worker's team manager an override commission on the worker's earnings.
+    OWNER'S RULE (audit fix): the COMPANY pays it — when the order's market is
+    known, the override is deducted from that market's treasury (capped by what it
+    holds) instead of being minted from thin air. Returns (manager_id:int,
+    amount:int) or (None, 0) if the worker has no manager / override disabled."""
     try:
         pct = float(MANAGER_OVERRIDE_ORDER_PCT)
         if pct <= 0:
@@ -2609,6 +2616,15 @@ def _pay_manager_override(worker_id, base_amount, reason: str = ""):
         amount = int(round(float(base_amount) * pct / 100.0))
         if amount <= 0:
             return None, 0
+        if market_id:
+            _avail = float(_db.get_treasury(market_id) or 0)
+            if amount > _avail:
+                log.warning("[override] %s treasury %s < override %s — paying what's covered",
+                            market_id, int(_avail), amount)
+                amount = int(max(0, _avail))
+            if amount <= 0:
+                return int(mgr), 0
+            _db.adjust_treasury(market_id, -float(amount), allow_negative=False)
         add_coins(int(mgr), amount, counts_as_principal=True)
         log.info("[override] manager %s +%s from worker %s (%s)", mgr, amount, worker_id, reason)
         return int(mgr), amount
@@ -2655,7 +2671,27 @@ def _pay_manager_sales_override(worker_id, net_delta, reason: str = ""):
         if coins <= 0 and points <= 0:
             return int(mgr), 0, 0
         if coins > 0:
-            add_coins(int(mgr), coins, counts_as_principal=True)
+            # OWNER'S RULE (audit fix): the company pays the override — it comes out of
+            # the market's treasury, never minted from thin air. The market id rides in
+            # `reason` as "csn:<mid>:<month>" / "hiveharvest:...", so extract it; if the
+            # treasury can't cover the full override, pay what it can and log the short.
+            _mid = None
+            try:
+                _parts = str(reason).split(":")
+                if _parts and _parts[0] == "csn" and len(_parts) >= 2:
+                    _mid = _parts[1]
+            except Exception:
+                _mid = None
+            if _mid:
+                _avail = float(_db.get_treasury(_mid) or 0)
+                if coins > _avail:
+                    log.warning("[override-sales] %s treasury %s < override %s — paying what's covered",
+                                _mid, int(_avail), coins)
+                    coins = int(max(0, _avail))
+                if coins > 0:
+                    _db.adjust_treasury(_mid, -float(coins), allow_negative=False)
+            if coins > 0:
+                add_coins(int(mgr), coins, counts_as_principal=True)
         if points > 0:
             _award_loyalty_points(int(mgr), points, reason=f"sales-override:{reason}")
         log.info("[override-sales] manager %s +%s coins +%s pts from worker %s (%s)",
@@ -2684,7 +2720,11 @@ def _credit_manager_on_csn(market_id, month, net):
         except Exception:
             prev = 0.0
         delta = float(net) - prev
-        _db.set_config(paid_key, float(net))   # forward-only marker
+        # AUDIT FIX (critical): the marker must be MONOTONIC. It used to be set to the
+        # latest net even when LOWER — so alternating a big export with a small one
+        # re-armed the override and minted the payment repeatedly. Now it only ratchets
+        # upward: a smaller re-post pays nothing and lowers nothing.
+        _db.set_config(paid_key, max(prev, float(net)))
         if delta <= 0:
             return None
         # log the worker's sales for the team leaderboard (no-op if they have no manager)
@@ -3076,7 +3116,16 @@ def _purge_garbage_brew_aliases() -> int:
     if not aliases:
         return 0
     affected = 0
+    _BREW_BASES = ("potion", "splash potion", "lingering potion", "tipped arrow")
     for k in list(aliases.keys()):
+        # AUDIT FIX (high): this purge runs on EVERY restart and used to re-clean
+        # every alias in the store — including /tool aliases ("Diamond Pickaxe#ahc"
+        # → "Diamond Pickaxe Eff V"), whose names never survive the brew-effect
+        # cleaner, so every tool alias silently vanished on the next boot. Only
+        # brew-shaped keys are brew aliases; everything else is left alone.
+        _base = str(k).split("#", 1)[0].strip().lower()
+        if _base not in _BREW_BASES:
+            continue
         old = str(aliases.get(k) or "")
         new = _clean_brew_effect_text(old)
         if new is None:
@@ -7310,6 +7359,10 @@ def _distribute_investor_profit(market_id: str, month_key: str, net: float) -> l
             add_coins(int(uid), amt, counts_as_principal=False, reason=f"investor:{tag}")
             _db.add_investor_payout(uid, amt, note=tag)
             paid.append((uid, amt))
+            try:
+                _drip_reinvest(uid, amt, _db.get_config("gexpr_drip_market") or "main")
+            except Exception:
+                pass
         if paid:
             log.info("[investors] %s %s: pool %.0f (%.1f%% of %.0f net) → %d investor(s)",
                      market_id, month_key, pool, pool_pct, net, len(paid))
@@ -8622,6 +8675,39 @@ def _market_backing(market_id) -> dict:
             "ok": total_pct >= target}
 
 
+# ── DRIP: dividend reinvestment ─────────────────────────────────────────────
+
+def _drip_enabled(user_id) -> bool:
+    import Restocker_db as _db
+    try:
+        return str(_db.get_config(f"drip:{user_id}") or "") == "1"
+    except Exception:
+        return False
+
+
+def _drip_reinvest(user_id, amount, market_id) -> tuple:
+    """After a cash payout, roll an opted-in holder's coins straight into shares
+    (bought from the float at market via the normal trade engine — float caps and
+    price impact all apply). Leftover that can't buy a whole share stays as coins.
+    Returns (shares_bought, coins_spent)."""
+    try:
+        if not _drip_enabled(user_id):
+            return 0, 0
+        import Restocker_db as _db
+        price = float((_db.get_market_shares(market_id) or {}).get("share_price") or 0)
+        if price <= 0:
+            return 0, 0
+        n = int(float(amount) // price)
+        if n <= 0:
+            return 0, 0
+        r = _do_stock_trade("buy", user_id, market_id, n)
+        if r.get("ok"):
+            return n, int(r.get("total") or 0)
+    except Exception as e:
+        log.warning("[drip] reinvest failed for %s: %s", user_id, e)
+    return 0, 0
+
+
 # ── Corporate bonds — item-collateralized debt ──────────────────────────────
 BOND_MIN_ITEM_COVER = _env_float("BOND_MIN_ITEM_COVER", 80.0)  # % of outstanding face that ITEMS must cover
 
@@ -8684,7 +8770,9 @@ def _service_bonds() -> None:
         label = b.get("name") or f"bond #{bid}"
         sold_face = _bond_sold_face(b)
         holders = _db.get_bond_holders(bid)
-        # ---- maturity ----
+        # ---- maturity (idempotent: per-holder coin-ledger guard, marker only
+        # after EVERY holder is paid — a crash mid-run resumes where it stopped
+        # and can never double-pay) ----
         mat = str(b.get("matures_at") or "")
         if mat and today >= mat[:10]:
             due = sold_face
@@ -8693,12 +8781,22 @@ def _service_bonds() -> None:
                 _db.update_bond(bid, status="repaid")
                 continue
             if tre >= due:
+                all_ok = True
                 for h in holders:
                     amt = int(round(float(h["units"]) * float(b["unit_price"])))
-                    if amt > 0:
-                        add_coins(h["user_id"], amt, counts_as_principal=False,
-                                  reason=f"bond:{bid}:principal")
-                _db.adjust_treasury(mid, -due)
+                    if amt <= 0:
+                        continue
+                    _tag = f"bond:{bid}:principal"
+                    try:
+                        if _db.coin_ledger_has(str(h["user_id"]), _tag):
+                            continue                      # already paid in a prior attempt
+                        add_coins(h["user_id"], amt, counts_as_principal=False, reason=_tag)
+                        _db.adjust_treasury(mid, -float(amt))
+                    except Exception as _pe:
+                        all_ok = False
+                        log.warning("[bonds] principal pay failed for %s: %s", h.get("user_id"), _pe)
+                if not all_ok:
+                    continue                              # retry remaining holders next tick
                 _db.update_bond(bid, status="repaid")
                 _queue_dividend_post({"type": "bond_event", "market_id": mid,
                     "title": f"🪙 Bond repaid — {label}",
@@ -8712,7 +8810,9 @@ def _service_bonds() -> None:
                               f"Bondholders hold FIRST CLAIM on the market's items — "
                               f"collateral `{int(col):,}` 🪙 on record."]})
             continue
-        # ---- monthly coupon ----
+        # ---- monthly coupon (same idempotency scheme: unique ledger tag per
+        # holder+month checked BEFORE paying; month marker written only after a
+        # fully successful run; treasury debited per actual payment) ----
         issued_month = str(b.get("issued_at") or "")[:7]
         if sold_face > 0 and holders and b.get("last_coupon_month") != cur_month and issued_month < cur_month:
             coupon = sold_face * float(b["coupon_pct"]) / 100.0
@@ -8721,19 +8821,32 @@ def _service_bonds() -> None:
                 _db.update_bond(bid, last_coupon_month=cur_month)
                 continue
             if tre >= coupon:
+                all_ok = True
+                paid_now = 0
                 for h in holders:
                     amt = int(round(float(h["units"]) * float(b["unit_price"])
                                     * float(b["coupon_pct"]) / 100.0))
-                    if amt > 0:
-                        add_coins(h["user_id"], amt, counts_as_principal=False,
-                                  reason=f"bond:{bid}:coupon:{cur_month}")
-                _db.adjust_treasury(mid, -coupon)
+                    if amt <= 0:
+                        continue
+                    _tag = f"bond:{bid}:coupon:{cur_month}"
+                    try:
+                        if _db.coin_ledger_has(str(h["user_id"]), _tag):
+                            continue
+                        add_coins(h["user_id"], amt, counts_as_principal=False, reason=_tag)
+                        _db.adjust_treasury(mid, -float(amt))
+                        paid_now += amt
+                    except Exception as _pe:
+                        all_ok = False
+                        log.warning("[bonds] coupon pay failed for %s: %s", h.get("user_id"), _pe)
+                if not all_ok:
+                    continue                              # unpaid holders retry next tick
                 _db.update_bond(bid, last_coupon_month=cur_month)
-                _queue_dividend_post({"type": "bond_event", "market_id": mid,
-                    "title": f"🪙 Bond coupon — {label} · {cur_month}",
-                    "lines": [f"`{int(coupon):,}` 🪙 ({float(b['coupon_pct']):g}%/mo on "
-                              f"`{int(sold_face):,}` face) paid to {len(holders)} holder(s) "
-                              f"from the {mid} treasury."]})
+                if paid_now > 0:
+                    _queue_dividend_post({"type": "bond_event", "market_id": mid,
+                        "title": f"🪙 Bond coupon — {label} · {cur_month}",
+                        "lines": [f"`{int(coupon):,}` 🪙 ({float(b['coupon_pct']):g}%/mo on "
+                                  f"`{int(sold_face):,}` face) paid to {len(holders)} holder(s) "
+                                  f"from the {mid} treasury."]})
             else:
                 missed = int(b.get("missed_coupons") or 0) + 1
                 _db.update_bond(bid, last_coupon_month=cur_month, missed_coupons=missed)
@@ -8741,6 +8854,116 @@ def _service_bonds() -> None:
                     "title": f"⚠️ Missed bond coupon — {label} · {cur_month}",
                     "lines": [f"{mid} treasury `{int(tre):,}` 🪙 < coupon `{int(coupon):,}` 🪙 "
                               f"(missed payment #{missed})."]})
+    # ---- coverage watchdog + cache (the 80% rule between purchases) ----
+    # The rule is only ENFORCED at issue/buy; an issuer selling its inventory
+    # after issuing would silently rot the collateral. Cache each issuer's live
+    # coverage for the dashboard and raise a public alarm (once per day per
+    # issuer) the moment items stop covering the bar.
+    try:
+        import json as _json
+        _mids = {str(b["market_id"]) for b in _db.list_bonds()
+                 if b.get("status") in ("open", "active")}
+        for _mid in _mids:
+            pct, col, face = _bond_coverage(_mid)
+            _db.set_config(f"bond_coverage:{_mid}", _json.dumps({
+                "pct": (round(pct, 1) if face > 0 else None),
+                "collateral": round(col), "face": round(face)}))
+            if face > 0 and pct < BOND_MIN_ITEM_COVER and \
+                    (_db.get_config(f"bond_cov_warned:{_mid}") or "") != today:
+                _db.set_config(f"bond_cov_warned:{_mid}", today)
+                _queue_dividend_post({"type": "bond_event", "bad": True, "market_id": _mid,
+                    "title": f"🚨 Collateral warning — {_mid}",
+                    "lines": [f"Item coverage fell to **{pct:.1f}%** "
+                              f"(rule ≥{BOND_MIN_ITEM_COVER:g}%): items `{int(col):,}` 🪙 "
+                              f"vs bond face `{int(face):,}` 🪙.",
+                              "New bond sales are blocked by the coverage rule until the "
+                              "issuer adds inventory or for-sale assets."]})
+    except Exception as e:
+        log.warning("[bonds] coverage watchdog error: %s", e)
+
+
+def _check_rating_changes() -> None:
+    """Ratings-agency announcements: when a company's composite grade moves, post
+    the upgrade/downgrade publicly with the pillar snapshot as the stated reason."""
+    import Restocker_db as _db
+    for mid in (_db.get_public_markets() or {}):
+        try:
+            grade, weight, _bp, _tp = _backing_rating(mid)
+        except Exception:
+            continue
+        prev = _db.get_config(f"last_grade:{mid}")
+        if prev is None:
+            _db.set_config(f"last_grade:{mid}", grade)
+            continue
+        if prev == grade:
+            continue
+        _db.set_config(f"last_grade:{mid}", grade)
+        up = _GRADE_RANK.get(grade, 0) > _GRADE_RANK.get(prev, 0)
+        lines = []
+        try:
+            import json as _json
+            q = _json.loads(_db.get_config(f"quality:{mid}") or "{}")
+            lines.append(f"Quality **{float(q.get('score') or 0)*100:.0f}/100** — "
+                         f"backing {float(q.get('backed_pct') or 0):.0f}% · "
+                         f"traffic {int(q.get('visitors_month') or 0):,}/mo · "
+                         f"orders `{int(q.get('order_value_30d') or 0):,}` 🪙/30d · "
+                         f"{int(q.get('history_months') or 0)} mo of reports")
+        except Exception:
+            pass
+        lines.append(f"Index weight now **{weight*100:.0f}%** of cap"
+                     + ("" if up else " · ABX fund buying "
+                        + ("continues" if _GRADE_RANK.get(grade, 0) >= _GRADE_RANK.get(ETF_MIN_GRADE, 2)
+                           else "SUSPENDED (below fund grade floor)")))
+        _queue_dividend_post({"type": "bond_event", "bad": not up, "market_id": mid,
+            "title": f"{'📈' if up else '📉'} Rating {'upgrade' if up else 'downgrade'} — "
+                     f"{mid}: {prev} → {grade}",
+            "lines": lines})
+
+
+def _monthly_investor_report() -> None:
+    """First run of each month: post a state-of-the-company card per listing —
+    price, cap, quality pillars, last closed month's net vs prior, backing and
+    bond coverage. GEX's 'year of reports' advantage, automated."""
+    import Restocker_db as _db
+    cur = datetime.now(timezone.utc).strftime("%Y-%m")
+    if (_db.get_config("investor_report_month") or "") == cur:
+        return
+    _db.set_config("investor_report_month", cur)
+    for mid, lst in (_db.get_public_markets() or {}).items():
+        try:
+            price = float(lst.get("share_price") or 0)
+            so = float(lst.get("shares_outstanding") or 0)
+            months = _rollup_combined_months(mid) or {}
+            closed = sorted(k for k in months if k < cur)
+            q = _market_quality(mid)
+            try:
+                grade = _backing_rating(mid)[0]
+            except Exception:
+                grade = "?"
+            lines = [f"Share `{price:,.2f}` 🪙 · cap `{int(price * so):,}` 🪙 · "
+                     f"quality **{q['score']*100:.0f}/100** (rating **{grade}**)"]
+            if closed:
+                last = closed[-1]
+                delta = ""
+                if len(closed) > 1 and months[closed[-2]]:
+                    ch = (months[last] - months[closed[-2]]) / abs(months[closed[-2]]) * 100.0
+                    delta = f" ({ch:+.0f}% vs {closed[-2]})"
+                lines.append(f"Net {last}: `{months[last]:,.0f}` 🪙{delta}")
+            lines.append(f"Backing {q['backed_pct']:.0f}% · traffic {q['visitors_month']:,}/mo · "
+                         f"orders `{q['order_value_30d']:,}` 🪙/30d · {q['history_months']} mo of reports")
+            try:
+                import json as _json
+                cov = _json.loads(_db.get_config(f"bond_coverage:{mid}") or "null")
+                if cov and cov.get("face"):
+                    lines.append(f"Bonds outstanding `{int(cov['face']):,}` 🪙 · item coverage "
+                                 f"**{cov['pct']:.0f}%**" if cov.get("pct") is not None else "")
+            except Exception:
+                pass
+            _queue_dividend_post({"type": "bond_event", "market_id": mid,
+                "title": f"📊 Monthly investor report — {mid} · {cur}",
+                "lines": [l for l in lines if l]})
+        except Exception as e:
+            log.warning("[report] monthly investor report failed for %s: %s", mid, e)
 
 
 def _market_quality(market_id) -> dict:
@@ -9284,6 +9507,15 @@ def _payout_share_dividends(market_id, month_key, net_profit):
         return None
     if (listing.get("last_dividend_month") or "") == month_key:
         return None
+    # PERMANENT per-month guard (audit fix): last_dividend_month is a single slot,
+    # so re-importing an OLD month (the normal earnings-correction workflow) used
+    # to double-pay every shareholder. The dividend log remembers every paid
+    # (market, month) forever.
+    try:
+        if _db.dividend_paid(market_id, month_key):
+            return None
+    except Exception:
+        pass
     if net_profit <= 0:
         _db.upsert_market_shares(market_id, last_dividend_month=month_key)
         return None
@@ -9312,6 +9544,7 @@ def _payout_share_dividends(market_id, month_key, net_profit):
             try:
                 add_coins(int(h["user_id"]), amt, counts_as_principal=True, reason=f"dividend {market_id}")
                 paid += amt
+                _drip_reinvest(h["user_id"], amt, market_id)   # opt-in: dividend → more shares
             except Exception as e:
                 log.warning("[dividends] credit failed for %s: %s", h.get("user_id"), e)
     if STOCK_TREASURY_ENABLED and paid > 0:
@@ -11355,7 +11588,7 @@ async def _main():
     for _ext in ("cogs.loyalty", "cogs.brew", "cogs.admin", "cogs.market", "cogs.stock",
                  "cogs.shop", "cogs.orders", "cogs.money", "cogs.reports", "cogs.misc",
                  "cogs.loops", "cogs.events", "cogs.config", "cogs.team", "cogs.inventory", "cogs.projects", "cogs.tool",
-                 "cogs.devassist", "cogs.hive", "cogs.lands", "cogs.bonds"):
+                 "cogs.devassist", "cogs.hive", "cogs.lands", "cogs.bonds", "cogs.voting"):
         try:
             await bot.load_extension(_ext)
         except Exception as e:

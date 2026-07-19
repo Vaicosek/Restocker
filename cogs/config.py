@@ -14,9 +14,22 @@ from discord.ext import commands
 import Restocker_db as db
 
 core = sys.modules.get("Restocker_main") or sys.modules["__main__"]
-is_manager = core.is_manager
 log = core.log
 order_id_autocomplete = core.order_id_autocomplete
+
+# AUDIT FIX (high): /config, /network and /ai_allow rebind server-critical channel
+# IDs and AI access — but "manager" was checked per-guild, so an admin of ANY guild
+# the bot got invited to could re-point the funds report or worker cards to their
+# own server. Every command in this cog is now pinned to the home guild.
+import os as _os
+_HOME_GUILD_ID = int(_os.getenv("HOME_GUILD_ID", "954487497411403806") or 0)
+_core_is_manager = core.is_manager
+
+
+def is_manager(interaction) -> bool:
+    if _HOME_GUILD_ID and getattr(interaction, "guild_id", None) != _HOME_GUILD_ID:
+        return False
+    return _core_is_manager(interaction)
 
 # (friendly name, DB key / module constant) for the channel-type IDs.
 _CHANNEL_KEYS = [

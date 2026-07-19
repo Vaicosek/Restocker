@@ -467,6 +467,33 @@ class LoopsCog(commands.Cog):
             core._service_bonds()
         except Exception as e:
             log.warning("[bonds] service loop error: %s", e)
+        try:
+            core._check_rating_changes()        # ratings-agency upgrade/downgrade posts
+        except Exception as e:
+            log.warning("[ratings] check error: %s", e)
+        try:
+            core._monthly_investor_report()     # first run each month per listing
+        except Exception as e:
+            log.warning("[report] monthly report error: %s", e)
+        # Monthly ETF quality rebalance: composition-change rebalances are event-driven,
+        # but quality DRIFTS continuously (traffic accrues, inventories move, treasuries
+        # fill). Once a month the fund re-tracks its defensive weights so it's always
+        # holding what the hard data says it should.
+        try:
+            import Restocker_db as _db
+            from datetime import datetime as _dt, timezone as _tz
+            _cur = _dt.now(_tz.utc).strftime("%Y-%m")
+            if (_db.get_config("etf_last_quality_rebalance") or "") != _cur:
+                r = core._etf_rebalance("monthly_quality")
+                _db.set_config("etf_last_quality_rebalance", _cur)
+                if r.get("changes"):
+                    core._queue_dividend_post({
+                        "type": "bond_event",
+                        "title": f"⚖️ ABX Index Fund — monthly quality rebalance · {_cur}",
+                        "lines": [f"{'Bought' if d > 0 else 'Sold'} `{abs(d):,}` sh {m} (`{t:,}` 🪙)"
+                                  for _k, m, d, t in r["changes"][:12]] or ["No adjustments needed."]})
+        except Exception as e:
+            log.warning("[etf] monthly quality rebalance error: %s", e)
 
     @bond_service_loop.before_loop
     async def _before_bond_service_loop(self, ):
@@ -503,8 +530,13 @@ class LoopsCog(commands.Cog):
             # and the report would never send. Weekday + the week-key above are sufficient.
             ok = await _send_funds_report(bot)
             if ok:
-                meta["last_funds_report_week"] = iso_week
-                _save_balances(data)
+                # AUDIT FIX (high): writing the PRE-AWAIT snapshot back reverted every
+                # balance change users made while the report was in flight (a /stock buy
+                # during the await had its coins resurrected — a mint). Re-load fresh
+                # state and let only the meta marker ride this write.
+                fresh = _load_balances()
+                fresh.setdefault("meta", {})["last_funds_report_week"] = iso_week
+                _save_balances(fresh)
         except Exception as e:
             log.warning("[weekly_funds_report_loop] %s", e)
 

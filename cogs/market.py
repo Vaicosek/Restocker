@@ -84,6 +84,17 @@ class MarketCog(commands.Cog):
         if coin_bonus < 0 or percent_bonus < 0:
             return await interaction.response.send_message(
                 "❌ coin_bonus and percent_bonus can't be negative.", ephemeral=True)
+        # AUDIT FIX (critical): bonuses were unbounded and owner-settable — a market
+        # owner could set coin_bonus 50,000,000 and mint it to an accomplice on a
+        # 1-item order the moment a manager clicked approve. Owners get sane caps;
+        # only a full server manager may exceed them.
+        if not is_manager(interaction):
+            _CAP_COIN, _CAP_PCT, _CAP_MULT = 5_000, 50.0, 3.0
+            if coin_bonus > _CAP_COIN or percent_bonus > _CAP_PCT or points_multiplier > _CAP_MULT:
+                return await interaction.response.send_message(
+                    f"❌ Owner caps: coin_bonus ≤ `{_CAP_COIN:,}`, percent_bonus ≤ `{_CAP_PCT:g}%`, "
+                    f"points_multiplier ≤ `{_CAP_MULT:g}×`. Ask a manager for anything above.",
+                    ephemeral=True)
         _set_market_loyalty(market_id, points_multiplier, coin_bonus, percent_bonus)
         mname = (_get_market(market_id) or {}).get("name", market_id)
         parts = []
@@ -245,6 +256,22 @@ class MarketCog(commands.Cog):
                 f"Re-run with **`confirm:True`** to delete.",
                 ephemeral=True)
 
+        # AUDIT FIX (high): deleting a public market with live holders silently
+        # destroyed their shares AND the treasury. Delist first — /stock delist pays
+        # holders out of the market's real backing; delete is for the empty shell.
+        try:
+            _held = sum(float(h.get("shares") or 0) for h in (_db.get_holders(real_id) or []))
+        except Exception:
+            _held = 0.0
+        _listing = _db.get_market_shares(real_id)
+        if _listing and _held > 0:
+            return await interaction.response.send_message(
+                f"⛔ `{real_id}` still has **{_held:,.0f}** share(s) in holders' hands — "
+                f"deleting would wipe their money. Run `/stock delist market_id:{real_id}` "
+                f"first (it pays holders from the treasury/fund), then delete.", ephemeral=True)
+        _tre = float(_db.get_treasury(real_id) or 0)
+        if _tre > 0:
+            log.warning("[market] deleting %s with %s coins still in treasury", real_id, _tre)
         counts = _db.delete_market(real_id)
         log.info("[market] %s deleted market '%s' -> %s", interaction.user, real_id, counts)
         await interaction.response.send_message(
@@ -905,7 +932,22 @@ class MarketCog(commands.Cog):
             return await interaction.response.send_message(
                 f"❌ Market `{child_market}` not found.", ephemeral=True)
         parent = (parent_stock or "").strip()
+        # AUDIT FIX (high): rolling a market into (or out of) a public stock changes
+        # THAT STOCK's fundamental — a child-side owner could re-point a loss-maker
+        # into `main` to walk its price down, buy cheap, detach, and sell the bounce.
+        # Any rollup change now also requires authority over the PARENT stock.
+        def _parent_ok(pmid):
+            return is_manager(interaction) or _is_market_manager(interaction, pmid)
         if not parent:
+            _cur_parent = None
+            try:
+                _cur_parent = core._market_rollup_parent(child_market)
+            except Exception:
+                pass
+            if _cur_parent and not _parent_ok(_cur_parent):
+                return await interaction.response.send_message(
+                    f"⛔ Detaching from **{_cur_parent}** changes that stock's valuation — "
+                    f"only its owner/managers (or a server manager) can do that.", ephemeral=True)
             core._set_market_rollup(child_market, None)
             return await interaction.response.send_message(
                 f"✅ **{markets[child_market].get('name', child_market)}** detached — it now prices its own "
@@ -916,6 +958,10 @@ class MarketCog(commands.Cog):
         if parent == child_market:
             return await interaction.response.send_message(
                 "❌ A market can't roll into itself.", ephemeral=True)
+        if not _parent_ok(parent):
+            return await interaction.response.send_message(
+                f"⛔ Rolling into **{parent}** changes that stock's valuation — only its "
+                f"owner/managers (or a server manager) can accept the rollup.", ephemeral=True)
         pct = 100.0 if share_pct is None else float(share_pct)
         core._set_market_rollup(child_market, parent, pct)
         await interaction.response.send_message(
@@ -966,6 +1012,18 @@ class MarketCog(commands.Cog):
         )
         price = _recompute_share_price(market_id, reason="ipo")
         if initial_price is not None and initial_price > 0:
+            # AUDIT FIX (critical): initial_price was unbounded and reachable by site
+            # managers — relist your own market at 1,000,000/share and sell into the
+            # treasury. House rule: price is HARD DATA. The override may not exceed
+            # 2× the computed fundamental (or 2× the floor with no history) unless a
+            # full server manager sets it.
+            _fund_cap = 2.0 * float(price or MIN_SHARE_PRICE)
+            if float(initial_price) > _fund_cap and not is_manager(interaction):
+                return await interaction.response.send_message(
+                    f"❌ initial_price `{float(initial_price):,.2f}` exceeds 2× the computed "
+                    f"fundamental (`{_fund_cap:,.2f}`). Launch prices are earned from real "
+                    f"CSN history — record earnings or set assets, don't type a number.",
+                    ephemeral=True)
             price = round(initial_price, 2)
             _db.upsert_market_shares(market_id, share_price=price)
             _db.log_stock_price(market_id, price, "ipo_override")

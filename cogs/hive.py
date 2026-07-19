@@ -48,11 +48,29 @@ def _fmt(n) -> str:
 
 def _ingest_lines(market_id: str, msg_id: str, lines: list, start_line: int = 0) -> list:
     """Insert parsed (ign, qty, item) rows for one message; returns the NEW row ids.
-    Values snapshot at ingest; unregistered IGNs stored with user_id NULL."""
+    Values snapshot at ingest; unregistered IGNs stored with user_id NULL.
+
+    AUDIT FIX (high): dedup is by CONTENT MULTISET per message, not line index.
+    The old index-based scheme assumed cumulative feeds only APPEND — a webhook
+    that prepends its newest sale shifted every old line to a new index (each one
+    re-ingested and re-paid) while the actual new line hid below start_line.
+    Now each already-stored (ign, qty, item) occurrence cancels one incoming
+    occurrence, so append, prepend and mid-rewrite are all safe. (start_line is
+    kept for call compatibility but content matching supersedes it.)"""
     import Restocker_db as _db
+    from collections import Counter
+    have = Counter()
+    try:
+        for t in _db.get_hive_msg_lines(msg_id):
+            have[t] += 1
+    except Exception:
+        pass
+    next_no = sum(have.values())
     new_ids = []
-    for i, (ign, qty, item) in enumerate(lines):
-        if i < start_line:
+    for (ign, qty, item) in lines:
+        key = (str(ign), int(qty), str(item))
+        if have.get(key, 0) > 0:
+            have[key] -= 1                    # already ingested from a prior version
             continue
         uid = None
         try:
@@ -61,11 +79,12 @@ def _ingest_lines(market_id: str, msg_id: str, lines: list, start_line: int = 0)
             pass
         val = core._hive_item_value(item)
         try:
-            rid = _db.add_hive_harvest(market_id, ign, uid, item, qty, val, msg_id, i)
+            rid = _db.add_hive_harvest(market_id, ign, uid, item, qty, val, msg_id, next_no)
             if rid:
                 new_ids.append(rid)
+                next_no += 1
         except Exception as e:
-            log.warning("[hive] ingest failed (%s line %d): %s", msg_id, i, e)
+            log.warning("[hive] ingest failed (%s line %d): %s", msg_id, next_no, e)
     return new_ids
 
 
@@ -142,24 +161,44 @@ class HiveCog(commands.Cog):
         opct = core._hive_owner_pct(market_id)
         mkt_mult, _mb, _mp = _market_loyalty_cfg(market_id)
         value_total = sum(g["value"] for g in groups.values())
-        # Partner-site share ("rent"): the site keeps this slice of the honey IN KIND —
-        # V Tech owes nobody coins for it. It is only BOOKED, so the ledger shows V Tech
-        # earning its 60% of production instead of the whole harvest.
-        owner_pay = int(round(value_total * opct / 100.0)) if opct > 0 else 0
 
         paid_lines, harv_total = [], 0
+        settled_value = 0
         for uid, g in sorted(groups.items(), key=lambda kv: -kv[1]["value"]):
             pay = int(round(g["value"] * pct / 100.0))
+            # AUDIT FIX (high): CLAIM FIRST, pay after. Two concurrent settle runs
+            # (the autopay listener mid-batch + a manager's /hive payout) used to
+            # snapshot the same unpaid rows and BOTH paid them. The claim is one
+            # atomic UPDATE ... WHERE paid=0; whoever claims, pays. A payment that
+            # fails releases the claim so the rows stay payable — and value is only
+            # BOOKED for rows settled in this run, so a later retry can't book the
+            # same production twice.
+            claimed = _db.mark_hive_harvests_paid(g["ids"])
+            if claimed <= 0:
+                continue                       # another settle run owns these rows
+            if claimed < len(g["ids"]):
+                # ambiguous overlap with another run's snapshot — release and let the
+                # next run recompute cleanly; no coins move on ambiguity.
+                try:
+                    _db.unmark_hive_harvests_paid(g["ids"])
+                except Exception:
+                    pass
+                continue
             if pay <= 0:
+                settled_value += g["value"]    # produced value with a 0-coin wage still books
                 continue
             try:
                 new_bal, _p = add_coins(int(uid), pay, counts_as_principal=True,
                                         reason=f"hive:{market_id}:{batch}")
             except Exception as e:
+                try:
+                    _db.unmark_hive_harvests_paid(g["ids"])   # release for retry
+                except Exception:
+                    pass
                 paid_lines.append(f"• <@{uid}> — ❌ pay failed: {e}")
                 continue
             harv_total += pay
-            _db.mark_hive_harvests_paid(g["ids"])
+            settled_value += g["value"]
             # Loyalty — order-payout convention: points from VALUE; market ledger full,
             # shared V Tech pool full-or-slice.
             lp = max(1, int(g["value"] // LOYALTY_POINTS_DIVISOR))
@@ -196,21 +235,34 @@ class HiveCog(commands.Cog):
                 pass
             await _aio.sleep(0.35)
 
+        # Partner-site share ("rent"): the site keeps this slice of the honey IN KIND —
+        # V Tech owes nobody coins for it. Computed on SETTLED value only, so failed
+        # or contested groups book nothing until they actually settle.
+        owner_pay = int(round(settled_value * opct / 100.0)) if opct > 0 else 0
         owner_line = ""
         if owner_pay > 0:
             owner_line = (f"🏠 Site share ({opct:g}%): **{_fmt(owner_pay)}** kept by the site "
                           f"in kind — no coins paid")
 
-        booked = core._book_hive_month(market_id, value_total, harv_total, owner_pay)
-        return {"paid_lines": paid_lines, "value_total": value_total,
+        booked = core._book_hive_month(market_id, settled_value, harv_total, owner_pay)
+        return {"paid_lines": paid_lines, "value_total": settled_value,
                 "harv_total": harv_total, "owner_line": owner_line,
-                "net": value_total - harv_total - owner_pay,
+                "net": settled_value - harv_total - owner_pay,
                 "month": booked.get("month", "current")}
 
     # ── feed listeners: record, and (autopay) pay on the spot ────────────────
     async def _handle_feed_message(self, message, start_line: int = 0):
         try:
             if message.author and self.bot.user and message.author.id == self.bot.user.id:
+                return
+            # AUDIT FIX (critical): only the notifier may feed harvest lines — a plain
+            # member typing "TheirIGN sold you 64000xHoney Block" in a bound channel
+            # was minting instant wages via autopay. Webhook posts and bot posts pass;
+            # human-authored messages never do.
+            if message.webhook_id is None and not getattr(message.author, "bot", False):
+                log.warning("[hive] REJECTED harvest line from human user %s in bound channel #%s",
+                            getattr(message.author, "id", "?"),
+                            getattr(message.channel, "name", "?"))
                 return
             import Restocker_db as _db
             mid = _db.get_config(f"hive_feed:{message.channel.id}")

@@ -69,7 +69,8 @@ def _payout_repair_plan(_db, items_data, orders) -> list:
             continue                                   # priced fine then → already paid
         for uid, qty in _order_worker_pairs(o):
             try:
-                if _db.coin_ledger_has(uid, f"repair:order#{o.get('id')}"):
+                if (_db.coin_ledger_has(uid, f"repair:order#{o.get('id')}")
+                        or _db.coin_ledger_has(uid, f"order#{o.get('id')}")):  # AUDIT FIX: normal payout counts as paid
                     continue                           # already repaired
             except Exception:
                 continue                               # can't verify → never risk double-pay
@@ -166,7 +167,12 @@ class AdminCog(commands.Cog):
             counts = {}
             try:
                 with _db.db() as conn:
-                    for tbl in ("stock_holdings", "stock_trade_log", "stock_price_log", "market_shares"):
+                    # AUDIT FIX: stock_limit_orders and stock_alarms were surviving the
+                    # wipe — limit orders don't escrow, so pre-wipe buy orders stayed
+                    # ARMED and auto-fired against fresh re-listings weeks later,
+                    # silently spending users' coins on trades from a previous era.
+                    for tbl in ("stock_holdings", "stock_trade_log", "stock_price_log",
+                                "market_shares", "stock_limit_orders", "stock_alarms"):
                         try:
                             counts[tbl] = conn.execute(f"DELETE FROM {tbl}").rowcount
                         except Exception as e:
@@ -201,6 +207,16 @@ class AdminCog(commands.Cog):
             try:
                 with _db.db() as conn:
                     items_deleted = conn.execute("DELETE FROM items WHERE market_id=?", (market_id,)).rowcount
+                    # AUDIT FIX: the wipe left a LIVE stock listing (active=1, price
+                    # frozen forever), holdings, armed limit orders, alarms and stock
+                    # rows — a tradeable ghost market, inherited by any future market
+                    # that reuses the id. Everything stock-side dies with the market.
+                    for tbl in ("market_shares", "stock_holdings", "stock_limit_orders",
+                                "stock_alarms", "market_stock"):
+                        try:
+                            conn.execute(f"DELETE FROM {tbl} WHERE market_id=?", (market_id,))
+                        except Exception as e2:
+                            log.warning("[admin_wipe market] %s cleanup failed: %s", tbl, e2)
             except Exception as e:
                 log.warning("[admin_wipe market] items delete failed: %s", e)
             csn_deleted = False
@@ -510,7 +526,8 @@ class AdminCog(commands.Cog):
                 # this check the filter below stays true forever and a second run would pay
                 # the same worker again.
                 try:
-                    if _db.coin_ledger_has(uid, f"repair:order#{o.get('id')}"):
+                    if (_db.coin_ledger_has(uid, f"repair:order#{o.get('id')}")
+                        or _db.coin_ledger_has(uid, f"order#{o.get('id')}")):  # AUDIT FIX: normal payout counts as paid
                         continue
                 except Exception:
                     continue                   # can't verify → don't risk a double payment
@@ -555,8 +572,8 @@ class AdminCog(commands.Cog):
             # this is mid-loop) could otherwise pay claims both plans captured. Check→pay
             # here is synchronous, so this closes the window.
             try:
-                if _db.coin_ledger_has(uid, f"repair:{detail}"):
-                    continue
+                if _db.coin_ledger_has(uid, f"repair:{detail}") or _db.coin_ledger_has(uid, detail):
+                    continue               # AUDIT FIX: a normal `order#N` payout also counts as paid
             except Exception:
                 continue                       # can't verify → never risk a double payment
             try:
@@ -662,8 +679,8 @@ class AdminCog(commands.Cog):
             detail = f"order#{o.get('id')}"
             # Pay-time ledger re-check (see repair_payouts): closes the overlapping-run window.
             try:
-                if _db.coin_ledger_has(uid, f"repair:{detail}"):
-                    continue
+                if _db.coin_ledger_has(uid, f"repair:{detail}") or _db.coin_ledger_has(uid, detail):
+                    continue               # AUDIT FIX: a normal `order#N` payout also counts as paid
             except Exception:
                 continue                       # can't verify → never risk a double payment
             try:
@@ -737,19 +754,40 @@ class AdminCog(commands.Cog):
 
         uid = str(worker.id)
         detail = f"order#{order_id}"
+        # AUDIT FIX (high): this tool is for orders that closed with NO claim on
+        # record. It used to accept any order and only check the repair: tag, so
+        # (a) a normally-paid worker could be paid again, and (b) because the
+        # attachment was never written back, repair_all kept flagging the order
+        # and a second manager could repair it AGAIN to a different account.
         try:
-            if _db.coin_ledger_has(uid, f"repair:{detail}"):
+            if core._order_worker_pairs(o):
                 return await interaction.followup.send(
-                    f"⚠️ {worker.mention} was already repaired for order #{order_id} — refusing to "
-                    f"pay twice.", ephemeral=True)
+                    f"❌ Order #{order_id} already has worker(s) attached — it isn't orphaned. "
+                    f"If someone was underpaid use the normal repair_payouts flow.", ephemeral=True)
+        except Exception:
+            pass
+        if str(o.get("status", "")).lower() != "fulfilled":
+            return await interaction.followup.send(
+                f"❌ Order #{order_id} is `{o.get('status','?')}` — only FULFILLED orders can be "
+                f"repair-attached.", ephemeral=True)
+        try:
+            if _db.coin_ledger_has(uid, f"repair:{detail}") or _db.coin_ledger_has(uid, detail):
+                return await interaction.followup.send(
+                    f"⚠️ {worker.mention} was already paid for order #{order_id} (normal payout or "
+                    f"prior repair) — refusing to pay twice.", ephemeral=True)
         except Exception:
             return await interaction.followup.send(
                 "⚠️ Couldn't verify the ledger — refusing to pay in case it double-pays.",
                 ephemeral=True)
 
-        pieces = int(qty) if qty > 0 else int(o.get("produced") or o.get("requested") or 0)
+        _max_pieces = int(o.get("produced") or o.get("requested") or 0)
+        pieces = int(qty) if qty > 0 else _max_pieces
         if pieces <= 0:
             return await interaction.followup.send("❌ Quantity must be > 0.", ephemeral=True)
+        if _max_pieces > 0 and pieces > _max_pieces:
+            return await interaction.followup.send(
+                f"❌ qty `{pieces:,}` exceeds the order's own quantity (`{_max_pieces:,}`).",
+                ephemeral=True)
         try:
             owed = int(core._coins_for_pieces(o, pieces, items_data))
         except Exception:
@@ -778,6 +816,13 @@ class AdminCog(commands.Cog):
                            reason=f"repair:{detail}")
         except Exception as e:
             return await interaction.followup.send(f"⚠️ Payout failed: {e}", ephemeral=True)
+        # AUDIT FIX: write the attachment BACK so the order stops showing as orphaned
+        # (previously repair_all re-flagged it forever, inviting a second repair).
+        try:
+            o["claimed_by"] = uid
+            _db.save_order(o)
+        except Exception as e:
+            log.warning("[repair_order] couldn't write attachment back on #%s: %s", order_id, e)
         try:
             if not _db.team_perf_exists(uid, detail, "order"):
                 mgr = _db.get_manager_of(uid)

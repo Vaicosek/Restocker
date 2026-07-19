@@ -170,6 +170,17 @@ class LoyaltyCog(commands.Cog):
             return await interaction.response.send_message(
                 f"❌ You've hit the max of **{MAX_IGNS_PER_USER}** in-game names. "
                 f"Ask a manager to `/loyalty unlink` one you no longer use first.", ephemeral=True)
+        # AUDIT FIX (high): money-bearing IGNs can't be self-claimed (anti-squatting) —
+        # unpaid harvest coins would flow to whoever registered the name first.
+        try:
+            _pend_val = _db_ri.ign_unpaid_value(ign)
+        except Exception:
+            _pend_val = 0
+        if _pend_val > 0 and not is_manager(interaction):
+            return await interaction.response.send_message(
+                f"⚠️ `{ign}` has **{int(_pend_val):,}** coins of unpaid harvests waiting, so it "
+                f"can't be self-claimed. Ask a manager to link it (they'll verify it's yours).",
+                ephemeral=True)
         _db_ri.add_ign(uid, ign)
         _db_ri.delete_ign_pending(uid)
         igns = _db_ri.get_igns(uid)
