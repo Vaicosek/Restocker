@@ -8651,30 +8651,16 @@ def _skim_insurance(market_id, trade_total) -> int:
 
 
 def _market_asset_value(market_id) -> float:
-    """Coin value of a market's live inventory (stock x PER-UNIT sell price, fallback buy).
-
-    BUGFIX: only rows the scanner captured on a per-UNIT basis are counted. A row whose
-    sell_qty AND buy_qty are both NULL is a LEGACY per-BULK scan — the price is the shop's
-    listing total ("64 for 2000"), stored raw. Treating that as per-unit over-values the
-    inventory by the listing quantity (up to ~64x) — this was the amazonia/bnl "99M / 139M
-    inventory" inflation that fed straight into backing %, grade and rating. The current
-    _parse_stock_csv normalizes price to per-unit and records the qty, so trusted rows carry
-    a qty; legacy rows don't. Skip the legacy rows until the shop is rescanned — the value
-    self-heals as fresh per-unit scans replace them. (We can't back-convert a legacy price:
-    the listing qty is unknown and varies per item — 64 for blocks, 16 for diamond, etc.)"""
+    """Coin value of a market's live inventory (stock x sell price, fallback buy)."""
     import Restocker_db as _db
     total = 0.0
     for it, x in (_db.get_market_stock(market_id) or {}).items():
-        stock = float(x.get("stock") or 0)
-        if stock <= 0:
+        px = x.get("sell_price")
+        if px is None:
+            px = x.get("buy_price")
+        if px is None:
             continue
-        if x.get("sell_qty") is not None and x.get("sell_price") is not None:
-            px = float(x["sell_price"])            # trusted per-unit sell price
-        elif x.get("buy_qty") is not None and x.get("buy_price") is not None:
-            px = float(x["buy_price"])             # trusted per-unit buy price (sell not listed)
-        else:
-            continue                               # legacy per-bulk row (NULL qty) — untrusted
-        total += stock * px
+        total += float(x.get("stock") or 0) * float(px)
     return total
 
 
@@ -11673,7 +11659,8 @@ async def _main():
     for _ext in ("cogs.loyalty", "cogs.brew", "cogs.admin", "cogs.market", "cogs.stock",
                  "cogs.shop", "cogs.orders", "cogs.money", "cogs.reports", "cogs.misc",
                  "cogs.loops", "cogs.events", "cogs.config", "cogs.team", "cogs.inventory", "cogs.projects", "cogs.tool",
-                 "cogs.devassist", "cogs.hive", "cogs.lands", "cogs.bonds", "cogs.voting"):
+                 "cogs.devassist", "cogs.hive", "cogs.lands", "cogs.bonds", "cogs.voting",
+                 "cogs.valuation"):
         try:
             await bot.load_extension(_ext)
         except Exception as e:
