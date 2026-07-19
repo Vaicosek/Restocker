@@ -8116,23 +8116,12 @@ def _remove_market_item(market_id: str, item: str, adjust_totals: bool = True) -
             catalog_removed = _db.delete_item(item)
     except Exception as e:
         log.warning("[remove_item] catalog delete failed: %s", e)
-    # BUGFIX: the dashboard shop list is driven by market_stock, but remove only
-    # cleared CSN history + the items catalog — so a deleted item survived in
-    # market_stock and reappeared on refresh ("the website re-added stock I don't
-    # have"). Delete the live-stock row too so the removal actually sticks.
-    stock_removed = False
-    try:
-        import Restocker_db as _db
-        stock_removed = _db.delete_market_stock_item(market_id, item)
-    except Exception as e:
-        log.warning("[remove_item] market_stock delete failed: %s", e)
     try:
         _recompute_share_price(market_id, reason="remove_item")
     except Exception:
         pass
     return {"item": item, "months_touched": touched, "removed_net": round(removed_net, 2),
-            "catalog_removed": catalog_removed, "stock_removed": stock_removed,
-            "adjusted": adjust_totals}
+            "catalog_removed": catalog_removed, "adjusted": adjust_totals}
 
 
 def _log_manual_restock(market_id: str, item: str, qty: int, cost: int) -> dict:
@@ -8662,16 +8651,30 @@ def _skim_insurance(market_id, trade_total) -> int:
 
 
 def _market_asset_value(market_id) -> float:
-    """Coin value of a market's live inventory (stock x sell price, fallback buy)."""
+    """Coin value of a market's live inventory (stock x PER-UNIT sell price, fallback buy).
+
+    BUGFIX: only rows the scanner captured on a per-UNIT basis are counted. A row whose
+    sell_qty AND buy_qty are both NULL is a LEGACY per-BULK scan — the price is the shop's
+    listing total ("64 for 2000"), stored raw. Treating that as per-unit over-values the
+    inventory by the listing quantity (up to ~64x) — this was the amazonia/bnl "99M / 139M
+    inventory" inflation that fed straight into backing %, grade and rating. The current
+    _parse_stock_csv normalizes price to per-unit and records the qty, so trusted rows carry
+    a qty; legacy rows don't. Skip the legacy rows until the shop is rescanned — the value
+    self-heals as fresh per-unit scans replace them. (We can't back-convert a legacy price:
+    the listing qty is unknown and varies per item — 64 for blocks, 16 for diamond, etc.)"""
     import Restocker_db as _db
     total = 0.0
     for it, x in (_db.get_market_stock(market_id) or {}).items():
-        px = x.get("sell_price")
-        if px is None:
-            px = x.get("buy_price")
-        if px is None:
+        stock = float(x.get("stock") or 0)
+        if stock <= 0:
             continue
-        total += float(x.get("stock") or 0) * float(px)
+        if x.get("sell_qty") is not None and x.get("sell_price") is not None:
+            px = float(x["sell_price"])            # trusted per-unit sell price
+        elif x.get("buy_qty") is not None and x.get("buy_price") is not None:
+            px = float(x["buy_price"])             # trusted per-unit buy price (sell not listed)
+        else:
+            continue                               # legacy per-bulk row (NULL qty) — untrusted
+        total += stock * px
     return total
 
 
