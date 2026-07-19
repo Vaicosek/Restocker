@@ -122,9 +122,19 @@ def _env_bool(name: str, default: bool) -> bool:
 STOCK_SPREAD_PCT = _env_float("STOCK_SPREAD_PCT", 1.0)
 STOCK_TREASURY_ENABLED = _env_bool("STOCK_TREASURY_ENABLED", True)
 STOCK_INSURANCE_PCT = _env_float("STOCK_INSURANCE_PCT", 0.5)   # % of each buy skimmed into the central exchange fund
-STOCK_BACK_CASH_PCT = _env_float("STOCK_BACK_CASH_PCT", 10.0)  # target cash (treasury) backing
-STOCK_BACK_ASSET_PCT = _env_float("STOCK_BACK_ASSET_PCT", 10.0)  # target asset (inventory) backing
-STOCK_BACK_FUND_PCT = _env_float("STOCK_BACK_FUND_PCT", 5.0)   # target exchange-fund backing
+# OWNER'S RULE (2026-07): the backing target is 50% of cap — this is a hard-collateral
+# exchange, not a vibes exchange. The target is the A-grade bar (AA needs 1.2×, AAA
+# 1.6× → near-fully-collateralized), the quality score's backing pillar, and what
+# bond issuers are judged against.
+STOCK_BACK_CASH_PCT = _env_float("STOCK_BACK_CASH_PCT", 15.0)  # target cash (treasury) backing
+STOCK_BACK_ASSET_PCT = _env_float("STOCK_BACK_ASSET_PCT", 25.0)  # target asset (inventory + for-sale) backing
+STOCK_BACK_FUND_PCT = _env_float("STOCK_BACK_FUND_PCT", 10.0)  # target exchange-fund backing
+# V TECH VAULT: every listed company must retain 10% of its monthly net at the vault
+# (vault_due accrues each closed month; deposits raise vault_bal — arrears cap the
+# grade at BBB). Item pledges count at 70% of market value: the haircut guarantees
+# they can actually be LIQUIDATED for coins if the company fails.
+STOCK_RETAINED_EARNINGS_PCT = _env_float("STOCK_RETAINED_EARNINGS_PCT", 10.0)
+VAULT_PLEDGE_HAIRCUT = _env_float("VAULT_PLEDGE_HAIRCUT", 70.0)
 STOCK_PRICE_TRAILING_MONTHS = _env_int("STOCK_PRICE_TRAILING_MONTHS", 3)
 # ---- Market quality model: traffic · order flow · backing · report history ----
 # Teleport fees are 100 coins/visit, so land fees ÷ 100 = real foot traffic.
@@ -8106,12 +8116,23 @@ def _remove_market_item(market_id: str, item: str, adjust_totals: bool = True) -
             catalog_removed = _db.delete_item(item)
     except Exception as e:
         log.warning("[remove_item] catalog delete failed: %s", e)
+    # BUGFIX: the dashboard shop list is driven by market_stock, but remove only
+    # cleared CSN history + the items catalog — so a deleted item survived in
+    # market_stock and reappeared on refresh ("the website re-added stock I don't
+    # have"). Delete the live-stock row too so the removal actually sticks.
+    stock_removed = False
+    try:
+        import Restocker_db as _db
+        stock_removed = _db.delete_market_stock_item(market_id, item)
+    except Exception as e:
+        log.warning("[remove_item] market_stock delete failed: %s", e)
     try:
         _recompute_share_price(market_id, reason="remove_item")
     except Exception:
         pass
     return {"item": item, "months_touched": touched, "removed_net": round(removed_net, 2),
-            "catalog_removed": catalog_removed, "adjusted": adjust_totals}
+            "catalog_removed": catalog_removed, "stock_removed": stock_removed,
+            "adjusted": adjust_totals}
 
 
 def _log_manual_restock(market_id: str, item: str, qty: int, cost: int) -> dict:
@@ -8514,6 +8535,27 @@ def _backing_rating(market_id):
             ratio, backed_pct, target_pct = 0.0, 0.0, 0.0
     grade = ("AAA" if ratio >= 1.5 else "AA" if ratio >= 1.0 else "A" if ratio >= 0.75
              else "BBB" if ratio >= 0.5 else "BB" if ratio >= 0.25 else "C")
+    # BACKING GATE (owner's rule, 2026-07): composite quality alone can't carry a
+    # listing into the high grades — real collateral must. Whatever the composite
+    # says, the grade is CAPPED by backed % of cap relative to the target (25%):
+    #   A needs the full target backed · AA 1.2× · AAA 1.6× · BBB 0.6× · BB 0.3×.
+    # 23% backed therefore reads BBB, not A — the label follows the chests.
+    _brat = (backed_pct / target_pct) if target_pct else 0.0
+    _cap = ("AAA" if _brat >= 1.6 else "AA" if _brat >= 1.2 else "A" if _brat >= 1.0
+            else "BBB" if _brat >= 0.6 else "BB" if _brat >= 0.3 else "C")
+    _rank = {"C": 0, "BB": 1, "BBB": 2, "A": 3, "AA": 4, "AAA": 5}
+    if _rank.get(_cap, 0) < _rank.get(grade, 0):
+        grade = _cap
+    # VAULT ARREARS: a company behind on its 10% retained-earnings deposits can't
+    # rate above BBB, whatever else it has — pay the vault first.
+    try:
+        import Restocker_db as _dbv
+        _due = float(_dbv.get_config(f"vault_due:{market_id}") or 0)
+        _bal = float(_dbv.get_config(f"vault_bal:{market_id}") or 0)
+        if _due - _bal > 1 and _rank.get(grade, 0) > 2:
+            grade = "BBB"
+    except Exception:
+        pass
     weight = min(1.0, INDEX_BACKING_BASE + (1.0 - INDEX_BACKING_BASE) * min(1.0, ratio))
     return grade, weight, backed_pct, target_pct
 
@@ -8665,13 +8707,30 @@ def _market_backing(market_id) -> dict:
     def pct(v):
         return (100.0 * v / mcap) if mcap > 0 else 0.0
     cash_pct, asset_pct, fund_pct, sell_pct = pct(cash), pct(assets), pct(fund_share), pct(sellable)
-    total_pct = cash_pct + asset_pct + fund_pct + sell_pct
+    # V TECH VAULT (owner's rule): coins the issuer actually deposited at the vault
+    # count as cash backing; items handed to V Tech count at a 70% haircut
+    # (VAULT_PLEDGE_HAIRCUT) — the discount is the vault's margin of safety.
+    try:
+        vault_bal = float(_db.get_config(f"vault_bal:{market_id}") or 0.0)
+        pledged_raw = float(_db.get_config(f"vault_pledged:{market_id}") or 0.0)
+    except Exception:
+        vault_bal, pledged_raw = 0.0, 0.0
+    pledged = pledged_raw * (VAULT_PLEDGE_HAIRCUT / 100.0)
+    vault_pct, pledge_pct = pct(vault_bal), pct(pledged)
+    total_pct = cash_pct + asset_pct + fund_pct + sell_pct + vault_pct + pledge_pct
     target = STOCK_BACK_CASH_PCT + STOCK_BACK_ASSET_PCT + STOCK_BACK_FUND_PCT
+    try:
+        vault_due = float(_db.get_config(f"vault_due:{market_id}") or 0.0)
+    except Exception:
+        vault_due = 0.0
     return {"mcap": mcap, "cash": cash, "assets": assets, "fund_share": fund_share,
             "sellable": sellable, "sellable_pct": sell_pct,
+            "vault_bal": vault_bal, "vault_due": vault_due, "vault_pct": vault_pct,
+            "pledged": pledged, "pledged_raw": pledged_raw, "pledge_pct": pledge_pct,
+            "vault_arrears": max(0.0, vault_due - vault_bal),
             "cash_pct": cash_pct, "asset_pct": asset_pct, "fund_pct": fund_pct,
             "total_pct": total_pct, "target_pct": target,
-            "cashable": cash + fund_share,  # real coins available on a delist payout
+            "cashable": cash + fund_share + vault_bal,
             "ok": total_pct >= target}
 
 
@@ -8880,6 +8939,29 @@ def _service_bonds() -> None:
                               "issuer adds inventory or for-sale assets."]})
     except Exception as e:
         log.warning("[bonds] coverage watchdog error: %s", e)
+
+
+def _accrue_vault_retention() -> None:
+    """Owner's rule: 10% of every listed company's positive closed-month net accrues
+    as a MANDATORY vault deposit obligation (vault_due). Idempotent per market+month
+    via vault_ret_done:<mid>:<month> markers; run from the bond service loop."""
+    import Restocker_db as _db
+    cur = datetime.now(timezone.utc).strftime("%Y-%m")
+    for mid in (_db.get_public_markets() or {}):
+        try:
+            months = _rollup_combined_months(mid) or {}
+            for mk in sorted(k for k in months if k < cur):
+                if _db.get_config(f"vault_ret_done:{mid}:{mk}"):
+                    continue
+                _db.set_config(f"vault_ret_done:{mid}:{mk}", "1")
+                net = float(months[mk] or 0)
+                if net <= 0:
+                    continue
+                due = net * STOCK_RETAINED_EARNINGS_PCT / 100.0
+                old = float(_db.get_config(f"vault_due:{mid}") or 0)
+                _db.set_config(f"vault_due:{mid}", str(old + due))
+        except Exception as e:
+            log.warning("[vault] retention accrual failed for %s: %s", mid, e)
 
 
 def _check_rating_changes() -> None:

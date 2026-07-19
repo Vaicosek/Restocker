@@ -743,9 +743,9 @@ def _load_stock_data() -> dict:
         # Rating — prefer the bot's cached composite quality (backing + tp-fee traffic
         # + order flow + report history, bot_config quality:<mid>); fall back to a
         # backing-only grade if the bot hasn't computed quality yet.
-        _target = (float(os.getenv("STOCK_BACK_CASH_PCT", "10") or 10)
-                   + float(os.getenv("STOCK_BACK_ASSET_PCT", "10") or 10)
-                   + float(os.getenv("STOCK_BACK_FUND_PCT", "5") or 5))
+        _target = (float(os.getenv("STOCK_BACK_CASH_PCT", "15") or 15)
+                   + float(os.getenv("STOCK_BACK_ASSET_PCT", "25") or 25)
+                   + float(os.getenv("STOCK_BACK_FUND_PCT", "10") or 10))
         _m["backing_target"] = _target
         _ratio = (_m["backing_pct"] / _target) if _target else 0.0
         if _dbk is not None:

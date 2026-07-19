@@ -468,6 +468,10 @@ class LoopsCog(commands.Cog):
         except Exception as e:
             log.warning("[bonds] service loop error: %s", e)
         try:
+            core._accrue_vault_retention()      # 10% of monthly net → mandatory vault due
+        except Exception as e:
+            log.warning("[vault] accrual error: %s", e)
+        try:
             core._check_rating_changes()        # ratings-agency upgrade/downgrade posts
         except Exception as e:
             log.warning("[ratings] check error: %s", e)

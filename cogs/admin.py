@@ -895,5 +895,109 @@ class AdminCog(commands.Cog):
             ephemeral=True)
 
 
+    @admin.command(
+        name="export_market",
+        description="(Managers) Dump a market's LIVE data to a JSON file you can hand to Cowork/AI",
+    )
+    @app_commands.describe(market_id="Market to export (e.g. amazonia)")
+    @app_commands.autocomplete(market_id=_market_autocomplete)
+    async def export_market(self, interaction: discord.Interaction, market_id: str):
+        """Read-only snapshot of everything the bot knows about one market — every
+        market-scoped table, its config keys, hive claims, and the derived figures a
+        valuation needs (treasury, asset book value, sellable). Returned as a JSON
+        attachment so it's the LIVE server state, not a stale local restocker.db copy."""
+        if not _is_market_manager(interaction, market_id):
+            return await interaction.response.send_message(
+                "⛔ Managers or this market's owner/managers only.", ephemeral=True)
+
+        import json as _json, io, Restocker_db as _db
+        from datetime import datetime, timezone
+
+        market_id = (market_id or "").strip()
+        market = _get_market(market_id)
+        if not market:
+            return await interaction.response.send_message(
+                f"❌ Market `{market_id}` not found.", ephemeral=True)
+
+        await interaction.response.defer(thinking=True, ephemeral=True)
+
+        out = {
+            "market_id": market_id,
+            "market_name": market.get("name", market_id),
+            "exported_at": datetime.now(timezone.utc).isoformat(),
+            "note": ("Every table row is filtered to this market. Discord/user IDs left "
+                     "as-is. This is the LIVE bot DB, not a committed snapshot."),
+            "tables": {},
+            "config": {},
+            "hive_claims": [],
+            "derived": {},
+        }
+
+        try:
+            with _db.db() as conn:
+                tabs = [r["name"] for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+                for t in tabs:
+                    if t == "sqlite_sequence":
+                        continue
+                    cols = [c["name"] for c in conn.execute(f"PRAGMA table_info({t})").fetchall()]
+                    if "market_id" not in cols:
+                        continue
+                    rows = conn.execute(
+                        f"SELECT * FROM {t} WHERE market_id=?", (market_id,)).fetchall()
+                    if rows:
+                        out["tables"][t] = [dict(r) for r in rows]
+
+                # market-scoped config: any key that mentions the id, or any value that IS the id
+                # (catches asset_value:<id>, sellable_assets:<id>, and land_map:<land> -> <id>)
+                mlow = market_id.lower()
+                for r in conn.execute("SELECT key, value FROM bot_config").fetchall():
+                    k, v = r["key"], r["value"]
+                    if mlow in str(k).lower() or (v is not None and str(v).strip().lower() == mlow):
+                        out["config"][k] = v
+
+                # hive_claims are keyed by land NAME, not market_id — match on the market name
+                nlow = str(market.get("name", market_id)).lower()
+                for r in conn.execute("SELECT * FROM hive_claims").fetchall():
+                    locn = str(r["location"]).lower()
+                    if locn in (mlow, nlow) or (nlow and nlow in locn):
+                        out["hive_claims"].append(dict(r))
+
+            # derived figures a valuation actually needs (via the bot's own helpers)
+            def _num(fn):
+                try:
+                    return float(fn() or 0.0)
+                except Exception:
+                    return None
+            out["derived"]["treasury"] = _num(lambda: _db.get_treasury(market_id))
+            out["derived"]["asset_book_value"] = _num(
+                lambda: _db.get_config(f"asset_value:{market_id}"))
+            out["derived"]["sellable_assets"] = _num(
+                lambda: _db.get_config(f"sellable_assets:{market_id}"))
+            try:
+                shares = _db.get_market_shares(market_id)
+                out["derived"]["listing"] = dict(shares) if shares else None
+            except Exception:
+                out["derived"]["listing"] = None
+
+            payload = _json.dumps(out, indent=2, default=str)
+        except Exception as e:  # noqa: BLE001
+            log.exception("export_market failed")
+            return await interaction.followup.send(
+                f"❌ Export failed: `{type(e).__name__}: {e}`")
+
+        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        fname = f"{market_id}_{stamp}.json"
+        n_rows = sum(len(v) for v in out["tables"].values())
+        buf = io.BytesIO(payload.encode("utf-8"))
+        await interaction.followup.send(
+            content=(f"📤 **{out['market_name']}** live export — "
+                     f"{len(out['tables'])} table(s), {n_rows} row(s), "
+                     f"{len(out['config'])} config key(s), "
+                     f"{len(out['hive_claims'])} hive claim(s).\n"
+                     f"Download and hand it to Cowork for valuation / AI."),
+            file=discord.File(buf, filename=fname))
+
+
 async def setup(bot):
     await bot.add_cog(AdminCog(bot))

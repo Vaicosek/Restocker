@@ -255,25 +255,28 @@ class HiveCog(commands.Cog):
         try:
             if message.author and self.bot.user and message.author.id == self.bot.user.id:
                 return
-            # AUDIT FIX (critical): only the notifier may feed harvest lines — a plain
-            # member typing "TheirIGN sold you 64000xHoney Block" in a bound channel
-            # was minting instant wages via autopay. Webhook posts and bot posts pass;
-            # human-authored messages never do.
-            if message.webhook_id is None and not getattr(message.author, "bot", False):
-                log.warning("[hive] REJECTED harvest line from human user %s in bound channel #%s",
-                            getattr(message.author, "id", "?"),
-                            getattr(message.channel, "name", "?"))
-                return
             import Restocker_db as _db
             mid = _db.get_config(f"hive_feed:{message.channel.id}")
             if not mid:
-                return
+                return                                 # not a hive-feed channel — ignore silently
             text = message.content or ""
             for e in (message.embeds or []):
                 if getattr(e, "description", None):
                     text += "\n" + e.description
             lines = core._parse_hive_feed(text)
             if not lines:
+                return                                 # normal chat, nothing harvest-shaped — ignore
+            # AUDIT FIX (critical): only the notifier may feed harvest lines — a plain
+            # member typing "TheirIGN sold you 64000xHoney Block" in a bound channel
+            # was minting instant wages via autopay. Webhook posts and bot posts pass;
+            # human-authored messages never do. This check now runs ONLY after we know
+            # the message is a real harvest line in a real feed channel, so ordinary
+            # human chatter no longer floods the log with false REJECTED warnings — the
+            # warning now marks a genuine injection attempt worth seeing.
+            if message.webhook_id is None and not getattr(message.author, "bot", False):
+                log.warning("[hive] REJECTED harvest line from human user %s in bound channel #%s",
+                            getattr(message.author, "id", "?"),
+                            getattr(message.channel, "name", "?"))
                 return
             new_ids = _ingest_lines(str(mid), str(message.id), lines, start_line=start_line)
             if not new_ids:

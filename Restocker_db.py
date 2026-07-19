@@ -1889,6 +1889,16 @@ def clear_market_stock(market_id: str, since_iso: str | None = None) -> int:
         return int(n)
 
 
+def delete_market_stock_item(market_id: str, item: str) -> bool:
+    """Delete ONE item's live-stock row from a market (the dashboard shop list).
+    Returns True if a row was removed. Used by the owner 'remove item' flow so a
+    deletion actually clears the shop entry, not just the CSN history + catalog."""
+    mid = market_id or "main"
+    with db() as conn:
+        cur = conn.execute("DELETE FROM market_stock WHERE market_id=? AND item=?", (mid, item))
+        return cur.rowcount > 0
+
+
 def set_stock_capacity(market_id: str, item: str, capacity: int) -> None:
     now = datetime.now(timezone.utc).isoformat()
     mid = market_id or "main"
