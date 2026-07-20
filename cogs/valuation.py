@@ -16,7 +16,8 @@ import sys
 import os
 import json
 import asyncio
-from datetime import datetime, timezone
+import calendar
+from datetime import datetime, timezone, timedelta, date
 
 import discord
 from discord import app_commands
@@ -39,7 +40,51 @@ DEF = dict(
     hive_haircut=0.50, pe_min=4.0, pe_max=25.0, quality_swing=0.20,
     q_w_backing=0.35, q_w_traffic=0.25, q_w_orders=0.25, q_w_history=0.15,
     q_traffic_target=10000.0, q_history_target=12.0, backing_target_pct=50.0,
+    outage_month_threshold=0.40,    # a month this fraction-covered by an outage is dropped from run-rate
 )
+
+
+def _load_outages(_db) -> list:
+    """Global server-outage windows: [{"start","end","reason"}] (ISO dates). A DDoS or
+    downtime here must not drag any company's earnings — affected months are dropped."""
+    raw = _db.get_config("outage_windows")
+    if not raw:
+        return []
+    try:
+        out = []
+        for w in json.loads(raw):
+            s, e = w.get("start"), w.get("end")
+            if s and e:
+                out.append({"start": str(s), "end": str(e), "reason": str(w.get("reason", ""))})
+        return out
+    except Exception:
+        return []
+
+
+def _save_outages(_db, windows: list) -> None:
+    _db.set_config("outage_windows", json.dumps(windows))
+
+
+def _month_outage_fraction(month_key: str, outages: list) -> float:
+    """Fraction of a calendar month (e.g. '2026-06') covered by any outage window."""
+    try:
+        y, m = int(month_key[:4]), int(month_key[5:7])
+    except Exception:
+        return 0.0
+    dim = calendar.monthrange(y, m)[1]
+    mstart, mend = date(y, m, 1), date(y, m, dim)
+    covered = set()
+    for w in outages:
+        try:
+            sd, ed = date.fromisoformat(w["start"]), date.fromisoformat(w["end"])
+        except Exception:
+            continue
+        a, b = max(mstart, sd), min(mend, ed)
+        d = a
+        while d <= b:
+            covered.add(d)
+            d += timedelta(days=1)
+    return len(covered) / dim if dim else 0.0
 
 
 def _num(v, d=0.0):
@@ -79,32 +124,31 @@ def gather_and_value(market_id: str) -> dict:
     months = (_load_csn_for_market(market_id) or {}).get("months", {}) or {}
     cur_key = datetime.now(timezone.utc).strftime("%Y-%m")
     closed = sorted(k for k in months if isinstance(months.get(k), dict) and k < cur_key)
-    # Owner can drop non-representative months (e.g. a server-outage month) from the
-    # run-rate: valuate:exclude_months:<mid> = "2026-06,2026-04".
+    # Months are dropped from the run-rate when (a) a global server-OUTAGE window covers
+    # most of them — downtime must not hurt companies — or (b) the owner excludes them
+    # manually: valuate:exclude_months:<mid> = "2026-06,2026-04".
+    outages = _load_outages(_db)
+    outage_thresh = g("outage_month_threshold")
     excl_raw = _db.get_config(f"valuate:exclude_months:{market_id}") or ""
-    excluded = {m.strip() for m in excl_raw.split(",") if m.strip()}
+    manual_excl = {m.strip() for m in excl_raw.split(",") if m.strip()}
 
     anomalies = []
     nets = []
+    excluded_months = []
     for k in closed:
         row_net = _num(months[k].get("net"))
-        if k in excluded:
-            anomalies.append(f"Month {k} excluded from the run-rate by the owner "
-                             f"(net {row_net:,.0f}) — treated as non-representative.")
+        frac = _month_outage_fraction(k, outages)
+        if frac >= outage_thresh:
+            excluded_months.append(k)
+            anomalies.append(f"Month {k} dropped from the run-rate — {frac*100:.0f}% of it fell in a "
+                             f"server-outage window (net {row_net:,.0f}). Downtime doesn't count against "
+                             f"the company.")
+            continue
+        if k in manual_excl:
+            excluded_months.append(k)
+            anomalies.append(f"Month {k} excluded by the owner (net {row_net:,.0f}) — non-representative.")
             continue
         nets.append(row_net)      # the real recorded net — never fabricated
-        raw = _db.get_config(f"csn_meta:{market_id}:{k}")
-        if raw:
-            try:
-                meta_net = _num(json.loads(raw).get("net"))
-            except Exception:
-                meta_net = 0.0
-            if meta_net and abs(meta_net - row_net) > max(10000.0, 0.10 * abs(meta_net)):
-                anomalies.append(
-                    f"Month {k}: recorded net {row_net:,.0f} is far below its csn_meta fingerprint "
-                    f"{meta_net:,.0f} — likely a server-outage / incomplete month (or a bad import). "
-                    f"It drags the trailing average; exclude it (valuate:exclude_months) or set a "
-                    f"valuation cap to pin the price.")
     window = nets[-3:] if nets else []
     avg_net = sum(window) / len(window) if window else 0.0
 
@@ -223,6 +267,7 @@ def gather_and_value(market_id: str) -> dict:
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "earnings": {
             "closed_months": closed, "monthly_nets": {k: _num(months[k].get("net")) for k in closed},
+            "excluded_months": excluded_months, "outage_windows": outages,
             "csn_trailing_avg": round(avg_net, 2),
             "hive_income_site_net": round(hive_site_net, 2),
             "tp_fee_income": round(tp_mo, 2),
@@ -438,6 +483,66 @@ class ValuationCog(commands.Cog):
                             value="\n".join(f"• {a[len('CRITICAL: '):]}" for a in crit)[:1000], inline=False)
         embed.set_footer(text=f"/stock buy market_id:{market_id} · /market go_private to delist")
         await interaction.followup.send(embed=embed)
+
+    # ── server-outage windows (global; a DDoS/downtime must not hurt companies) ──
+    outage = app_commands.Group(
+        name="outage", description="(Manager) Server-outage windows excluded from every valuation")
+
+    @outage.command(name="add", description="Record a server-outage window — excluded from all valuations")
+    @app_commands.describe(start="Start date (YYYY-MM-DD)", end="End date (YYYY-MM-DD)", reason="What happened (e.g. DDoS)")
+    async def outage_add(self, interaction: discord.Interaction, start: str, end: str,
+                         reason: Optional[str] = ""):
+        if not is_manager(interaction):
+            return await interaction.response.send_message("⛔ Server managers only.", ephemeral=True)
+        try:
+            sd = date.fromisoformat(start.strip())
+            ed = date.fromisoformat(end.strip())
+        except Exception:
+            return await interaction.response.send_message("❌ Dates must be `YYYY-MM-DD`.", ephemeral=True)
+        if ed < sd:
+            return await interaction.response.send_message("❌ End date is before the start date.", ephemeral=True)
+        import Restocker_db as _db
+        wins = _load_outages(_db)
+        wins.append({"start": sd.isoformat(), "end": ed.isoformat(), "reason": (reason or "").strip()})
+        wins.sort(key=lambda w: w["start"])
+        _save_outages(_db, wins)
+        days = (ed - sd).days + 1
+        thr = int(_gd(_db, "outage_month_threshold", DEF["outage_month_threshold"]) * 100)
+        await interaction.response.send_message(
+            f"✅ Outage recorded: **{sd} → {ed}** ({days}d)"
+            + (f" · {reason}" if reason else "")
+            + f"\nAny month ≥{thr}% inside an outage now drops out of every company's run-rate.",
+            ephemeral=True)
+
+    @outage.command(name="list", description="Show recorded server-outage windows")
+    async def outage_list(self, interaction: discord.Interaction):
+        import Restocker_db as _db
+        wins = _load_outages(_db)
+        if not wins:
+            return await interaction.response.send_message("No outage windows recorded.", ephemeral=True)
+        lines = []
+        for i, w in enumerate(wins):
+            try:
+                d = f"{(date.fromisoformat(w['end']) - date.fromisoformat(w['start'])).days + 1}d"
+            except Exception:
+                d = "?"
+            lines.append(f"`{i}` **{w['start']} → {w['end']}** ({d})"
+                         + (f" · {w['reason']}" if w.get("reason") else ""))
+        await interaction.response.send_message("🛑 **Server-outage windows**\n" + "\n".join(lines), ephemeral=True)
+
+    @outage.command(name="remove", description="Remove an outage window by index (see /outage list)")
+    @app_commands.describe(index="Index shown by /outage list")
+    async def outage_remove(self, interaction: discord.Interaction, index: int):
+        if not is_manager(interaction):
+            return await interaction.response.send_message("⛔ Server managers only.", ephemeral=True)
+        import Restocker_db as _db
+        wins = _load_outages(_db)
+        if index < 0 or index >= len(wins):
+            return await interaction.response.send_message(f"❌ No outage window at index {index}.", ephemeral=True)
+        removed = wins.pop(index)
+        _save_outages(_db, wins)
+        await interaction.response.send_message(
+            f"🗑️ Removed outage **{removed['start']} → {removed['end']}**.", ephemeral=True)
 
 
 async def setup(bot):
