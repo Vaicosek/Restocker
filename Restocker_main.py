@@ -8651,16 +8651,26 @@ def _skim_insurance(market_id, trade_total) -> int:
 
 
 def _market_asset_value(market_id) -> float:
-    """Coin value of a market's live inventory (stock x sell price, fallback buy)."""
+    """Coin value of a market's live inventory (stock x PER-UNIT price).
+
+    BUGFIX: only rows the scanner captured on a per-UNIT basis (sell_qty/buy_qty present)
+    are counted. A NULL-qty row is a LEGACY per-STACK price ("64 for 2000" stored raw);
+    treating it as per-unit over-values inventory up to ~64x — the "99M inventory / 383%
+    backed / AAA" inflation that fed straight into backing % and grade. Skip legacy rows
+    until the shop is rescanned by the current parser (which stores per-unit + qty)."""
     import Restocker_db as _db
     total = 0.0
     for it, x in (_db.get_market_stock(market_id) or {}).items():
-        px = x.get("sell_price")
-        if px is None:
-            px = x.get("buy_price")
-        if px is None:
+        stock = float(x.get("stock") or 0)
+        if stock <= 0:
             continue
-        total += float(x.get("stock") or 0) * float(px)
+        if x.get("sell_qty") is not None and x.get("sell_price") is not None:
+            px = float(x["sell_price"])
+        elif x.get("buy_qty") is not None and x.get("buy_price") is not None:
+            px = float(x["buy_price"])
+        else:
+            continue                       # legacy per-stack row (NULL qty) — untrusted
+        total += stock * px
     return total
 
 

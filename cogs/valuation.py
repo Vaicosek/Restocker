@@ -79,28 +79,32 @@ def gather_and_value(market_id: str) -> dict:
     months = (_load_csn_for_market(market_id) or {}).get("months", {}) or {}
     cur_key = datetime.now(timezone.utc).strftime("%Y-%m")
     closed = sorted(k for k in months if isinstance(months.get(k), dict) and k < cur_key)
+    # Owner can drop non-representative months (e.g. a server-outage month) from the
+    # run-rate: valuate:exclude_months:<mid> = "2026-06,2026-04".
+    excl_raw = _db.get_config(f"valuate:exclude_months:{market_id}") or ""
+    excluded = {m.strip() for m in excl_raw.split(",") if m.strip()}
+
     anomalies = []
-    nets = []                     # self-healed nets used for the valuation
+    nets = []
     for k in closed:
         row_net = _num(months[k].get("net"))
-        use = row_net
+        if k in excluded:
+            anomalies.append(f"Month {k} excluded from the run-rate by the owner "
+                             f"(net {row_net:,.0f}) — treated as non-representative.")
+            continue
+        nets.append(row_net)      # the real recorded net — never fabricated
         raw = _db.get_config(f"csn_meta:{market_id}:{k}")
         if raw:
             try:
                 meta_net = _num(json.loads(raw).get("net"))
             except Exception:
                 meta_net = 0.0
-            # a stored month far below its csn_meta fingerprint = a stub re-import that
-            # overwrote the full month. Trust the fuller fingerprint for the valuation,
-            # but flag it — the LIVE engine still reads the corrupt row until re-imported.
             if meta_net and abs(meta_net - row_net) > max(10000.0, 0.10 * abs(meta_net)):
-                use = meta_net
                 anomalies.append(
-                    f"CRITICAL: month {k} csn_history net {row_net:,.0f} disagrees with its "
-                    f"csn_meta fingerprint {meta_net:,.0f}. Used the csn_meta figure here, but the "
-                    f"live pricing engine still reads {row_net:,.0f} — RE-IMPORT the real month or "
-                    f"the quote will drift after listing.")
-        nets.append(use)
+                    f"Month {k}: recorded net {row_net:,.0f} is far below its csn_meta fingerprint "
+                    f"{meta_net:,.0f} — likely a server-outage / incomplete month (or a bad import). "
+                    f"It drags the trailing average; exclude it (valuate:exclude_months) or set a "
+                    f"valuation cap to pin the price.")
     window = nets[-3:] if nets else []
     avg_net = sum(window) / len(window) if window else 0.0
 
@@ -123,8 +127,19 @@ def gather_and_value(market_id: str) -> dict:
     visitors_month = visits_wk * 52.0 / 12.0
 
     # ── assets & backing components ──────────────────────────────────────────
+    # Inventory computed HERE (not via core._market_asset_value) so a NULL-qty legacy row —
+    # a per-STACK price that inflates inventory ~64x (the "99M inventory / 383% backed" bug) —
+    # is skipped regardless of whether main.py carries the fix. Only rows the scanner captured
+    # on a per-UNIT basis (qty present) count; the rest self-heal on the next fresh scan.
+    inventory = 0.0
     try:
-        inventory = float(core._market_asset_value(market_id) or 0.0)
+        for _it, _x in (_db.get_market_stock(market_id) or {}).items():
+            if float(_x.get("stock") or 0) <= 0:
+                continue
+            if _x.get("sell_qty") is not None and _x.get("sell_price") is not None:
+                inventory += float(_x["stock"]) * float(_x["sell_price"])
+            elif _x.get("buy_qty") is not None and _x.get("buy_price") is not None:
+                inventory += float(_x["stock"]) * float(_x["buy_price"])
     except Exception:
         inventory = 0.0
     hive_count = pm("hive_count")
@@ -155,10 +170,12 @@ def gather_and_value(market_id: str) -> dict:
     traffic_score = 0.0
     wsum = (g("q_w_backing") + g("q_w_traffic") + g("q_w_orders") + g("q_w_history")) or 1.0
     swing = g("quality_swing")
-    cap_ceiling = pm("cap", 0.0)   # 0 = uncapped
-
-    # backing_score depends on cap, cap depends on quality -> iterate to a fixed point
-    cap = max(1.0, earnings * pe_base)
+    # `cap` is the owner's stated valuation. When set, the market cap IS that number
+    # (their informed call — e.g. normal run-rate despite a one-off outage month) and the
+    # earnings-based figure is shown alongside for transparency. When unset, the valuation
+    # is purely earnings-driven. Either way the grade is measured against the market cap.
+    cap_ceiling = pm("cap", 0.0)   # owner valuation / ceiling; 0 = earnings-driven
+    cap = cap_ceiling if cap_ceiling > 0 else max(1.0, earnings * pe_base)
     pe_q = pe_base
     for _ in range(40):
         b_pct = 100.0 * backing / cap if cap > 0 else 0.0
@@ -168,9 +185,9 @@ def gather_and_value(market_id: str) -> dict:
         fac = 1.0 - swing + 2.0 * swing * q
         pe_q = round(max(g("pe_min"), min(g("pe_max"), pe_base * fac)), 2)
         uncapped = earnings * pe_q
-        cap = min(uncapped, cap_ceiling) if cap_ceiling > 0 else uncapped
+        cap = cap_ceiling if cap_ceiling > 0 else uncapped
     uncapped = earnings * pe_q
-    market_cap = min(uncapped, cap_ceiling) if cap_ceiling > 0 else uncapped
+    market_cap = cap_ceiling if cap_ceiling > 0 else uncapped
 
     listing = None
     try:
@@ -190,9 +207,11 @@ def gather_and_value(market_id: str) -> dict:
                          "quality multiple. Bind the land for the traffic upside.")
     if hive_count and not (honey_r or comb_r):
         anomalies.append("Hive fleet recorded but no per-render production set — hive income reads 0.")
-    if cap_ceiling and uncapped > cap_ceiling:
-        anomalies.append(f"Uncapped value {uncapped:,.0f} exceeds the conservative cap "
-                         f"{cap_ceiling:,.0f}; headline held at the cap.")
+    if cap_ceiling and abs(uncapped - cap_ceiling) > 0.05 * cap_ceiling:
+        rel = "above" if cap_ceiling > uncapped else "below"
+        anomalies.append(f"Owner valuation {cap_ceiling:,.0f} is {rel} the earnings-based figure "
+                         f"{uncapped:,.0f} — headline uses the owner valuation. If that gap is a "
+                         f"one-off outage month, exclude it so the run-rate agrees.")
     now_partial = months.get(cur_key)
     if isinstance(now_partial, dict):
         anomalies.append(f"Current month {cur_key} is in-progress (net {_num(now_partial.get('net')):,.0f}) "
