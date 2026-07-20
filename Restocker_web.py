@@ -3886,6 +3886,8 @@ header.tshell nav a:hover{color:var(--ink)}
 .panel{background:var(--panel);border:1px solid var(--line)}
 .ph{height:30px;display:flex;align-items:center;justify-content:space-between;padding:0 10px;background:var(--panel2);border-bottom:1px solid var(--line)}
 .ph .t{font-size:10px;letter-spacing:.7px;text-transform:uppercase;color:var(--muted);font-weight:600}
+.content{max-width:1240px;margin:0 auto;width:100%}
+@media(min-width:1300px){.content{border-left:1px solid var(--line);border-right:1px solid var(--line)}}
 """
 
 # ── /inventory — terminal Inventory page (Pass 1) ────────────────────────────
@@ -3913,9 +3915,16 @@ font-size:11px;letter-spacing:.4px;text-transform:uppercase;padding:6px 12px;cur
 .stat .k{font-size:9.5px;letter-spacing:.5px;text-transform:uppercase;color:var(--faint);font-weight:600}
 .stat .v{font-family:var(--mono);font-size:16px;font-weight:600;margin-top:3px;font-variant-numeric:tabular-nums}
 table.inv{width:100%;border-collapse:collapse}
+table.inv{table-layout:fixed}
 table.inv th{font-size:9.5px;letter-spacing:.5px;text-transform:uppercase;color:var(--faint);font-weight:600;text-align:right;
 padding:6px 12px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--panel2);cursor:pointer;user-select:none}
 table.inv th:first-child{text-align:left}
+table.inv th:nth-child(2){width:215px}
+table.inv th:nth-child(3),table.inv th:nth-child(4){width:105px}
+table.inv th:nth-child(5){width:100px}
+table.inv td:first-child{overflow:hidden;text-overflow:ellipsis}
+tr.zero td:first-child{color:var(--muted)}
+tr.zero .pct{opacity:.5}
 table.inv th.sorted{color:var(--ink)}
 table.inv td{padding:0 12px;height:28px;border-bottom:1px solid var(--row);font-size:12px;white-space:nowrap}
 table.inv td.num{text-align:right;font-family:var(--mono);font-variant-numeric:tabular-nums}
@@ -3928,6 +3937,7 @@ table.inv tr:hover td{background:var(--hover)}
 .msg{font-size:11px;color:var(--muted);font-family:var(--mono)}
 </style></head><body>
 __NAV__
+<div class="content">
 <div class="bar" id="chips"></div>
 <div class="statrow" id="stats"></div>
 <div class="bar">
@@ -3941,6 +3951,7 @@ __NAV__
 <th data-k="stock">In stock</th><th data-k="capacity">Capacity</th><th data-k="price">Price ¢</th>
 </tr></thead><tbody id="tb"></tbody></table>
 <div class="empty" id="empty" style="display:none">No barrel scan yet — press the stock-scan key in-game and click your shops.</div>
+</div>
 </div>
 <script>
 const INV=__INVENTORY_JSON__;
@@ -3971,7 +3982,7 @@ function render(){
  document.getElementById('empty').style.display=(DATA.length&&items.length)?'none':'';
  document.getElementById('tb').innerHTML=rows.map(x=>{
   const p=Math.max(0,Math.min(100,x.pct||0));
-  return '<tr><td>'+esc(x.item)+'</td>'+
+  return '<tr'+(((x.stock||0)<=0)?' class="zero"':'')+'><td>'+esc(x.item)+'</td>'+
   '<td class="num"><div class="fillcell"><div class="fillbar"><i style="width:'+p+'%;background:'+col(p)+'"></i></div>'+
   '<span class="pct" style="color:'+col(p)+'">'+Math.round(p)+'%</span></div></td>'+
   '<td class="num">'+fmt(x.stock)+'</td><td class="num">'+fmt(x.capacity)+'</td>'+
@@ -4032,6 +4043,7 @@ table.t td.num{text-align:right;font-family:var(--mono);font-variant-numeric:tab
 table.t tr:hover td{background:var(--hover)}
 </style></head><body>
 __NAV__
+<div class="content">
 <div class="bar" id="chips"></div>
 <div class="statrow" id="stats"></div>
 <div class="chartwrap"><svg class="chart" id="chart" preserveAspectRatio="none"></svg><div class="tip" id="tip"></div></div>
@@ -4040,6 +4052,7 @@ __NAV__
 <table class="t"><thead><tr><th>Month</th><th>Income</th><th>Spent</th><th>Net</th></tr></thead><tbody id="mt"></tbody></table></div>
 <div class="panel"><div class="ph"><span class="t">Top items · lifetime net</span></div>
 <table class="t"><thead><tr><th>Item</th><th>Sold</th><th>Bought</th><th>Net ¢</th></tr></thead><tbody id="it"></tbody></table></div>
+</div>
 </div>
 <script>
 const EF=__EARNFULL_JSON__;
@@ -4145,6 +4158,7 @@ table.cart td{padding:3px 10px 3px 0;font-size:12px}
 .x{color:var(--down);cursor:pointer;font-family:var(--mono)}
 </style></head><body>
 __NAV__
+<div class="content">
 <div class="place">
   <div id="locked" class="msg">Log in to order — run /website_login in Discord, then link on the old dashboard.</div>
   <div id="form" style="display:none">
@@ -4164,6 +4178,7 @@ __NAV__
 <table class="t"><thead><tr><th style="width:52px">#</th><th>Item</th><th>Requested</th><th>Claimed</th><th>Progress</th><th style="width:110px">Status</th></tr></thead>
 <tbody id="tb"></tbody></table>
 <div id="empty" class="faint" style="display:none;padding:36px;text-align:center;font-size:12px">No open orders — all caught up.</div>
+</div>
 </div>
 <script>
 const OD=__ORDERS_JSON__;const ITEMS=__ITEMS_JSON__;
@@ -4244,12 +4259,14 @@ table.t tr:hover td{background:var(--hover)}
 .wk{font-size:10.5px;color:var(--muted)}
 </style></head><body>
 __NAV__
+<div class="content">
 <div class="panel" style="border-top:0">
 <div class="ph"><span class="t">Team leaderboard · last <span id="d">7</span> days</span><span class="t mono" id="gen"></span></div>
 <table class="t"><thead><tr><th style="width:40px">#</th><th>Team</th><th>Members</th><th>Orders</th><th>Order ¢</th><th>Sales ¢</th><th>Futures</th><th>Total ¢</th></tr></thead>
 <tbody id="tb"></tbody></table>
 <div id="empty" class="faint" style="display:none;padding:36px;text-align:center;font-size:12px">No team activity yet.</div>
 <div class="sub">Ranked by total coins (order payouts + chest-shop sales). In-game names only — no Discord IDs.</div>
+</div>
 </div>
 <script>
 const TD=__TEAMS_JSON__;
@@ -4302,6 +4319,7 @@ _MYMARKET_HTML = r"""<!DOCTYPE html>
 .locked{padding:60px;text-align:center;color:var(--faint)}
 </style></head><body>
 __NAV__
+<div class="content">
 <div id="locked" class="locked">Owner tools — run <span class="mono" style="color:var(--ink)">/website_login</span> in Discord, link on the dashboard, then reload.</div>
 <div id="panel" style="display:none">
 <div class="bar" id="chips"></div>
@@ -4349,6 +4367,7 @@ __NAV__
   </div>
   <div class="note">Deletes from catalog, live shop list and earnings totals — the dashboard reflects it immediately.</div>
 </div></div>
+</div>
 </div>
 <script>
 const fmt=n=>Math.round(n||0).toLocaleString('en-US').replace(/,/g,' ');
