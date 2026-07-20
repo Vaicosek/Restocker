@@ -257,11 +257,15 @@ class ValuationCog(commands.Cog):
         description="AI valuation — auto-gathers earnings, hives, traffic & backing, grades the stock")
     @app_commands.describe(
         market_id="Market to value",
-        visits_per_week="(optional) set weekly teleport visits — persists",
-        cash="(optional) set cash/treasury backing — persists",
-        honey_per_render="(optional) set hive honey blocks per render — persists",
-        comb_per_render="(optional) set hive comb blocks per render — persists",
-        cap="(optional) set a conservative valuation cap — persists",
+        visits_per_week="(optional) weekly teleport visits — persists",
+        cash="(optional) cash/treasury backing — persists",
+        honey_per_render="(optional) hive honey blocks per render — persists",
+        comb_per_render="(optional) hive comb blocks per render — persists",
+        hive_count="(optional) number of hives on site — persists",
+        hive_build_cost="(optional) build cost per hive at its level — persists",
+        barrel_honey="(optional) honey blocks stockpiled in barrels — persists",
+        barrel_comb="(optional) comb blocks stockpiled in barrels — persists",
+        cap="(optional) conservative valuation cap — persists",
     )
     @app_commands.autocomplete(market_id=_market_autocomplete)
     async def valuate(self, interaction: discord.Interaction, market_id: str,
@@ -269,6 +273,10 @@ class ValuationCog(commands.Cog):
                       cash: Optional[float] = None,
                       honey_per_render: Optional[float] = None,
                       comb_per_render: Optional[float] = None,
+                      hive_count: Optional[float] = None,
+                      hive_build_cost: Optional[float] = None,
+                      barrel_honey: Optional[float] = None,
+                      barrel_comb: Optional[float] = None,
                       cap: Optional[float] = None):
         if not is_manager(interaction) and not core._is_market_manager(interaction, market_id):
             return await interaction.response.send_message(
@@ -281,6 +289,8 @@ class ValuationCog(commands.Cog):
         # optional args persist to config so future runs are zero-input
         for key, val in (("tp_visits_wk", visits_per_week), ("cash", cash),
                          ("honey_per_render", honey_per_render), ("comb_per_render", comb_per_render),
+                         ("hive_count", hive_count), ("hive_build_cost", hive_build_cost),
+                         ("barrel_honey_blocks", barrel_honey), ("barrel_comb_blocks", barrel_comb),
                          ("cap", cap)):
             if val is not None:
                 _db.set_config(f"valuate:{key}:{market_id}", str(float(val)))
@@ -374,8 +384,11 @@ class ValuationCog(commands.Cog):
         price = v.get("share_price") or (v["market_cap"] / shares if shares else 0.0)
         sellable = float(b["hive_fleet_at_haircut"]) + float(b["barrels_at_haircut"])  # liquid backing
         try:
-            # book-value floor = hive fleet; sellable = liquid backing; treasury = model cash
-            _db.set_config(f"asset_value:{market_id}", str(float(h["fleet_asset"])))
+            # PIN the price: set the book-value floor to the model's (capped) market cap, so the
+            # engine's own rule (price >= asset_value / shares) holds the quote at the valuation
+            # even though the live engine can't see the hive/TP layers or the corrupt-June fix.
+            # sellable = liquid backing (for the grade); treasury = model cash.
+            _db.set_config(f"asset_value:{market_id}", str(float(v["market_cap"])))
             _db.set_config(f"sellable_assets:{market_id}", str(sellable))
             _db.upsert_market_shares(
                 market_id, active=1, shares_outstanding=shares, pe_multiplier=12.0,
@@ -393,7 +406,7 @@ class ValuationCog(commands.Cog):
                         f"({b['pct_of_cap']:.0f}% backed)"),
             color=0x2ECC71)
         embed.add_field(name="Set from the model",
-                        value=(f"asset_value `{h['fleet_asset']:,.0f}`\n"
+                        value=(f"asset_value `{v['market_cap']:,.0f}` (pins price)\n"
                                f"sellable `{sellable:,.0f}`\n"
                                f"treasury `{b['cash']:,.0f}`"), inline=True)
         embed.add_field(name="Earnings /mo",
