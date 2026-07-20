@@ -37,7 +37,7 @@ DEF = dict(
     honey_worker_val=2.539063, comb_worker_val=1.953125,     # per-block, worker/production basis
     honey_asset_stack=520.0, comb_asset_stack=450.0, blocks_per_stack=64.0,  # market/asset basis
     wage_pct=0.17, wage_site_share=0.50, tp_fee=100.0, renders_per_day=1.0,
-    hive_haircut=0.50, pe_min=4.0, pe_max=25.0, quality_swing=0.20,
+    hive_haircut=0.50, land_haircut=0.65, pe_min=4.0, pe_max=25.0, quality_swing=0.20,
     q_w_backing=0.35, q_w_traffic=0.25, q_w_orders=0.25, q_w_history=0.15,
     q_traffic_target=10000.0, q_history_target=12.0, backing_target_pct=50.0,
     outage_month_threshold=0.40,    # a month this fraction-covered by an outage is dropped from run-rate
@@ -200,7 +200,14 @@ def gather_and_value(market_id: str) -> dict:
     barrel_val = (barrel_honey * g("honey_asset_stack") / bps
                   + barrel_comb * g("comb_asset_stack") / bps)
     haircut = g("hive_haircut")
-    backing = cash + hive_asset * haircut + inventory + barrel_val * haircut
+    # Land claim: the owner's assessed value of the plot + build/farms (e.g. Amazonia:
+    # 200 chunks × 10k = 2M raw, assessed 3.5M with build/farms; AllMart sold at 5M as a comp).
+    # Counted at the LAND haircut (0.65) — the owner's stated conservative "65% rule" —
+    # so only 65% of the assessment backs the stock. It's an asset, not liquid, so it does
+    # NOT feed `sellable`/liquid-backing in list_public; it only lifts the credit grade.
+    land_claim = pm("land_claim")
+    land_backing = land_claim * g("land_haircut")
+    backing = cash + hive_asset * haircut + inventory + barrel_val * haircut + land_backing
 
     # ── earnings total ───────────────────────────────────────────────────────
     earnings = avg_net + hive_site_net + tp_mo
@@ -292,6 +299,8 @@ def gather_and_value(market_id: str) -> dict:
         "backing": {
             "cash": round(cash, 2), "hive_fleet_at_haircut": round(hive_asset * haircut, 2),
             "inventory": round(inventory, 2), "barrels_at_haircut": round(barrel_val * haircut, 2),
+            "land_claim_assessed": round(land_claim, 2), "land_claim_at_haircut": round(land_backing, 2),
+            "land_haircut": g("land_haircut"),
             "total": round(backing, 2), "pct_of_cap": round(backing_pct, 1),
             "target_pct": g("backing_target_pct"), "grade": grade,
         },
@@ -329,6 +338,7 @@ class ValuationCog(commands.Cog):
         hive_build_cost="(optional) build cost per hive at its level — persists",
         barrel_honey="(optional) honey blocks stockpiled in barrels — persists",
         barrel_comb="(optional) comb blocks stockpiled in barrels — persists",
+        land_claim="(optional) assessed land/build value — backs the stock at the 65% rule — persists",
         cap="(optional) conservative valuation cap — persists",
     )
     @app_commands.autocomplete(market_id=_market_autocomplete)
@@ -341,6 +351,7 @@ class ValuationCog(commands.Cog):
                       hive_build_cost: Optional[float] = None,
                       barrel_honey: Optional[float] = None,
                       barrel_comb: Optional[float] = None,
+                      land_claim: Optional[float] = None,
                       cap: Optional[float] = None):
         if not is_manager(interaction) and not core._is_market_manager(interaction, market_id):
             return await interaction.response.send_message(
@@ -355,7 +366,7 @@ class ValuationCog(commands.Cog):
                          ("honey_per_render", honey_per_render), ("comb_per_render", comb_per_render),
                          ("hive_count", hive_count), ("hive_build_cost", hive_build_cost),
                          ("barrel_honey_blocks", barrel_honey), ("barrel_comb_blocks", barrel_comb),
-                         ("cap", cap)):
+                         ("land_claim", land_claim), ("cap", cap)):
             if val is not None:
                 _db.set_config(f"valuate:{key}:{market_id}", str(float(val)))
 
@@ -374,7 +385,9 @@ class ValuationCog(commands.Cog):
                   f"Earnings `{data['earnings']['total_monthly']:,.0f}`/mo × P/E `{v['pe_quality_adjusted']}` "
                   + (f"(capped from `{v['uncapped_value']:,.0f}`)" if v['cap_ceiling'] and v['uncapped_value'] > v['market_cap'] else "")
                   + f"\nBacking: cash `{b['cash']:,.0f}` + hive50% `{b['hive_fleet_at_haircut']:,.0f}` + "
-                  f"inv `{b['inventory']:,.0f}` + barrels50% `{b['barrels_at_haircut']:,.0f}` = `{b['total']:,.0f}`")
+                  + f"inv `{b['inventory']:,.0f}` + barrels50% `{b['barrels_at_haircut']:,.0f}`"
+                  + (f" + land65% `{b['land_claim_at_haircut']:,.0f}`" if b.get('land_claim_at_haircut') else "")
+                  + f" = `{b['total']:,.0f}`")
 
         # AI narrative (falls back to the deterministic header + anomaly list)
         narrative = None
