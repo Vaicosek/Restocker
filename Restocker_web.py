@@ -4004,6 +4004,409 @@ async def _handle_inventory_page(request):
     return web.Response(text=html, content_type="text/html")
 
 
+# ── /ledger — terminal Earnings page (Pass 2) ────────────────────────────────
+_LEDGER_HTML = r"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Ledger · Abexilas</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>__TERMINAL_CSS__
+.bar{display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--panel);border-bottom:1px solid var(--line);flex-wrap:wrap}
+.chip{border:1px solid var(--line2);background:var(--panel2);color:var(--muted);font-family:var(--mono);font-size:11px;padding:5px 10px;cursor:pointer;white-space:nowrap}
+.chip.on{color:var(--ink2);border-color:var(--accent);box-shadow:inset 0 -2px 0 var(--accent)}
+.chip:hover{color:var(--ink)}
+.statrow{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--seam)}
+.stat{background:var(--panel);padding:9px 12px;border-bottom:1px solid var(--line)}
+.stat .k{font-size:9.5px;letter-spacing:.5px;text-transform:uppercase;color:var(--faint);font-weight:600}
+.stat .v{font-family:var(--mono);font-size:16px;font-weight:600;margin-top:3px;font-variant-numeric:tabular-nums}
+.chartwrap{position:relative;padding:8px 6px 6px;background:var(--panel);border-bottom:1px solid var(--line)}
+svg.chart{width:100%;height:220px;display:block}
+.tip{position:absolute;pointer-events:none;background:var(--panel2);border:1px solid var(--line2);padding:4px 8px;font-size:11px;font-family:var(--mono);transform:translate(-50%,-135%);white-space:nowrap;opacity:0}
+.cols{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--seam)}
+@media(max-width:1000px){.cols{grid-template-columns:1fr}}
+table.t{width:100%;border-collapse:collapse}
+table.t th{font-size:9.5px;letter-spacing:.5px;text-transform:uppercase;color:var(--faint);font-weight:600;text-align:right;padding:6px 12px;border-bottom:1px solid var(--line);background:var(--panel2)}
+table.t th:first-child{text-align:left}
+table.t td{padding:0 12px;height:27px;border-bottom:1px solid var(--row);font-size:12px;white-space:nowrap}
+table.t td.num{text-align:right;font-family:var(--mono);font-variant-numeric:tabular-nums}
+table.t tr:hover td{background:var(--hover)}
+</style></head><body>
+__NAV__
+<div class="bar" id="chips"></div>
+<div class="statrow" id="stats"></div>
+<div class="chartwrap"><svg class="chart" id="chart" preserveAspectRatio="none"></svg><div class="tip" id="tip"></div></div>
+<div class="cols">
+<div class="panel"><div class="ph"><span class="t">Monthly ledger</span></div>
+<table class="t"><thead><tr><th>Month</th><th>Income</th><th>Spent</th><th>Net</th></tr></thead><tbody id="mt"></tbody></table></div>
+<div class="panel"><div class="ph"><span class="t">Top items · lifetime net</span></div>
+<table class="t"><thead><tr><th>Item</th><th>Sold</th><th>Bought</th><th>Net ¢</th></tr></thead><tbody id="it"></tbody></table></div>
+</div>
+<script>
+const EF=__EARNFULL_JSON__;
+const fmt=n=>Math.round(n||0).toLocaleString('en-US').replace(/,/g,' ');
+const esc=s=>String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;');
+const css=v=>getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const MS=(EF&&EF.markets)||[];let act=0;
+function chips(){document.getElementById('chips').innerHTML=MS.map((m,i)=>
+ '<div class="chip'+(i===act?' on':'')+'" data-i="'+i+'">'+esc(m.name||m.id)+' · '+(m.months||[]).length+' mo</div>').join('');
+ document.querySelectorAll('.chip').forEach(c=>c.onclick=()=>{act=+c.dataset.i;chips();render();});}
+function pathD(vals,w,h,pad){const mn=Math.min(...vals,0),mx=Math.max(...vals,1),rg=(mx-mn)||1;
+ return vals.map((v,i)=>{const x=pad+i/((vals.length-1)||1)*(w-2*pad);const y=pad+(1-(v-mn)/rg)*(h-2*pad);
+ return (i?'L':'M')+x.toFixed(1)+' '+y.toFixed(1);}).join(' ');}
+function render(){const m=MS[act]||{};const mo=m.months||[];
+ const nets=mo.map(x=>x.net||0);const life=nets.reduce((a,b)=>a+b,0);
+ const best=mo.length?mo.reduce((a,b)=>(b.net>a.net?b:a)):null;
+ const last=mo[mo.length-1];
+ document.getElementById('stats').innerHTML=[
+  ['Lifetime net',fmt(life)+' ¢','style="color:'+(life>=0?css('--up'):css('--down'))+'"'],
+  ['Months tracked',mo.length,''],
+  ['Best month',best?(best.label+' · '+fmt(best.net)):'—',''],
+  ['Last month net',last?fmt(last.net)+' ¢':'—',last?('style="color:'+(last.net>=0?css('--up'):css('--down'))+'"'):'']]
+  .map(s=>'<div class="stat"><div class="k">'+s[0]+'</div><div class="v" '+(s[2]||'')+'>'+s[1]+'</div></div>').join('');
+ // chart
+ const el=document.getElementById('chart');const w=el.clientWidth||900,h=220,pad=14;
+ el.setAttribute('viewBox','0 0 '+w+' '+h);
+ const v=nets.length>1?nets:[0,0];
+ const col=(v[v.length-1]>=0)?css('--up'):css('--down');
+ let grid='';for(let i=0;i<5;i++){const y=pad+i/4*(h-2*pad);
+  grid+='<line x1="'+pad+'" y1="'+y+'" x2="'+(w-pad)+'" y2="'+y+'" stroke="'+css('--line')+'" stroke-width="1"/>';}
+ const mn=Math.min(...v,0),mx=Math.max(...v,1),rg=(mx-mn)||1;
+ const zy=pad+(1-(0-mn)/rg)*(h-2*pad);
+ el.innerHTML=grid+'<line x1="'+pad+'" y1="'+zy+'" x2="'+(w-pad)+'" y2="'+zy+'" stroke="'+css('--line2')+'" stroke-width="1" stroke-dasharray="3 3"/>'+
+  '<path d="'+pathD(v,w,h,pad)+'" fill="none" stroke="'+col+'" stroke-width="1.4"/>'+
+  '<circle id="dot" r="3" fill="'+col+'" style="opacity:0"/>';
+ const tip=document.getElementById('tip'),dot=document.getElementById('dot');
+ el.onmousemove=e=>{const r=el.getBoundingClientRect();let i2=Math.round((e.clientX-r.left)/r.width*(v.length-1));
+  i2=Math.max(0,Math.min(v.length-1,i2));const x=pad+i2/((v.length-1)||1)*(w-2*pad),y=pad+(1-(v[i2]-mn)/rg)*(h-2*pad);
+  dot.setAttribute('cx',x);dot.setAttribute('cy',y);dot.style.opacity=1;
+  tip.style.left=(x/w*100)+'%';tip.style.top=(y/h*100)+'%';tip.style.opacity=1;
+  tip.textContent=(mo[i2]?mo[i2].label+': ':'')+fmt(v[i2])+' ¢';};
+ el.onmouseleave=()=>{dot.style.opacity=0;tip.style.opacity=0;};
+ // month table (newest first)
+ document.getElementById('mt').innerHTML=mo.slice().reverse().map(x=>
+  '<tr><td>'+esc(x.label||x.month)+'</td><td class="num">'+fmt(x.income)+'</td>'+
+  '<td class="num">'+fmt(x.spent)+'</td><td class="num" style="color:'+((x.net||0)>=0?css('--up'):css('--down'))+'">'+fmt(x.net)+'</td></tr>').join('')
+  ||'<tr><td colspan="4" class="faint" style="height:34px">No earnings recorded.</td></tr>';
+ // lifetime items
+ const agg={};mo.forEach(x=>(x.items||[]).forEach(it=>{const e=agg[it.item]=agg[it.item]||{s:0,b:0,n:0};
+  e.s+=it.sold||0;e.b+=it.bought||0;e.n+=it.net||0;}));
+ const rows=Object.entries(agg).sort((a,b)=>Math.abs(b[1].n)-Math.abs(a[1].n)).slice(0,30);
+ document.getElementById('it').innerHTML=rows.map(([k,e])=>
+  '<tr><td>'+esc(k)+'</td><td class="num">'+fmt(e.s)+'</td><td class="num">'+fmt(e.b)+'</td>'+
+  '<td class="num" style="color:'+(e.n>=0?css('--up'):css('--down'))+'">'+fmt(e.n)+'</td></tr>').join('')
+  ||'<tr><td colspan="4" class="faint" style="height:34px">No item data.</td></tr>';}
+chips();render();addEventListener('resize',render);
+</script></body></html>"""
+
+
+async def _handle_ledger_page(request):
+    ef = _cached("earnings_full", _load_earnings_full)
+    html = (_LEDGER_HTML.replace("__TERMINAL_CSS__", _TERMINAL_CSS)
+            .replace("__NAV__", _TERMINAL_NAV).replace("__EARNFULL_JSON__", _jscript(ef)))
+    return web.Response(text=html, content_type="text/html")
+
+
+# ── /orders — terminal Orders board (Pass 3) ─────────────────────────────────
+_ORDERS_HTML = r"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Orders · Abexilas</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>__TERMINAL_CSS__
+.bar{display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--panel);border-bottom:1px solid var(--line);flex-wrap:wrap}
+.chip{border:1px solid var(--line2);background:var(--panel2);color:var(--muted);font-family:var(--mono);font-size:11px;padding:5px 10px;cursor:pointer;white-space:nowrap}
+.chip.on{color:var(--ink2);border-color:var(--accent);box-shadow:inset 0 -2px 0 var(--accent)}
+.chip:hover{color:var(--ink)}
+.statrow{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--seam)}
+.stat{background:var(--panel);padding:9px 12px;border-bottom:1px solid var(--line)}
+.stat .k{font-size:9.5px;letter-spacing:.5px;text-transform:uppercase;color:var(--faint);font-weight:600}
+.stat .v{font-family:var(--mono);font-size:16px;font-weight:600;margin-top:3px;font-variant-numeric:tabular-nums}
+table.t{width:100%;border-collapse:collapse}
+table.t th{font-size:9.5px;letter-spacing:.5px;text-transform:uppercase;color:var(--faint);font-weight:600;text-align:right;padding:6px 12px;border-bottom:1px solid var(--line);background:var(--panel2)}
+table.t th:nth-child(1),table.t th:nth-child(2){text-align:left}
+table.t td{padding:0 12px;height:28px;border-bottom:1px solid var(--row);font-size:12px;white-space:nowrap}
+table.t td.num{text-align:right;font-family:var(--mono);font-variant-numeric:tabular-nums}
+table.t tr:hover td{background:var(--hover)}
+.tag{display:inline-block;font-size:9.5px;font-weight:600;letter-spacing:.4px;padding:1px 6px;border:1px solid;border-radius:2px;font-family:var(--mono);text-transform:uppercase}
+.pbar{width:120px;height:5px;background:var(--row);border:1px solid var(--line);position:relative;display:inline-block;vertical-align:middle}
+.pbar i{position:absolute;left:0;top:0;bottom:0}
+.place{padding:10px 12px;background:var(--panel);border-bottom:1px solid var(--line)}
+.place .row{display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap}
+.fld label{font-size:9.5px;letter-spacing:.5px;text-transform:uppercase;color:var(--faint);font-weight:600;display:block;margin-bottom:4px}
+.fld input{background:var(--bg);border:1px solid var(--line2);color:var(--ink);font-family:var(--mono);font-size:12px;padding:6px 9px;outline:none}
+.fld input:focus{border-color:var(--accent)}
+.btn{border:1px solid var(--accent);background:transparent;color:var(--accent);font-weight:600;font-size:11px;
+letter-spacing:.4px;text-transform:uppercase;padding:6px 12px;cursor:pointer;font-family:var(--sans)}
+.btn:hover{background:var(--accent);color:#04120c}
+.btn.go{border-color:var(--up);color:var(--up)}.btn.go:hover{background:var(--up)}
+.msg{font-size:11px;color:var(--muted);font-family:var(--mono)}
+table.cart{border-collapse:collapse;margin-top:8px}
+table.cart td{padding:3px 10px 3px 0;font-size:12px}
+.x{color:var(--down);cursor:pointer;font-family:var(--mono)}
+</style></head><body>
+__NAV__
+<div class="place">
+  <div id="locked" class="msg">Log in to order — run /website_login in Discord, then link on the old dashboard.</div>
+  <div id="form" style="display:none">
+    <div class="row">
+      <div class="fld"><label>Item</label><input id="oi" list="cat" style="width:230px" placeholder="Search catalog…"><datalist id="cat"></datalist></div>
+      <div class="fld"><label>Qty</label><input id="oq" type="number" min="1" value="64" style="width:80px"></div>
+      <button class="btn" id="add">Add</button>
+      <div class="fld" style="flex:1;min-width:180px"><label>Notes</label><input id="on" style="width:100%" placeholder="optional — e.g. deliver to spawn"></div>
+      <button class="btn go" id="sub">Submit order</button><span class="msg" id="m"></span>
+    </div>
+    <table class="cart" id="cart"></table>
+  </div>
+</div>
+<div class="bar" id="chips"></div>
+<div class="statrow" id="stats"></div>
+<div class="panel" style="border-top:0">
+<table class="t"><thead><tr><th style="width:52px">#</th><th>Item</th><th>Requested</th><th>Claimed</th><th>Progress</th><th style="width:110px">Status</th></tr></thead>
+<tbody id="tb"></tbody></table>
+<div id="empty" class="faint" style="display:none;padding:36px;text-align:center;font-size:12px">No open orders — all caught up.</div>
+</div>
+<script>
+const OD=__ORDERS_JSON__;const ITEMS=__ITEMS_JSON__;
+const fmt=n=>Math.round(n||0).toLocaleString('en-US').replace(/,/g,' ');
+const esc=s=>String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;');
+const css=v=>getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const MS=(OD&&OD.markets)||[];let act=0,cart=[];
+const STC={open:'--accent',claimed:'--amber',partial:'--amber',in_progress:'--amber',ready:'--up',pending:'--muted'};
+function chips(){document.getElementById('chips').innerHTML=MS.map((m,i)=>
+ '<div class="chip'+(i===act?' on':'')+'" data-i="'+i+'">'+esc(m.name||m.market_id)+' · '+m.count+'</div>').join('');
+ document.querySelectorAll('.chip').forEach(c=>c.onclick=()=>{act=+c.dataset.i;chips();render();});}
+function render(){const mk=MS[act]||{};const os=mk.orders||[];
+ const open=os.length,units=os.reduce((a,o)=>a+(o.requested||0),0),
+ done=os.reduce((a,o)=>a+Math.min(o.claimed||0,o.requested||0),0);
+ document.getElementById('stats').innerHTML=[['Open orders',open],['Units requested',fmt(units)],
+  ['Units claimed',fmt(done)],['Fill rate',(units?Math.round(100*done/units):0)+'%']].map(s=>
+  '<div class="stat"><div class="k">'+s[0]+'</div><div class="v">'+s[1]+'</div></div>').join('');
+ document.getElementById('empty').style.display=os.length?'none':'';
+ document.getElementById('tb').innerHTML=os.map(o=>{
+  const p=o.requested?Math.min(100,100*(o.claimed||0)/o.requested):0;
+  const st=String(o.status||'open').toLowerCase();const c=css(STC[st]||'--muted');
+  return '<tr><td class="num muted">'+o.id+'</td><td>'+esc(o.item)+'</td>'+
+  '<td class="num">'+fmt(o.requested)+'</td><td class="num muted">'+fmt(o.claimed)+'</td>'+
+  '<td class="num"><span class="pbar"><i style="width:'+p+'%;background:'+(p>=100?css('--up'):css('--amber'))+'"></i></span> '+
+  '<span class="mono" style="font-size:11px">'+Math.round(p)+'%</span></td>'+
+  '<td class="num"><span class="tag" style="color:'+c+';border-color:'+c+';background:'+c+'1c">'+esc(st)+'</span></td></tr>';}).join('');}
+function cartR(){const t=document.getElementById('cart');
+ t.innerHTML=cart.map((c,i)=>{const px=(ITEMS[c.item]&&ITEMS[c.item].coin)||0;
+  return '<tr><td>'+esc(c.item)+'</td><td class="mono">×'+c.qty+'</td>'+
+  '<td class="mono muted">'+(px?('≈ '+fmt(px*c.qty)+' ¢'):'')+'</td>'+
+  '<td class="x" data-i="'+i+'">✕</td></tr>';}).join('');
+ t.querySelectorAll('.x').forEach(x=>x.onclick=()=>{cart.splice(+x.dataset.i,1);cartR();});}
+document.getElementById('add').onclick=()=>{const it=document.getElementById('oi').value.trim();
+ const q=+document.getElementById('oq').value||0;if(!it||q<=0)return;
+ cart.push({item:it,qty:q});document.getElementById('oi').value='';cartR();};
+document.getElementById('sub').onclick=async()=>{const m=document.getElementById('m');
+ if(!cart.length){m.textContent='cart is empty';return;}
+ m.textContent='submitting…';
+ try{const r=await fetch('/api/order',{method:'POST',headers:{'Content-Type':'application/json',
+  'X-CSRF-Token':(window.OWNERINFO&&window.OWNERINFO.csrf)||''},
+  body:JSON.stringify({items:cart,notes:document.getElementById('on').value})});
+  const d=await r.json();m.textContent=d.ok?'order placed ✓':(d.error||'failed');
+  if(d.ok){cart=[];cartR();}}catch(e){m.textContent='failed';}};
+window.addEventListener('load',()=>{setTimeout(()=>{
+ if(window.OWNERINFO&&window.OWNERINFO.logged_in){
+  document.getElementById('locked').style.display='none';
+  document.getElementById('form').style.display='';
+  document.getElementById('cat').innerHTML=Object.keys(ITEMS||{}).sort().map(k=>'<option value="'+esc(k)+'">').join('');}
+ },350);});
+chips();render();
+</script></body></html>"""
+
+
+async def _handle_orders_page(request):
+    orders = _cached("orders_board", _load_orders_data)
+    items = _cached("items", _load_items)
+    html = (_ORDERS_HTML.replace("__TERMINAL_CSS__", _TERMINAL_CSS)
+            .replace("__NAV__", _TERMINAL_NAV)
+            .replace("__ORDERS_JSON__", _jscript(orders))
+            .replace("__ITEMS_JSON__", _jscript(items)))
+    return web.Response(text=html, content_type="text/html")
+
+
+# ── /teams — terminal Teams leaderboard (Pass 4a) ────────────────────────────
+_TEAMS_HTML = r"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Teams · Abexilas</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>__TERMINAL_CSS__
+table.t{width:100%;border-collapse:collapse}
+table.t th{font-size:9.5px;letter-spacing:.5px;text-transform:uppercase;color:var(--faint);font-weight:600;text-align:right;padding:6px 12px;border-bottom:1px solid var(--line);background:var(--panel2)}
+table.t th:nth-child(1),table.t th:nth-child(2){text-align:left}
+table.t td{padding:0 12px;height:30px;border-bottom:1px solid var(--row);font-size:12px;white-space:nowrap}
+table.t td.num{text-align:right;font-family:var(--mono);font-variant-numeric:tabular-nums}
+table.t tr:hover td{background:var(--hover)}
+.sub{font-size:10px;color:var(--faint);padding:8px 12px}
+.wk{font-size:10.5px;color:var(--muted)}
+</style></head><body>
+__NAV__
+<div class="panel" style="border-top:0">
+<div class="ph"><span class="t">Team leaderboard · last <span id="d">7</span> days</span><span class="t mono" id="gen"></span></div>
+<table class="t"><thead><tr><th style="width:40px">#</th><th>Team</th><th>Members</th><th>Orders</th><th>Order ¢</th><th>Sales ¢</th><th>Futures</th><th>Total ¢</th></tr></thead>
+<tbody id="tb"></tbody></table>
+<div id="empty" class="faint" style="display:none;padding:36px;text-align:center;font-size:12px">No team activity yet.</div>
+<div class="sub">Ranked by total coins (order payouts + chest-shop sales). In-game names only — no Discord IDs.</div>
+</div>
+<script>
+const TD=__TEAMS_JSON__;
+const fmt=n=>Math.round(n||0).toLocaleString('en-US').replace(/,/g,' ');
+const esc=s=>String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;');
+const ts=(TD&&TD.teams)||[];
+document.getElementById('d').textContent=(TD&&TD.days)||7;
+document.getElementById('gen').textContent=(TD&&TD.generated)||'';
+document.getElementById('empty').style.display=ts.length?'none':'';
+document.getElementById('tb').innerHTML=ts.map((t,i)=>{
+ const wk=(t.top_workers||[]).map(w=>esc(w.ign)+' '+fmt(w.coins)).join(' · ');
+ return '<tr><td class="num muted">'+(i+1)+'</td>'+
+ '<td>'+esc(t.captain)+(wk?('<div class="wk">'+wk+'</div>'):'')+'</td>'+
+ '<td class="num">'+t.members+'</td><td class="num">'+t.orders+'</td>'+
+ '<td class="num">'+fmt(t.order_coins)+'</td><td class="num">'+fmt(t.sales_coins)+'</td>'+
+ '<td class="num">'+fmt(t.futures)+'</td><td class="num" style="font-weight:600">'+fmt(t.total)+'</td></tr>';}).join('');
+</script></body></html>"""
+
+
+async def _handle_teams_page(request):
+    teams = _cached("teams_data", _load_teams_data)
+    html = (_TEAMS_HTML.replace("__TERMINAL_CSS__", _TERMINAL_CSS)
+            .replace("__NAV__", _TERMINAL_NAV).replace("__TEAMS_JSON__", _jscript(teams)))
+    return web.Response(text=html, content_type="text/html")
+
+
+# ── /mymarket — terminal owner panel (Pass 4b) ───────────────────────────────
+_MYMARKET_HTML = r"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>My Market · Abexilas</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>__TERMINAL_CSS__
+.bar{display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--panel);border-bottom:1px solid var(--line);flex-wrap:wrap}
+.chip{border:1px solid var(--line2);background:var(--panel2);color:var(--muted);font-family:var(--mono);font-size:11px;padding:5px 10px;cursor:pointer;white-space:nowrap}
+.chip.on{color:var(--ink2);border-color:var(--accent);box-shadow:inset 0 -2px 0 var(--accent)}
+.cols{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--seam)}
+@media(max-width:1000px){.cols{grid-template-columns:1fr}}
+.pb{padding:10px 12px}
+.row{display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap}
+.fld label{font-size:9.5px;letter-spacing:.5px;text-transform:uppercase;color:var(--faint);font-weight:600;display:block;margin-bottom:4px}
+.fld input{background:var(--bg);border:1px solid var(--line2);color:var(--ink);font-family:var(--mono);font-size:12px;padding:6px 9px;outline:none}
+.fld input:focus{border-color:var(--accent)}
+.btn{border:1px solid var(--accent);background:transparent;color:var(--accent);font-weight:600;font-size:11px;letter-spacing:.4px;text-transform:uppercase;padding:6px 12px;cursor:pointer;font-family:var(--sans)}
+.btn:hover{background:var(--accent);color:#04120c}
+.btn.up{border-color:var(--up);color:var(--up)}.btn.up:hover{background:var(--up)}
+.btn.danger{border-color:var(--down);color:var(--down)}.btn.danger:hover{background:var(--down);color:#fff}
+.msg{font-size:11px;color:var(--muted);font-family:var(--mono)}
+.note{font-size:10px;color:var(--faint);margin-top:6px}
+.locked{padding:60px;text-align:center;color:var(--faint)}
+</style></head><body>
+__NAV__
+<div id="locked" class="locked">Owner tools — run <span class="mono" style="color:var(--ink)">/website_login</span> in Discord, link on the dashboard, then reload.</div>
+<div id="panel" style="display:none">
+<div class="bar" id="chips"></div>
+<div class="cols">
+  <div class="panel"><div class="ph"><span class="t">Restock rewards</span></div><div class="pb">
+    <div class="row">
+      <div class="fld"><label>Loyalty × points</label><input id="lm" type="number" step="0.1" min="0.1" style="width:90px"></div>
+      <div class="fld"><label>Coin bonus / order</label><input id="lb" type="number" min="0" style="width:110px"></div>
+      <div class="fld"><label>% bonus / order</label><input id="lp" type="number" min="0" step="1" style="width:90px"></div>
+      <button class="btn" id="ls">Save</button><span class="msg" id="lmsg"></span>
+    </div>
+    <div class="note">Extra pay for workers who fill this market's orders. Synced with /market loyalty in Discord.</div>
+  </div></div>
+  <div class="panel"><div class="ph"><span class="t">Actions</span></div><div class="pb">
+    <div class="row">
+      <button class="btn up" id="gen">Generate restock orders → 80%</button>
+      <span class="msg" id="gmsg"></span>
+    </div>
+    <div class="note">Creates worker orders from the real shortfall (capacity − stock). Same as the Inventory page button.</div>
+  </div></div>
+</div>
+<div class="cols">
+  <div class="panel"><div class="ph"><span class="t">Set item price / stock</span></div><div class="pb">
+    <div class="row">
+      <div class="fld"><label>Item</label><input id="si" list="cat" style="width:200px" placeholder="item name"><datalist id="cat"></datalist></div>
+      <div class="fld"><label>Price ¢/unit</label><input id="sp" type="number" min="0" step="0.01" style="width:100px"></div>
+      <div class="fld"><label>Stock</label><input id="ss" type="number" min="0" style="width:90px" placeholder="optional"></div>
+      <button class="btn" id="sset">Set</button><span class="msg" id="smsg"></span>
+    </div>
+  </div></div>
+  <div class="panel"><div class="ph"><span class="t">Log a restock</span></div><div class="pb">
+    <div class="row">
+      <div class="fld"><label>Item</label><input id="ri" list="cat" style="width:200px" placeholder="item name"></div>
+      <div class="fld"><label>Qty added</label><input id="rq" type="number" min="1" style="width:90px"></div>
+      <div class="fld"><label>Cost ¢ (total)</label><input id="rc" type="number" min="0" style="width:110px"></div>
+      <button class="btn" id="rlog">Log</button><span class="msg" id="rmsg"></span>
+    </div>
+    <div class="note">Records what you refilled by hand so margins stay honest.</div>
+  </div></div>
+</div>
+<div class="panel"><div class="ph"><span class="t">Remove an item</span></div><div class="pb">
+  <div class="row">
+    <div class="fld"><label>Item</label><input id="di" list="cat" style="width:200px" placeholder="item name"></div>
+    <button class="btn danger" id="del">Remove (full)</button><span class="msg" id="dmsg"></span>
+  </div>
+  <div class="note">Deletes from catalog, live shop list and earnings totals — the dashboard reflects it immediately.</div>
+</div></div>
+</div>
+<script>
+const fmt=n=>Math.round(n||0).toLocaleString('en-US').replace(/,/g,' ');
+const esc=s=>String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;');
+let owned=[],act=0;
+const mid=()=> (owned[act]&&owned[act].mid)||'';
+const csrf=()=> (window.OWNERINFO&&window.OWNERINFO.csrf)||'';
+async function post(url,body){const r=await fetch(url,{method:'POST',
+ headers:{'Content-Type':'application/json','X-CSRF-Token':csrf()},body:JSON.stringify(body)});
+ return r.json();}
+function chips(){document.getElementById('chips').innerHTML=owned.map((m,i)=>
+ '<div class="chip'+(i===act?' on':'')+'" data-i="'+i+'">'+esc(m.name||m.mid)+'</div>').join('');
+ document.querySelectorAll('.chip').forEach(c=>c.onclick=()=>{act=+c.dataset.i;chips();loadMk();});}
+async function loadMk(){
+ try{const r=await fetch('/api/owner/loyalty?market_id='+encodeURIComponent(mid()));const d=await r.json();
+  if(d&&d.ok!==false){document.getElementById('lm').value=d.pts_mult??d.mult??1;
+   document.getElementById('lb').value=d.coin_bonus??0;document.getElementById('lp').value=d.pct_bonus??0;}}catch(e){}
+ try{const r=await fetch('/api/owner/catalog?market_id='+encodeURIComponent(mid()));const d=await r.json();
+  const names=[];(d&&d.groups?Object.values(d.groups):[]).forEach(g=>(g||[]).forEach(x=>names.push(x.item||x.name)));
+  if(!names.length&&d&&Array.isArray(d.items))d.items.forEach(x=>names.push(x.item||x.name));
+  document.getElementById('cat').innerHTML=names.sort().map(n=>'<option value="'+esc(n)+'">').join('');}catch(e){}}
+document.getElementById('ls').onclick=async()=>{const m=document.getElementById('lmsg');m.textContent='saving…';
+ const d=await post('/api/owner/set_loyalty',{market_id:mid(),pts_mult:+document.getElementById('lm').value||1,
+  coin_bonus:+document.getElementById('lb').value||0,pct_bonus:+document.getElementById('lp').value||0}).catch(()=>({}));
+ m.textContent=d.ok?'saved ✓':(d.error||'failed');};
+document.getElementById('gen').onclick=async()=>{const m=document.getElementById('gmsg');m.textContent='working…';
+ const d=await post('/api/owner/generate_orders',{market_id:mid()}).catch(()=>({}));
+ m.textContent=d.ok?('created '+(d.created??'?')+' order(s)'):(d.error||'failed');};
+document.getElementById('sset').onclick=async()=>{const m=document.getElementById('smsg');m.textContent='…';
+ const b={market_id:mid(),item:document.getElementById('si').value.trim(),
+  coin:+document.getElementById('sp').value||0};
+ const st=document.getElementById('ss').value;if(st!=='')b.stock=+st;
+ const d=await post('/api/owner/set_item',b).catch(()=>({}));
+ m.textContent=d.ok?'set ✓':(d.error||'failed');};
+document.getElementById('rlog').onclick=async()=>{const m=document.getElementById('rmsg');m.textContent='…';
+ const d=await post('/api/owner/log_restock',{market_id:mid(),item:document.getElementById('ri').value.trim(),
+  qty:+document.getElementById('rq').value||0,cost:+document.getElementById('rc').value||0}).catch(()=>({}));
+ m.textContent=d.ok?'logged ✓':(d.error||'failed');};
+document.getElementById('del').onclick=async()=>{const m=document.getElementById('dmsg');
+ const it=document.getElementById('di').value.trim();if(!it){m.textContent='enter an item';return;}
+ m.textContent='removing…';
+ const d=await post('/api/owner/remove_item',{market_id:mid(),item:it,mode:'full'}).catch(()=>({}));
+ m.textContent=d.ok?'removed ✓':(d.error||'failed');};
+window.addEventListener('load',()=>{setTimeout(()=>{
+ const me=window.OWNERINFO;
+ if(me&&me.logged_in&&(me.owned||[]).length){owned=me.owned;
+  document.getElementById('locked').style.display='none';
+  document.getElementById('panel').style.display='';chips();loadMk();}
+ },400);});
+</script></body></html>"""
+
+
+async def _handle_mymarket_page(request):
+    html = (_MYMARKET_HTML.replace("__TERMINAL_CSS__", _TERMINAL_CSS)
+            .replace("__NAV__", _TERMINAL_NAV))
+    return web.Response(text=html, content_type="text/html")
+
+
 # ── /exchange — pro-terminal exchange view (XTB/IBKR-style, read-only) ────────
 # Purely additive page: consumes the existing /api/stocks and /api/me endpoints.
 # The site can't trade (no per-user trade auth), so the order ticket is an
@@ -4952,14 +5355,15 @@ async def start_webserver(port: int = 8080):
         return await handler(request)
 
     app = web.Application(middlewares=[_rate_limit_mw])
-    app.router.add_get("/",              _handle_index)
-    # per-section URLs — un-remade sections serve the shell with that tab active;
-    # remade sections get their own standalone handler (stocks → /exchange below)
-    app.router.add_get("/ledger",        _handle_index)
-    app.router.add_get("/orders",        _handle_index)
-    app.router.add_get("/teams",         _handle_index)
-    app.router.add_get("/mymarket",      _handle_index)
+    # Terminal redesign: every section is its own page. The old SPA stays at
+    # /classic as a fallback until the new pages are proven in production.
+    app.router.add_get("/",              _handle_inventory_page)
+    app.router.add_get("/classic",       _handle_index)
     app.router.add_get("/inventory",     _handle_inventory_page)
+    app.router.add_get("/ledger",        _handle_ledger_page)
+    app.router.add_get("/orders",        _handle_orders_page)
+    app.router.add_get("/teams",         _handle_teams_page)
+    app.router.add_get("/mymarket",      _handle_mymarket_page)
     app.router.add_get("/api/items",     _handle_api_items)
     app.router.add_get("/api/markets",   _handle_api_markets)
     app.router.add_get("/api/earnings",  _handle_api_earnings)
