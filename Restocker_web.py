@@ -754,18 +754,19 @@ def _load_stock_data() -> dict:
                    + float(os.getenv("STOCK_BACK_ASSET_PCT", "25") or 25)
                    + float(os.getenv("STOCK_BACK_FUND_PCT", "10") or 10))
         _m["backing_target"] = _target
-        _ratio = (_m["backing_pct"] / _target) if _target else 0.0
         if _dbk is not None:
             try:
                 _qraw = _dbk.get_config(f"quality:{_m['mid']}")
                 if _qraw:
-                    _q = json.loads(_qraw)
-                    _m["quality"] = _q
-                    _ratio = float(_q.get("score") or 0.0) / 0.60
+                    _m["quality"] = json.loads(_qraw)   # kept for display (visitors etc.)
             except Exception:
                 pass
-        _m["rating"] = ("AAA" if _ratio >= 1.5 else "AA" if _ratio >= 1.0 else "A" if _ratio >= 0.75
-                        else "BBB" if _ratio >= 0.5 else "BB" if _ratio >= 0.25 else "C")
+        # HOUSE RULE: the grade is GATED BY COLLATERAL alone — backing % of market cap
+        # against the gates A=50 / AA=60 / AAA=80 / BBB=30 / BB=15. (The old quality-ratio
+        # grade mixed in traffic/orders and marked well-collateralised markets BBB.)
+        _bp = float(_m["backing_pct"] or 0.0)
+        _m["rating"] = ("AAA" if _bp >= 80 else "AA" if _bp >= 60 else "A" if _bp >= 50
+                        else "BBB" if _bp >= 30 else "BB" if _bp >= 15 else "C")
     bonds = []
     try:
         for b in (db.list_bonds() or []):
@@ -4634,15 +4635,25 @@ function render(){const m=MK.find(x=>x.mid===cur);if(!m)return;
   '<div class="stat"><div class="k">'+s[0]+'</div><div class="v">'+s[1]+'</div>'+
   (s[2]?'<div class="s '+s[2]+'">'+(s[2]=='up'?'≥ target':'&lt; target')+'</div>':'')+'</div>').join('');
  document.getElementById('ownSub').textContent=fmt(m.shares)+' shares';
- const cols=['--accent','--up','--amber','--down','--muted','--faint'];
- document.getElementById('ownBody').innerHTML=(m.top_holders||[]).map((o,i)=>
-  '<tr><td><span class="dotc" style="background:'+css(cols[i%cols.length])+'"></span>'+o.id+'</td>'+
-  '<td class="num muted">'+fmt(o.shares)+'</td><td class="num muted">'+fmt(o.value)+'</td>'+
-  '<td class="num" style="font-weight:600">'+(m.shares?(o.shares/m.shares*100).toFixed(2):'0.00')+'%</td></tr>').join('')
-  ||'<tr><td colspan="4" class="faint" style="height:34px">No holders yet</td></tr>';
+ renderHolders(m);
  drawMain(m);
  document.querySelectorAll('#list tr').forEach(t=>t.classList.toggle('sel',t.dataset.k===cur));
  calc();renderPos();}
+const CT={};
+function holderRows(rows,shares){const cols=['--accent','--up','--amber','--down','--muted','--faint'];
+ return rows.map((o,i)=>
+  '<tr'+(o.you?' style="box-shadow:inset 2px 0 0 var(--up)"':'')+'><td><span class="dotc" style="background:'+css(cols[i%cols.length])+'"></span>'+
+  (o.name||o.id)+(o.you?' <span style="font-size:9px;color:var(--up);font-weight:700">YOU</span>':'')+'</td>'+
+  '<td class="num muted">'+fmt(o.shares)+'</td><td class="num muted">'+fmt(o.value)+'</td>'+
+  '<td class="num" style="font-weight:600">'+(o.pct!=null?o.pct.toFixed(2):(shares?(o.shares/shares*100).toFixed(2):'0.00'))+'%</td></tr>').join('')
+  ||'<tr><td colspan="4" class="faint" style="height:34px">No holders yet</td></tr>';}
+async function renderHolders(m){const el=document.getElementById('ownBody');
+ if(CT[m.mid]){el.innerHTML=holderRows(CT[m.mid],m.shares);return;}
+ el.innerHTML=holderRows(m.top_holders||[],m.shares);   // instant fallback
+ try{const r=await fetch('/api/exchange/captable?market_id='+encodeURIComponent(m.mid));
+  const d=await r.json();
+  if(d&&d.ok&&Array.isArray(d.rows||d.holders)){CT[m.mid]=(d.rows||d.holders);
+   if(cur===m.mid)el.innerHTML=holderRows(CT[m.mid],m.shares);}}catch(e){}}
 function renderList(){const tot=MK.reduce((a,m)=>a+m.mcap,0);
  document.getElementById('wCap').textContent=fmt(tot)+' ¢';
  document.getElementById('list').innerHTML=MK.map(m=>{const up=m.pct>=0;
