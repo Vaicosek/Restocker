@@ -1632,14 +1632,27 @@ if (window.Chart) {
 }
 
 // ── Nav tabs ───────────────────────────────────────────────────────────────
+// Real per-section routing — every subsection is its own URL (normal-website
+// behavior: back button, shareable links). Remade sections get standalone pages
+// (stocks → /exchange); the rest serve this shell with their tab activated.
+const PAGE_ROUTES = {inventory: "/inventory", earnings: "/ledger", stocks: "/exchange",
+                     orders: "/orders", teams: "/teams", mymarket: "/mymarket"};
+const ROUTE_PAGES = {"/": "inventory", "/inventory": "inventory", "/ledger": "earnings",
+                     "/orders": "orders", "/teams": "teams", "/mymarket": "mymarket"};
 document.querySelectorAll(".nav-tab").forEach(tab => {
   tab.addEventListener("click", () => {
-    document.querySelectorAll(".nav-tab").forEach(t => t.classList.remove("active"));
-    document.querySelectorAll(".page").forEach(p => p.classList.remove("active"));
-    tab.classList.add("active");
-    document.getElementById("page-" + tab.dataset.page).classList.add("active");
+    const dest = PAGE_ROUTES[tab.dataset.page];
+    if (dest && dest !== window.location.pathname) { window.location.href = dest; return; }
   });
 });
+(function activateFromPath() {
+  const page = ROUTE_PAGES[window.location.pathname] || "inventory";
+  document.querySelectorAll(".nav-tab").forEach(t =>
+    t.classList.toggle("active", t.dataset.page === page));
+  document.querySelectorAll(".page").forEach(p => p.classList.remove("active"));
+  const el = document.getElementById("page-" + page);
+  if (el) el.classList.add("active");
+})();
 
 // ══════════════════════════ PRICES ══════════════════════════════════════════
 (function initPrices() {
@@ -3827,6 +3840,170 @@ async def _handle_health(request):
     return web.Response(text="ok")
 
 
+# ── shared terminal shell (nav) for the remade pages ─────────────────────────
+_TERMINAL_NAV = r"""
+<header class="tshell">
+  <div class="brand"><span class="m">A</span>ABEXILAS <span class="faint" style="font-weight:600">EXCHANGE</span></div>
+  <nav>
+    <a href="/inventory" data-nav="inventory">Inventory</a>
+    <a href="/ledger" data-nav="ledger">Ledger</a>
+    <a href="/exchange" data-nav="exchange">Exchange</a>
+    <a href="/orders" data-nav="orders">Orders</a>
+    <a href="/teams" data-nav="teams">Teams</a>
+    <a href="/mymarket" data-nav="mymarket">My Market</a>
+  </nav>
+  <div class="rt"><div class="bp"><b class="mono" id="hWho">—</b><br><span id="hWhoSub">not linked</span></div></div>
+</header>
+<script>document.addEventListener('DOMContentLoaded',()=>{const p=location.pathname.replace('/','')||'inventory';
+const a=document.querySelector('[data-nav="'+p+'"]');if(a)a.classList.add('on');
+fetch('/api/me').then(r=>r.json()).then(me=>{if(me&&me.logged_in){
+ document.getElementById('hWho').textContent=me.name||'linked';
+ document.getElementById('hWhoSub').textContent='Discord linked';
+ window.OWNERINFO=me;}}).catch(()=>{});});</script>
+"""
+
+_TERMINAL_CSS = r"""
+:root{--bg:#0b0f10;--panel:#11171a;--panel2:#161d20;--row:#121a1c;--hover:#1a2427;--sel:#1c2a30;
+--seam:#070b0b;--line:#212b2e;--line2:#2b3739;--ink:#d9e0e0;--ink2:#f0f4f4;--muted:#7a8a8a;--faint:#4b5a5a;
+--up:#1fa97a;--down:#e5484d;--accent:#3f8fcf;--amber:#cfa637;
+--sans:"IBM Plex Sans",-apple-system,"Segoe UI",Roboto,sans-serif;
+--mono:"IBM Plex Mono",ui-monospace,"SF Mono",Menlo,Consolas,monospace}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:13px;-webkit-font-smoothing:antialiased}
+.mono{font-family:var(--mono);font-variant-numeric:tabular-nums;font-feature-settings:"tnum" 1}
+.up{color:var(--up)}.down{color:var(--down)}.muted{color:var(--muted)}.faint{color:var(--faint)}
+header.tshell{display:flex;align-items:center;gap:20px;height:44px;padding:0 16px;border-bottom:1px solid var(--line);background:var(--panel)}
+.brand{display:flex;align-items:center;gap:9px;font-weight:700;font-size:14px;letter-spacing:.4px}
+.brand .m{width:22px;height:22px;background:var(--up);color:#04120c;display:grid;place-items:center;font-weight:700;font-size:13px}
+header.tshell nav{display:flex;gap:2px;height:100%;margin-left:6px}
+header.tshell nav a{display:flex;align-items:center;padding:0 13px;color:var(--muted);font-weight:600;font-size:13px;cursor:pointer;
+border-bottom:2px solid transparent;text-decoration:none}
+header.tshell nav a.on{color:var(--ink2);border-bottom-color:var(--accent)}
+header.tshell nav a:hover{color:var(--ink)}
+.rt{margin-left:auto;display:flex;align-items:center;gap:14px}
+.rt .bp{text-align:right;line-height:1.15}.rt .bp b{font-size:13px}
+.rt .bp span{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px}
+.panel{background:var(--panel);border:1px solid var(--line)}
+.ph{height:30px;display:flex;align-items:center;justify-content:space-between;padding:0 10px;background:var(--panel2);border-bottom:1px solid var(--line)}
+.ph .t{font-size:10px;letter-spacing:.7px;text-transform:uppercase;color:var(--muted);font-weight:600}
+"""
+
+# ── /inventory — terminal Inventory page (Pass 1) ────────────────────────────
+_INVENTORY_HTML = r"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Inventory · Abexilas</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>__TERMINAL_CSS__
+.wrap{display:grid;grid-template-columns:1fr;gap:1px;background:var(--seam);padding:0}
+.bar{display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--panel);border-bottom:1px solid var(--line);flex-wrap:wrap}
+.chip{border:1px solid var(--line2);background:var(--panel2);color:var(--muted);font-family:var(--mono);font-size:11px;
+padding:5px 10px;cursor:pointer;white-space:nowrap}
+.chip.on{color:var(--ink2);border-color:var(--accent);box-shadow:inset 0 -2px 0 var(--accent)}
+.chip:hover{color:var(--ink)}
+.search{margin-left:auto;background:var(--bg);border:1px solid var(--line2);color:var(--ink);font-family:var(--mono);
+font-size:12px;padding:6px 10px;width:220px;outline:none}
+.search:focus{border-color:var(--accent)}
+.gen{border:1px solid var(--up);background:transparent;color:var(--up);font-family:var(--sans);font-weight:600;
+font-size:11px;letter-spacing:.4px;text-transform:uppercase;padding:6px 12px;cursor:pointer}
+.gen:hover{background:var(--up);color:#04120c}
+.statrow{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--seam)}
+.stat{background:var(--panel);padding:9px 12px;border-bottom:1px solid var(--line)}
+.stat .k{font-size:9.5px;letter-spacing:.5px;text-transform:uppercase;color:var(--faint);font-weight:600}
+.stat .v{font-family:var(--mono);font-size:16px;font-weight:600;margin-top:3px;font-variant-numeric:tabular-nums}
+table.inv{width:100%;border-collapse:collapse}
+table.inv th{font-size:9.5px;letter-spacing:.5px;text-transform:uppercase;color:var(--faint);font-weight:600;text-align:right;
+padding:6px 12px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--panel2);cursor:pointer;user-select:none}
+table.inv th:first-child{text-align:left}
+table.inv th.sorted{color:var(--ink)}
+table.inv td{padding:0 12px;height:28px;border-bottom:1px solid var(--row);font-size:12px;white-space:nowrap}
+table.inv td.num{text-align:right;font-family:var(--mono);font-variant-numeric:tabular-nums}
+table.inv tr:hover td{background:var(--hover)}
+.fillcell{display:flex;align-items:center;gap:8px;justify-content:flex-end}
+.fillbar{width:110px;height:5px;background:var(--row);border:1px solid var(--line);position:relative}
+.fillbar i{position:absolute;left:0;top:0;bottom:0;display:block}
+.pct{font-family:var(--mono);font-size:11px;width:38px;text-align:right}
+.empty{padding:40px;text-align:center;color:var(--faint);font-size:12px}
+.msg{font-size:11px;color:var(--muted);font-family:var(--mono)}
+</style></head><body>
+__NAV__
+<div class="bar" id="chips"></div>
+<div class="statrow" id="stats"></div>
+<div class="bar">
+  <button class="gen" id="gen" style="display:none">Generate restock orders → 80%</button>
+  <span class="msg" id="genmsg"></span>
+  <input class="search" id="q" placeholder="Search items…" autocomplete="off">
+</div>
+<div class="panel" style="border-top:0">
+<table class="inv"><thead><tr>
+<th data-k="item" style="text-align:left">Item</th><th data-k="pct" class="sorted">Fullness ↑</th>
+<th data-k="stock">In stock</th><th data-k="capacity">Capacity</th><th data-k="price">Price ¢</th>
+</tr></thead><tbody id="tb"></tbody></table>
+<div class="empty" id="empty" style="display:none">No barrel scan yet — press the stock-scan key in-game and click your shops.</div>
+</div>
+<script>
+const INV=__INVENTORY_JSON__;
+const fmt=n=>Math.round(n||0).toLocaleString('en-US').replace(/,/g,' ');
+const esc=s=>String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;');
+const DATA=(INV&&INV.markets)||[];
+let act=0,sortK='pct',dir=1;
+const col=p=>p<=20?'var(--down)':(p<60?'var(--amber)':'var(--up)');
+function chips(){document.getElementById('chips').innerHTML=DATA.map((m,i)=>
+ '<div class="chip'+(i===act?' on':'')+'" data-i="'+i+'">'+esc(m.name||m.market_id)+' · '+m.count+'</div>').join('');
+ document.querySelectorAll('.chip').forEach(c=>c.onclick=()=>{act=+c.dataset.i;chips();render();});}
+function render(){
+ const mk=DATA[act]||{};const items=mk.items||[];
+ const gen=document.getElementById('gen');
+ const owns=window.OWNERINFO&&(window.OWNERINFO.owned||[]).some(o=>String(o.mid)===String(mk.market_id));
+ gen.style.display=owns?'':'none';gen.dataset.mid=mk.market_id||'';
+ const low=items.filter(x=>x.capacity>0&&x.pct<=20).length;
+ const cap=items.reduce((s,x)=>s+(x.capacity||0),0),st=items.reduce((s,x)=>s+(x.stock||0),0);
+ const avg=cap?Math.round(100*st/cap):0;
+ document.getElementById('stats').innerHTML=[
+  ['Items',items.length,''],['Low ≤20%',low,low>0?'style="color:var(--down)"':''],
+  ['Avg fullness',avg+'%','style="color:'+col(avg)+'"'],['Shelf units',fmt(st),'']].map(s=>
+  '<div class="stat"><div class="k">'+s[0]+'</div><div class="v" '+s[2]+'>'+s[1]+'</div></div>').join('');
+ const q=(document.getElementById('q').value||'').toLowerCase();
+ let rows=items.filter(x=>(x.item||'').toLowerCase().includes(q));
+ rows.sort((a,b)=>{let x=a[sortK],y=b[sortK];
+  if(typeof x==='string')return x.localeCompare(y)*dir;return ((x||0)-(y||0))*dir;});
+ document.getElementById('empty').style.display=(DATA.length&&items.length)?'none':'';
+ document.getElementById('tb').innerHTML=rows.map(x=>{
+  const p=Math.max(0,Math.min(100,x.pct||0));
+  return '<tr><td>'+esc(x.item)+'</td>'+
+  '<td class="num"><div class="fillcell"><div class="fillbar"><i style="width:'+p+'%;background:'+col(p)+'"></i></div>'+
+  '<span class="pct" style="color:'+col(p)+'">'+Math.round(p)+'%</span></div></td>'+
+  '<td class="num">'+fmt(x.stock)+'</td><td class="num">'+fmt(x.capacity)+'</td>'+
+  '<td class="num">'+(x.price>0?(x.price<1?x.price.toFixed(2):fmt(x.price)):'—')+'</td></tr>';}).join('')
+  ||'<tr><td colspan="5" class="faint" style="height:34px">No items match.</td></tr>';}
+document.getElementById('q').oninput=render;
+document.querySelectorAll('th[data-k]').forEach(th=>th.onclick=()=>{
+ const k=th.dataset.k;if(sortK===k)dir=-dir;else{sortK=k;dir=1;}
+ document.querySelectorAll('th[data-k]').forEach(t=>{t.classList.toggle('sorted',t.dataset.k===sortK);
+  t.textContent=t.textContent.replace(/ [↑↓]$/,'')+(t.dataset.k===sortK?(dir===1?' ↑':' ↓'):'');});render();});
+document.getElementById('gen').onclick=async()=>{
+ const mid=document.getElementById('gen').dataset.mid;const msg=document.getElementById('genmsg');
+ msg.textContent='working…';
+ try{const r=await fetch('/api/owner/generate_orders',{method:'POST',
+  headers:{'Content-Type':'application/json','X-CSRF-Token':(window.OWNERINFO&&window.OWNERINFO.csrf)||''},
+  body:JSON.stringify({market_id:mid})});
+  const d=await r.json();msg.textContent=d.ok?('created '+(d.created??'?')+' order(s)'):(d.error||'failed');}
+ catch(e){msg.textContent='failed';}};
+window.addEventListener('load',()=>{setTimeout(()=>{chips();render();},60);});
+setTimeout(()=>{chips();render();},400);
+</script></body></html>"""
+
+
+async def _handle_inventory_page(request):
+    inventory = _cached("inventory", _load_inventory_data)
+    html = (_INVENTORY_HTML
+            .replace("__TERMINAL_CSS__", _TERMINAL_CSS)
+            .replace("__NAV__", _TERMINAL_NAV)
+            .replace("__INVENTORY_JSON__", _jscript(inventory)))
+    return web.Response(text=html, content_type="text/html")
+
+
 # ── /exchange — pro-terminal exchange view (XTB/IBKR-style, read-only) ────────
 # Purely additive page: consumes the existing /api/stocks and /api/me endpoints.
 # The site can't trade (no per-user trade auth), so the order ticket is an
@@ -3931,7 +4108,7 @@ background:var(--panel2);color:var(--muted);font-family:var(--sans)}
 <body>
 <header>
   <div class="brand"><span class="m">A</span>ABEXILAS <span class="faint" style="font-weight:600">EXCHANGE</span></div>
-  <nav><a href="/">Dashboard</a><a class="on">Exchange</a></nav>
+  <nav><a href="/inventory">Inventory</a><a href="/ledger">Ledger</a><a class="on">Exchange</a><a href="/orders">Orders</a><a href="/teams">Teams</a><a href="/mymarket">My Market</a></nav>
   <div class="rt"><div class="bp"><b class="mono" id="hWho">—</b><br><span id="hWhoSub">not linked</span></div></div>
 </header>
 <div class="grid">
@@ -4776,6 +4953,13 @@ async def start_webserver(port: int = 8080):
 
     app = web.Application(middlewares=[_rate_limit_mw])
     app.router.add_get("/",              _handle_index)
+    # per-section URLs — un-remade sections serve the shell with that tab active;
+    # remade sections get their own standalone handler (stocks → /exchange below)
+    app.router.add_get("/ledger",        _handle_index)
+    app.router.add_get("/orders",        _handle_index)
+    app.router.add_get("/teams",         _handle_index)
+    app.router.add_get("/mymarket",      _handle_index)
+    app.router.add_get("/inventory",     _handle_inventory_page)
     app.router.add_get("/api/items",     _handle_api_items)
     app.router.add_get("/api/markets",   _handle_api_markets)
     app.router.add_get("/api/earnings",  _handle_api_earnings)
