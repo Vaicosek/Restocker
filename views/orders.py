@@ -1272,7 +1272,9 @@ class OrderView(View):
             f"Requested: {fmt_qty(order, requested, prefer_original_amount=True)}, "
             f"Produced: {fmt_qty(order, produced)}, "
             f"Remaining: {fmt_qty(order, remaining)}\n\n"
-            f"{interaction.user.mention}, please upload **picture proof** of the finished order.\n"
+            f"{interaction.user.mention}, please upload **picture proof** — TWO shots:\n"
+            "\u2022 \U0001f4e6 the **finished order**\n"
+            "\u2022 \U0001f4cd **where you put it** (the chest/location you dropped it) so we know where the stock is\n"
             "Managers can Approve/Reject below."
         )
         try:
