@@ -3364,11 +3364,18 @@ def _public_markets(markets: dict) -> dict:
 # the fly from the display name. First-match-wins; ORDER MATTERS for overlaps
 # (redstone lamp→Redstone, nether wart→Farm, soul sand→Nether).
 _INV_CAT_ORDER = [
-    "Wood & Logs", "Ores & Minerals", "Redstone", "Concrete & Clay",
+    "Wood & Logs", "Ores & Minerals", "Enchanted Gear", "Redstone", "Concrete & Clay",
     "Nether", "End", "Ice & Snow", "Farm & Food", "Dyes & Wool",
     "Mob Drops", "Glass & Light", "Nature", "Building", "Other",
 ]
 _INV_CAT_RULES = [
+    # Tools/armor/weapons (the server's "enchanted gear") — matched FIRST so a
+    # Diamond Pickaxe / Netherite Axe lands here, not under Ores by its material name.
+    # " axe"/" hoe" use a leading space so "Waxed Copper" / "Shoe"-likes don't match.
+    ("Enchanted Gear", ["pickaxe", "shovel", " axe", " hoe", "sword", "helmet",
+                        "chestplate", "leggings", "boots", "elytra", "trident",
+                        "crossbow", "bow", "shears", "fishing rod", "flint and steel",
+                        "mace", "brush", "shield", "horse armor"]),
     ("Redstone", ["redstone", "repeater", "comparator", "piston", "observer",
                   "hopper", "dispenser", "dropper", "rail", "tripwire",
                   "daylight", "note block", "lever", "activator", "sculk sensor"]),
@@ -4027,7 +4034,7 @@ const INV=__INVENTORY_JSON__;
 const fmt=n=>Math.round(n||0).toLocaleString('en-US').replace(/,/g,' ');
 const esc=s=>String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;');
 const DATA=(INV&&INV.markets)||[];
-const CATORDER=["Wood & Logs","Ores & Minerals","Redstone","Concrete & Clay","Nether","End","Ice & Snow","Farm & Food","Dyes & Wool","Mob Drops","Glass & Light","Nature","Building","Other"];
+const CATORDER=["Wood & Logs","Ores & Minerals","Enchanted Gear","Redstone","Concrete & Clay","Nether","End","Ice & Snow","Farm & Food","Dyes & Wool","Mob Drops","Glass & Light","Nature","Building","Other"];
 let act=0,sortK='pct',dir=1,catAct='All';
 const col=p=>p<=20?'var(--down)':(p<60?'var(--amber)':'var(--up)');
 const catsIn=items=>{const c={};items.forEach(x=>{const k=x.cat||'Other';c[k]=(c[k]||0)+1;});
