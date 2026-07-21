@@ -456,6 +456,17 @@ class ManagerReviewView(View):
         oid, ch_id = self._resolve(interaction)
         chan = interaction.client.get_channel(ch_id)
 
+        # Self-approval guard: a manager who claimed/fulfilled this order can't sign off their
+        # OWN work — another manager must review it (mirrors the website order-approval guard).
+        try:
+            _sa_d, _sa_o, _ = await self._load(interaction)
+            if _sa_o is not None and _claim_of(_sa_o, interaction.user.id) is not None:
+                return await interaction.followup.send(
+                    "⛔ You claimed/fulfilled this order — you can't approve your **own** work; "
+                    "another manager has to review it.", ephemeral=True)
+        except Exception:
+            pass
+
         def _claim_approval(order):
             if str(order.get("status", "")).lower() == "fulfilled":
                 return False

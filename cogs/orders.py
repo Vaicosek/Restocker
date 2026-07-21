@@ -293,7 +293,9 @@ def _earnings_rundown(user_id, max_lines: int = 12) -> str:
                         pass
                 nm = item[:46] if item else det
                 q = f"{qty}× " if qty else ""
-                lines.append(f"• {det} · {q}{nm} · approved by <@{r['mgr']}> · {str(r['first'])[:10]}")
+                # flag self-approval (a manager signing off their OWN order) — a governance red flag
+                appr = f"<@{r['mgr']}>" + (" \u26a0 self-approved" if str(r["mgr"]) == uid else "")
+                lines.append(f"• {det} · {q}{nm} · approved by {appr} · {str(r['first'])[:10]}")
             if not rows:
                 cr = conn.execute(
                     "SELECT o.item item, COUNT(DISTINCT oc.order_id) n, SUM(oc.qty) q "
@@ -304,8 +306,10 @@ def _earnings_rundown(user_id, max_lines: int = 12) -> str:
     except Exception:
         return ""
     if not lines:
-        return ""
-    return "\U0001f4cb **Work rundown** — what they did to earn this:\n" + "\n".join(lines)
+        return ("\u26a0\ufe0f **Work rundown: NOTHING recorded for this account** \u2014 no approved "
+                "orders, harvests, or claims. This account has not earned via work \u2014 review "
+                "carefully before paying.")
+    return "\U0001f4cb **Work rundown** \u2014 what they did to earn this:\n" + "\n".join(lines)
 
 
 class OrdersCog(commands.Cog):
