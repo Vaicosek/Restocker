@@ -4034,6 +4034,8 @@ const INV=__INVENTORY_JSON__;
 const fmt=n=>Math.round(n||0).toLocaleString('en-US').replace(/,/g,' ');
 const esc=s=>String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;');
 const DATA=(INV&&INV.markets)||[];
+if(DATA.length>1){const _all=DATA.reduce((a,m)=>a.concat(m.items||[]),[]);
+ DATA.unshift({market_id:"__all__",name:"All Markets",items:_all,count:_all.length,low:_all.filter(x=>x.capacity>0&&x.pct<=20).length});}
 const CATORDER=["Wood & Logs","Ores & Minerals","Enchanted Gear","Redstone","Concrete & Clay","Nether","End","Ice & Snow","Farm & Food","Dyes & Wool","Mob Drops","Glass & Light","Nature","Building","Other"];
 let act=0,sortK='pct',dir=1,catAct='All';
 const col=p=>p<=20?'var(--down)':(p<60?'var(--amber)':'var(--up)');
@@ -4074,13 +4076,7 @@ function render(){
  rows.sort((a,b)=>{let x=a[sortK],y=b[sortK];
   if(typeof x==='string')return x.localeCompare(y)*dir;return ((x||0)-(y||0))*dir;});
  document.getElementById('empty').style.display=(DATA.length&&items.length)?'none':'';
- let html='';
- if(catAct==='All'){
-  const {order}=catsIn(rows);
-  for(const c of order){const grp=rows.filter(x=>(x.cat||'Other')===c);if(!grp.length)continue;
-   html+='<tr class="grp"><td colspan="5">'+esc(c)+'<span class="gcount">'+grp.length+'</span></td></tr>';
-   html+=grp.map(rowHTML).join('');}
- }else{html=rows.map(rowHTML).join('');}
+ const html=rows.map(rowHTML).join('');
  document.getElementById('tb').innerHTML=html
   ||'<tr><td colspan="5" class="faint" style="height:34px">No items match.</td></tr>';}
 document.getElementById('q').oninput=render;
