@@ -4002,6 +4002,7 @@ table.inv th:nth-child(3),table.inv th:nth-child(4){width:105px}
 table.inv th:nth-child(5){width:100px}
 table.inv td:first-child{overflow:hidden;text-overflow:ellipsis}
 tr.zero td:first-child{color:var(--muted)}
+table.inv td .mkt{color:var(--accent);font-size:10px;margin-left:8px;font-family:var(--mono);text-transform:uppercase;letter-spacing:.3px;opacity:.85}
 tr.zero .pct{opacity:.5}
 table.inv th.sorted{color:var(--ink)}
 table.inv td{padding:0 12px;height:28px;border-bottom:1px solid var(--row);font-size:12px;white-space:nowrap}
@@ -4028,6 +4029,7 @@ __NAV__
 <div class="bar">
   <button class="gen" id="gen" style="display:none">Generate restock orders → 80%</button>
   <span class="msg" id="genmsg"></span>
+  <div class="chip" id="grpbtn" style="cursor:pointer;white-space:nowrap">Σ Avg price</div>
   <input class="search" id="q" placeholder="Search items…" autocomplete="off">
 </div>
 <div class="panel" style="border-top:0">
@@ -4043,10 +4045,10 @@ const INV=__INVENTORY_JSON__;
 const fmt=n=>Math.round(n||0).toLocaleString('en-US').replace(/,/g,' ');
 const esc=s=>String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;');
 const DATA=(INV&&INV.markets)||[];
-if(DATA.length>1){const _all=DATA.reduce((a,m)=>a.concat(m.items||[]),[]);
+if(DATA.length>1){const _all=DATA.reduce((a,m)=>a.concat((m.items||[]).map(x=>Object.assign({},x,{_mkt:m.name||m.market_id}))),[]);
  DATA.unshift({market_id:"__all__",name:"All Markets",items:_all,count:_all.length,low:_all.filter(x=>x.capacity>0&&x.pct<=20).length});}
 const CATORDER=["Wood & Logs","Ores & Minerals","Enchanted Gear","Redstone","Concrete & Clay","Nether","End","Ice & Snow","Farm & Food","Dyes & Wool","Mob Drops","Glass & Light","Nature","Building","Other"];
-let act=0,sortK='pct',dir=1,catAct='All';
+let act=0,sortK='pct',dir=1,catAct='All',grp=false;
 const col=p=>p<=20?'var(--down)':(p<60?'var(--amber)':'var(--up)');
 const catsIn=items=>{const c={};items.forEach(x=>{const k=x.cat||'Other';c[k]=(c[k]||0)+1;});
  const present=CATORDER.filter(k=>c[k]);
@@ -4062,11 +4064,26 @@ function catchips(){
   '<div class="chip'+(c===catAct?' on':'')+'" data-c="'+esc(c)+'">'+esc(c)+' · '+(c==='All'?items.length:counts[c])+'</div>').join('');
  document.querySelectorAll('#catchips .chip').forEach(el=>el.onclick=()=>{catAct=el.dataset.c;catchips();render();});}
 function rowHTML(x){const p=Math.max(0,Math.min(100,x.pct||0));
- return '<tr'+(((x.stock||0)<=0)?' class="zero"':'')+'><td>'+esc(x.item)+'</td>'+
+ return '<tr'+(((x.stock||0)<=0)?' class="zero"':'')+'><td>'+esc(x.item)+(x._mkt?'<span class="mkt">'+esc(x._mkt)+'</span>':'')+'</td>'+
   '<td class="num"><div class="fillcell"><div class="fillbar"><i style="width:'+p+'%;background:'+col(p)+'"></i></div>'+
   '<span class="pct" style="color:'+col(p)+'">'+Math.round(p)+'%</span></div></td>'+
   '<td class="num">'+fmt(x.stock)+'</td><td class="num">'+fmt(x.capacity)+'</td>'+
   '<td class="num">'+(x.price>0?(x.price<1?x.price.toFixed(2):fmt(x.price)):'—')+'</td></tr>';}
+function groupRows(rows){
+ const g={};
+ for(const x of rows){const k=x.item;
+  const e=g[k]||(g[k]={item:k,cat:x.cat,stock:0,capacity:0,prices:[],mkts:new Set()});
+  e.stock+=x.stock||0;e.capacity+=x.capacity||0;
+  if(x.price>0)e.prices.push(x.price);
+  if(x._mkt)e.mkts.add(x._mkt);}
+ return Object.values(g).map(e=>{
+  const ps=e.prices.filter(p=>p>0);let price=0;
+  if(ps.length){const mx=Math.max.apply(null,ps);const keep=ps.filter(p=>p>=0.2*mx);const a=keep.length?keep:ps;
+   price=a.reduce((s,v)=>s+v,0)/a.length;}
+  const pct=e.capacity>0?100*e.stock/e.capacity:0;
+  const nm=e.mkts.size?(e.mkts.size+(e.mkts.size===1?" mkt":" mkts")):"";
+  return {item:e.item,cat:e.cat,stock:e.stock,capacity:e.capacity,pct:Math.round(pct*10)/10,
+          price:Math.round(price*100)/100,_mkt:nm};});}
 function render(){
  const mk=DATA[act]||{};const items=mk.items||[];
  const gen=document.getElementById('gen');
@@ -4082,6 +4099,7 @@ function render(){
  const q=(document.getElementById('q').value||'').toLowerCase();
  let rows=items.filter(x=>(x.item||'').toLowerCase().includes(q));
  if(catAct!=='All')rows=rows.filter(x=>(x.cat||'Other')===catAct);
+ if(grp)rows=groupRows(rows);
  rows.sort((a,b)=>{let x=a[sortK],y=b[sortK];
   if(typeof x==='string')return x.localeCompare(y)*dir;return ((x||0)-(y||0))*dir;});
  document.getElementById('empty').style.display=(DATA.length&&items.length)?'none':'';
@@ -4089,6 +4107,7 @@ function render(){
  document.getElementById('tb').innerHTML=html
   ||'<tr><td colspan="5" class="faint" style="height:34px">No items match.</td></tr>';}
 document.getElementById('q').oninput=render;
+document.getElementById('grpbtn').onclick=()=>{grp=!grp;document.getElementById('grpbtn').classList.toggle('on',grp);render();};
 document.querySelectorAll('th[data-k]').forEach(th=>th.onclick=()=>{
  const k=th.dataset.k;if(sortK===k)dir=-dir;else{sortK=k;dir=1;}
  document.querySelectorAll('th[data-k]').forEach(t=>{t.classList.toggle('sorted',t.dataset.k===sortK);
