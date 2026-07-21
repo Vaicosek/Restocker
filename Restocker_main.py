@@ -11567,6 +11567,102 @@ def _start_cloudflared(port: int) -> None:
 _BOT_LOOP = None
 
 
+
+# -- Land Exchange network bridge (called by Restocker_web land endpoints) --
+def _network_land_listings(limit: int = 25) -> list:
+    """Active land listings as plain dicts for the satellite board. Headless."""
+    try:
+        from cogs.land_exchange import network_land_listings
+        return network_land_listings(limit)
+    except Exception as e:
+        log.warning("[network] land listings build failed: %s", e)
+        return []
+
+
+def _record_network_land_bid(listing_id, bidder_id, bidder_name, source_guild_id, amount) -> dict:
+    """A bid placed from a partner server via the land satellite. Runs the SAME escrow
+    core the /realestate bid slash command uses — no forked money logic."""
+    try:
+        from cogs.land_exchange import _place_bid_core
+        return _place_bid_core(int(listing_id or 0), str(bidder_id), amount)
+    except Exception as e:
+        log.warning("[network] land bid failed: %s", e)
+        return {"ok": False, "error": "Couldn't place that bid — try again shortly."}
+
+
+def _record_network_land_buy(listing_id, buyer_id, buyer_name, source_guild_id) -> dict:
+    """An instant-buy from a partner server via the land satellite."""
+    try:
+        from cogs.land_exchange import _instant_buy_core
+        res = _instant_buy_core(int(listing_id or 0), str(buyer_id))
+        if res.get("ok"):
+            res["sold_to_buyer"] = str(buyer_id)   # so the notify step can open the deal room
+        return res
+    except Exception as e:
+        log.warning("[network] land buy failed: %s", e)
+        return {"ok": False, "error": "Couldn't complete that purchase — try again shortly."}
+
+
+def _record_network_land_create(seller_id, source_guild_id, payload: dict) -> dict:
+    """The satellite's /sell — create a listing (headless) and store any photos it hosts."""
+    try:
+        from cogs.land_exchange import create_listing_core, set_listing_photos
+        p = payload or {}
+        res = create_listing_core(
+            seller_id, p.get("title"), p.get("starting_price"), buy_now=p.get("buy_now"),
+            details=p.get("details"), category=p.get("category"), chunks=p.get("chunks"),
+            backs_company=p.get("backs_company"), duration_days=p.get("duration_days"))
+        if res.get("ok") and p.get("photos"):
+            set_listing_photos(res["listing"]["id"], p["photos"])
+            res["listing"]["photos"] = p["photos"][:4]
+            res["listing"]["image_url"] = p["photos"][0]
+        return res
+    except Exception as e:
+        log.warning("[network] land create failed: %s", e)
+        return {"ok": False, "error": "Couldn't create that listing — try again shortly."}
+
+
+def _record_network_land_cancel(listing_id, requester_id, is_manager=False) -> dict:
+    try:
+        from cogs.land_exchange import cancel_listing_core
+        return cancel_listing_core(int(listing_id or 0), str(requester_id), bool(is_manager))
+    except Exception as e:
+        log.warning("[network] land cancel failed: %s", e)
+        return {"ok": False, "error": "Couldn't cancel — try again shortly."}
+
+
+def _record_network_land_close(listing_id, refund_bidder=False) -> dict:
+    try:
+        from cogs.land_exchange import close_listing_core
+        return close_listing_core(int(listing_id or 0), bool(refund_bidder))
+    except Exception as e:
+        log.warning("[network] land close failed: %s", e)
+        return {"ok": False, "error": "Couldn't close — try again shortly."}
+
+
+def _network_land_config(updates: dict = None) -> dict:
+    from cogs.land_exchange import get_exchange_config, set_exchange_config
+    return set_exchange_config(**updates) if updates else get_exchange_config()
+
+
+async def _notify_network_land(listing_id, note: str = "", res: dict = None):
+    """After a network bid/buy, run the same after-effects the home slash/buttons do:
+    refresh the listing embed, DM anyone just outbid, and (on a completed buy) DM the
+    winner + open the seller/winner transfer room. Everything lives on the cog."""
+    try:
+        cog = bot.get_cog("LandExchangeCog")
+        if cog is None:
+            return
+        res = res or {}
+        if res.get("sold_to_buyer"):
+            await cog._post_sale(int(listing_id), res["sold_to_buyer"], res.get("price"), note or "")
+        elif res.get("ok") is not False and ("amount" in res or res.get("prev_bidder")):
+            await cog._post_bid(int(listing_id), res, note or "")
+        else:
+            await cog._refresh_message(int(listing_id), extra=note or "")
+    except Exception as e:
+        log.warning("[network] land notify failed: %s", e)
+
 async def run_on_bot_loop(fn, *args, _timeout: float = 20.0, **kwargs):
     """Await a synchronous, state-mutating fn on the bot's event loop even when
     called from the web thread. Non-blocking for the caller's loop. Falls back to a
@@ -11672,7 +11768,8 @@ async def _main():
     for _ext in ("cogs.loyalty", "cogs.brew", "cogs.admin", "cogs.market", "cogs.stock",
                  "cogs.shop", "cogs.orders", "cogs.money", "cogs.reports", "cogs.misc",
                  "cogs.loops", "cogs.events", "cogs.config", "cogs.team", "cogs.inventory", "cogs.projects", "cogs.tool",
-                 "cogs.devassist", "cogs.hive", "cogs.lands", "cogs.bonds", "cogs.voting"):
+                 "cogs.devassist", "cogs.hive", "cogs.lands", "cogs.bonds", "cogs.voting",
+                 "cogs.land_exchange"):
         try:
             await bot.load_extension(_ext)
         except Exception as e:
