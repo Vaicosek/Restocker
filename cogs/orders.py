@@ -90,6 +90,90 @@ def _resolve_gear(text: str):
     return f"Diamond {tool} - {', '.join(ench)}"
 
 
+# ── enchanted-gear name canonicalization ─────────────────────────────────────
+# Old CSN/history data spells the same gear many ways: enchants in a different order,
+# "Silk Touch" vs "Silk Touch I", and pre-1.13 lore names ("Damage All V" == Sharpness V,
+# "Dig Speed" == Efficiency, "Durability" == Unbreaking). That made the /order autocomplete
+# list the same item many times AND offer spellings that fail the catalog lookup
+# ("… no longer exists"). Canonicalizing collapses every variant to one form.
+_ENCH_SYN = {
+    "efficiency": "Efficiency", "dig speed": "Efficiency",
+    "fortune": "Fortune", "loot bonus blocks": "Fortune",
+    "silk touch": "Silk Touch",
+    "sharpness": "Sharpness", "damage all": "Sharpness",
+    "smite": "Smite", "damage undead": "Smite",
+    "bane of arthropods": "Bane of Arthropods", "damage arthropods": "Bane of Arthropods",
+    "fire aspect": "Fire Aspect", "knockback": "Knockback",
+    "looting": "Looting", "loot bonus mobs": "Looting",
+    "protection": "Protection", "protect": "Protection",
+    "unbreaking": "Unbreaking", "durability": "Unbreaking", "mending": "Mending",
+    "sweeping edge": "Sweeping Edge", "sweeping": "Sweeping Edge",
+    "power": "Power", "punch": "Punch", "flame": "Flame", "infinity": "Infinity",
+    "lure": "Lure", "luck of the sea": "Luck of the Sea", "thorns": "Thorns",
+    "respiration": "Respiration", "aqua affinity": "Aqua Affinity", "depth strider": "Depth Strider",
+    "feather falling": "Feather Falling", "blast protection": "Blast Protection",
+    "fire protection": "Fire Protection", "projectile protection": "Projectile Protection",
+    "loyalty": "Loyalty", "impaling": "Impaling", "riptide": "Riptide", "channeling": "Channeling",
+    "multishot": "Multishot", "quick charge": "Quick Charge", "piercing": "Piercing",
+    "soul speed": "Soul Speed", "swift sneak": "Swift Sneak",
+}
+_ROMAN = {1: "I", 2: "II", 3: "III", 4: "IV", 5: "V", 6: "VI", 7: "VII", 8: "VIII", 9: "IX", 10: "X"}
+
+
+def _ench_level(rest: str) -> str:
+    m = _re.search(r"\b(\d+)\b", rest)
+    if m:
+        return _ROMAN.get(int(m.group(1)), m.group(1))
+    rm = _re.search(r"\b(x|ix|iv|v?i{1,3}|v)\b", rest)
+    return rm.group(1).upper() if rm else ""
+
+
+def _canon_ench(clause: str):
+    low = " ".join((clause or "").strip().lower().split())
+    if not low:
+        return None, False
+    for syn in sorted(_ENCH_SYN, key=len, reverse=True):
+        if syn in low:
+            name = _ENCH_SYN[syn]
+            lvl = _ench_level(low.replace(syn, " ", 1))
+            return (f"{name} {lvl}" if lvl and lvl != "I" else name), True
+    return clause.strip(), False
+
+
+def _canon_gear_name(name: str) -> str:
+    """Collapse enchanted-gear name variants (enchant order, level-I notation, lore synonyms)
+    to one canonical form. Names with no recognised enchant pass through unchanged."""
+    s = " ".join((name or "").strip().split())
+    if " - " not in s:
+        return s
+    prefix, ench_part = s.split(" - ", 1)
+    canon, known = [], 0
+    for cl in ench_part.split(","):
+        if not cl.strip():
+            continue
+        c, is_known = _canon_ench(cl)
+        if is_known:
+            known += 1
+        if c and c not in canon:
+            canon.append(c)
+    if known == 0:
+        return s
+    canon.sort()
+    return f"{prefix} - {', '.join(canon)}"
+
+
+async def _order_item_autocomplete(interaction: discord.Interaction, current: str):
+    """/order item autocomplete: canonicalize gear names + de-duplicate so the same enchanted
+    item is offered once (not once per old-data spelling) and the picked value resolves."""
+    base = await normal_item_autocomplete(interaction, current)
+    seen = {}
+    for ch in base:
+        canon = _canon_gear_name(ch.value)
+        key = canon.lower()
+        if key not in seen:
+            seen[key] = app_commands.Choice(name=canon[:100], value=canon[:100])
+    return list(seen.values())[:25]
+
 _NONSTACK_KEYWORDS = ("pickaxe", "axe", "shovel", "sword", "hoe", "helmet", "chestplate",
                       "leggings", "boots", "set", "bow", "trident", "shield", "elytra", "fishing rod")
 
@@ -231,7 +315,7 @@ class OrdersCog(commands.Cog):
         app_commands.Choice(name="Stacks", value="stacks"),
         app_commands.Choice(name="Barrels", value="barrels"),
     ])
-    @app_commands.autocomplete(item_key=normal_item_autocomplete)
+    @app_commands.autocomplete(item_key=_order_item_autocomplete)
     async def order(self,
         interaction: discord.Interaction,
         item_key: str,
@@ -287,10 +371,18 @@ class OrdersCog(commands.Cog):
 
         items = (shops.get("items") or {})
         if item not in items:
-            return await interaction.followup.send(
-                f"❌ Item **{item}** no longer exists.",
-                **ephemeral_kwargs(interaction)
-            )
+            # Resolve enchanted-gear name variants (order / level-I / lore synonyms) to
+            # the real catalog key so a canonicalized pick still matches an item stored
+            # under a different spelling instead of failing with "no longer exists".
+            _cn = _canon_gear_name(item)
+            _match = _cn if _cn in items else {_canon_gear_name(k): k for k in items}.get(_cn)
+            if _match:
+                item = _match
+            else:
+                return await interaction.followup.send(
+                    f"❌ Item **{item}** no longer exists.",
+                    **ephemeral_kwargs(interaction)
+                )
 
         info = items.get(item) or {}
         if not isinstance(info, dict):
@@ -579,9 +671,12 @@ class OrdersCog(commands.Cog):
             )
 
         data = load_orders()
+        # Resend re-posts every order that is NOT closed (open OR claimed-but-unfulfilled),
+        # so a manager can always force the cards back into the channel — the old
+        # "and not o.get('claims')" wrongly skipped anything already claimed.
         open_orders = [
             o for o in data.get("orders", [])
-            if isinstance(o, dict) and not _order_is_claimed_closed(o) and not o.get("claims")
+            if isinstance(o, dict) and not _order_is_claimed_closed(o)
         ]
         open_orders.sort(key=lambda o: int(o.get("id", 0) or 0))
 
@@ -613,7 +708,7 @@ class OrdersCog(commands.Cog):
         save_orders(fresh)
 
         msg = (f"📮 Posted **{posted}/{len(open_orders)}** order card(s) to <#{WORKER_CHANNEL_ID}>, "
-               f"and queued the **@Employee DM digest** — it goes out within ~1 min once the loop fix is live.")
+               f"and queued the **@Employee DM digest** — it goes out within ~1 min.")
         if errors:
             msg += "\n\n⚠️ Real errors (this is what the loop was hiding):\n" + "\n".join(f"`{e}`" for e in errors[:8])
         elif posted == 0:

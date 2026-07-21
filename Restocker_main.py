@@ -1402,6 +1402,32 @@ def remaining_to_assign(order: dict) -> int:
     return max(0, (order.get("requested", 0) or 0) - assigned)
 
 
+def _order_age_str(order: dict) -> str:
+    # Compact age since the order was placed: '3d', '5h', '12m', or '' if unknown.
+    ts = order.get("created_at")
+    if not ts:
+        return ""
+    try:
+        dt = parse_iso(ts)
+    except Exception:
+        return ""
+    if not dt:
+        return ""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    try:
+        secs = max(0.0, (datetime.now(timezone.utc) - dt).total_seconds())
+    except Exception:
+        return ""
+    d = int(secs // 86400)
+    if d >= 1:
+        return f"{d}d"
+    h = int(secs // 3600)
+    if h >= 1:
+        return f"{h}h"
+    return f"{int(secs // 60)}m"
+
+
 def remaining_for(order: dict) -> int:
     requested = order.get("requested", order.get("amount", 0)) or 0
     produced = order.get("produced", 0) or 0
@@ -4313,7 +4339,8 @@ async def orders_cmd(interaction: discord.Interaction):
                 who = ""
             rem = remaining_to_assign(o)
             rem_txt = f" · rem {fmt_qty(o, rem)}" if rem > 0 else ""
-            all_lines.append(f"• **#{o['id']}** {o.get('item','')} · {badge}{rem_txt}{who}")
+            _age = _order_age_str(o)
+            all_lines.append(f"• **#{o['id']}** {o.get('item','')} · {badge}{rem_txt}{who}" + (f" · {_age}" if _age else ""))
 
         # Stay within Discord's 4096-char embed description limit.
         desc, shown = "", 0
@@ -4641,6 +4668,9 @@ async def update_order_messages(client: discord.Client, order: dict, *, allow_po
         embed.add_field(name="Requested", value=fmt_qty(order, requested, prefer_original_amount=True), inline=True)
         embed.add_field(name="Remaining", value=fmt_qty(order, remaining), inline=True)
         embed.add_field(name="Status", value=str(order.get("status", "open")).capitalize(), inline=True)
+        _age = _order_age_str(order)
+        if _age:
+            embed.add_field(name="Age", value=f"{_age} ago", inline=True)
         if _is_futures:
             _cust = order.get("customer_id")
             embed.add_field(name="🔮 Futures",

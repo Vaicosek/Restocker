@@ -122,6 +122,7 @@ class LoopsCog(commands.Cog):
                     return
 
                 bulk_threshold = int(getattr(core, "ORDER_BULK_CARD_THRESHOLD", 12) or 12)
+                _failed_ids = []
                 if len(ready) > bulk_threshold:
                     # BULK MODE — a full-market refill (100+ orders) posts ONE grouped
                     # board instead of a hundred rate-limited embeds. Claims run through
@@ -130,12 +131,23 @@ class LoopsCog(commands.Cog):
                         await core._post_bulk_order_board(bot, channel, ready)
                     except Exception as _be:
                         print(f"[worker_announce_loop] bulk board failed: {_be}")
+                        _failed_ids = [int(o.get("id", 0) or 0) for o in ready]
                 else:
                     for o in ready:
                         try:
                             await update_order_messages(bot, o, allow_post=True)
-                        except Exception:
-                            pass
+                        except Exception as _pe:
+                            print(f"[worker_announce_loop] card post failed #{o.get('id')}: {_pe}")
+                            _failed_ids.append(int(o.get("id", 0) or 0))
+                # Un-strand any order whose card FAILED to post: revert worker_announced so the
+                # next loop retries it. Successfully-posted orders stay marked → no double-post.
+                if _failed_ids:
+                    _fd = load_orders()
+                    _fset = set(_failed_ids)
+                    for _fo in _fd.get("orders", []):
+                        if isinstance(_fo, dict) and int(_fo.get("id", 0) or 0) in _fset:
+                            _fo["worker_announced"] = False
+                    save_orders(_fd)
 
                 # After all order cards are posted, fan the whole open-order set out to the SW
                 # Trade Network as ONE consolidated thread. Self-throttled (≤ every
