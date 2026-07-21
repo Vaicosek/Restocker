@@ -343,53 +343,6 @@ class OrdersCog(commands.Cog):
     async def orders(self, interaction: discord.Interaction):
         return await orders_cmd(interaction)
 
-    @app_commands.command(name="order_search",
-                          description="Search orders by item name, IGN, Discord name/ID, or order #")
-    @app_commands.describe(query="Item name, IGN, Discord name or ID, or an order number")
-    async def order_search(self, interaction: discord.Interaction, query: str):
-        q = (query or "").strip().lower()
-        if not q:
-            return await interaction.response.send_message("❌ Type something to search for.", **ephemeral_kwargs(interaction))
-        import Restocker_db as _db
-        _ign_cache = {}
-        def _ign(uid):
-            uid = str(uid or "")
-            if uid and uid not in _ign_cache:
-                try:
-                    _ign_cache[uid] = _db.get_ign(uid) or ""
-                except Exception:
-                    _ign_cache[uid] = ""
-            return _ign_cache.get(uid, "")
-        data = load_orders()
-        matches = []
-        for o in (data.get("orders", []) or []):
-            if not isinstance(o, dict):
-                continue
-            hay = [str(o.get("item", "")), str(o.get("id", "")), "#" + str(o.get("id", "")), str(o.get("status", "")), str(o.get("claimed_by", ""))]
-            for c in (o.get("claims") or []):
-                hay.append(str(c.get("user_tag", "")))
-                hay.append(str(c.get("user_id", "")))
-                hay.append(_ign(c.get("user_id", "")))
-            if q in " ".join(hay).lower():
-                matches.append(o)
-        if not matches:
-            return await interaction.response.send_message(f"🔎 No orders match **{query}**.", **ephemeral_kwargs(interaction))
-        matches.sort(key=lambda o: int(o.get("id", 0) or 0), reverse=True)
-        _BADGE = {"fulfilled": "✅ Fulfilled", "cancelled": "❌ Cancelled", "claimed": "🟡 Claimed", "open": "⚪ Open"}
-        lines = []
-        for o in matches[:25]:
-            st = str(o.get("status", "open")).lower()
-            who = ""
-            cl = o.get("claims") or []
-            if cl:
-                parts = []
-                for c in cl[:3]:
-                    nm = _ign(c.get("user_id", "")) or str(c.get("user_tag", "") or "?")
-                    parts.append(f"{nm} ({int(c.get('qty', 0) or 0)})")
-                who = " · " + ", ".join(parts)
-            lines.append(f"• **#{o.get('id')}** {o.get('item', '')} · {_BADGE.get(st, st.capitalize())}{who}")
-        head = f"🔎 **{len(matches)} order(s) matching \"{query}\"**" + (" — showing 25" if len(matches) > 25 else "")
-        await interaction.response.send_message((head + "\n" + "\n".join(lines))[:1990], **ephemeral_kwargs(interaction))
 
 
     @app_commands.command(name="cancel_order", description="(Managers) Cancel an existing restock order by ID")
