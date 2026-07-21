@@ -3532,8 +3532,8 @@ def _load_orders_data() -> dict:
     by_market = {}
     for o in rows:
         st = str(o.get("status", "") or "").lower()
-        if st in ("fulfilled", "cancelled"):
-            continue
+        if st == "cancelled":
+            continue   # cancelled are prunable junk; fulfilled are KEPT (shown at the bottom)
         mid = o.get("market_id") or "main"
         claimed = sum(int(c.get("qty") or 0) for c in (o.get("claims") or []))
         by_market.setdefault(mid, []).append({
@@ -3547,9 +3547,18 @@ def _load_orders_data() -> dict:
         import Restocker_main as _m
     except Exception:
         _m = None
+    def _ostatus_rank(x):
+        # unclaimed first (0), then claimed/in-progress (1), then fulfilled at the bottom (2)
+        if x["status"] == "fulfilled":
+            return 2
+        return 1 if x["claimed"] > 0 else 0
     out = []
-    for mid, orders in by_market.items():
-        orders.sort(key=lambda x: x["id"], reverse=True)
+    FULFILLED_SHOWN = 40   # board stays light: newest 40 fulfilled per market shown as
+    for mid, orders in by_market.items():   # history; the rest still live in the DB for records
+        orders.sort(key=lambda x: (_ostatus_rank(x), -x["id"]))
+        active = [o for o in orders if _ostatus_rank(o) < 2]
+        done = [o for o in orders if _ostatus_rank(o) == 2][:FULFILLED_SHOWN]
+        orders = active + done
         loc = ""
         if _m is not None:
             try:
@@ -3557,7 +3566,7 @@ def _load_orders_data() -> dict:
             except Exception:
                 loc = ""
         out.append({"market_id": mid, "name": names.get(mid, mid),
-                    "orders": orders, "count": len(orders), "sell_location": loc})
+                    "orders": orders, "count": len(active), "sell_location": loc})
     out.sort(key=lambda m: m["count"], reverse=True)
     return {"markets": out}
 

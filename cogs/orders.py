@@ -727,7 +727,7 @@ class OrdersCog(commands.Cog):
                 "Use the buttons below:\n"
                 "• **View Orders** → full order list (same as `/orders`)\n"
                 "• **Escalate order…** → repost/bump an order to workers\n"
-                "• **Prune Fulfilled/Cancelled** → removes closed orders"
+                "• **Prune Cancelled** → deletes cancelled orders (fulfilled kept as history)"
             ),
             color=discord.Color.gold()
         )

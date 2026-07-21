@@ -1831,7 +1831,7 @@ class ManagerPanelView(discord.ui.View):
         )
         return await interaction.response.send_message(embed=embed, view=EscalatePickView(), ephemeral=True)
 
-    @discord.ui.button(label="🧹 Prune Fulfilled/Cancelled", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label="🧹 Prune Cancelled", style=discord.ButtonStyle.danger)
     async def prune_closed(self, interaction: discord.Interaction, button: Button):
         if not is_manager(interaction):
             return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
@@ -1842,9 +1842,11 @@ class ManagerPanelView(discord.ui.View):
         before = list(data.get("orders", []) or [])
 
 
+        # Delete CANCELLED orders only. Fulfilled orders are KEPT (they are real history
+        # feeding records/valuation) — they just sort to the bottom of the website board.
         keep = [
             o for o in before
-            if str(o.get("status", "")).lower() not in ("fulfilled", "cancelled")
+            if str(o.get("status", "")).lower() != "cancelled"
         ]
 
         removed = len(before) - len(keep)
@@ -1855,7 +1857,7 @@ class ManagerPanelView(discord.ui.View):
             return await interaction.followup.send("❌ Failed to prune (could not write orders.yml).", ephemeral=True)
 
         return await interaction.followup.send(
-            f"🧹 Removed **{removed}** fulfilled/cancelled order(s).",
+            f"🧹 Removed **{removed}** cancelled order(s). Fulfilled orders kept as history.",
             ephemeral=True
         )
 
