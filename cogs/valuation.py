@@ -41,7 +41,16 @@ DEF = dict(
     q_w_backing=0.35, q_w_traffic=0.25, q_w_orders=0.25, q_w_history=0.15,
     q_traffic_target=10000.0, q_history_target=12.0, backing_target_pct=50.0,
     outage_month_threshold=0.40,    # a month this fraction-covered by an outage is dropped from run-rate
+    land_rate_per_chunk=10000.0,    # owner's anchor: 10,000 coins/chunk of RAW land
 )
+
+# Quality-multiplier presets for value_plot() — how much build/farms/market quality
+# lifts a plot above raw land value. Amazonia is the owner's real anchor point:
+# 200 chunks x 10k = 2M raw -> assessed 3.5M with build+farms = a 1.75x multiplier.
+# Overridable per-tier via bot_config: valuate:land_quality_mult:<tier>.
+_LAND_QUALITY_MULT = {
+    "raw": 1.0, "modest": 1.25, "developed": 1.5, "premium": 1.75, "flagship": 2.0,
+}
 
 
 def _load_outages(_db) -> list:
@@ -109,6 +118,43 @@ def _pm(_db, key, market_id, fallback=0.0):
 def _grade(pct):
     return ("AAA" if pct >= 80 else "AA" if pct >= 60 else "A" if pct >= 50
             else "BBB" if pct >= 30 else "BB" if pct >= 15 else "C")
+
+
+def value_plot(chunks: float, quality: str = "raw", comps: "list[float] | None" = None) -> dict:
+    """Standalone reserve/listing-price estimate for a plot of land — factored out of
+    `gather_and_value`'s land math so the Land Exchange (cogs/land_exchange.py) can
+    auto-price a listing without needing a market_id or the full valuation run.
+
+    Same anchor as the land-backing math (owner's number): chunks x 10,000 coins/chunk
+    raw, lifted by a quality multiplier for build/farms/market quality (see
+    _LAND_QUALITY_MULT — Amazonia's real comp is a 1.75x "premium" plot). If `comps`
+    (recent comparable sale prices, e.g. AllMart at 5M) are supplied, the estimate is
+    averaged with them so a reserve price is never JUST the formula when real sales
+    exist to anchor it.
+
+    This is deliberately independent of DEF['land_haircut'] / the land_claim/backing
+    pillar in gather_and_value — that's about how much of an ASSESSED value backs a
+    stock's credit grade (65% rule), a different question from what a plot should
+    list for. Selling a plot does not change how it backs any company."""
+    import Restocker_db as _db
+    chunks = max(0.0, _num(chunks))
+    quality = (quality or "raw").strip().lower()
+    rate = _gd(_db, "land_rate_per_chunk", DEF["land_rate_per_chunk"])
+    mult = _gd(_db, f"land_quality_mult:{quality}", _LAND_QUALITY_MULT.get(quality, 1.0))
+    raw_value = chunks * rate
+    formula_value = raw_value * mult
+    comps = [c for c in (comps or []) if _num(c) > 0]
+    if comps:
+        comp_avg = sum(_num(c) for c in comps) / len(comps)
+        assessed_value = round((formula_value + comp_avg) / 2.0, 2)
+    else:
+        comp_avg = None
+        assessed_value = round(formula_value, 2)
+    return {
+        "chunks": chunks, "quality": quality, "rate_per_chunk": rate, "quality_multiplier": mult,
+        "raw_value": round(raw_value, 2), "formula_value": round(formula_value, 2),
+        "comps_used": comps, "comp_avg": comp_avg, "assessed_value": assessed_value,
+    }
 
 
 def gather_and_value(market_id: str) -> dict:

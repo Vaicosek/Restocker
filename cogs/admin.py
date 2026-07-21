@@ -896,107 +896,107 @@ class AdminCog(commands.Cog):
 
 
     @admin.command(
-        name="export_market",
-        description="(Managers) Dump a market's LIVE data to a JSON file you can hand to Cowork/AI",
-    )
-    @app_commands.describe(market_id="Market to export (e.g. amazonia)")
+        name="hive_audit",
+        description="(Managers) Detect hive-feed double counting — same sale ingested under many messages")
+    @app_commands.describe(
+        market_id="(optional) limit to one hive market",
+        show="How many repeated-sale rows to list (default 12)")
     @app_commands.autocomplete(market_id=_market_autocomplete)
-    async def export_market(self, interaction: discord.Interaction, market_id: str):
-        """Read-only snapshot of everything the bot knows about one market — every
-        market-scoped table, its config keys, hive claims, and the derived figures a
-        valuation needs (treasury, asset book value, sellable). Returned as a JSON
-        attachment so it's the LIVE server state, not a stale local restocker.db copy."""
-        if not _is_market_manager(interaction, market_id):
-            return await interaction.response.send_message(
-                "⛔ Managers or this market's owner/managers only.", ephemeral=True)
+    async def hive_audit(self, interaction: discord.Interaction,
+                         market_id: Optional[str] = None, show: int = 12):
+        if not is_manager(interaction):
+            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
+        import Restocker_db as _db
+        show = max(1, min(int(show or 12), 40))
+        where = "WHERE market_id=?" if market_id else ""
+        params = (market_id,) if market_id else ()
 
-        import json as _json, io, Restocker_db as _db
-        from datetime import datetime, timezone
-
-        market_id = (market_id or "").strip()
-        market = _get_market(market_id)
-        if not market:
-            return await interaction.response.send_message(
-                f"❌ Market `{market_id}` not found.", ephemeral=True)
-
-        await interaction.response.defer(thinking=True, ephemeral=True)
-
-        out = {
-            "market_id": market_id,
-            "market_name": market.get("name", market_id),
-            "exported_at": datetime.now(timezone.utc).isoformat(),
-            "note": ("Every table row is filtered to this market. Discord/user IDs left "
-                     "as-is. This is the LIVE bot DB, not a committed snapshot."),
-            "tables": {},
-            "config": {},
-            "hive_claims": [],
-            "derived": {},
-        }
+        def _fmt(n):
+            return f"{int(round(float(n or 0))):,}"
 
         try:
             with _db.db() as conn:
-                tabs = [r["name"] for r in conn.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
-                for t in tabs:
-                    if t == "sqlite_sequence":
-                        continue
-                    cols = [c["name"] for c in conn.execute(f"PRAGMA table_info({t})").fetchall()]
-                    if "market_id" not in cols:
-                        continue
-                    rows = conn.execute(
-                        f"SELECT * FROM {t} WHERE market_id=?", (market_id,)).fetchall()
-                    if rows:
-                        out["tables"][t] = [dict(r) for r in rows]
+                # table may not exist on an old DB
+                if not conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table' AND name='hive_harvests'"
+                ).fetchone():
+                    return await interaction.response.send_message(
+                        "ℹ️ No `hive_harvests` table yet — the hive engine hasn't recorded anything.",
+                        ephemeral=True)
 
-                # market-scoped config: any key that mentions the id, or any value that IS the id
-                # (catches asset_value:<id>, sellable_assets:<id>, and land_map:<land> -> <id>)
-                mlow = market_id.lower()
-                for r in conn.execute("SELECT key, value FROM bot_config").fetchall():
-                    k, v = r["key"], r["value"]
-                    if mlow in str(k).lower() or (v is not None and str(v).strip().lower() == mlow):
-                        out["config"][k] = v
+                tot = conn.execute(
+                    f"SELECT COUNT(*) c, COUNT(DISTINCT msg_id) m, "
+                    f"COALESCE(SUM(qty*unit_value),0) v, COALESCE(SUM(paid),0) paid "
+                    f"FROM hive_harvests {where}", params).fetchone()
+                rows_total, msgs, val_total, paid_rows = tot["c"], tot["m"], tot["v"], tot["paid"]
+                if not rows_total:
+                    return await interaction.response.send_message(
+                        "🐝 No hive rows recorded" + (f" for `{market_id}`." if market_id else "."),
+                        ephemeral=True)
 
-                # hive_claims are keyed by land NAME, not market_id — match on the market name
-                nlow = str(market.get("name", market_id)).lower()
-                for r in conn.execute("SELECT * FROM hive_claims").fetchall():
-                    locn = str(r["location"]).lower()
-                    if locn in (mlow, nlow) or (nlow and nlow in locn):
-                        out["hive_claims"].append(dict(r))
+                # The fullest single message ≈ the true set of sales when the feed re-posts a
+                # cumulative list; total across all messages minus that ≈ duplicated rows.
+                full = conn.execute(
+                    f"SELECT COUNT(*) lines, COALESCE(SUM(qty*unit_value),0) v "
+                    f"FROM hive_harvests {where} GROUP BY msg_id ORDER BY lines DESC LIMIT 1",
+                    params).fetchone()
+                full_lines, full_val = (full["lines"], full["v"]) if full else (rows_total, val_total)
+                est_dupe_rows = max(0, rows_total - full_lines)
+                est_dupe_val = max(0.0, val_total - full_val)
 
-            # derived figures a valuation actually needs (via the bot's own helpers)
-            def _num(fn):
-                try:
-                    return float(fn() or 0.0)
-                except Exception:
-                    return None
-            out["derived"]["treasury"] = _num(lambda: _db.get_treasury(market_id))
-            out["derived"]["asset_book_value"] = _num(
-                lambda: _db.get_config(f"asset_value:{market_id}"))
-            out["derived"]["sellable_assets"] = _num(
-                lambda: _db.get_config(f"sellable_assets:{market_id}"))
-            try:
-                shares = _db.get_market_shares(market_id)
-                out["derived"]["listing"] = dict(shares) if shares else None
-            except Exception:
-                out["derived"]["listing"] = None
+                # fingerprint: the same (ign, item, qty) appearing under >1 message
+                fp = conn.execute(
+                    f"SELECT ign, item, qty, COUNT(DISTINCT msg_id) msgs, COUNT(*) rows "
+                    f"FROM hive_harvests {where} "
+                    f"GROUP BY ign, item, qty COLLATE NOCASE HAVING msgs > 1 "
+                    f"ORDER BY msgs DESC, rows DESC LIMIT ?", (*params, show)).fetchall()
 
-            payload = _json.dumps(out, indent=2, default=str)
-        except Exception as e:  # noqa: BLE001
-            log.exception("export_market failed")
-            return await interaction.followup.send(
-                f"❌ Export failed: `{type(e).__name__}: {e}`")
+                # lines-per-message shape (edit-in-place → 1 big msg; re-post → many msgs)
+                dist = conn.execute(
+                    f"SELECT lines, COUNT(*) n FROM "
+                    f"(SELECT msg_id, COUNT(*) lines FROM hive_harvests {where} GROUP BY msg_id) "
+                    f"GROUP BY lines ORDER BY lines DESC LIMIT 6", params).fetchall()
+        except Exception as e:
+            return await interaction.response.send_message(
+                f"⚠️ Audit failed: `{type(e).__name__}: {e}`", ephemeral=True)
 
-        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        fname = f"{market_id}_{stamp}.json"
-        n_rows = sum(len(v) for v in out["tables"].values())
-        buf = io.BytesIO(payload.encode("utf-8"))
-        await interaction.followup.send(
-            content=(f"📤 **{out['market_name']}** live export — "
-                     f"{len(out['tables'])} table(s), {n_rows} row(s), "
-                     f"{len(out['config'])} config key(s), "
-                     f"{len(out['hive_claims'])} hive claim(s).\n"
-                     f"Download and hand it to Cowork for valuation / AI."),
-            file=discord.File(buf, filename=fname))
+        # verdict
+        spanning = len(fp)
+        if msgs <= 2 and est_dupe_rows == 0:
+            verdict = ("✅ **Looks clean.** The feed reads as one message edited in place — "
+                       "no sale appears under a second message, so nothing is double-counted.")
+        elif est_dupe_rows > 0 and (est_dupe_rows >= 0.15 * rows_total or spanning):
+            verdict = (f"🚨 **Likely double-counting.** ~**{_fmt(est_dupe_rows)}** duplicate row(s) "
+                       f"(~**{_fmt(est_dupe_val)}** coins of harvest value) look re-ingested across "
+                       f"**{msgs}** separate messages. Fix: make the CSN export **edit one message "
+                       f"in place**, or run `/csn clear` after each export so only new sales post.")
+        else:
+            verdict = (f"⚠️ **Some repeats found** across {msgs} messages "
+                       f"(~{_fmt(est_dupe_rows)} suspect row(s)). Could be genuine repeat sales — "
+                       f"check the fingerprint list below.")
+
+        head = market_id or "ALL markets"
+        body = [
+            f"🐝 **Hive-feed audit — {head}**",
+            f"Rows recorded **{_fmt(rows_total)}** · feed messages **{_fmt(msgs)}** · "
+            f"paid rows **{_fmt(paid_rows)}** · fullest single message **{_fmt(full_lines)}** lines",
+            f"Recorded harvest value **{_fmt(val_total)}** coins",
+            "",
+            verdict,
+        ]
+        if dist:
+            body.append("")
+            body.append("**Lines per message** (few big messages = safe; many messages = re-posted):")
+            body.append(" · ".join(f"`{d['lines']}`×{d['n']}msg" for d in dist))
+        if fp:
+            body.append("")
+            body.append("**Same sale under multiple messages** (the double-count fingerprint):")
+            for r in fp:
+                body.append(f"• `{r['ign']}` {r['qty']}×{r['item']} — in **{r['msgs']}** messages "
+                            f"({r['rows']} rows)")
+        note = ("\n\n_Estimate assumes the feed re-posts a cumulative list; if you `/csn clear` "
+                "between exports it may over-state duplicates. Cross-check with the message shape above._")
+        await interaction.response.send_message(("\n".join(body) + note)[:1990], ephemeral=True)
 
 
 async def setup(bot):

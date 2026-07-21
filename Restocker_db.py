@@ -665,6 +665,60 @@ CREATE TABLE IF NOT EXISTS market_item_targets (
     PRIMARY KEY (market_id, item)
 );
 CREATE INDEX IF NOT EXISTS idx_mit_market ON market_item_targets(market_id);
+
+-- ── Land Exchange (Restocker Land Exchange — real-estate listings/auctions) ──
+-- A listing is a plot of land up for sale, either fixed-price ("buy_now") or a
+-- timed auction with a live current_bid/current_bidder. Escrow is NOT a separate
+-- ledger here: a bidder's coins are actually deducted (core.deduct_coins) the
+-- moment their bid is accepted and refunded (core.add_coins) the moment they're
+-- outbid or the listing is cancelled/expired — the bidder's own `balances` row
+-- IS the hold. See cogs/land_exchange.py.
+CREATE TABLE IF NOT EXISTS land_listings (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    seller_id           TEXT NOT NULL,
+    kind                TEXT NOT NULL DEFAULT 'item',  -- 'land' or 'item' (drives fields shown)
+    title               TEXT,               -- the listing name (item name or land name)
+    category            TEXT,               -- optional free-text tag (Tools / Books / Land Claims…)
+    photos              TEXT,               -- JSON list of image URLs (dragged-in attachments)
+    market_id           TEXT,               -- optional: company this plot backs on sale (land)
+    land                TEXT,               -- optional: ties to land_ledger/land_balances
+    chunks              REAL NOT NULL DEFAULT 0,
+    coords              TEXT,               -- optional — seller's choice to disclose
+    description         TEXT,
+    image_url           TEXT,               -- optional listing image (land sells on looks)
+    winner_message      TEXT,               -- seller's handover note, DM'd to the winner on close
+    mode                TEXT NOT NULL DEFAULT 'auction',  -- 'fixed' or 'auction'
+    quality             TEXT NOT NULL DEFAULT 'raw',
+    reserve             REAL NOT NULL DEFAULT 0,   -- AI-valued or seller-set starting/reserve price
+    buy_now             REAL,               -- instant-buy price (required for 'fixed')
+    current_bid         REAL,
+    current_bidder      TEXT,
+    min_increment_pct   REAL NOT NULL DEFAULT 5.0,
+    commission_pct      REAL NOT NULL DEFAULT 5.0,
+    listing_fee         REAL NOT NULL DEFAULT 0,
+    starts_at           TEXT NOT NULL DEFAULT (datetime('now')),
+    ends_at             TEXT,               -- NULL for fixed-price (no expiry)
+    anti_snipe_minutes  INTEGER NOT NULL DEFAULT 5,
+    status              TEXT NOT NULL DEFAULT 'active',  -- active / sold / cancelled / expired
+    channel_id          TEXT,
+    message_id          TEXT,
+    sold_price          REAL,
+    sold_to             TEXT,
+    created_at          TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at          TEXT NOT NULL DEFAULT (datetime('now')),
+    closed_at           TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_land_listings_status ON land_listings(status);
+CREATE INDEX IF NOT EXISTS idx_land_listings_seller ON land_listings(seller_id);
+
+CREATE TABLE IF NOT EXISTS land_bids (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    listing_id  INTEGER NOT NULL,
+    bidder_id   TEXT NOT NULL,
+    amount      REAL NOT NULL,
+    ts          TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_land_bids_listing ON land_bids(listing_id);
 """
 
 
@@ -705,6 +759,16 @@ def _migrate(conn: sqlite3.Connection) -> None:
         "ALTER TABLE investors ADD COLUMN pref_shares REAL NOT NULL DEFAULT 0",
         "ALTER TABLE investors ADD COLUMN share_pct REAL NOT NULL DEFAULT 0",
         "ALTER TABLE investors ADD COLUMN total_received REAL NOT NULL DEFAULT 0",
+        # Land Exchange: listing image + seller's winner-handover message (added after
+        # the table shipped, so ALTER for any DB that already created land_listings).
+        "ALTER TABLE land_listings ADD COLUMN image_url TEXT",
+        "ALTER TABLE land_listings ADD COLUMN winner_message TEXT",
+        # Auction House generalisation: the exchange now sells items too, one command
+        # (/sell) with dragged-in photos. kind/title/category/photos added after ship.
+        "ALTER TABLE land_listings ADD COLUMN kind TEXT NOT NULL DEFAULT 'item'",
+        "ALTER TABLE land_listings ADD COLUMN title TEXT",
+        "ALTER TABLE land_listings ADD COLUMN category TEXT",
+        "ALTER TABLE land_listings ADD COLUMN photos TEXT",
     ]
     for sql in migrations:
         try:
@@ -2746,6 +2810,100 @@ def get_land_fees(land: str) -> dict:
 def get_all_land_fees() -> list[dict]:
     with db() as conn:
         rows = conn.execute("SELECT land, month, fees FROM land_fees").fetchall()
+        return [dict(r) for r in rows]
+
+
+# ── Land Exchange (listings/auctions) ────────────────────────────────────────
+_LAND_LISTING_FIELDS = (
+    "seller_id", "kind", "title", "category", "photos",
+    "market_id", "land", "chunks", "coords", "description",
+    "image_url", "winner_message", "mode",
+    "quality", "reserve", "buy_now", "current_bid", "current_bidder",
+    "min_increment_pct", "commission_pct", "listing_fee", "starts_at", "ends_at",
+    "anti_snipe_minutes", "status", "channel_id", "message_id", "sold_price",
+    "sold_to", "closed_at",
+)
+
+
+def create_land_listing(**kwargs) -> int:
+    """Insert a new listing. Recognised kwargs are any column in _LAND_LISTING_FIELDS
+    (unset ones take the schema default). Returns the new listing's id."""
+    cols = [k for k in kwargs if k in _LAND_LISTING_FIELDS]
+    with db() as conn:
+        cur = conn.execute(
+            f"INSERT INTO land_listings ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
+            [kwargs[k] for k in cols],
+        )
+        return int(cur.lastrowid)
+
+
+def get_land_listing(listing_id: int) -> Optional[dict]:
+    with db() as conn:
+        row = conn.execute("SELECT * FROM land_listings WHERE id=?", (int(listing_id),)).fetchone()
+        return dict(row) if row else None
+
+
+def update_land_listing(listing_id: int, **kwargs) -> None:
+    """Partial update — only columns passed are touched. Always bumps updated_at."""
+    cols = [k for k in kwargs if k in _LAND_LISTING_FIELDS]
+    if not cols:
+        return
+    set_clause = ", ".join(f"{c}=?" for c in cols) + ", updated_at=datetime('now')"
+    with db() as conn:
+        conn.execute(
+            f"UPDATE land_listings SET {set_clause} WHERE id=?",
+            [kwargs[k] for k in cols] + [int(listing_id)],
+        )
+
+
+def get_active_land_listings(mode: str = None) -> list[dict]:
+    with db() as conn:
+        if mode:
+            rows = conn.execute(
+                "SELECT * FROM land_listings WHERE status='active' AND mode=? ORDER BY "
+                "(ends_at IS NULL), ends_at ASC, created_at DESC", (mode,)).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM land_listings WHERE status='active' ORDER BY "
+                "(ends_at IS NULL), ends_at ASC, created_at DESC").fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_land_listings_by_seller(seller_id: str, include_closed: bool = True) -> list[dict]:
+    with db() as conn:
+        if include_closed:
+            rows = conn.execute(
+                "SELECT * FROM land_listings WHERE seller_id=? ORDER BY created_at DESC",
+                (str(seller_id),)).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM land_listings WHERE seller_id=? AND status='active' "
+                "ORDER BY created_at DESC", (str(seller_id),)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_expired_active_listings() -> list[dict]:
+    """Active auctions whose ends_at has passed — due for automatic settlement."""
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM land_listings WHERE status='active' AND ends_at IS NOT NULL "
+            "AND ends_at <= datetime('now')").fetchall()
+        return [dict(r) for r in rows]
+
+
+def add_land_bid(listing_id: int, bidder_id: str, amount: float) -> int:
+    with db() as conn:
+        cur = conn.execute(
+            "INSERT INTO land_bids (listing_id, bidder_id, amount) VALUES (?,?,?)",
+            (int(listing_id), str(bidder_id), float(amount)))
+        return int(cur.lastrowid)
+
+
+def get_land_bids(listing_id: int, limit: int = 20) -> list[dict]:
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM land_bids WHERE listing_id=? ORDER BY ts DESC LIMIT ?",
+            (int(listing_id), limit)).fetchall()
         return [dict(r) for r in rows]
 
 

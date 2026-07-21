@@ -3358,6 +3358,66 @@ def _public_markets(markets: dict) -> dict:
     return out
 
 
+# ── inventory categories (auto-classified by item name; display-only, non-destructive) ──
+# Groups the flat shop list into Minecraft-native buckets on the Inventory page. This does
+# NOT touch items.category (the shop catalog's armor/tools/swords tags) — it's computed on
+# the fly from the display name. First-match-wins; ORDER MATTERS for overlaps
+# (redstone lamp→Redstone, nether wart→Farm, soul sand→Nether).
+_INV_CAT_ORDER = [
+    "Wood & Logs", "Ores & Minerals", "Redstone", "Concrete & Clay",
+    "Nether", "End", "Ice & Snow", "Farm & Food", "Dyes & Wool",
+    "Mob Drops", "Glass & Light", "Nature", "Building", "Other",
+]
+_INV_CAT_RULES = [
+    ("Redstone", ["redstone", "repeater", "comparator", "piston", "observer",
+                  "hopper", "dispenser", "dropper", "rail", "tripwire",
+                  "daylight", "note block", "lever", "activator", "sculk sensor"]),
+    ("Concrete & Clay", ["concrete", "terracotta", "glazed", "clay",
+                         "mud brick", "packed mud"]),
+    ("Farm & Food", ["wheat", "carrot", "potato", "beetroot", "melon", "pumpkin",
+                     "apple", "bread", "seed", "sugar", "cocoa", "wart", "kelp",
+                     "berry", "berries", "honey", "honeycomb", "egg", "milk",
+                     "beef", "porkchop", "mutton", "chicken", "rabbit", "cod",
+                     "salmon", "fish", "bamboo", "cactus", "hay", "cookie",
+                     "carved pumpkin", "stew"]),
+    ("Ores & Minerals", ["ingot", "ore", "raw iron", "raw copper", "raw gold",
+                         "nugget", "coal", "charcoal", "lapis", "diamond",
+                         "emerald", "netherite", "scrap", "amethyst",
+                         "copper block", "iron block", "gold block",
+                         "block of copper", "block of iron", "block of gold"]),
+    ("Wood & Logs", ["log", "planks", "stem", "hyphae", "stripped", "wood"]),
+    ("Ice & Snow", ["ice", "snow"]),
+    ("Dyes & Wool", ["dye", "wool", "carpet", " bed", "banner"]),
+    ("End", ["end stone", "ender", "chorus", "purpur", "shulker", "dragon",
+             "elytra", "end rod"]),
+    ("Nether", ["nether", "soul", "blaze", "ghast", "wither", "crimson",
+                "warped", "magma", "glowstone", "shroomlight", "quartz",
+                "blackstone", "basalt", "gilded"]),
+    ("Mob Drops", ["bone", "string", "spider eye", "gunpowder", "slime",
+                   "rotten flesh", "leather", "feather", "phantom", "ink sac",
+                   "scute", "prismarine shard", "nautilus", "arrow", "pearl"]),
+    ("Glass & Light", ["glass", "lantern", "torch", "candle", "lamp",
+                       "campfire", "sea pickle"]),
+    ("Nature", ["sapling", "flower", "leaves", "vine", "moss", "grass", "dirt",
+                "sand", "gravel", "podzol", "mycelium", "mud", "root", "lily",
+                "coral", "sponge", "mushroom", "fern", "azalea", "dripleaf",
+                "spore", "lichen", "rose", "tulip", "petal"]),
+    ("Building", ["stone", "cobble", "brick", "deepslate", "granite", "diorite",
+                  "andesite", "tuff", "calcite", "sandstone", "prismarine",
+                  "smooth", "polished", "chiseled", "slab", "stair", "wall",
+                  "pillar", "tile", "mossy", "cut "]),
+]
+
+
+def _item_category(name: str) -> str:
+    n = (name or "").lower()
+    for cat, kws in _INV_CAT_RULES:
+        for kw in kws:
+            if kw in n:
+                return cat
+    return "Other"
+
+
 def _load_inventory_data() -> dict:
     """Per-market barrel fullness for the Inventory tab. Merges the live barrel scan
     (stock + capacity + listed price) with the catalog, so EVERY market shows up — not just
@@ -3436,7 +3496,8 @@ def _load_inventory_data() -> dict:
                     disp = it
             disp = disp or it
             items.append({"item": disp, "stock": cur, "capacity": cap,
-                          "pct": round(pct, 1), "owner": r.get("owner") or "", "price": price})
+                          "pct": round(pct, 1), "owner": r.get("owner") or "", "price": price,
+                          "cat": _item_category(disp or it)})
         items.sort(key=lambda x: x["pct"])
         low = sum(1 for x in items if x["capacity"] > 0 and x["pct"] <= 20.0)
         out.append({"market_id": mid, "name": names.get(mid, mid),
@@ -3936,11 +3997,18 @@ table.inv tr:hover td{background:var(--hover)}
 .pct{font-family:var(--mono);font-size:11px;width:38px;text-align:right}
 .empty{padding:40px;text-align:center;color:var(--faint);font-size:12px}
 .msg{font-size:11px;color:var(--muted);font-family:var(--mono)}
+.catbar{overflow-x:auto}
+table.inv tr.grp td{background:var(--panel);color:var(--faint);font-family:var(--sans);font-size:10px;
+letter-spacing:.6px;text-transform:uppercase;font-weight:700;height:26px;text-align:left;
+border-bottom:1px solid var(--line2);border-top:1px solid var(--line)}
+table.inv tr.grp:hover td{background:var(--panel)}
+table.inv tr.grp td .gcount{color:var(--accent);margin-left:6px;font-family:var(--mono)}
 </style></head><body>
 __NAV__
 <div class="content">
 <div class="bar" id="chips"></div>
 <div class="statrow" id="stats"></div>
+<div class="bar catbar" id="catchips"></div>
 <div class="bar">
   <button class="gen" id="gen" style="display:none">Generate restock orders → 80%</button>
   <span class="msg" id="genmsg"></span>
@@ -3959,11 +4027,28 @@ const INV=__INVENTORY_JSON__;
 const fmt=n=>Math.round(n||0).toLocaleString('en-US').replace(/,/g,' ');
 const esc=s=>String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;');
 const DATA=(INV&&INV.markets)||[];
-let act=0,sortK='pct',dir=1;
+const CATORDER=["Wood & Logs","Ores & Minerals","Redstone","Concrete & Clay","Nether","End","Ice & Snow","Farm & Food","Dyes & Wool","Mob Drops","Glass & Light","Nature","Building","Other"];
+let act=0,sortK='pct',dir=1,catAct='All';
 const col=p=>p<=20?'var(--down)':(p<60?'var(--amber)':'var(--up)');
+const catsIn=items=>{const c={};items.forEach(x=>{const k=x.cat||'Other';c[k]=(c[k]||0)+1;});
+ const present=CATORDER.filter(k=>c[k]);
+ const extra=Object.keys(c).filter(k=>!CATORDER.includes(k)).sort();
+ return {order:[...present,...extra],counts:c};};
 function chips(){document.getElementById('chips').innerHTML=DATA.map((m,i)=>
  '<div class="chip'+(i===act?' on':'')+'" data-i="'+i+'">'+esc(m.name||m.market_id)+' · '+m.count+'</div>').join('');
- document.querySelectorAll('.chip').forEach(c=>c.onclick=()=>{act=+c.dataset.i;chips();render();});}
+ document.querySelectorAll('#chips .chip').forEach(c=>c.onclick=()=>{act=+c.dataset.i;catAct='All';chips();catchips();render();});}
+function catchips(){
+ const mk=DATA[act]||{};const items=mk.items||[];const {order,counts}=catsIn(items);
+ const cats=['All',...order];
+ document.getElementById('catchips').innerHTML=cats.map(c=>
+  '<div class="chip'+(c===catAct?' on':'')+'" data-c="'+esc(c)+'">'+esc(c)+' · '+(c==='All'?items.length:counts[c])+'</div>').join('');
+ document.querySelectorAll('#catchips .chip').forEach(el=>el.onclick=()=>{catAct=el.dataset.c;catchips();render();});}
+function rowHTML(x){const p=Math.max(0,Math.min(100,x.pct||0));
+ return '<tr'+(((x.stock||0)<=0)?' class="zero"':'')+'><td>'+esc(x.item)+'</td>'+
+  '<td class="num"><div class="fillcell"><div class="fillbar"><i style="width:'+p+'%;background:'+col(p)+'"></i></div>'+
+  '<span class="pct" style="color:'+col(p)+'">'+Math.round(p)+'%</span></div></td>'+
+  '<td class="num">'+fmt(x.stock)+'</td><td class="num">'+fmt(x.capacity)+'</td>'+
+  '<td class="num">'+(x.price>0?(x.price<1?x.price.toFixed(2):fmt(x.price)):'—')+'</td></tr>';}
 function render(){
  const mk=DATA[act]||{};const items=mk.items||[];
  const gen=document.getElementById('gen');
@@ -3978,16 +4063,18 @@ function render(){
   '<div class="stat"><div class="k">'+s[0]+'</div><div class="v" '+s[2]+'>'+s[1]+'</div></div>').join('');
  const q=(document.getElementById('q').value||'').toLowerCase();
  let rows=items.filter(x=>(x.item||'').toLowerCase().includes(q));
+ if(catAct!=='All')rows=rows.filter(x=>(x.cat||'Other')===catAct);
  rows.sort((a,b)=>{let x=a[sortK],y=b[sortK];
   if(typeof x==='string')return x.localeCompare(y)*dir;return ((x||0)-(y||0))*dir;});
  document.getElementById('empty').style.display=(DATA.length&&items.length)?'none':'';
- document.getElementById('tb').innerHTML=rows.map(x=>{
-  const p=Math.max(0,Math.min(100,x.pct||0));
-  return '<tr'+(((x.stock||0)<=0)?' class="zero"':'')+'><td>'+esc(x.item)+'</td>'+
-  '<td class="num"><div class="fillcell"><div class="fillbar"><i style="width:'+p+'%;background:'+col(p)+'"></i></div>'+
-  '<span class="pct" style="color:'+col(p)+'">'+Math.round(p)+'%</span></div></td>'+
-  '<td class="num">'+fmt(x.stock)+'</td><td class="num">'+fmt(x.capacity)+'</td>'+
-  '<td class="num">'+(x.price>0?(x.price<1?x.price.toFixed(2):fmt(x.price)):'—')+'</td></tr>';}).join('')
+ let html='';
+ if(catAct==='All'){
+  const {order}=catsIn(rows);
+  for(const c of order){const grp=rows.filter(x=>(x.cat||'Other')===c);if(!grp.length)continue;
+   html+='<tr class="grp"><td colspan="5">'+esc(c)+'<span class="gcount">'+grp.length+'</span></td></tr>';
+   html+=grp.map(rowHTML).join('');}
+ }else{html=rows.map(rowHTML).join('');}
+ document.getElementById('tb').innerHTML=html
   ||'<tr><td colspan="5" class="faint" style="height:34px">No items match.</td></tr>';}
 document.getElementById('q').oninput=render;
 document.querySelectorAll('th[data-k]').forEach(th=>th.onclick=()=>{
@@ -4002,8 +4089,8 @@ document.getElementById('gen').onclick=async()=>{
   body:JSON.stringify({market_id:mid})});
   const d=await r.json();msg.textContent=d.ok?('created '+(d.created??'?')+' order(s)'):(d.error||'failed');}
  catch(e){msg.textContent='failed';}};
-window.addEventListener('load',()=>{setTimeout(()=>{chips();render();},60);});
-setTimeout(()=>{chips();render();},400);
+window.addEventListener('load',()=>{setTimeout(()=>{chips();catchips();render();},60);});
+setTimeout(()=>{chips();catchips();render();},400);
 </script></body></html>"""
 
 
@@ -5338,6 +5425,193 @@ async def _handle_network_claim(request):
     return web.json_response(res)
 
 
+# ── Land Exchange network API (the "V Tech Lands & Auctions" satellite) ──────────
+async def _handle_network_land_listings(request):
+    """Satellite pulls the current active land listings to render as a board."""
+    if not _network_secret_ok(request):
+        return web.json_response({"ok": False, "error": "unauthorized"}, status=401)
+    import Restocker_main as _m
+    try:
+        listings = _m._network_land_listings()
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=500)
+    return web.json_response({"ok": True, "listings": listings})
+
+
+def _land_body_fields(body):
+    try:
+        lid = int(body.get("listing_id") or 0)
+    except (TypeError, ValueError):
+        lid = 0
+    uid   = str(body.get("bidder_id") or body.get("buyer_id") or "").strip()
+    uname = str(body.get("bidder_name") or body.get("buyer_name") or "member").strip()[:64]
+    gid   = str(body.get("source_guild_id") or "").strip()
+    return lid, uid, uname, gid
+
+
+async def _handle_network_land_bid(request):
+    """Satellite relays a bid placed in a partner server. Escrow runs on the bot loop."""
+    if not _network_secret_ok(request):
+        return web.json_response({"ok": False, "error": "unauthorized"}, status=401)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    lid, uid, uname, gid = _land_body_fields(body)
+    try:
+        amount = float(body.get("amount")) if body.get("amount") not in (None, "") else None
+    except (TypeError, ValueError):
+        amount = None
+    if not lid or not uid:
+        return web.json_response({"ok": False, "error": "listing_id and bidder_id are required"})
+
+    import Restocker_main as _m
+    try:
+        res = await _m.run_on_bot_loop(_m._record_network_land_bid, lid, uid, uname, gid, amount)
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    if res.get("ok"):
+        try:
+            loop = getattr(_m, "_BOT_LOOP", None)
+            if loop is not None:
+                import asyncio as _a
+                note = (f"💰 Network bid on **#{lid}**: `{int(res.get('amount') or 0):,}` 🪙 "
+                        f"from `{uname}`" + (" · ⏱️ anti-snipe extended" if res.get("anti_snipe_extended") else ""))
+                _a.run_coroutine_threadsafe(_m._notify_network_land(lid, note, res), loop)
+        except Exception as e:
+            print(f"⚠️ network land bid notify failed: {e}")
+    return web.json_response(res)
+
+
+async def _handle_network_land_buy(request):
+    """Satellite relays an instant-buy placed in a partner server."""
+    if not _network_secret_ok(request):
+        return web.json_response({"ok": False, "error": "unauthorized"}, status=401)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    lid, uid, uname, gid = _land_body_fields(body)
+    if not lid or not uid:
+        return web.json_response({"ok": False, "error": "listing_id and buyer_id are required"})
+
+    import Restocker_main as _m
+    try:
+        res = await _m.run_on_bot_loop(_m._record_network_land_buy, lid, uid, uname, gid)
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    if res.get("ok"):
+        try:
+            loop = getattr(_m, "_BOT_LOOP", None)
+            if loop is not None:
+                import asyncio as _a
+                note = f"🏡 **#{lid}** bought via the network by `{uname}` for `{int(res.get('price') or 0):,}` 🪙."
+                _a.run_coroutine_threadsafe(_m._notify_network_land(lid, note, res), loop)
+        except Exception as e:
+            print(f"⚠️ network land buy notify failed: {e}")
+    return web.json_response(res)
+
+
+async def _handle_network_land_create(request):
+    """Satellite's /sell — create a listing. Writes run on the bot loop."""
+    if not _network_secret_ok(request):
+        return web.json_response({"ok": False, "error": "unauthorized"}, status=401)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    seller = str(body.get("seller_id") or "").strip()
+    gid = str(body.get("source_guild_id") or "").strip()
+    if not seller or not (body.get("title") and body.get("starting_price") is not None):
+        return web.json_response({"ok": False, "error": "seller_id, title and starting_price are required"})
+    import Restocker_main as _m
+    try:
+        res = await _m.run_on_bot_loop(_m._record_network_land_create, seller, gid, body)
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=500)
+    return web.json_response(res)
+
+
+async def _handle_network_land_cancel(request):
+    """Satellite's /cancel — seller/manager cancels a bid-free listing."""
+    if not _network_secret_ok(request):
+        return web.json_response({"ok": False, "error": "unauthorized"}, status=401)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    lid, uid, uname, gid = _land_body_fields(body)
+    is_mgr = bool(body.get("is_manager"))
+    if not lid or not uid:
+        return web.json_response({"ok": False, "error": "listing_id and requester_id are required"})
+    import Restocker_main as _m
+    try:
+        res = await _m.run_on_bot_loop(_m._record_network_land_cancel, lid, uid, is_mgr)
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=500)
+    if res.get("ok"):
+        try:
+            loop = getattr(_m, "_BOT_LOOP", None)
+            if loop is not None:
+                import asyncio as _a
+                _a.run_coroutine_threadsafe(
+                    _m._notify_network_land(lid, f"🚫 Listing **#{lid}** cancelled."), loop)
+        except Exception:
+            pass
+    return web.json_response(res)
+
+
+async def _handle_network_land_close(request):
+    """Satellite's manager /close — force-settle or refund. Deal room opens via notify."""
+    if not _network_secret_ok(request):
+        return web.json_response({"ok": False, "error": "unauthorized"}, status=401)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    try:
+        lid = int(body.get("listing_id") or 0)
+    except (TypeError, ValueError):
+        lid = 0
+    refund = bool(body.get("refund_bidder"))
+    if not lid:
+        return web.json_response({"ok": False, "error": "listing_id is required"})
+    import Restocker_main as _m
+    try:
+        res = await _m.run_on_bot_loop(_m._record_network_land_close, lid, refund)
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=500)
+    if res.get("ok"):
+        try:
+            loop = getattr(_m, "_BOT_LOOP", None)
+            if loop is not None:
+                import asyncio as _a
+                note = f"🔨 Listing **#{lid}** closed by a manager ({res.get('outcome')})."
+                _a.run_coroutine_threadsafe(_m._notify_network_land(lid, note, res), loop)
+        except Exception:
+            pass
+    return web.json_response(res)
+
+
+async def _handle_network_land_config(request):
+    """Satellite's manager /config — GET current knobs (empty body) or set them."""
+    if not _network_secret_ok(request):
+        return web.json_response({"ok": False, "error": "unauthorized"}, status=401)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    updates = body.get("updates") if isinstance(body.get("updates"), dict) else None
+    import Restocker_main as _m
+    try:
+        cfg = await _m.run_on_bot_loop(_m._network_land_config, updates)
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=500)
+    return web.json_response({"ok": True, "config": cfg})
+
+
 def start_webserver_thread(port: int = 8080):
     """Run the aiohttp server in its OWN OS thread + event loop so dashboard
     traffic can't stall the Discord bot's gateway loop. State-mutating endpoints
@@ -5421,6 +5695,13 @@ async def start_webserver(port: int = 8080):
     app.router.add_post("/api/order",    _handle_api_order)
     app.router.add_get("/api/network/orders", _handle_network_orders)
     app.router.add_post("/api/network/claim", _handle_network_claim)
+    app.router.add_get("/api/network/land/listings", _handle_network_land_listings)
+    app.router.add_post("/api/network/land/bid", _handle_network_land_bid)
+    app.router.add_post("/api/network/land/buy", _handle_network_land_buy)
+    app.router.add_post("/api/network/land/create", _handle_network_land_create)
+    app.router.add_post("/api/network/land/cancel", _handle_network_land_cancel)
+    app.router.add_post("/api/network/land/close", _handle_network_land_close)
+    app.router.add_post("/api/network/land/config", _handle_network_land_config)
     app.router.add_get("/report/{market}/{month}", _handle_report)
     app.router.add_get("/report/{market}",         _handle_report)
     app.router.add_get("/shares/{market}",         _handle_shares)
