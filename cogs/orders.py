@@ -259,9 +259,81 @@ class _StockRefillConfirmView(discord.ui.View):
         self.stop()
 
 
+_PAYOUT_REQ_RE = _re.compile(r"Requester:\s*<@!?(\d+)>")
+
+
+def _earnings_rundown(user_id, max_lines: int = 12) -> str:
+    # What a user actually DID to earn their coins — DISTINCT approved orders (deduped, since the
+    # perf log can double-log a re-approval), each with item, qty, WHO approved it, and WHEN. Falls
+    # back to raw order claims (flagged) when nothing was approved. Posted under the withdrawal card.
+    try:
+        import Restocker_db as _db
+    except Exception:
+        return ""
+    uid = str(user_id)
+    lines = []
+    try:
+        with _db.db() as conn:
+            rows = conn.execute(
+                "SELECT detail, MAX(manager_id) mgr, MIN(created_at) first "
+                "FROM team_perf_log WHERE worker_id = ? AND kind = 'order' "
+                "GROUP BY detail ORDER BY first", (uid,)).fetchall()
+            for r in rows[:max_lines]:
+                det = str(r["detail"] or "")
+                item, qty = "", 0
+                if det.lower().startswith("order#"):
+                    try:
+                        o = conn.execute(
+                            "SELECT item, COALESCE(requested, amount, 0) q FROM orders WHERE id = ?",
+                            (int(det.split("#", 1)[1]),)).fetchone()
+                        if o:
+                            item = str(o["item"] or "")
+                            qty = int(o["q"] or 0)
+                    except Exception:
+                        pass
+                nm = item[:46] if item else det
+                q = f"{qty}× " if qty else ""
+                lines.append(f"• {det} · {q}{nm} · approved by <@{r['mgr']}> · {str(r['first'])[:10]}")
+            if not rows:
+                cr = conn.execute(
+                    "SELECT o.item item, COUNT(DISTINCT oc.order_id) n, SUM(oc.qty) q "
+                    "FROM order_claims oc JOIN orders o ON o.id = oc.order_id WHERE oc.user_id = ? "
+                    "GROUP BY o.item ORDER BY q DESC", (uid,)).fetchall()
+                for r in cr[:max_lines]:
+                    lines.append(f"• {int(r['q'] or 0)}× {r['item']} ({r['n']} order) — ⚠ no approval logged")
+    except Exception:
+        return ""
+    if not lines:
+        return ""
+    return "\U0001f4cb **Work rundown** — what they did to earn this:\n" + "\n".join(lines)
+
+
 class OrdersCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+
+    @commands.Cog.listener("on_message")
+    async def _payout_rundown_listener(self, message):
+        # Reply with a work rundown under the bot's own "Coins Withdrawal Request" card so a
+        # manager can see what the requester actually did before approving. In a loaded cog, so
+        # it needs zero edits to Restocker_main.
+        try:
+            if not self.bot.user or getattr(message.author, "id", 0) != self.bot.user.id:
+                return
+            content = message.content or ""
+            if "Coins Withdrawal Request" not in content:
+                return
+            mt = _PAYOUT_REQ_RE.search(content)
+            if not mt:
+                return
+            rundown = _earnings_rundown(mt.group(1))
+            if rundown:
+                await message.channel.send(rundown[:1990], allowed_mentions=discord.AllowedMentions.none())
+        except Exception as _e:
+            try:
+                core.log.warning("[payout_rundown] %s", _e)
+            except Exception:
+                pass
 
     @app_commands.command(name="orders", description="Show open production requests")
     async def orders(self, interaction: discord.Interaction):

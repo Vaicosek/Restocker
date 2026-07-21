@@ -999,5 +999,50 @@ class AdminCog(commands.Cog):
         await interaction.response.send_message(("\n".join(body) + note)[:1990], ephemeral=True)
 
 
+    @admin.command(
+        name="dedupe_perflog",
+        description="(Managers) Remove duplicate team-performance rows (re-logged orders inflating stats)")
+    @app_commands.describe(confirm="Set true to actually delete the duplicates (default: preview only)")
+    async def dedupe_perflog(self, interaction: discord.Interaction, confirm: bool = False):
+        if not is_manager(interaction):
+            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
+        import Restocker_db as _db
+        try:
+            with _db.db() as conn:
+                groups = conn.execute(
+                    "SELECT worker_id, kind, detail, COUNT(*) n, MIN(id) keep_id "
+                    "FROM team_perf_log GROUP BY worker_id, kind, detail HAVING n > 1 "
+                    "ORDER BY n DESC").fetchall()
+                if not groups:
+                    return await interaction.response.send_message(
+                        "✅ No duplicate performance-log rows — nothing to clean.", ephemeral=True)
+                extra = sum(int(g["n"]) - 1 for g in groups)
+                lines = [f"• `{g['detail']}` ({g['kind']}) — {int(g['n'])} rows, remove {int(g['n'])-1}"
+                         for g in groups[:15]]
+                preview = ("🧹 **Perf-log dedupe**\n"
+                           f"{len(groups)} duplicated group(s), **{extra}** row(s) to remove — keeping the "
+                           f"earliest of each (which matches the actual coin payment; coins paid are NOT touched):\n"
+                           + "\n".join(lines))
+                if not confirm:
+                    return await interaction.response.send_message(
+                        preview[:1900] + "\n\n*Preview only — re-run with `confirm:True` to delete these.*",
+                        ephemeral=True)
+                removed = 0
+                for g in groups:
+                    cur = conn.execute(
+                        "DELETE FROM team_perf_log WHERE worker_id IS ? AND kind IS ? AND detail IS ? AND id <> ?",
+                        (g["worker_id"], g["kind"], g["detail"], g["keep_id"]))
+                    removed += cur.rowcount
+                await interaction.response.send_message(
+                    f"✅ Removed **{removed}** duplicate perf-log row(s) across {len(groups)} group(s). "
+                    f"Coins already paid are unaffected — this only fixes inflated worker/manager stats.",
+                    ephemeral=True)
+        except Exception as e:
+            try:
+                await interaction.response.send_message(f"⚠️ Failed: `{type(e).__name__}: {e}`", ephemeral=True)
+            except Exception:
+                pass
+
+
 async def setup(bot):
     await bot.add_cog(AdminCog(bot))
