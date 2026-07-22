@@ -291,6 +291,105 @@ class MiscCog(commands.Cog):
             ephemeral=True,
         )
 
+    @app_commands.command(
+        name="edit_dm",
+        description="(Managers) Edit a previously sent DM by message ID",
+    )
+    @app_commands.describe(
+        user_id="The Discord user ID whose DM channel contains the message",
+        message_id="The ID of the DM message to edit",
+        new_content="The new content to replace the message with",
+    )
+    @app_commands.checks.has_any_role(MANAGER_ROLE_NAME)
+    @app_commands.default_permissions(manage_guild=True)
+    async def edit_dm_cmd(
+        self,
+        interaction: discord.Interaction,
+        user_id: str,
+        message_id: str,
+        new_content: str,
+    ):
+        await interaction.response.defer(ephemeral=True)
+
+        # Validate and parse IDs
+        try:
+            uid = int(user_id.strip())
+        except ValueError:
+            return await interaction.followup.send(
+                "❌ `user_id` must be a numeric Discord user ID.", ephemeral=True
+            )
+
+        try:
+            mid = int(message_id.strip())
+        except ValueError:
+            return await interaction.followup.send(
+                "❌ `message_id` must be a numeric Discord message ID.", ephemeral=True
+            )
+
+        # Fetch the user
+        try:
+            user = await self.bot.fetch_user(uid)
+        except discord.NotFound:
+            return await interaction.followup.send(
+                f"❌ No user found with ID `{uid}`.", ephemeral=True
+            )
+        except discord.HTTPException as e:
+            return await interaction.followup.send(
+                f"❌ Failed to fetch user: {e}", ephemeral=True
+            )
+
+        # Open / retrieve the DM channel
+        try:
+            dm_channel = user.dm_channel or await user.create_dm()
+        except discord.Forbidden:
+            return await interaction.followup.send(
+                f"❌ Cannot open a DM channel with {user} (DMs may be closed).", ephemeral=True
+            )
+        except discord.HTTPException as e:
+            return await interaction.followup.send(
+                f"❌ Failed to create DM channel: {e}", ephemeral=True
+            )
+
+        # Fetch the specific message
+        try:
+            message = await dm_channel.fetch_message(mid)
+        except discord.NotFound:
+            return await interaction.followup.send(
+                f"❌ Message `{mid}` not found in {user}'s DM channel.", ephemeral=True
+            )
+        except discord.Forbidden:
+            return await interaction.followup.send(
+                "❌ Missing permission to read that DM channel.", ephemeral=True
+            )
+        except discord.HTTPException as e:
+            return await interaction.followup.send(
+                f"❌ Failed to fetch message: {e}", ephemeral=True
+            )
+
+        # Verify the message was sent by the bot
+        if message.author.id != self.bot.user.id:
+            return await interaction.followup.send(
+                "❌ That message was not sent by this bot — only bot-authored messages can be edited.",
+                ephemeral=True,
+            )
+
+        # Edit the message
+        try:
+            await message.edit(content=new_content)
+        except discord.Forbidden:
+            return await interaction.followup.send(
+                "❌ Missing permission to edit that message.", ephemeral=True
+            )
+        except discord.HTTPException as e:
+            return await interaction.followup.send(
+                f"❌ Failed to edit message: {e}", ephemeral=True
+            )
+
+        await interaction.followup.send(
+            f"✅ Successfully edited message `{mid}` in {user.mention}'s DM channel.",
+            ephemeral=True,
+        )
+
 
 async def setup(bot):
     await bot.add_cog(MiscCog(bot))
