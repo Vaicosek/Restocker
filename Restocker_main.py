@@ -3549,6 +3549,18 @@ async def _record_stock_report(rows: list, market_id: str, report_channel, filen
         log.warning("[stock-alarm] hook failed: %s", _e)
 
 
+# Market value per PIECE of stock that arrives via 0-coin collection shops (workers deposit
+# it free, so CSN records 0 coins, but it is worth its gross market sell price). Combs are
+# sold at 450/64 (Honeycomb Block) and 500/64 (Honey Block). Overridable per item at runtime
+# via the "acq_value:<item>" config key; only items listed here (or given a config rate) are
+# valued — arbitrary 0-coin buys in other markets are NOT touched. Worker harvest pay is a
+# separate expense and is not netted here (values are GROSS market value).
+_ACQ_VALUE_PER_PIECE = {
+    "Honeycomb Block": 450.0 / 64.0,   # 7.03125
+    "Honey Block": 500.0 / 64.0,       # 7.8125
+}
+
+
 async def _process_csn_attachment(attachment: discord.Attachment, report_channel, source_channel_id=None):
     filename = attachment.filename
     try:
@@ -3726,6 +3738,39 @@ async def _process_csn_attachment(attachment: discord.Attachment, report_channel
                 f"Recorded to the `{effective_market_id}` (fallback) market instead of a real one. "
                 f"Create it first with `/market add market_id:{csv_market_id}`, or check for typos."
             )
+
+    # Combs (and any other item we choose to price) arrive via 0-coin collection shops:
+    # workers deposit them free, so CSN records 0 coins, but the STOCK gained is worth its
+    # gross market value. Credit bought_qty x market-rate to profit so that free stock shows
+    # up as income instead of vanishing. SCOPED: only items with a rate (config
+    # "acq_value:<item>" first, else the _ACQ_VALUE_PER_PIECE code defaults) are valued, so
+    # incidental 0-coin buys in other markets are never touched. Only 0-cost buys qualify
+    # (items bought at a real cost already register as 'spent'). Worker harvest pay is a
+    # separate expense — these are GROSS market values, not netted.
+    try:
+        import Restocker_db as _db_acq
+        _acq_total = 0.0
+        for _it, _v in list(items.items()):
+            _bq = int(_v.get("bought_qty", 0) or 0)
+            _nc = float(_v.get("net_coins", 0) or 0)
+            if _bq <= 0 or abs(_nc) >= 1.0:
+                continue
+            try:
+                _ov = float(_db_acq.get_config("acq_value:" + _it) or 0)
+            except Exception:
+                _ov = 0.0
+            _pp = _ov or float(_ACQ_VALUE_PER_PIECE.get(_it, 0.0) or 0.0)
+            if _pp > 0:
+                _val = _bq * _pp
+                _v["net_coins"] = _nc + _val
+                _v["acquired_value"] = round(_val, 2)
+                _acq_total += _val
+        if _acq_total > 0:
+            income = float(income) + _acq_total
+            log.info("[csn] valued %.0f coins of free-deposited stock (combs) as profit for %s",
+                     _acq_total, effective_market_id)
+    except Exception as _e:
+        log.warning("[csn] comb/acquired-stock valuation failed: %s", _e)
 
     _record_to_market_history(effective_market_id, month_key, month_label, filename, income, spent, items)
     if effective_market_id == DEFAULT_MARKET_ID:

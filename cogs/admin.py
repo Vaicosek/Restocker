@@ -131,6 +131,93 @@ class AdminCog(commands.Cog):
 
     admin = app_commands.Group(name="admin", description="(Managers) Destructive maintenance — guarded by confirm", default_permissions=discord.Permissions(manage_guild=True))
 
+    @admin.command(name="value_free_stock",
+                   description="(Managers) Count 0-coin acquired stock (combs / deposits) as profit at market value")
+    @app_commands.describe(market_id="Limit to one market (blank = every market)",
+                           apply="Write the changes (default: dry-run preview only)")
+    @app_commands.autocomplete(market_id=_market_autocomplete)
+    async def value_free_stock(self, interaction: discord.Interaction,
+                               market_id: Optional[str] = None, apply: bool = False):
+        """Back-fill stored CSN months: an item BOUGHT at ~0 coins (worker deposits into
+        0-coin collection shops) is worth its market value, so credit bought_qty x rate to
+        that month's profit. Rate = config 'acq_value:<item>' (e.g. combs) else catalog price.
+        Idempotent (once valued, net_coins != 0 so a re-run skips it). New reports already do
+        this at ingest. Does NOT retroactively pay dividends or charge platform fees."""
+        if not is_manager(interaction):
+            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        import Restocker_db as _db
+        try:
+            mids = [market_id] if market_id else list(_db.csn_all_market_ids())
+        except Exception as e:
+            return await interaction.followup.send(f"❌ Couldn't list markets: {e}", ephemeral=True)
+
+        report_lines = []
+        grand_added = 0.0
+        for mid in mids:
+            def _price(name):
+                # SCOPED to combs / explicitly-priced stock: config "acq_value:<item>" first,
+                # else the code-default _ACQ_VALUE_PER_PIECE map. No generic catalog fallback,
+                # so incidental 0-coin buys of other items are never revalued.
+                try:
+                    ov = float(_db.get_config("acq_value:" + name) or 0)
+                except Exception:
+                    ov = 0.0
+                if ov:
+                    return ov
+                try:
+                    return float(getattr(core, "_ACQ_VALUE_PER_PIECE", {}).get(name, 0.0) or 0.0)
+                except Exception:
+                    return 0.0
+
+            try:
+                data = _db.csn_get_market(mid)
+            except Exception:
+                continue
+            months = (data or {}).get("months", {}) or {}
+            mid_added = 0.0
+            changed = []
+            for mk, md in months.items():
+                if not isinstance(md, dict):
+                    continue
+                m_add = 0.0
+                for it, iv in (md.get("items") or {}).items():
+                    if not isinstance(iv, dict):
+                        continue
+                    bq = int(iv.get("bought_qty", 0) or 0)
+                    nc = float(iv.get("net_coins", 0) or 0)
+                    if bq > 0 and abs(nc) < 1.0:
+                        pp = _price(it)
+                        if pp > 0:
+                            val = bq * pp
+                            iv["net_coins"] = round(val, 2)
+                            m_add += val
+                            changed.append(f"{mk} · {it}: {bq:,}x{pp:g} = +{val:,.0f}")
+                if m_add:
+                    md["income"] = round(float(md.get("income", 0) or 0) + m_add, 2)
+                    md["net"] = round(float(md.get("net", 0) or 0) + m_add, 2)
+                    mid_added += m_add
+            if mid_added:
+                grand_added += mid_added
+                report_lines.append(f"**{mid}** +{mid_added:,.0f}")
+                report_lines.extend(f"  · {c}" for c in changed[:6])
+                if apply:
+                    try:
+                        _db.csn_save_market(mid, data)
+                        _recompute_share_price(mid, reason="value_free_stock")
+                    except Exception as e:
+                        report_lines.append(f"  ⚠️ save failed for {mid}: {e}")
+
+        if grand_added == 0:
+            return await interaction.followup.send(
+                "Nothing to value — no 0-coin acquired stock found (or it's already valued).",
+                ephemeral=True)
+        head = (("✅ **Applied**" if apply else "🔍 **Dry-run** (nothing written)")
+                + f" — total profit added: **{grand_added:,.0f}** coins\n\n")
+        body = "\n".join(report_lines)[:1700]
+        tail = "" if apply else "\n\nRe-run with **apply: True** to write it. New reports do this automatically."
+        await interaction.followup.send(head + body + tail, ephemeral=True)
+
     @admin.command(name="wipe", description="(Managers) Destructive wipe — requires confirm")
     @app_commands.describe(
         target="What to wipe",
