@@ -1,4 +1,5 @@
-"""Loyalty cog — points, tiers, leaderboard, IGN registration + link audit.
+"""
+Loyalty cog — points, tiers, leaderboard, IGN registration + link audit.
 
 First extracted cog (pilot for the module split). Shared helpers/config are bound
 from the running core module via sys.modules, so this works whether the bot is
@@ -190,6 +191,39 @@ class LoyaltyCog(commands.Cog):
             msg = (f"✅ Added alt **{ign}**. You now have **{len(igns)}** in-game names, all "
                    f"pooling into this one account:\n" + ", ".join(f"`{g}`" for g in igns))
         await interaction.response.send_message(msg, ephemeral=True)
+
+    @loyalty.command(name="unlink_ign", description="Remove a previously registered Minecraft IGN from your loyalty account")
+    @app_commands.describe(ign="The Minecraft IGN to remove from your account")
+    async def loyalty_unlink_ign(self, interaction: discord.Interaction, ign: str):
+        import re as _re_ui, Restocker_db as _db_ui
+        ign = ign.strip()
+        if not _re_ui.match(_IGN_RE, ign):
+            return await interaction.response.send_message(
+                "❌ Invalid IGN. Must be 3-16 characters: letters, numbers, underscores.", ephemeral=True)
+        uid = str(interaction.user.id)
+        current = _db_ui.get_igns(uid)
+        if not current:
+            return await interaction.response.send_message(
+                "❌ You have no IGNs registered on your account.", ephemeral=True)
+        if ign not in current:
+            return await interaction.response.send_message(
+                f"❌ `{ign}` is not registered to your account. Your IGNs: "
+                + ", ".join(f"`{g}`" for g in current), ephemeral=True)
+        if _db_ui.remove_ign(uid, ign):
+            remaining = _db_ui.get_igns(uid)
+            if remaining:
+                left_txt = ", ".join(f"`{g}`" for g in remaining)
+                await interaction.response.send_message(
+                    f"🔓 `{ign}` has been unlinked from your account. "
+                    f"Remaining IGN(s): {left_txt}.", ephemeral=True)
+            else:
+                await interaction.response.send_message(
+                    f"🔓 `{ign}` has been unlinked from your account. "
+                    f"You now have no IGNs registered.", ephemeral=True)
+        else:
+            await interaction.response.send_message(
+                f"❌ Something went wrong trying to unlink `{ign}`. Please try again or contact a manager.",
+                ephemeral=True)
 
     @loyalty.command(name="unlinked", description="(Manager) List employees who haven't linked their Minecraft IGN")
     async def loyalty_unlinked(self, interaction: discord.Interaction):
