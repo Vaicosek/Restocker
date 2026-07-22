@@ -702,6 +702,28 @@ class InvestorSyncModal(discord.ui.Modal, title="Sync investors — paste GEX.PR
                                                 allowed_mentions=discord.AllowedMentions.none())
 
 
+class PayoutProofCloseView(discord.ui.View):
+    """Transient close button shown after a payout is marked paid, while the manager
+    uploads the in-game payment screenshot. NOT restart-persistent (payout tickets are
+    short-lived); if the bot restarts before close, a manager deletes the channel."""
+
+    def __init__(self, user_id: int = 0, amount: int = 0):
+        super().__init__(timeout=86400)
+        self.user_id = int(user_id or 0)
+        self.amount = int(amount or 0)
+
+    @discord.ui.button(label="🗑 Close ticket", style=discord.ButtonStyle.gray,
+                       custom_id="payout_proof:close")
+    async def close(self, interaction: discord.Interaction, button: Button):
+        if not is_manager(interaction):
+            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
+        await interaction.response.send_message("Closing…", ephemeral=True)
+        try:
+            await interaction.channel.delete(reason="Payout ticket closed after payment proof")
+        except Exception:
+            pass
+
+
 class PayoutReviewView(discord.ui.View):
     """Withdrawal Approve/Reject. RESTART-PERSISTENT: registered with bot.add_view and
     stable custom_ids, so buttons on old tickets keep working after redeploys. A fresh
@@ -772,10 +794,27 @@ class PayoutReviewView(discord.ui.View):
             await interaction.followup.send(
                 f"✅ Marked **{amount} coins** as paid and deducted from balance.", ephemeral=True)
 
+            # Disable this card's buttons so the payout can't be double-actioned.
+            try:
+                for _c in self.children:
+                    _c.disabled = True
+                if interaction.message:
+                    await interaction.message.edit(view=self)
+            except Exception:
+                pass
+
+            # Payment-proof step: the paying manager drops the in-game screenshot here;
+            # a listener (cogs/orders _payout_proof_listener) DMs it to the employee and
+            # files it in the payment-proof archive. Ticket stays open until they close it.
             try:
                 if chan:
-                    await chan.send("✅ Payment marked complete. Closing this ticket…")
-                    await chan.delete(reason="Payout approved")
+                    await chan.send(
+                        f"✅ **Paid & deducted.**\n"
+                        f"📸 <@{interaction.user.id}> — upload the **in-game payment screenshot** "
+                        f"here and I'll DM it to <@{uid}> and file it in the payment-proof archive.\n"
+                        f"Click **🗑 Close ticket** when you're done.",
+                        view=PayoutProofCloseView(uid, amount),
+                        allowed_mentions=discord.AllowedMentions.none())
             except Exception:
                 pass
         finally:

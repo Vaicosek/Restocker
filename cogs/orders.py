@@ -271,6 +271,14 @@ def _earnings_rundown(user_id, max_lines: int = 12) -> str:
     except Exception:
         return ""
     uid = str(user_id)
+    # Withdrawal requests need the requester's registered Minecraft IGN so the manager
+    # knows exactly which in-game account to pay (and can spot an unregistered account).
+    try:
+        _ign = _db.get_ign(uid) or ""
+    except Exception:
+        _ign = ""
+    ign_line = (f"\U0001f3ae IGN: `{_ign}`\n" if _ign
+                else "\u26a0\ufe0f No IGN registered for this account\n")
     lines = []
     try:
         with _db.db() as conn:
@@ -306,10 +314,10 @@ def _earnings_rundown(user_id, max_lines: int = 12) -> str:
     except Exception:
         return ""
     if not lines:
-        return ("\u26a0\ufe0f **Work rundown: NOTHING recorded for this account** \u2014 no approved "
+        return (ign_line + "\u26a0\ufe0f **Work rundown: NOTHING recorded for this account** \u2014 no approved "
                 "orders, harvests, or claims. This account has not earned via work \u2014 review "
                 "carefully before paying.")
-    return "\U0001f4cb **Work rundown** \u2014 what they did to earn this:\n" + "\n".join(lines)
+    return ign_line + "\U0001f4cb **Work rundown** \u2014 what they did to earn this:\n" + "\n".join(lines)
 
 
 class OrdersCog(commands.Cog):
@@ -336,6 +344,121 @@ class OrdersCog(commands.Cog):
         except Exception as _e:
             try:
                 core.log.warning("[payout_rundown] %s", _e)
+            except Exception:
+                pass
+
+    @commands.Cog.listener("on_message")
+    async def _payout_proof_listener(self, message):
+        """When a manager uploads an in-game payment screenshot inside a payout ticket,
+        DM it to the employee and file it in the payment-proof archive channel. Runs in
+        a loaded cog, so it needs zero edits to Restocker_main. The employee + amount are
+        read from the ticket's own 'Coins Withdrawal Request' card."""
+        try:
+            if message.author.bot or message.guild is None:
+                return
+            ch = message.channel
+            if not str(getattr(ch, "name", "")).startswith("payout-"):
+                return
+            imgs = [a for a in (message.attachments or [])
+                    if (a.content_type or "").lower().startswith("image/")
+                    or a.filename.lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".gif"))]
+            if not imgs:
+                return
+            # Only a manager's upload counts as the payment proof.
+            member = message.author if isinstance(message.author, discord.Member) else \
+                (message.guild.get_member(message.author.id) if message.guild else None)
+            is_mgr = False
+            try:
+                is_mgr = bool(member and core._ai_is_manager(member)) or \
+                    int(getattr(message.author, "id", 0)) in getattr(core, "MANAGER_DM_IDS", set())
+            except Exception:
+                is_mgr = False
+            if not is_mgr:
+                return
+            # Resolve the employee (+ amount) from the withdrawal card in this ticket.
+            uid, amount = 0, 0
+            try:
+                async for m in ch.history(limit=30, oldest_first=True):
+                    if self.bot.user and m.author.id == self.bot.user.id and "Coins Withdrawal Request" in (m.content or ""):
+                        mu = _PAYOUT_REQ_RE.search(m.content or "")
+                        ma = _re.search(r"Amount:\s*\*\*([\d,]+)\s*coins", m.content or "")
+                        if mu:
+                            uid = int(mu.group(1))
+                        if ma:
+                            amount = int(ma.group(1).replace(",", ""))
+                        break
+            except Exception:
+                pass
+            if not uid:
+                await message.reply("⚠️ Couldn't tell who this payout is for (no requester card found), "
+                                    "so I didn't forward the screenshot.",
+                                    allowed_mentions=discord.AllowedMentions.none())
+                return
+
+            import io as _io
+            import Restocker_db as _db
+            amt_txt = f"{amount:,} coins" if amount else "coins"
+            try:
+                ign = _db.get_ign(str(uid)) or ""
+            except Exception:
+                ign = ""
+            ign_txt = f" · IGN `{ign}`" if ign else ""
+            when = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+            caption = (f"💸 **Payment proof** — {amt_txt}{ign_txt}\n"
+                       f"Paid to <@{uid}> · by {message.author.mention} · {when}")
+
+            # Read each image once, fan out to the employee DM + the archive.
+            dm_ok = False
+            archived = 0
+            arch_ch = None
+            try:
+                _cfg = _db.get_config("PAYMENT_PROOF_CHANNEL_ID")
+                if _cfg:
+                    arch_ch = self.bot.get_channel(int(_cfg))
+            except Exception:
+                arch_ch = None
+            try:
+                employee = await self.bot.fetch_user(uid)
+            except Exception:
+                employee = None
+            for att in imgs:
+                try:
+                    raw = await att.read()
+                except Exception:
+                    continue
+                if employee is not None:
+                    try:
+                        await employee.send(
+                            content=(f"💸 Proof of your payout of **{amt_txt}** has been recorded. "
+                                     f"Screenshot attached."),
+                            file=discord.File(_io.BytesIO(raw), filename=att.filename))
+                        dm_ok = True
+                    except Exception:
+                        pass
+                if arch_ch is not None:
+                    try:
+                        await arch_ch.send(content=caption,
+                                           file=discord.File(_io.BytesIO(raw), filename=att.filename),
+                                           allowed_mentions=discord.AllowedMentions.none())
+                        archived += 1
+                    except Exception:
+                        pass
+            try:
+                await message.add_reaction("📸")
+            except Exception:
+                pass
+            bits = []
+            bits.append("✅ DM'd to the employee" if dm_ok else "⚠️ couldn't DM the employee (DMs closed?)")
+            if arch_ch is not None:
+                bits.append(f"archived {archived} shot(s) in {arch_ch.mention}")
+            else:
+                bits.append("no archive channel set (`/config set_channel` → *Payment-proof archive channel*)")
+            await message.reply("📸 Payment screenshot: " + "; ".join(bits) + ". "
+                                "Click **🗑 Close ticket** when done.",
+                                allowed_mentions=discord.AllowedMentions.none())
+        except Exception as _e:
+            try:
+                core.log.warning("[payout_proof] %s", _e)
             except Exception:
                 pass
 

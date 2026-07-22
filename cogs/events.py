@@ -27,6 +27,8 @@ log = core.log
 timedelta = core.timedelta
 timezone = core.timezone
 
+
+
 class EventsCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -138,18 +140,6 @@ class EventsCog(commands.Cog):
                         except Exception:
                             pass
                 return
-
-        if (
-            not message.author.bot
-            and message.guild is not None
-            and bot.user is not None
-            and bot.user.mentioned_in(message)
-            and not message.mention_everyone
-        ):
-            if not _is_ai_allowed(message.author.id):
-                return
-            await handle_ai_mention(message)
-            return
 
         if (not message.author.bot and message.guild is None and message.content.strip()):
             import Restocker_db as _db_ign2
@@ -308,3 +298,18 @@ class EventsCog(commands.Cog):
 
 async def setup(bot):
     await bot.add_cog(EventsCog(bot))
+    # Nested-load the dedicated AI-brain cog so main.py's hardcoded cog tuple
+    # never needs editing. Failure here must not take down the events cog.
+    try:
+        await bot.load_extension("cogs.ai")
+    except commands.ExtensionAlreadyLoaded:
+        pass
+    except Exception as _e:
+        log.error("[events] failed to load cogs.ai: %s", _e)
+    for _ext in ("cogs.enchant",):
+        try:
+            await bot.load_extension(_ext)
+        except commands.ExtensionAlreadyLoaded:
+            pass
+        except Exception as _e:
+            log.error("[events] failed to load %s: %s", _ext, _e)

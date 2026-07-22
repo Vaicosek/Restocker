@@ -650,9 +650,69 @@ class ManagerReviewView(View):
         except Exception:
             pass
 
+        # Before the verification channel is destroyed, ARCHIVE the proof photos the worker
+        # uploaded — otherwise the fulfillment proof is lost forever on approval. Then post a
+        # closure note to managers so a late-arriving manager sees "approved & closed" instead
+        # of a dead "# unknown" link. Archive channel: FULFILL_PROOF_CHANNEL_ID, falling back
+        # to the shared PAYMENT_PROOF_CHANNEL_ID so one channel can hold both kinds of proof.
+        try:
+            import io as _io
+            import Restocker_db as _dbp
+            arch_ch = None
+            try:
+                _cfg = _dbp.get_config("FULFILL_PROOF_CHANNEL_ID") or _dbp.get_config("PAYMENT_PROOF_CHANNEL_ID")
+                if _cfg:
+                    arch_ch = interaction.client.get_channel(int(_cfg))
+            except Exception:
+                arch_ch = None
+            archived = 0
+            if arch_ch is not None and chan is not None:
+                try:
+                    async for _m in chan.history(limit=100, oldest_first=True):
+                        for _a in (_m.attachments or []):
+                            _isimg = (_a.content_type or "").lower().startswith("image/") or \
+                                _a.filename.lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".gif"))
+                            if not _isimg:
+                                continue
+                            try:
+                                _raw = await _a.read()
+                                _cap = (f"📦 **Fulfillment proof — Order #{order['id']} — "
+                                        f"{order.get('item','')}** · by <@{_m.author.id}> · "
+                                        f"approved by {interaction.user.mention}")
+                                await arch_ch.send(content=_cap,
+                                                   file=discord.File(_io.BytesIO(_raw), filename=_a.filename),
+                                                   allowed_mentions=discord.AllowedMentions.none())
+                                archived += 1
+                            except Exception:
+                                continue
+                except Exception:
+                    pass
+            log.info("[fulfill] order #%s: archived %s proof image(s)", order.get("id"), archived)
+        except Exception as _e:
+            try:
+                log.warning("[fulfill] proof-archive failed for #%s: %s", order.get("id"), _e)
+            except Exception:
+                pass
+
+        # Closure note to managers: turns the soon-to-be-dead DM link into clear closure.
+        try:
+            guild = getattr(chan, "guild", None) or interaction.guild
+            mgr_role = discord.utils.get(guild.roles, name=MANAGER_ROLE_NAME) if guild else None
+            if mgr_role:
+                _note = (f"✅ **Order #{order['id']} — {order.get('item','')}** approved by "
+                         f"{interaction.user.mention} — verification closed, worker(s) paid. "
+                         f"(The verification channel link will now show as deleted.)")
+                for _mm in list(mgr_role.members):
+                    try:
+                        await _mm.send(_note)
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+
         try:
             if chan:
-                await chan.send("✅ Approved by Managers. Channel will be deleted.")
+                await chan.send("✅ Approved by Managers. Proof archived. Channel will be deleted.")
                 await chan.delete(reason="Order approved.")
         except Exception:
             pass

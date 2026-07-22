@@ -41,6 +41,8 @@ _CHANNEL_KEYS = [
     ("Futures approval channel",  "FUTURES_CHANNEL_ID"),
     ("CSN-report channel",        "CSN_REPORT_CHANNEL_ID"),
     ("Trade-network forum channel", "NETWORK_FORUM_CHANNEL_ID"),
+    ("Payment-proof archive channel", "PAYMENT_PROOF_CHANNEL_ID"),
+    ("Fulfillment-proof archive channel", "FULFILL_PROOF_CHANNEL_ID"),
 ]
 _GUILD_KEY = ("Funds-report guild", "FUNDS_REPORT_GUILD_ID")
 

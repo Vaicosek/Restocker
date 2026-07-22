@@ -2390,6 +2390,77 @@ def list_notes(author_id: str | None = None, limit: int = 10) -> list[dict]:
 
 
 
+# ── Enchant-area roster ──────────────────────────────────────────────────────
+# Which employees (by IGN) operate which enchant-table AREA (a /la land area).
+# For now managers supply the IGNs manually; onboarding will auto-bind later.
+def _ensure_enchant_area_table(conn):
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS enchant_area_members ("
+        "  area      TEXT NOT NULL,"
+        "  ign       TEXT NOT NULL,"
+        "  user_id   TEXT,"                # resolved from ign_registry if known, else NULL
+        "  added_by  TEXT,"
+        "  added_at  TEXT NOT NULL DEFAULT (datetime('now')),"
+        "  PRIMARY KEY (area, ign)"
+        ")")
+
+
+def enchant_area_add(area: str, ign: str, added_by: str = "") -> str:
+    """Bind one IGN to an enchant area. Returns 'added' or 'exists'."""
+    area = str(area).strip()
+    ign = str(ign).strip()
+    if not area or not ign:
+        return "skip"
+    uid = get_user_id_by_ign(ign)
+    with db() as conn:
+        _ensure_enchant_area_table(conn)
+        row = conn.execute(
+            "SELECT 1 FROM enchant_area_members WHERE area=? COLLATE NOCASE AND ign=? COLLATE NOCASE",
+            (area, ign)).fetchone()
+        if row:
+            # refresh the resolved user_id in case they registered since
+            conn.execute(
+                "UPDATE enchant_area_members SET user_id=COALESCE(?, user_id) "
+                "WHERE area=? COLLATE NOCASE AND ign=? COLLATE NOCASE", (uid, area, ign))
+            return "exists"
+        conn.execute(
+            "INSERT INTO enchant_area_members (area, ign, user_id, added_by) VALUES (?,?,?,?)",
+            (area, ign, uid, str(added_by) or None))
+        return "added"
+
+
+def enchant_area_list(area: str | None = None) -> list[dict]:
+    """All roster rows, or just one area's. Ordered by area then ign."""
+    with db() as conn:
+        _ensure_enchant_area_table(conn)
+        if area:
+            rows = conn.execute(
+                "SELECT area, ign, user_id, added_by, added_at FROM enchant_area_members "
+                "WHERE area=? COLLATE NOCASE ORDER BY ign COLLATE NOCASE", (str(area).strip(),)).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT area, ign, user_id, added_by, added_at FROM enchant_area_members "
+                "ORDER BY area COLLATE NOCASE, ign COLLATE NOCASE").fetchall()
+    return [dict(r) for r in rows]
+
+
+def enchant_area_remove(area: str, ign: str) -> bool:
+    with db() as conn:
+        _ensure_enchant_area_table(conn)
+        cur = conn.execute(
+            "DELETE FROM enchant_area_members WHERE area=? COLLATE NOCASE AND ign=? COLLATE NOCASE",
+            (str(area).strip(), str(ign).strip()))
+        return cur.rowcount > 0
+
+
+def enchant_area_clear(area: str) -> int:
+    with db() as conn:
+        _ensure_enchant_area_table(conn)
+        cur = conn.execute(
+            "DELETE FROM enchant_area_members WHERE area=? COLLATE NOCASE", (str(area).strip(),))
+        return cur.rowcount
+
+
 def save_web_order(discord_username: str, discord_id: str, items: list, notes: str = "") -> int:
     with db() as conn:
         cur = conn.execute(
