@@ -113,6 +113,32 @@ class EventsCog(commands.Cog):
             await message.channel.send(f"✅ Cleared **{deleted}** messages.")
             return
 
+        # A human dropping a CSN report CSV (csn_monthly/export/stock) should get it LOGGED — the
+        # AI mention handler can't see attachments, and the webhook-only path below skips humans, so
+        # a manager uploading the file used to be ignored. Route it straight to the validated importer
+        # (it verifies the market's secret code from the "# MARKET,<id>,<code>" header), with or
+        # without an @mention. Result posts in this channel so they get immediate feedback.
+        if (not message.author.bot) and message.guild is not None and message.attachments:
+            _human_csn = [a for a in message.attachments
+                          if a.filename.lower().endswith(".csv")
+                          and any(k in a.filename.lower() for k in ("csn_monthly", "csn_export", "csn_stock"))]
+            if _human_csn:
+                try:
+                    await message.add_reaction("📥")
+                except Exception:
+                    pass
+                for _att in _human_csn:
+                    try:
+                        await _process_csn_attachment(_att, message.channel, source_channel_id=message.channel.id)
+                    except Exception as _e:
+                        log.error("CSN human upload failed: %s", _e)
+                        try:
+                            await message.reply(f"⚠️ Couldn't import that CSN report: {_e}",
+                                                allowed_mentions=discord.AllowedMentions.none())
+                        except Exception:
+                            pass
+                return
+
         if (
             not message.author.bot
             and message.guild is not None
