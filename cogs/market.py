@@ -879,6 +879,50 @@ class MarketCog(commands.Cog):
             ephemeral=True,
         )
 
+    @market.command(
+        name="set_code",
+        description="(Manager) Set a market's CSN verification code to an exact value, without rotating it",
+    )
+    @app_commands.describe(
+        market_id="The market to set the code for",
+        code="The exact code to store — must match what's typed into the CSN mod's Market Code field",
+    )
+    @app_commands.autocomplete(market_id=_market_autocomplete)
+    async def market_set_code(self,
+        interaction: discord.Interaction,
+        market_id: str,
+        code: str,
+    ):
+        if not is_manager(interaction):
+            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
+
+        code = code.strip().upper()
+        if not code or not code.isalnum() or len(code) > 32:
+            return await interaction.response.send_message(
+                "❌ Code must be letters/digits only (no spaces or symbols).", ephemeral=True
+            )
+
+        data = _load_markets()
+        markets = data.get("markets") or {}
+        if market_id not in markets:
+            return await interaction.response.send_message(
+                f"❌ Market `{market_id}` not found.", ephemeral=True
+            )
+
+        # Unlike /market_code, this NEVER touches leader_discord_id — it only overwrites
+        # the stored code so a manager can sync it to whatever the shop owner already has
+        # typed into their mod, instead of forcing a rotate-and-redistribute cycle.
+        markets[market_id]["leader_code"] = code
+        _save_markets(data)
+
+        await interaction.response.send_message(
+            f"✅ **{markets[market_id].get('name', market_id)}** (`{market_id}`) code set to `{code}`.\n"
+            f"Make sure the CSN mod's **Market Code** field for this shop is set to exactly this value "
+            f"(case-insensitive). To check the currently-stored code without changing it, use "
+            f"`/market info market_id:{market_id}`.",
+            ephemeral=True,
+        )
+
     @app_commands.command(
         name="market_set_location",
         description="(Manager/Owner) Set where workers deliver goods for a market (the /la spawn warp)",

@@ -320,6 +320,67 @@ def _earnings_rundown(user_id, max_lines: int = 12) -> str:
     return ign_line + "\U0001f4cb **Work rundown** \u2014 what they did to earn this:\n" + "\n".join(lines)
 
 
+def _order_search_matches(query: str, orders: list[dict]) -> list[dict]:
+    """Item name / IGN / Discord name-or-ID / order # search — shared by /search_orders and
+    its autocomplete (and mirrors the 🔎 Search button's modal in views/orders.py). A bare
+    '#<digits>' or plain-digits query does an EXACT id match instead of substring, so '#1'
+    doesn't also pull in #10-#19, #100+, etc."""
+    raw = (query or "").strip()
+    q = raw.lower()
+    if not q:
+        return []
+    m = _re.fullmatch(r"#?(\d+)", raw)
+    if m:
+        target = int(m.group(1))
+        return [o for o in orders if isinstance(o, dict) and int(o.get("id", 0) or 0) == target]
+    import Restocker_db as _db
+    _ic = {}
+    def _ign(uid):
+        uid = str(uid or "")
+        if uid and uid not in _ic:
+            try:
+                _ic[uid] = _db.get_ign(uid) or ""
+            except Exception:
+                _ic[uid] = ""
+        return _ic.get(uid, "")
+    matches = []
+    for o in orders:
+        if not isinstance(o, dict):
+            continue
+        hay = [str(o.get("item", "")), str(o.get("id", "")), "#" + str(o.get("id", "")),
+               str(o.get("status", "")), str(o.get("claimed_by", ""))]
+        for c in (o.get("claims") or []):
+            hay += [str(c.get("user_tag", "")), str(c.get("user_id", "")), _ign(c.get("user_id", ""))]
+        if q in " ".join(hay).lower():
+            matches.append(o)
+    return matches
+
+
+_ORDER_STATUS_BADGE = {"fulfilled": "✅ Fulfilled", "cancelled": "❌ Cancelled",
+                        "claimed": "🟡 Claimed", "open": "⚪ Open"}
+
+
+async def _order_search_autocomplete(interaction: discord.Interaction, current: str):
+    """Live suggestions as you type — this is what a discord.ui.Modal text field CANNOT do
+    (Discord's autocomplete only exists on slash-command options), which is why this search
+    also exists as a real command and not just the 🔎 button's popup form."""
+    current = (current or "").strip()
+    if not current:
+        return []
+    try:
+        data = load_orders()
+        matches = _order_search_matches(current, data.get("orders", []) or [])
+    except Exception:
+        return []
+    matches.sort(key=lambda o: int(o.get("id", 0) or 0), reverse=True)
+    out = []
+    for o in matches[:25]:
+        st = str(o.get("status", "open")).lower()
+        label = f"#{o.get('id')} {o.get('item', '')} · {_ORDER_STATUS_BADGE.get(st, st.capitalize())}"[:100]
+        out.append(app_commands.Choice(name=label, value=f"#{o.get('id')}"))
+    return out
+
+
 class OrdersCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -466,7 +527,47 @@ class OrdersCog(commands.Cog):
     async def orders(self, interaction: discord.Interaction):
         return await orders_cmd(interaction)
 
-
+    @app_commands.command(
+        name="search_orders",
+        description="Search orders by item, IGN, Discord name/ID, or order # — shows live matches as you type",
+    )
+    @app_commands.describe(query="Item name, IGN, Discord name/ID, or order # (e.g. shovel · jzlr · #17)")
+    @app_commands.autocomplete(query=_order_search_autocomplete)
+    async def search_orders(self, interaction: discord.Interaction, query: str):
+        await interaction.response.defer(**ephemeral_kwargs(interaction))
+        try:
+            data = load_orders()
+            matches = _order_search_matches(query, data.get("orders", []) or [])
+        except Exception as e:
+            return await interaction.followup.send(
+                f"❌ Search failed: `{type(e).__name__}: {e}`", **ephemeral_kwargs(interaction)
+            )
+        if not matches:
+            return await interaction.followup.send(f"🔎 No orders match **{query}**.", **ephemeral_kwargs(interaction))
+        matches.sort(key=lambda o: int(o.get("id", 0) or 0), reverse=True)
+        import Restocker_db as _db
+        _ic = {}
+        def _ign(uid):
+            uid = str(uid or "")
+            if uid and uid not in _ic:
+                try:
+                    _ic[uid] = _db.get_ign(uid) or ""
+                except Exception:
+                    _ic[uid] = ""
+            return _ic.get(uid, "")
+        lines = []
+        for o in matches[:25]:
+            st = str(o.get("status", "open")).lower()
+            cl = o.get("claims") or []
+            who = ""
+            if cl:
+                who = " · " + ", ".join(
+                    f"{(_ign(c.get('user_id', '')) or c.get('user_tag', '') or '?')} ({int(c.get('qty', 0) or 0)})"
+                    for c in cl[:3]
+                )
+            lines.append(f"• **#{o.get('id')}** {o.get('item', '')} · {_ORDER_STATUS_BADGE.get(st, st.capitalize())}{who}")
+        head = f"🔎 **{len(matches)} order(s) matching \"{query}\"**" + (" — showing 25" if len(matches) > 25 else "")
+        await interaction.followup.send((head + "\n" + "\n".join(lines))[:1990], **ephemeral_kwargs(interaction))
 
     @app_commands.command(name="cancel_order", description="(Managers) Cancel an existing restock order by ID")
 

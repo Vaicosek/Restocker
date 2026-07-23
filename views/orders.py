@@ -1631,41 +1631,67 @@ class SearchOrdersModal(discord.ui.Modal, title="Search orders"):
         q = raw.lower()
         if not q:
             return await interaction.response.send_message("❌ Empty search.", ephemeral=True)
-        import Restocker_db as _db
-        _ic = {}
-        def _ign(uid):
-            uid = str(uid or "")
-            if uid and uid not in _ic:
-                try:
-                    _ic[uid] = _db.get_ign(uid) or ""
-                except Exception:
-                    _ic[uid] = ""
-            return _ic.get(uid, "")
-        data = load_orders()
-        matches = []
-        for o in (data.get("orders", []) or []):
-            if not isinstance(o, dict):
-                continue
-            hay = [str(o.get("item", "")), str(o.get("id", "")), "#" + str(o.get("id", "")),
-                   str(o.get("status", "")), str(o.get("claimed_by", ""))]
-            for c in (o.get("claims") or []):
-                hay += [str(c.get("user_tag", "")), str(c.get("user_id", "")), _ign(c.get("user_id", ""))]
-            if q in " ".join(hay).lower():
-                matches.append(o)
-        if not matches:
-            return await interaction.response.send_message(f"🔎 No orders match **{raw}**.", ephemeral=True)
-        matches.sort(key=lambda o: int(o.get("id", 0) or 0), reverse=True)
-        _B = {"fulfilled": "✅ Fulfilled", "cancelled": "❌ Cancelled", "claimed": "🟡 Claimed", "open": "⚪ Open"}
-        lines = []
-        for o in matches[:25]:
-            st = str(o.get("status", "open")).lower()
-            cl = o.get("claims") or []
-            who = ""
-            if cl:
-                who = " · " + ", ".join(f"{(_ign(c.get('user_id','')) or c.get('user_tag','') or '?')} ({int(c.get('qty',0) or 0)})" for c in cl[:3])
-            lines.append(f"• **#{o.get('id')}** {o.get('item','')} · {_B.get(st, st.capitalize())}{who}")
-        head = f"🔎 **{len(matches)} order(s) matching \"{raw}\"**" + (" — showing 25" if len(matches) > 25 else "")
-        await interaction.response.send_message((head + "\n" + "\n".join(lines))[:1990], ephemeral=True)
+        try:
+            import re as _re
+            data = load_orders()
+            all_orders = [o for o in (data.get("orders", []) or []) if isinstance(o, dict)]
+            # A bare '#<digits>' or plain-digits query is an EXACT id match — otherwise
+            # '#1' would also substring-match #10-#19, #100+, etc.
+            id_m = _re.fullmatch(r"#?(\d+)", raw)
+            if id_m:
+                target = int(id_m.group(1))
+                matches = [o for o in all_orders if int(o.get("id", 0) or 0) == target]
+            else:
+                import Restocker_db as _db
+                _ic = {}
+                def _ign(uid):
+                    uid = str(uid or "")
+                    if uid and uid not in _ic:
+                        try:
+                            _ic[uid] = _db.get_ign(uid) or ""
+                        except Exception:
+                            _ic[uid] = ""
+                    return _ic.get(uid, "")
+                matches = []
+                for o in all_orders:
+                    hay = [str(o.get("item", "")), str(o.get("id", "")), "#" + str(o.get("id", "")),
+                           str(o.get("status", "")), str(o.get("claimed_by", ""))]
+                    for c in (o.get("claims") or []):
+                        hay += [str(c.get("user_tag", "")), str(c.get("user_id", "")), _ign(c.get("user_id", ""))]
+                    if q in " ".join(hay).lower():
+                        matches.append(o)
+            if not matches:
+                return await interaction.response.send_message(f"🔎 No orders match **{raw}**.", ephemeral=True)
+            matches.sort(key=lambda o: int(o.get("id", 0) or 0), reverse=True)
+            _B = {"fulfilled": "✅ Fulfilled", "cancelled": "❌ Cancelled", "claimed": "🟡 Claimed", "open": "⚪ Open"}
+            import Restocker_db as _db2
+            _ic2 = {}
+            def _ign2(uid):
+                uid = str(uid or "")
+                if uid and uid not in _ic2:
+                    try:
+                        _ic2[uid] = _db2.get_ign(uid) or ""
+                    except Exception:
+                        _ic2[uid] = ""
+                return _ic2.get(uid, "")
+            lines = []
+            for o in matches[:25]:
+                st = str(o.get("status", "open")).lower()
+                cl = o.get("claims") or []
+                who = ""
+                if cl:
+                    who = " · " + ", ".join(f"{(_ign2(c.get('user_id','')) or c.get('user_tag','') or '?')} ({int(c.get('qty',0) or 0)})" for c in cl[:3])
+                lines.append(f"• **#{o.get('id')}** {o.get('item','')} · {_B.get(st, st.capitalize())}{who}")
+            head = f"🔎 **{len(matches)} order(s) matching \"{raw}\"**" + (" — showing 25" if len(matches) > 25 else "")
+            await interaction.response.send_message((head + "\n" + "\n".join(lines))[:1990], ephemeral=True)
+        except Exception as e:
+            # Previously an unhandled exception here left the interaction unacknowledged,
+            # which Discord surfaces client-side as a generic "Something went wrong. Try
+            # again." with no useful detail — send an actual error instead.
+            if interaction.response.is_done():
+                await interaction.followup.send(f"❌ Search failed: `{type(e).__name__}: {e}`", ephemeral=True)
+            else:
+                await interaction.response.send_message(f"❌ Search failed: `{type(e).__name__}: {e}`", ephemeral=True)
 
 
 class OrdersBrowser(View):

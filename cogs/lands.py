@@ -131,11 +131,17 @@ class LandsCog(commands.Cog):
                 log.warning("[lands] REJECTED LANDS FEED in unauthorized channel %s",
                             message.channel.id)
                 return
-            await self._ingest(message, content)
+            # SECURITY: no channel lock configured means ANY webhook in ANY channel can
+            # post LANDS-BAL/LANDS-ENTRY lines that overwrite a bound market's treasury —
+            # this is exactly how another market's CSN-mod client (misconfigured land name)
+            # can corrupt YOUR treasury unnoticed. Still ingest (don't break a currently
+            # working setup) but flag it loudly every time so it can't go unnoticed.
+            unlocked = not _ch
+            await self._ingest(message, content, unlocked=unlocked)
         except Exception as e:
             log.warning("[lands] feed ingest failed: %s", e)
 
-    async def _ingest(self, message, content: str):
+    async def _ingest(self, message, content: str, unlocked: bool = False):
         import Restocker_db as _db
         touched = set()
         balances = {}
@@ -185,8 +191,12 @@ class LandsCog(commands.Cog):
             report.append(line)
         if new_entries or balances:
             try:
+                warn = ("⚠️ **No lands-feed channel is locked** — this was accepted from "
+                         "**any** webhook, including ones belonging to other markets. Run "
+                         "`/land feed_channel` to restrict ingestion to your official feed "
+                         "channel and close this gap.\n\n") if unlocked else ""
                 await message.channel.send(
-                    f"✅ Lands feed ingested — {new_entries} new entrie(s), "
+                    warn + f"✅ Lands feed ingested — {new_entries} new entrie(s), "
                     f"{len(balances)} balance(s).\n" + "\n".join(report)[:1700])
             except Exception:
                 pass
