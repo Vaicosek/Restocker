@@ -578,7 +578,8 @@ def _load_earnings() -> list:
 def _load_earnings_full() -> dict:
     """Per-market earnings WITH per-item breakdown, for the redesigned Earnings tab.
     Shape: {"markets":[{"id","name","months":[{month,label,income,spent,net,
-    items:[{item,sold,bought,net}]}]}]}. Months sorted oldest→newest.
+    items:[{item,sold,bought,net,income,expense,tsold,tbought}]}]}]}.
+    Months sorted oldest→newest.
     Additive: the legacy /api/earnings endpoint is unchanged."""
     out = []
     try:
@@ -599,10 +600,14 @@ def _load_earnings_full() -> dict:
                     if not isinstance(iv, dict):
                         continue
                     items.append({
-                        "item":   item,
-                        "sold":   int(iv.get("sold_qty", 0) or 0),
-                        "bought": int(iv.get("bought_qty", 0) or 0),
-                        "net":    int(round(float(iv.get("net_coins", 0) or 0))),
+                        "item":    item,
+                        "sold":    int(iv.get("sold_qty", 0) or 0),
+                        "bought":  int(iv.get("bought_qty", 0) or 0),
+                        "net":     int(round(float(iv.get("net_coins", 0) or 0))),
+                        "income":  int(round(float(iv.get("income_coins", 0) or 0))),
+                        "expense": int(round(float(iv.get("expense_coins", 0) or 0))),
+                        "tsold":   int(iv.get("times_sold", 0) or 0),
+                        "tbought": int(iv.get("times_bought", 0) or 0),
                     })
                 mlist.append({
                     "month":  mk,
@@ -4160,18 +4165,27 @@ table.t th:first-child{text-align:left}
 table.t td{padding:0 12px;height:27px;border-bottom:1px solid var(--row);font-size:12px;white-space:nowrap}
 table.t td.num{text-align:right;font-family:var(--mono);font-variant-numeric:tabular-nums}
 table.t tr:hover td{background:var(--hover)}
+table.t th.sort{cursor:pointer;user-select:none}
+table.t th.sort:hover{color:var(--ink)}
+table.t th .ar{font-size:8px;opacity:.7;margin-left:2px}
+.mmbadge{font-family:var(--mono);font-size:10px;margin-left:6px;font-variant-numeric:tabular-nums}
+.split{display:inline-flex;flex-direction:column;gap:2px;width:120px;vertical-align:middle}
+.split i{height:4px;display:block;background:var(--row)}
+.msel{background:var(--bg);border:1px solid var(--line2);color:var(--ink);font-family:var(--mono);font-size:11px;padding:3px 7px;outline:none;margin-left:auto}
+.msel:focus{border-color:var(--accent)}
+.ph.rowh{display:flex;align-items:center;gap:8px}
+.tblscroll{overflow-x:auto}
 </style></head><body>
 __NAV__
 <div class="content">
 <div class="bar" id="chips"></div>
 <div class="statrow" id="stats"></div>
+<div class="bar" id="metric"></div>
 <div class="chartwrap"><svg class="chart" id="chart" preserveAspectRatio="none"></svg><div class="tip" id="tip"></div></div>
-<div class="cols">
 <div class="panel"><div class="ph"><span class="t">Monthly ledger</span></div>
-<table class="t"><thead><tr><th>Month</th><th>Income</th><th>Spent</th><th>Net</th></tr></thead><tbody id="mt"></tbody></table></div>
-<div class="panel"><div class="ph"><span class="t">Top items · lifetime net</span></div>
-<table class="t"><thead><tr><th>Item</th><th>Sold</th><th>Bought</th><th>Net ¢</th></tr></thead><tbody id="it"></tbody></table></div>
-</div>
+<div class="tblscroll"><table class="t"><thead><tr><th>Month</th><th>Income</th><th>Spent</th><th>Net</th><th>MoM</th><th>Income vs spent</th></tr></thead><tbody id="mt"></tbody></table></div></div>
+<div class="panel"><div class="ph rowh"><span class="t">Top items</span><select class="msel" id="msel"></select></div>
+<div class="tblscroll"><table class="t"><thead><tr id="ith"></tr></thead><tbody id="it"></tbody></table></div></div>
 </div>
 <script>
 const EF=__EARNFULL_JSON__;
@@ -4179,12 +4193,26 @@ const fmt=n=>Math.round(n||0).toLocaleString('en-US').replace(/,/g,' ');
 const esc=s=>String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;');
 const css=v=>getComputedStyle(document.documentElement).getPropertyValue(v).trim();
 const MS=(EF&&EF.markets)||[];let act=0;
+let METRIC='net';                 // chart line: net | income | spent
+let MSEL='__life';                // top-items scope: '__life' or a month key
+let SORT={k:'net',dir:-1};        // top-items sort column + direction
+const METRICS=[['net','Net'],['income','Income'],['spent','Spent']];
+// item table columns: key, label, numeric-getter (from an aggregated row)
+const ICOLS=[['item','Item',null],['s','Sold',r=>r.s],['b','Bought',r=>r.b],
+ ['inc','Income',r=>r.inc],['exp','Expense',r=>r.exp],['net','Net ¢',r=>r.net],
+ ['mgn','Margin %',r=>r.inc>0?r.net/r.inc*100:-1e18],['vel','Vel ×',r=>r.vel]];
 function chips(){document.getElementById('chips').innerHTML=MS.map((m,i)=>
  '<div class="chip'+(i===act?' on':'')+'" data-i="'+i+'">'+esc(m.name||m.id)+' · '+(m.months||[]).length+' mo</div>').join('');
- document.querySelectorAll('.chip').forEach(c=>c.onclick=()=>{act=+c.dataset.i;chips();render();});}
-function pathD(vals,w,h,pad){const mn=Math.min(...vals,0),mx=Math.max(...vals,1),rg=(mx-mn)||1;
+ document.querySelectorAll('#chips .chip').forEach(c=>c.onclick=()=>{act=+c.dataset.i;MSEL='__life';chips();render();});}
+function metricChips(){document.getElementById('metric').innerHTML=METRICS.map(([k,l])=>
+ '<div class="chip'+(k===METRIC?' on':'')+'" data-k="'+k+'">'+l+'</div>').join('');
+ document.querySelectorAll('#metric .chip').forEach(c=>c.onclick=()=>{METRIC=c.dataset.k;render();});}
+function pathD(vals,w,h,pad,mn,rg){
  return vals.map((v,i)=>{const x=pad+i/((vals.length-1)||1)*(w-2*pad);const y=pad+(1-(v-mn)/rg)*(h-2*pad);
  return (i?'L':'M')+x.toFixed(1)+' '+y.toFixed(1);}).join(' ');}
+// margin cell colouring: profitable → up, thin/negative → down
+function mgnCell(r){if(!(r.inc>0))return '<td class="num faint">—</td>';
+ const p=r.net/r.inc*100;return '<td class="num" style="color:'+(p>=0?css('--up'):css('--down'))+'">'+p.toFixed(0)+'%</td>';}
 function render(){const m=MS[act]||{};const mo=m.months||[];
  const nets=mo.map(x=>x.net||0);const life=nets.reduce((a,b)=>a+b,0);
  const best=mo.length?mo.reduce((a,b)=>(b.net>a.net?b:a)):null;
@@ -4195,17 +4223,25 @@ function render(){const m=MS[act]||{};const mo=m.months||[];
   ['Best month',best?(best.label+' · '+fmt(best.net)):'—',''],
   ['Last month net',last?fmt(last.net)+' ¢':'—',last?('style="color:'+(last.net>=0?css('--up'):css('--down'))+'"'):'']]
   .map(s=>'<div class="stat"><div class="k">'+s[0]+'</div><div class="v" '+(s[2]||'')+'>'+s[1]+'</div></div>').join('');
- // chart
+ metricChips();
+ // ── chart: income/spent bars (always) + selected-metric line ────────────────
  const el=document.getElementById('chart');const w=el.clientWidth||900,h=220,pad=14;
  el.setAttribute('viewBox','0 0 '+w+' '+h);
- const v=nets.length>1?nets:[0,0];
- const col=(v[v.length-1]>=0)?css('--up'):css('--down');
+ const line=mo.map(x=>x[METRIC]||0);const v=line.length>1?line:[0,0];
+ const col=METRIC==='spent'?css('--down'):(v[v.length-1]>=0?css('--up'):css('--down'));
  let grid='';for(let i=0;i<5;i++){const y=pad+i/4*(h-2*pad);
   grid+='<line x1="'+pad+'" y1="'+y+'" x2="'+(w-pad)+'" y2="'+y+'" stroke="'+css('--line')+'" stroke-width="1"/>';}
  const mn=Math.min(...v,0),mx=Math.max(...v,1),rg=(mx-mn)||1;
  const zy=pad+(1-(0-mn)/rg)*(h-2*pad);
- el.innerHTML=grid+'<line x1="'+pad+'" y1="'+zy+'" x2="'+(w-pad)+'" y2="'+zy+'" stroke="'+css('--line2')+'" stroke-width="1" stroke-dasharray="3 3"/>'+
-  '<path d="'+pathD(v,w,h,pad)+'" fill="none" stroke="'+col+'" stroke-width="1.4"/>'+
+ // faint income (up) vs spent (down) bars behind the line, scaled together
+ const barMax=Math.max(1,...mo.map(x=>Math.max(x.income||0,x.spent||0)));
+ const n=mo.length,bw=n?Math.max(2,(w-2*pad)/n*0.34):0;let bars='';
+ mo.forEach((x,i)=>{const cx=pad+(n>1?i/(n-1):0.5)*(w-2*pad);
+  const ih=(x.income||0)/barMax*(h-2*pad)*0.5,sh=(x.spent||0)/barMax*(h-2*pad)*0.5;
+  bars+='<rect x="'+(cx-bw-1)+'" y="'+(zy-ih)+'" width="'+bw+'" height="'+ih+'" fill="'+css('--up')+'" opacity="0.16"/>'+
+        '<rect x="'+(cx+1)+'" y="'+zy+'" width="'+bw+'" height="'+sh+'" fill="'+css('--down')+'" opacity="0.16"/>';});
+ el.innerHTML=grid+bars+'<line x1="'+pad+'" y1="'+zy+'" x2="'+(w-pad)+'" y2="'+zy+'" stroke="'+css('--line2')+'" stroke-width="1" stroke-dasharray="3 3"/>'+
+  '<path d="'+pathD(v,w,h,pad,mn,rg)+'" fill="none" stroke="'+col+'" stroke-width="1.4"/>'+
   '<circle id="dot" r="3" fill="'+col+'" style="opacity:0"/>';
  const tip=document.getElementById('tip'),dot=document.getElementById('dot');
  el.onmousemove=e=>{const r=el.getBoundingClientRect();let i2=Math.round((e.clientX-r.left)/r.width*(v.length-1));
@@ -4214,19 +4250,48 @@ function render(){const m=MS[act]||{};const mo=m.months||[];
   tip.style.left=(x/w*100)+'%';tip.style.top=(y/h*100)+'%';tip.style.opacity=1;
   tip.textContent=(mo[i2]?mo[i2].label+': ':'')+fmt(v[i2])+' ¢';};
  el.onmouseleave=()=>{dot.style.opacity=0;tip.style.opacity=0;};
- // month table (newest first)
- document.getElementById('mt').innerHTML=mo.slice().reverse().map(x=>
-  '<tr><td>'+esc(x.label||x.month)+'</td><td class="num">'+fmt(x.income)+'</td>'+
-  '<td class="num">'+fmt(x.spent)+'</td><td class="num" style="color:'+((x.net||0)>=0?css('--up'):css('--down'))+'">'+fmt(x.net)+'</td></tr>').join('')
-  ||'<tr><td colspan="4" class="faint" style="height:34px">No earnings recorded.</td></tr>';
- // lifetime items
- const agg={};mo.forEach(x=>(x.items||[]).forEach(it=>{const e=agg[it.item]=agg[it.item]||{s:0,b:0,n:0};
-  e.s+=it.sold||0;e.b+=it.bought||0;e.n+=it.net||0;}));
- const rows=Object.entries(agg).sort((a,b)=>Math.abs(b[1].n)-Math.abs(a[1].n)).slice(0,30);
+ // ── month table (newest first) with MoM % + income/spent split bar ──────────
+ const smax=Math.max(1,...mo.map(x=>Math.max(x.income||0,x.spent||0)));
+ document.getElementById('mt').innerHTML=mo.map((x,i)=>{
+   const prev=i>0?mo[i-1]:null;let mom='<span class="faint">—</span>';
+   if(prev){const d=(prev.net||0)!==0?((x.net-prev.net)/Math.abs(prev.net)*100):(x.net?100:0);
+     mom='<span class="mmbadge" style="color:'+(d>=0?css('--up'):css('--down'))+'">'+(d>=0?'+':'')+d.toFixed(0)+'%</span>';}
+   const iw=(x.income||0)/smax*118,sw=(x.spent||0)/smax*118;
+   return {i,html:'<tr><td>'+esc(x.label||x.month)+'</td><td class="num">'+fmt(x.income)+'</td>'+
+    '<td class="num">'+fmt(x.spent)+'</td><td class="num" style="color:'+((x.net||0)>=0?css('--up'):css('--down'))+'">'+fmt(x.net)+'</td>'+
+    '<td class="num">'+mom+'</td>'+
+    '<td><span class="split"><i style="width:'+iw+'px;background:'+css('--up')+'"></i>'+
+    '<i style="width:'+sw+'px;background:'+css('--down')+'"></i></span></td></tr>'};
+  }).reverse().map(o=>o.html).join('')
+  ||'<tr><td colspan="6" class="faint" style="height:34px">No earnings recorded.</td></tr>';
+ // ── top items: month selector, drill-down, sortable, margin + velocity ──────
+ const sel=document.getElementById('msel');
+ sel.innerHTML='<option value="__life">Lifetime</option>'+mo.slice().reverse().map(x=>
+   '<option value="'+esc(x.month)+'">'+esc(x.label||x.month)+'</option>').join('');
+ sel.value=MSEL;sel.onchange=()=>{MSEL=sel.value;renderItems();};
+ renderItems();}
+function renderItems(){const m=MS[act]||{};const mo=m.months||[];
+ const src=MSEL==='__life'?mo:mo.filter(x=>x.month===MSEL);
+ const agg={};src.forEach(x=>(x.items||[]).forEach(it=>{const e=agg[it.item]=agg[it.item]||
+   {s:0,b:0,net:0,inc:0,exp:0,vel:0};
+   e.s+=it.sold||0;e.b+=it.bought||0;e.net+=it.net||0;
+   e.inc+=it.income||0;e.exp+=it.expense||0;e.vel+=it.tsold||0;}));
+ // header (sortable)
+ document.getElementById('ith').innerHTML=ICOLS.map(([k,l,g])=>
+   '<th class="sort" data-k="'+k+'">'+l+(SORT.k===k?'<span class="ar">'+(SORT.dir<0?'▼':'▲')+'</span>':'')+'</th>').join('');
+ document.querySelectorAll('#ith .sort').forEach(th=>th.onclick=()=>{const k=th.dataset.k;
+   if(SORT.k===k)SORT.dir*=-1;else{SORT.k=k;SORT.dir=(k==='item')?1:-1;}renderItems();});
+ const getv=ICOLS.find(c=>c[0]===SORT.k)[2];
+ let rows=Object.entries(agg);
+ rows.sort((a,b)=>{if(SORT.k==='item')return SORT.dir*a[0].localeCompare(b[0]);
+   return SORT.dir*((getv(a[1])||0)-(getv(b[1])||0));});
+ rows=rows.slice(0,40);
  document.getElementById('it').innerHTML=rows.map(([k,e])=>
-  '<tr><td>'+esc(k)+'</td><td class="num">'+fmt(e.s)+'</td><td class="num">'+fmt(e.b)+'</td>'+
-  '<td class="num" style="color:'+(e.n>=0?css('--up'):css('--down'))+'">'+fmt(e.n)+'</td></tr>').join('')
-  ||'<tr><td colspan="4" class="faint" style="height:34px">No item data.</td></tr>';}
+   '<tr><td>'+esc(k)+'</td><td class="num">'+fmt(e.s)+'</td><td class="num">'+fmt(e.b)+'</td>'+
+   '<td class="num">'+fmt(e.inc)+'</td><td class="num" style="color:'+css('--down')+'">'+fmt(e.exp)+'</td>'+
+   '<td class="num" style="color:'+(e.net>=0?css('--up'):css('--down'))+'">'+fmt(e.net)+'</td>'+
+   mgnCell(e)+'<td class="num muted">'+fmt(e.vel)+'</td></tr>').join('')
+  ||'<tr><td colspan="8" class="faint" style="height:34px">No item data.</td></tr>';}
 chips();render();addEventListener('resize',render);
 </script></body></html>"""
 

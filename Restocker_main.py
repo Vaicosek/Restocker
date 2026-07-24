@@ -6120,15 +6120,21 @@ def _parse_monthly_csv(csv_text: str) -> tuple:
                 # expense = coins spent buying (≤0); net = income + expense.
                 income = float(row.get("income_coins") or 0)
                 expense = float(row.get("expense_coins") or 0)
+                # transaction counts (velocity) — also v1.2, absent→0 on older files
+                t_sold = int(float(row.get("times_sold") or 0))
+                t_bought = int(float(row.get("times_bought") or 0))
             except Exception:
                 continue
             e = d.setdefault(item, {"sold_qty": 0, "bought_qty": 0, "net_coins": 0.0,
-                                    "income_coins": 0.0, "expense_coins": 0.0})
+                                    "income_coins": 0.0, "expense_coins": 0.0,
+                                    "times_sold": 0, "times_bought": 0})
             e["sold_qty"] += sold
             e["bought_qty"] += bought
             e["net_coins"] += net
             e["income_coins"] += income
             e["expense_coins"] += expense
+            e["times_sold"] += t_sold
+            e["times_bought"] += t_bought
         return d
 
     run_dicts = [d for d in (parse_rows(rows) for _, rows in runs) if d]
@@ -6140,12 +6146,15 @@ def _parse_monthly_csv(csv_text: str) -> tuple:
         for d in dicts:
             for item, v in d.items():
                 a = out.setdefault(item, {"sold_qty": 0, "bought_qty": 0, "net_coins": 0.0,
-                                          "income_coins": 0.0, "expense_coins": 0.0})
+                                          "income_coins": 0.0, "expense_coins": 0.0,
+                                          "times_sold": 0, "times_bought": 0})
                 a["sold_qty"] += v["sold_qty"]
                 a["bought_qty"] += v["bought_qty"]
                 a["net_coins"] += v["net_coins"]
                 a["income_coins"] += v.get("income_coins", 0.0)
                 a["expense_coins"] += v.get("expense_coins", 0.0)
+                a["times_sold"] += v.get("times_sold", 0)
+                a["times_bought"] += v.get("times_bought", 0)
         return out
 
     if len(run_dicts) == 1:
@@ -6203,7 +6212,9 @@ def _parse_monthly_csv(csv_text: str) -> tuple:
         items[item] = {"sold_qty": v["sold_qty"], "bought_qty": v["bought_qty"],
                        "net_coins": v["net_coins"],
                        "income_coins": v.get("income_coins", 0.0),
-                       "expense_coins": v.get("expense_coins", 0.0)}
+                       "expense_coins": v.get("expense_coins", 0.0),
+                       "times_sold": v.get("times_sold", 0),
+                       "times_bought": v.get("times_bought", 0)}
         if v["net_coins"] > 0:
             income += v["net_coins"]
         else:

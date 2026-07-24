@@ -178,12 +178,19 @@ CREATE TABLE IF NOT EXISTS csn_history (
     PRIMARY KEY (market_id, month)
 );
 CREATE TABLE IF NOT EXISTS csn_history_items (
-    market_id   TEXT NOT NULL DEFAULT 'main',
-    month       TEXT NOT NULL,
-    item        TEXT NOT NULL,
-    sold_qty    INTEGER NOT NULL DEFAULT 0,
-    bought_qty  INTEGER NOT NULL DEFAULT 0,
-    net_coins   REAL NOT NULL DEFAULT 0,
+    market_id     TEXT NOT NULL DEFAULT 'main',
+    month         TEXT NOT NULL,
+    item          TEXT NOT NULL,
+    sold_qty      INTEGER NOT NULL DEFAULT 0,
+    bought_qty    INTEGER NOT NULL DEFAULT 0,
+    net_coins     REAL NOT NULL DEFAULT 0,
+    -- CSN mod v1.2 detail: how many times an item transacted (velocity) and the
+    -- gross split of net_coins (income = sales revenue ≥0, expense = buy spend ≤0).
+    -- Enables per-item margin %, avg unit price and turnover on the ledger.
+    times_sold    INTEGER NOT NULL DEFAULT 0,
+    times_bought  INTEGER NOT NULL DEFAULT 0,
+    income_coins  REAL NOT NULL DEFAULT 0,
+    expense_coins REAL NOT NULL DEFAULT 0,
     PRIMARY KEY (market_id, month, item)
 );
 CREATE INDEX IF NOT EXISTS idx_csn_items_market_month ON csn_history_items(market_id, month);
@@ -769,6 +776,13 @@ def _migrate(conn: sqlite3.Connection) -> None:
         "ALTER TABLE land_listings ADD COLUMN title TEXT",
         "ALTER TABLE land_listings ADD COLUMN category TEXT",
         "ALTER TABLE land_listings ADD COLUMN photos TEXT",
+        # CSN per-item detail (mod v1.2): transaction counts (velocity) and the gross
+        # income/expense split behind net_coins. Older rows stay 0 until re-scanned,
+        # which reads as "no detail" on the ledger (margin/velocity blank, net still shown).
+        "ALTER TABLE csn_history_items ADD COLUMN times_sold    INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE csn_history_items ADD COLUMN times_bought  INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE csn_history_items ADD COLUMN income_coins  REAL NOT NULL DEFAULT 0",
+        "ALTER TABLE csn_history_items ADD COLUMN expense_coins REAL NOT NULL DEFAULT 0",
     ]
     for sql in migrations:
         try:
@@ -1417,7 +1431,8 @@ def set_active_batch_id(batch_id: Optional[str]):
 
 def csn_get_market(market_id: str) -> dict:
     """Return {"months": {month: {label, source, recorded_at, income, spent, net,
-    items: {item: {sold_qty, bought_qty, net_coins}}}}} for one market."""
+    items: {item: {sold_qty, bought_qty, net_coins, times_sold, times_bought,
+    income_coins, expense_coins}}}}} for one market."""
     mid = market_id or "main"
     with db() as conn:
         mrows = conn.execute(
@@ -1425,11 +1440,16 @@ def csn_get_market(market_id: str) -> dict:
         irows = conn.execute(
             "SELECT * FROM csn_history_items WHERE market_id=?", (mid,)).fetchall()
     items_by_month: dict = {}
+    ikeys = set(irows[0].keys()) if irows else set()  # tolerate pre-migration rows
     for r in irows:
         items_by_month.setdefault(r["month"], {})[r["item"]] = {
-            "sold_qty":   int(r["sold_qty"] or 0),
-            "bought_qty": int(r["bought_qty"] or 0),
-            "net_coins":  float(r["net_coins"] or 0),
+            "sold_qty":      int(r["sold_qty"] or 0),
+            "bought_qty":    int(r["bought_qty"] or 0),
+            "net_coins":     float(r["net_coins"] or 0),
+            "times_sold":    int(r["times_sold"] or 0) if "times_sold" in ikeys else 0,
+            "times_bought":  int(r["times_bought"] or 0) if "times_bought" in ikeys else 0,
+            "income_coins":  float(r["income_coins"] or 0) if "income_coins" in ikeys else 0.0,
+            "expense_coins": float(r["expense_coins"] or 0) if "expense_coins" in ikeys else 0.0,
         }
     months: dict = {}
     for r in mrows:
@@ -1466,10 +1486,13 @@ def csn_save_market(market_id: str, data: dict) -> None:
                 if not isinstance(iv, dict):
                     continue
                 conn.execute(
-                    "INSERT INTO csn_history_items (market_id, month, item, sold_qty, bought_qty, net_coins)"
-                    " VALUES (?,?,?,?,?,?)",
+                    "INSERT INTO csn_history_items (market_id, month, item, sold_qty, bought_qty, net_coins,"
+                    " times_sold, times_bought, income_coins, expense_coins)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?)",
                     (mid, mk, item, int(iv.get("sold_qty", 0) or 0),
-                     int(iv.get("bought_qty", 0) or 0), float(iv.get("net_coins", 0) or 0)),
+                     int(iv.get("bought_qty", 0) or 0), float(iv.get("net_coins", 0) or 0),
+                     int(iv.get("times_sold", 0) or 0), int(iv.get("times_bought", 0) or 0),
+                     float(iv.get("income_coins", 0) or 0), float(iv.get("expense_coins", 0) or 0)),
                 )
 
 
