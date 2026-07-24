@@ -4522,6 +4522,8 @@ table.t td{padding:0 12px;height:27px;border-bottom:1px solid var(--row);font-si
 table.t td.num{text-align:right;font-family:var(--mono);font-variant-numeric:tabular-nums}
 table.t tr:hover td{background:var(--hover)}
 .tblscroll{overflow-x:auto}
+.rbox{max-height:56vh;overflow-y:auto}
+.rbox table.t thead th{position:sticky;top:0;z-index:2}
 .rrow{display:flex;gap:8px;align-items:center;padding:8px 12px;background:var(--panel);border-bottom:1px solid var(--line)}
 .rsearch{flex:1;min-width:160px;background:var(--bg);border:1px solid var(--line2);color:var(--ink);font-family:var(--mono);font-size:12px;padding:6px 9px;outline:none}
 .rsearch:focus{border-color:var(--accent)}
@@ -4541,7 +4543,7 @@ __NAV__
 <div class="panel" style="border-top:0">
   <div class="ph rowh"><span class="t">Monthly report</span>
     <select class="msel" id="rmonth"></select>
-    <a class="btn" id="ropen" href="#" target="_blank" rel="noopener" style="margin-left:auto">Open full ↗</a>
+    <span class="msg" id="rhint" style="margin-left:auto"></span>
   </div>
   <div class="statrow" id="rstats"></div>
   <div class="statrow" id="fstats"></div>
@@ -4553,7 +4555,7 @@ __NAV__
       <option value="expense">Expense (net &lt; 0)</option>
     </select>
   </div>
-  <div class="tblscroll"><table class="t"><thead><tr id="rth"></tr></thead><tbody id="rtb"></tbody></table></div>
+  <div class="tblscroll rbox"><table class="t"><thead><tr id="rth"></tr></thead><tbody id="rtb"></tbody></table></div>
 </div>
 <div class="panel"><div class="ph rowh"><span class="t">Restock next</span><span class="msg" id="lsnote" style="margin-left:auto"></span></div>
   <div class="tblscroll"><table class="t"><thead><tr><th>Item</th><th>Fullness</th><th>In stock</th><th>Capacity</th><th>Need</th></tr></thead><tbody id="lstb"></tbody></table></div>
@@ -4648,7 +4650,6 @@ async function loadReport(){
  catch(e){document.getElementById('fstats').innerHTML='';document.getElementById('lstb').innerHTML='';}}
 function renderReport(){
  const mo=curMonth();if(!mo)return;
- document.getElementById('ropen').href='/report/'+encodeURIComponent(mid())+'/'+encodeURIComponent(mo.month);
  const inc=mo.income||0,sp=mo.spent||0,net=mo.net||0,its=mo.items||[];
  document.getElementById('rstats').innerHTML=[
   ['Income',fmt(inc)+' ¢','style="color:var(--up)"'],
@@ -4657,7 +4658,13 @@ function renderReport(){
   ['Items',its.length,''],
   ['Income SKUs',its.filter(x=>(x.net||0)>0).length,'']
  ].map(s=>'<div class="stat"><div class="k">'+s[0]+'</div><div class="v" '+(s[2]||'')+'>'+s[1]+'</div></div>').join('');
- document.getElementById('rth').innerHTML=RCOLS.map(([k,l])=>
+ // Months imported before per-item income/expense/velocity existed carry 0 there —
+ // drop those columns (+ hint) rather than show a wall of zeros; they light up on re-scan.
+ const detail=its.some(x=>(x.income||0)||(x.expense||0)||(x.tsold||0)||(x.tbought||0));
+ const cols=detail?RCOLS:RCOLS.filter(c=>['item','sold','bought','net'].indexOf(c[0])>=0);
+ if(!cols.some(c=>c[0]===RSORT.k)){RSORT.k='net';RSORT.dir=-1;}
+ document.getElementById('rhint').textContent=detail?'':'income · margin · velocity fill in after this market’s next scan';
+ document.getElementById('rth').innerHTML=cols.map(([k,l])=>
   '<th class="sort" data-k="'+k+'">'+l+(RSORT.k===k?'<span class="ar">'+(RSORT.dir<0?'▼':'▲')+'</span>':'')+'</th>').join('');
  document.querySelectorAll('#rth .sort').forEach(th=>th.onclick=()=>{const k=th.dataset.k;
   if(RSORT.k===k)RSORT.dir*=-1;else{RSORT.k=k;RSORT.dir=(k==='item')?1:-1;}renderReport();});
@@ -4668,14 +4675,18 @@ function renderReport(){
  const getv=RCOLS.find(c=>c[0]===RSORT.k)[2];
  rows.sort((a,b)=>{if(RSORT.k==='item')return RSORT.dir*String(a.item).localeCompare(String(b.item));
   return RSORT.dir*((getv(a)||0)-(getv(b)||0));});
- document.getElementById('rtb').innerHTML=rows.slice(0,300).map(x=>{
-  const mgn=(x.income>0)?(x.net/x.income*100):null;
-  return '<tr><td>'+esc(x.item)+'</td><td class="num">'+fmt(x.sold)+'</td><td class="num">'+fmt(x.bought)+'</td>'+
-   '<td class="num">'+fmt(x.income)+'</td><td class="num" style="color:var(--down)">'+fmt(x.expense)+'</td>'+
-   '<td class="num" style="color:'+((x.net||0)>=0?'var(--up)':'var(--down)')+'">'+fmt(x.net)+'</td>'+
-   (mgn===null?'<td class="num faint">—</td>':'<td class="num" style="color:'+(mgn>=0?'var(--up)':'var(--down)')+'">'+mgn.toFixed(0)+'%</td>')+
-   '<td class="num muted">'+fmt(x.tsold)+'</td></tr>';}).join('')
-  ||'<tr><td colspan="8" class="faint" style="height:34px">No items match.</td></tr>';}
+ const cell=(x,k)=>{
+  if(k==='item')return '<td>'+esc(x.item)+'</td>';
+  if(k==='sold')return '<td class="num">'+fmt(x.sold)+'</td>';
+  if(k==='bought')return '<td class="num">'+fmt(x.bought)+'</td>';
+  if(k==='income')return '<td class="num">'+fmt(x.income)+'</td>';
+  if(k==='expense')return '<td class="num" style="color:var(--down)">'+fmt(x.expense)+'</td>';
+  if(k==='net')return '<td class="num" style="color:'+((x.net||0)>=0?'var(--up)':'var(--down)')+'">'+fmt(x.net)+'</td>';
+  if(k==='mgn'){const m=(x.income>0)?(x.net/x.income*100):null;
+   return m===null?'<td class="num faint">—</td>':'<td class="num" style="color:'+(m>=0?'var(--up)':'var(--down)')+'">'+m.toFixed(0)+'%</td>';}
+  return '<td class="num muted">'+fmt(x.tsold)+'</td>';};
+ document.getElementById('rtb').innerHTML=rows.map(x=>'<tr>'+cols.map(c=>cell(x,c[0])).join('')+'</tr>').join('')
+  ||'<tr><td colspan="'+cols.length+'" class="faint" style="height:34px">No items match.</td></tr>';}
 function renderFullness(items){
  const cap=items.reduce((a,x)=>a+(x.capacity||0),0),st=items.reduce((a,x)=>a+(x.stock||0),0);
  const avg=cap?Math.round(100*st/cap):0;
