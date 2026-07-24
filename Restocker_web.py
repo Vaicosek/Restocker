@@ -3912,7 +3912,8 @@ async def _handle_report(request):
     try:
         html = m._render_full_report_html(
             f"Monthly Report — {mname}", mname, month_label,
-            items, float(mo.get("income", 0) or 0), float(mo.get("spent", 0) or 0))
+            items, float(mo.get("income", 0) or 0), float(mo.get("spent", 0) or 0),
+            nav_html=_TERMINAL_NAV)
     except Exception as e:
         return web.Response(text=f"Could not render report: {e}", status=500,
                             content_type="text/plain")
@@ -4175,6 +4176,8 @@ table.t th .ar{font-size:8px;opacity:.7;margin-left:2px}
 .msel:focus{border-color:var(--accent)}
 .ph.rowh{display:flex;align-items:center;gap:8px}
 .tblscroll{overflow-x:auto}
+a.molink{color:var(--ink);text-decoration:none;border-bottom:1px dotted var(--line2)}
+a.molink:hover{color:var(--accent);border-bottom-color:var(--accent)}
 </style></head><body>
 __NAV__
 <div class="content">
@@ -4257,7 +4260,8 @@ function render(){const m=MS[act]||{};const mo=m.months||[];
    if(prev){const d=(prev.net||0)!==0?((x.net-prev.net)/Math.abs(prev.net)*100):(x.net?100:0);
      mom='<span class="mmbadge" style="color:'+(d>=0?css('--up'):css('--down'))+'">'+(d>=0?'+':'')+d.toFixed(0)+'%</span>';}
    const iw=(x.income||0)/smax*118,sw=(x.spent||0)/smax*118;
-   return {i,html:'<tr><td>'+esc(x.label||x.month)+'</td><td class="num">'+fmt(x.income)+'</td>'+
+   const rep='/report/'+encodeURIComponent(m.id||'')+'/'+encodeURIComponent(x.month||'');
+   return {i,html:'<tr><td><a class="molink" href="'+rep+'" title="Open full report">'+esc(x.label||x.month)+'</a></td><td class="num">'+fmt(x.income)+'</td>'+
     '<td class="num">'+fmt(x.spent)+'</td><td class="num" style="color:'+((x.net||0)>=0?css('--up'):css('--down'))+'">'+fmt(x.net)+'</td>'+
     '<td class="num">'+mom+'</td>'+
     '<td><span class="split"><i style="width:'+iw+'px;background:'+css('--up')+'"></i>'+
@@ -4501,12 +4505,59 @@ _MYMARKET_HTML = r"""<!DOCTYPE html>
 .msg{font-size:11px;color:var(--muted);font-family:var(--mono)}
 .note{font-size:10px;color:var(--faint);margin-top:6px}
 .locked{padding:60px;text-align:center;color:var(--faint)}
+.statrow{display:grid;grid-template-columns:repeat(5,1fr);gap:1px;background:var(--seam)}
+@media(max-width:1000px){.statrow{grid-template-columns:repeat(2,1fr)}}
+.stat{background:var(--panel);padding:9px 12px;border-bottom:1px solid var(--line)}
+.stat .k{font-size:9.5px;letter-spacing:.5px;text-transform:uppercase;color:var(--faint);font-weight:600}
+.stat .v{font-family:var(--mono);font-size:16px;font-weight:600;margin-top:3px;font-variant-numeric:tabular-nums}
+.ph.rowh{justify-content:flex-start;gap:8px}
+.msel{background:var(--bg);border:1px solid var(--line2);color:var(--ink);font-family:var(--mono);font-size:11px;padding:3px 7px;outline:none}
+.msel:focus{border-color:var(--accent)}
+table.t{width:100%;border-collapse:collapse}
+table.t th{font-size:9.5px;letter-spacing:.5px;text-transform:uppercase;color:var(--faint);font-weight:600;text-align:right;padding:6px 12px;border-bottom:1px solid var(--line);background:var(--panel2)}
+table.t th:first-child{text-align:left}
+table.t th.sort{cursor:pointer;user-select:none}table.t th.sort:hover{color:var(--ink)}
+table.t th .ar{font-size:8px;opacity:.7;margin-left:2px}
+table.t td{padding:0 12px;height:27px;border-bottom:1px solid var(--row);font-size:12px;white-space:nowrap}
+table.t td.num{text-align:right;font-family:var(--mono);font-variant-numeric:tabular-nums}
+table.t tr:hover td{background:var(--hover)}
+.tblscroll{overflow-x:auto}
+.rrow{display:flex;gap:8px;align-items:center;padding:8px 12px;background:var(--panel);border-bottom:1px solid var(--line)}
+.rsearch{flex:1;min-width:160px;background:var(--bg);border:1px solid var(--line2);color:var(--ink);font-family:var(--mono);font-size:12px;padding:6px 9px;outline:none}
+.rsearch:focus{border-color:var(--accent)}
+.fill{display:inline-block;width:70px;height:5px;background:var(--row);border:1px solid var(--line);position:relative;vertical-align:middle;margin-right:6px}
+.fill i{position:absolute;left:0;top:0;bottom:0}
+a.btn{text-decoration:none;display:inline-block}
+a.pick{color:var(--ink);text-decoration:none;border-bottom:1px dotted var(--line2);cursor:pointer}
+a.pick:hover{color:var(--accent);border-bottom-color:var(--accent)}
+@keyframes fl{0%{border-color:var(--accent);background:var(--sel)}100%{border-color:var(--line2);background:var(--bg)}}
+.flash{animation:fl 1.2s ease}
 </style></head><body>
 __NAV__
 <div class="content">
 <div id="locked" class="locked">Owner tools — run <span class="mono" style="color:var(--ink)">/website_login</span> in Discord, link on the dashboard, then reload.</div>
 <div id="panel" style="display:none">
 <div class="bar" id="chips"></div>
+<div class="panel" style="border-top:0">
+  <div class="ph rowh"><span class="t">Monthly report</span>
+    <select class="msel" id="rmonth"></select>
+    <a class="btn" id="ropen" href="#" target="_blank" rel="noopener" style="margin-left:auto">Open full ↗</a>
+  </div>
+  <div class="statrow" id="rstats"></div>
+  <div class="statrow" id="fstats"></div>
+  <div class="rrow">
+    <input class="rsearch" id="rq" placeholder="Search items…" autocomplete="off">
+    <select class="msel" id="rf">
+      <option value="all">All items</option>
+      <option value="income">Income (net &gt; 0)</option>
+      <option value="expense">Expense (net &lt; 0)</option>
+    </select>
+  </div>
+  <div class="tblscroll"><table class="t"><thead><tr id="rth"></tr></thead><tbody id="rtb"></tbody></table></div>
+</div>
+<div class="panel"><div class="ph rowh"><span class="t">Restock next</span><span class="msg" id="lsnote" style="margin-left:auto"></span></div>
+  <div class="tblscroll"><table class="t"><thead><tr><th>Item</th><th>Fullness</th><th>In stock</th><th>Capacity</th><th>Need</th></tr></thead><tbody id="lstb"></tbody></table></div>
+</div>
 <div class="cols">
   <div class="panel"><div class="ph"><span class="t">Restock rewards</span></div><div class="pb">
     <div class="row">
@@ -4572,7 +4623,93 @@ async function loadMk(){
  try{const r=await fetch('/api/owner/catalog?market_id='+encodeURIComponent(mid()));const d=await r.json();
   const names=[];(d&&d.groups?Object.values(d.groups):[]).forEach(g=>(g||[]).forEach(x=>names.push(x.item||x.name)));
   if(!names.length&&d&&Array.isArray(d.items))d.items.forEach(x=>names.push(x.item||x.name));
-  document.getElementById('cat').innerHTML=names.sort().map(n=>'<option value="'+esc(n)+'">').join('');}catch(e){}}
+  document.getElementById('cat').innerHTML=names.sort().map(n=>'<option value="'+esc(n)+'">').join('');}catch(e){}
+ loadReport();}
+
+// ── Monthly report + fullness (per owned market) ─────────────────────────────
+let EARN=null,RSORT={k:'net',dir:-1};
+const RCOLS=[['item','Item',null],['sold','Sold',r=>r.sold],['bought','Bought',r=>r.bought],
+ ['income','Income',r=>r.income],['expense','Expense',r=>r.expense],['net','Net ¢',r=>r.net],
+ ['mgn','Margin %',r=>r.income>0?r.net/r.income*100:-1e18],['vel','Vel ×',r=>r.tsold]];
+const fcol=p=>p<=20?'var(--down)':(p<60?'var(--amber)':'var(--up)');
+function curMarket(){return ((EARN&&EARN.markets)||[]).find(x=>String(x.id)===String(mid()));}
+function curMonth(){const mk=curMarket();const ms=(mk&&mk.months)||[];
+ const v=document.getElementById('rmonth').value;return ms.find(x=>x.month===v)||ms[ms.length-1]||null;}
+async function loadReport(){
+ if(!EARN){try{EARN=await (await fetch('/api/earnings_full')).json();}catch(e){EARN={markets:[]};}}
+ const mk=curMarket();const ms=(mk&&mk.months)||[];const sel=document.getElementById('rmonth');
+ if(!ms.length){sel.innerHTML='<option>—</option>';
+  document.getElementById('rstats').innerHTML='<div class="stat"><div class="k">No report data yet</div><div class="v faint">—</div></div>';
+  document.getElementById('fstats').innerHTML='';document.getElementById('rth').innerHTML='';document.getElementById('rtb').innerHTML='';return;}
+ sel.innerHTML=ms.slice().reverse().map(x=>'<option value="'+esc(x.month)+'">'+esc(x.label||x.month)+'</option>').join('');
+ renderReport();
+ try{const inv=await (await fetch('/api/owner/inventory?market_id='+encodeURIComponent(mid()))).json();
+  const its=(inv&&inv.items)||[];renderFullness(its);renderLowStock(its);}
+ catch(e){document.getElementById('fstats').innerHTML='';document.getElementById('lstb').innerHTML='';}}
+function renderReport(){
+ const mo=curMonth();if(!mo)return;
+ document.getElementById('ropen').href='/report/'+encodeURIComponent(mid())+'/'+encodeURIComponent(mo.month);
+ const inc=mo.income||0,sp=mo.spent||0,net=mo.net||0,its=mo.items||[];
+ document.getElementById('rstats').innerHTML=[
+  ['Income',fmt(inc)+' ¢','style="color:var(--up)"'],
+  ['Spent',fmt(sp)+' ¢','style="color:var(--down)"'],
+  ['Net profit',(net>=0?'+':'')+fmt(net)+' ¢','style="color:'+(net>=0?'var(--up)':'var(--down)')+'"'],
+  ['Items',its.length,''],
+  ['Income SKUs',its.filter(x=>(x.net||0)>0).length,'']
+ ].map(s=>'<div class="stat"><div class="k">'+s[0]+'</div><div class="v" '+(s[2]||'')+'>'+s[1]+'</div></div>').join('');
+ document.getElementById('rth').innerHTML=RCOLS.map(([k,l])=>
+  '<th class="sort" data-k="'+k+'">'+l+(RSORT.k===k?'<span class="ar">'+(RSORT.dir<0?'▼':'▲')+'</span>':'')+'</th>').join('');
+ document.querySelectorAll('#rth .sort').forEach(th=>th.onclick=()=>{const k=th.dataset.k;
+  if(RSORT.k===k)RSORT.dir*=-1;else{RSORT.k=k;RSORT.dir=(k==='item')?1:-1;}renderReport();});
+ const q=(document.getElementById('rq').value||'').toLowerCase(),f=document.getElementById('rf').value;
+ let rows=its.filter(x=>(x.item||'').toLowerCase().includes(q));
+ if(f==='income')rows=rows.filter(x=>(x.net||0)>0);
+ if(f==='expense')rows=rows.filter(x=>(x.net||0)<0);
+ const getv=RCOLS.find(c=>c[0]===RSORT.k)[2];
+ rows.sort((a,b)=>{if(RSORT.k==='item')return RSORT.dir*String(a.item).localeCompare(String(b.item));
+  return RSORT.dir*((getv(a)||0)-(getv(b)||0));});
+ document.getElementById('rtb').innerHTML=rows.slice(0,300).map(x=>{
+  const mgn=(x.income>0)?(x.net/x.income*100):null;
+  return '<tr><td>'+esc(x.item)+'</td><td class="num">'+fmt(x.sold)+'</td><td class="num">'+fmt(x.bought)+'</td>'+
+   '<td class="num">'+fmt(x.income)+'</td><td class="num" style="color:var(--down)">'+fmt(x.expense)+'</td>'+
+   '<td class="num" style="color:'+((x.net||0)>=0?'var(--up)':'var(--down)')+'">'+fmt(x.net)+'</td>'+
+   (mgn===null?'<td class="num faint">—</td>':'<td class="num" style="color:'+(mgn>=0?'var(--up)':'var(--down)')+'">'+mgn.toFixed(0)+'%</td>')+
+   '<td class="num muted">'+fmt(x.tsold)+'</td></tr>';}).join('')
+  ||'<tr><td colspan="8" class="faint" style="height:34px">No items match.</td></tr>';}
+function renderFullness(items){
+ const cap=items.reduce((a,x)=>a+(x.capacity||0),0),st=items.reduce((a,x)=>a+(x.stock||0),0);
+ const avg=cap?Math.round(100*st/cap):0;
+ const low=items.filter(x=>(x.capacity||0)>0&&(x.pct||0)<=20).length;
+ const zero=items.filter(x=>(x.stock||0)<=0).length;
+ document.getElementById('fstats').innerHTML=[
+  ['Catalog items',items.length,''],
+  ['Avg fullness','<span class="fill"><i style="width:'+Math.min(100,avg)+'%;background:'+fcol(avg)+'"></i></span>'+avg+'%','style="color:'+fcol(avg)+'"'],
+  ['Low ≤20%',low,low>0?'style="color:var(--down)"':''],
+  ['At 0 stock',zero,zero>0?'style="color:var(--amber)"':''],
+  ['Shelf units',fmt(st),'']
+ ].map(s=>'<div class="stat"><div class="k">'+s[0]+'</div><div class="v" '+(s[2]||'')+'>'+s[1]+'</div></div>').join('');}
+function renderLowStock(items){
+ const low=items.filter(x=>(x.capacity||0)>0&&(x.stock||0)<(x.capacity||0))
+  .map(x=>({item:x.item,stock:x.stock||0,cap:x.capacity||0,pct:x.pct||0,need:Math.max(0,(x.capacity||0)-(x.stock||0))}))
+  .sort((a,b)=>a.pct-b.pct).slice(0,15);
+ document.getElementById('lsnote').textContent=low.length?('lowest '+low.length+' · click an item to prefill below'):'';
+ document.getElementById('lstb').innerHTML=low.map(x=>{const p=Math.max(0,Math.min(100,x.pct));
+  return '<tr><td><a class="pick" href="javascript:void 0" data-item="'+esc(x.item)+'" data-need="'+x.need+'" data-cap="'+x.cap+'">'+esc(x.item)+'</a></td>'+
+   '<td class="num"><span class="fill"><i style="width:'+p+'%;background:'+fcol(p)+'"></i></span>'+
+   '<span style="color:'+fcol(p)+'">'+Math.round(p)+'%</span></td>'+
+   '<td class="num">'+fmt(x.stock)+'</td><td class="num">'+fmt(x.cap)+'</td>'+
+   '<td class="num" style="color:var(--amber)">'+fmt(x.need)+'</td></tr>';}).join('')
+  ||'<tr><td colspan="5" class="faint" style="height:34px">Everything is well stocked.</td></tr>';
+ document.querySelectorAll('#lstb .pick').forEach(a=>a.onclick=()=>
+  pickItem(a.dataset.item,+a.dataset.need||0,+a.dataset.cap||0));}
+function pickItem(item,need,cap){
+ // prefill the item into every item input + suggest the shortfall as restock qty / fill-to-cap stock
+ ['si','ri','di'].forEach(id=>{const el=document.getElementById(id);if(el){el.value=item;el.classList.add('flash');setTimeout(()=>el.classList.remove('flash'),1200);}});
+ const rq=document.getElementById('rq');if(rq&&need)rq.value=need;
+ const ss=document.getElementById('ss');if(ss&&cap)ss.value=cap;
+ const ri=document.getElementById('ri');if(ri){try{ri.scrollIntoView({behavior:'smooth',block:'center'});}catch(e){}ri.focus();}}
+['rmonth','rf'].forEach(id=>document.getElementById(id).onchange=renderReport);
+document.getElementById('rq').oninput=renderReport;
 document.getElementById('ls').onclick=async()=>{const m=document.getElementById('lmsg');m.textContent='saving…';
  const d=await post('/api/owner/set_loyalty',{market_id:mid(),pts_mult:+document.getElementById('lm').value||1,
   coin_bonus:+document.getElementById('lb').value||0,pct_bonus:+document.getElementById('lp').value||0}).catch(()=>({}));

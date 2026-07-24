@@ -6512,13 +6512,33 @@ def _build_csn_embed(
 
 
 def _render_full_report_html(title: str, market_label: str, month_label: str,
-                             items: dict, income: float, spent: float) -> str:
+                             items: dict, income: float, spent: float,
+                             nav_html: str = "") -> str:
     """Render the COMPLETE monthly report as a self-contained, sortable HTML page —
     every item (not just the embed's top-10), split into income vs expense with a live
     search and click-to-sort table. Used both as a downloadable attachment and served
-    by the /report web route, so people can open and read the whole month."""
+    by the /report web route, so people can open and read the whole month.
+
+    Pass ``nav_html`` (the site's terminal nav) to embed the report inside the website
+    chrome; left blank it stays a standalone page (the downloadable attachment path)."""
     import html as _html
     import json as _json
+
+    # Site-nav styling restyled to this page's own (GitHub-dark) palette, so the shared
+    # nav markup renders consistently when the report is served on the website. Harmless
+    # (unused) when nav_html is blank, e.g. the downloadable attachment.
+    nav_css = """
+header.tshell{display:flex;align-items:center;gap:20px;height:44px;padding:0 16px;border-bottom:1px solid var(--line);background:var(--card);font-family:ui-sans-serif,system-ui,"Segoe UI",Roboto,sans-serif}
+header.tshell .brand{display:flex;align-items:center;gap:9px;font-weight:700;font-size:14px;color:var(--fg)}
+header.tshell .brand .m{width:22px;height:22px;background:var(--green);color:#04120c;display:grid;place-items:center;font-weight:700;font-size:13px;border-radius:4px}
+header.tshell nav{display:flex;gap:2px;height:44px;margin-left:6px}
+header.tshell nav a{display:flex;align-items:center;padding:0 13px;color:var(--muted);font-weight:600;font-size:13px;text-decoration:none;border-bottom:2px solid transparent}
+header.tshell nav a.on{color:var(--fg);border-bottom-color:var(--blue)}
+header.tshell nav a:hover{color:var(--fg)}
+header.tshell .rt{margin-left:auto;text-align:right;line-height:1.15}
+header.tshell .rt .bp b{font-size:13px;color:var(--fg)}
+header.tshell .rt .bp span{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px}
+"""
 
     rows = []
     for name, v in (items or {}).items():
@@ -6575,7 +6595,8 @@ th{cursor:pointer;user-select:none;color:var(--muted);font-weight:600;position:s
 th:hover{color:var(--fg)}tr:last-child td{border-bottom:none}
 tbody tr:hover{background:#1c2129}
 .foot{color:var(--muted);font-size:12px;margin-top:16px}
-</style></head><body><div class="wrap">
+__NAVCSS__
+</style></head><body>__NAV__<div class="wrap">
 <h1>__TITLE__</h1>
 <div class="sub">__MARKET__ &middot; __MONTH__ &middot; __NROWS__ items (__INCOME_CT__ income, __EXPENSE_CT__ expense)</div>
 <div class="cards">
@@ -6630,7 +6651,9 @@ render();
         .replace("__NETSIGN__", "+" if net_total >= 0 else "") \
         .replace("__NET__", _c(net_total)) \
         .replace("__ROWS__", rows_html) \
-        .replace("__DATA__", data_json)
+        .replace("__DATA__", data_json) \
+        .replace("__NAVCSS__", nav_css if nav_html else "") \
+        .replace("__NAV__", nav_html or "")
 
 
 def _render_cap_table_html(name: str, ticker: str, outstanding: float, mark: float,
@@ -8468,6 +8491,17 @@ def _market_inventory(market_id: str) -> list:
             optimal = float(cur_coin or 0)
         return int(round(optimal)), round(effective, 2)
 
+    # Barrel fullness: merge this market's live scan (stock + capacity), deriving a
+    # 1-barrel capacity (54 × stack) when the scan didn't record one — same rule the
+    # Inventory page uses, so My Market shows real fullness for owned markets.
+    scan_here = {}
+    try:
+        for r in (_db.get_all_market_stock() or []):
+            if (r.get("market_id") or "main") == market_id:
+                scan_here[r.get("item")] = r
+    except Exception:
+        pass
+
     for name, e in out.items():
         sug, eff = _suggest(name, e["coin"])
         e["suggested"] = sug
@@ -8475,6 +8509,20 @@ def _market_inventory(market_id: str) -> list:
         if not e.get("category"):
             e["category"] = _item_category(name)
         e["display"] = _pretty_item_name(name)   # cleaned name; raw stays in e["item"] as the key
+        r = scan_here.get(name) or {}
+        if r.get("stock") is not None:
+            e["stock"] = int(r.get("stock") or 0)
+        cur = int(e.get("stock") or 0)
+        cap = int(r.get("capacity") or 0)
+        if cap <= 0:
+            try:
+                ss = _detect_stack_size(name) or 0
+            except Exception:
+                ss = 0
+            cap = 54 * (ss if ss > 0 else 64)
+        cap = max(cap, cur)
+        e["capacity"] = cap
+        e["pct"] = round(100.0 * cur / cap, 1) if cap > 0 else 0.0
     return sorted(out.values(), key=lambda x: -x["sold"])
 
 
