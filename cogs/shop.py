@@ -144,6 +144,86 @@ class ShopCog(commands.Cog):
                 **ephemeral_kwargs(interaction)
             )
 
+    @app_commands.command(name="item_edit", description="Edit an existing item's price and/or stackability")
+    @app_commands.checks.has_any_role(MANAGER_ROLE_NAME)
+    @app_commands.describe(
+        item="Item to edit",
+        coin="(Optional) new coin price per piece. Leave blank to keep the current price.",
+        stackable="(Optional) True = stacks to 64, False = single piece (potions, tools, armor sets). Blank = keep.",
+        stack_size="(Optional) exact stack size (advanced, e.g. 16). Leave -1 to derive from stackable.",
+    )
+    @app_commands.autocomplete(item=any_item_autocomplete)
+    @app_commands.default_permissions(manage_guild=True)
+    async def item_edit(self, interaction: discord.Interaction, item: str,
+                        coin: int | None = None, stackable: bool | None = None,
+                        stack_size: int = -1):
+        if coin is not None and coin < 0:
+            return await interaction.response.send_message("❌ Coin must be ≥ 0.", **ephemeral_kwargs(interaction))
+        if coin is None and stackable is None and stack_size < 0:
+            return await interaction.response.send_message(
+                "❌ Nothing to change — pass `coin:` and/or `stackable:`.", **ephemeral_kwargs(interaction))
+
+        shops = _load_items()
+        items = shops.setdefault("items", {})
+        if item not in items:
+            return await interaction.response.send_message(
+                f"❌ Item `{item}` not found. Use `/add_item` to create it.", **ephemeral_kwargs(interaction))
+        entry = items[item]
+        changes = []
+
+        # ── stackability (explicit stack_size wins over the True/False toggle) ──
+        new_ss = None
+        if stack_size >= 1:
+            new_ss = int(stack_size)
+        elif stackable is True:
+            new_ss = 64
+        elif stackable is False:
+            new_ss = 1
+        if new_ss is not None:
+            entry["stackable"] = new_ss > 1
+            entry["stack_size"] = new_ss
+            changes.append("stackable → **" + (f"yes, ×{new_ss}" if new_ss > 1 else "no (single)") + "**")
+
+        # ── price ──
+        new_coin = None
+        if coin is not None:
+            old_price = entry.get("coin", 0)
+            new_coin = int(coin)
+            entry["coin"] = new_coin
+            changes.append(f"price `{old_price}¢` → `{new_coin}¢`/piece")
+
+        _save_items(shops)
+
+        # Mirror to the DB items table (the JSON store above is the catalog source of
+        # truth; the items table is the twin the orders/stock paths read).
+        try:
+            import Restocker_db as _db_ie
+            with _db_ie.db() as _conn:
+                if new_coin is not None:
+                    _conn.execute("UPDATE items SET coin=? WHERE name=?", (new_coin, item))
+                if new_ss is not None:
+                    _conn.execute("UPDATE items SET stackable=?, stack_size=? WHERE name=?",
+                                  (1 if new_ss > 1 else 0, new_ss, item))
+        except Exception:
+            pass
+
+        # Keep the normal ↔ Future twin at the same price when price changed.
+        twin_note = ""
+        if new_coin is not None:
+            twin = _sync_twin_price(item, new_coin)
+            if twin:
+                twin_note = f"\n↔️ Synced its twin **{twin}** to the same price."
+
+        eff_ss = int(entry.get("stack_size", 1) or 1)
+        eff_coin = entry.get("coin", 0)
+        barrel = round(eff_coin * BARREL_PIECES * eff_ss)
+        return await interaction.response.send_message(
+            f"✅ **{item}** updated: " + "; ".join(changes) +
+            f".\nBarrel now = **{BARREL_PIECES} slots × {eff_ss} = {BARREL_PIECES * eff_ss} items** → `{barrel:,}¢`."
+            + twin_note,
+            **ephemeral_kwargs(interaction)
+        )
+
     # /fix_stacks and /pair_items removed 2026-07-15 — one-time catalog cleanup tools.
     # _detect_stack_size and the twin-pairing logic (_sync_twin_price) still live in core for
     # the normal add/price paths; restore these two commands from git history if a bulk
@@ -166,6 +246,7 @@ class ShopCog(commands.Cog):
 
         stack_size = info.get("stack_size", 1 if not info.get("stackable", True) else 64)
         barrel_price = coin * BARREL_PIECES * stack_size
+        is_stackable = stack_size > 1
 
         embed = discord.Embed(title=f"📦 {item}", color=0x3498DB)
         embed.add_field(name="Price/piece", value=f"`{coin}¢`", inline=True)
@@ -173,6 +254,9 @@ class ShopCog(commands.Cog):
         embed.add_field(name="Stock", value=f"`{stock}`", inline=True)
         embed.add_field(name="Market", value=f"`{market_name}`", inline=True)
         embed.add_field(name="Barrel size", value=f"`{BARREL_PIECES} slots × {stack_size} = {BARREL_PIECES * stack_size} items`", inline=True)
+        embed.add_field(name="Stackable",
+                        value=(f"`yes · ×{stack_size}`" if is_stackable else "`no · single`"), inline=True)
+        embed.set_footer(text="Managers: /item_edit to change price or stackability")
         await interaction.response.send_message(embed=embed)
 
 
