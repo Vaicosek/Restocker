@@ -4534,6 +4534,10 @@ a.pick{color:var(--ink);text-decoration:none;border-bottom:1px dotted var(--line
 a.pick:hover{color:var(--accent);border-bottom-color:var(--accent)}
 @keyframes fl{0%{border-color:var(--accent);background:var(--sel)}100%{border-color:var(--line2);background:var(--bg)}}
 .flash{animation:fl 1.2s ease}
+.panel>.ph{cursor:pointer;user-select:none}
+.ph .cx{display:inline-block;transition:transform .12s;color:var(--muted);margin-right:6px;font-size:10px}
+.panel.collapsed>.ph .cx{transform:rotate(-90deg)}
+.panel.collapsed>:not(.ph){display:none!important}
 </style></head><body>
 __NAV__
 <div class="content">
@@ -4749,6 +4753,20 @@ window.addEventListener('load',()=>{setTimeout(()=>{
   document.getElementById('locked').style.display='none';
   document.getElementById('panel').style.display='';chips();loadMk();}
  },400);});
+// Collapsible panels — click any header to minimize it; remembered per panel across reloads.
+(function(){
+ document.querySelectorAll('.panel>.ph').forEach(ph=>{
+  const panel=ph.parentElement;
+  const cx=document.createElement('span');cx.className='cx';cx.textContent='▾';ph.insertBefore(cx,ph.firstChild);
+  const tt=ph.querySelector('.t');const k='mmcol:'+((tt?tt.textContent:ph.textContent)||'').trim();
+  try{if(localStorage.getItem(k)==='1')panel.classList.add('collapsed');}catch(e){}
+  ph.addEventListener('click',e=>{
+   if(e.target!==cx&&e.target.closest('select,input,a,button'))return;   // don't toggle when using a control
+   panel.classList.toggle('collapsed');
+   try{localStorage.setItem(k,panel.classList.contains('collapsed')?'1':'0');}catch(e){}
+  });
+ });
+})();
 </script></body></html>"""
 
 
