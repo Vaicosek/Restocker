@@ -2563,12 +2563,19 @@ def _parse_hive_feed(text: str) -> list:
         if qty <= 0:
             continue
         item = m.group("rest").strip()
+        # Optional absolute sale timestamp injected by the CSN mod: "… @2026-07-22T09:44:43Z".
+        # Captured (and stripped from the item) so the bot can dedup on the real sale identity.
+        sale_ts = None
+        _tsm = re.search(r"@\s*(\S+)", item)
+        if _tsm:
+            sale_ts = _tsm.group(1)
+            item = (item[:_tsm.start()] + item[_tsm.end():]).strip()
         item = re.sub(r"\s*\(.*?Coins?.*?\)\s*$", "", item, flags=re.IGNORECASE)   # "(-0 Coins)"
         item = re.sub(r"\s+\d[\ddhms]*\s+ago\b.*$", "", item, flags=re.IGNORECASE)  # "3d10h45m ago"
         item = re.sub(r"\s+", " ", item).strip(" -·•")
         if not item:
             continue
-        out.append((m.group("ign"), qty, item))
+        out.append((m.group("ign"), qty, item, sale_ts))
     return out
 
 

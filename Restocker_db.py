@@ -362,6 +362,7 @@ CREATE TABLE IF NOT EXISTS hive_harvests (
     recorded_at TEXT NOT NULL DEFAULT (datetime('now')),
     paid        INTEGER NOT NULL DEFAULT 0,
     paid_at     TEXT,
+    sale_ts     TEXT,                                  -- absolute ISO time of the in-game sale (from the CSN mod), NULL on legacy/untimed lines
     UNIQUE(msg_id, line_no)
 );
 CREATE INDEX IF NOT EXISTS idx_hive_unpaid ON hive_harvests(market_id, paid);
@@ -783,12 +784,26 @@ def _migrate(conn: sqlite3.Connection) -> None:
         "ALTER TABLE csn_history_items ADD COLUMN times_bought  INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE csn_history_items ADD COLUMN income_coins  REAL NOT NULL DEFAULT 0",
         "ALTER TABLE csn_history_items ADD COLUMN expense_coins REAL NOT NULL DEFAULT 0",
+        # Hive harvests: absolute sale timestamp from the CSN mod, so the same sale can be
+        # posted/re-scanned any number of times and still pay ONCE (see the unique index below).
+        "ALTER TABLE hive_harvests ADD COLUMN sale_ts TEXT",
     ]
     for sql in migrations:
         try:
             conn.execute(sql)
         except sqlite3.OperationalError:
             pass
+
+    # Hive dedup by real sale identity: the same in-game sale (market+ign+item+qty+sale_ts)
+    # can only be stored once, so re-posting harvest lines, re-scanning after a .seen wipe,
+    # or two instances reporting the same shop can NEVER double-pay. Partial index (only
+    # timed rows) so legacy/untimed lines still fall back to the msg_id+line_no dedup.
+    try:
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_hive_sale "
+                     "ON hive_harvests(market_id, ign, item, qty, sale_ts) "
+                     "WHERE sale_ts IS NOT NULL")
+    except sqlite3.OperationalError:
+        pass
 
     # CSN history: upgrade the legacy single-market table (month PRIMARY KEY,
     # no market_id) to the market-aware schema, preserving any rows as 'main'.
@@ -2715,17 +2730,21 @@ def set_item_worker_cost(name: str, worker_cost) -> None:
 # ── Hive engine ──────────────────────────────────────────────────────────────
 
 def add_hive_harvest(market_id: str, ign: str, user_id, item: str, qty: int,
-                     unit_value: float, msg_id: str, line_no: int):
-    """Record one parsed harvest line. Returns the new row id if it was NEW, else None
-    (idempotent per message+line, so re-ingesting the same Discord message never
-    double-counts). The id lets auto-payout settle exactly the rows it just created."""
+                     unit_value: float, msg_id: str, line_no: int, sale_ts: str = None):
+    """Record one parsed harvest line. Returns the new row id if it was NEW, else None.
+    Idempotent two ways: per message+line (re-ingesting the same Discord message never
+    double-counts), and — when a sale timestamp is present — per real sale identity
+    (market+ign+item+qty+sale_ts via the uq_hive_sale index), so the same sale posted or
+    re-scanned any number of times still pays exactly once. The id lets auto-payout settle
+    exactly the rows it just created."""
     with db() as conn:
         cur = conn.execute(
             "INSERT OR IGNORE INTO hive_harvests "
-            "(market_id, ign, user_id, item, qty, unit_value, msg_id, line_no) "
-            "VALUES (?,?,?,?,?,?,?,?)",
+            "(market_id, ign, user_id, item, qty, unit_value, msg_id, line_no, sale_ts) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
             (str(market_id), str(ign), (str(user_id) if user_id else None), str(item),
-             int(qty), float(unit_value or 0), str(msg_id), int(line_no)))
+             int(qty), float(unit_value or 0), str(msg_id), int(line_no),
+             (str(sale_ts) if sale_ts else None)))
         return int(cur.lastrowid) if cur.rowcount > 0 else None
 
 

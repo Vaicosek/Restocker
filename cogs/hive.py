@@ -87,11 +87,17 @@ def _ingest_lines(market_id: str, msg_id: str, lines: list, start_line: int = 0)
         pass
     next_no = sum(have.values())
     new_ids = []
-    for (ign, qty, item) in lines:
-        key = (str(ign), int(qty), str(item))
-        if have.get(key, 0) > 0:
-            have[key] -= 1                    # already ingested from a prior version
-            continue
+    for row in lines:
+        ign, qty, item = row[0], row[1], row[2]
+        sale_ts = row[3] if len(row) > 3 else None
+        # Timed lines dedup on real sale identity in the DB (uq_hive_sale), so skip the
+        # per-message content counter for them — it would wrongly cancel two distinct sales
+        # of the same qty. Untimed (legacy) lines keep the content-multiset dedup.
+        if sale_ts is None:
+            key = (str(ign), int(qty), str(item))
+            if have.get(key, 0) > 0:
+                have[key] -= 1                # already ingested from a prior version
+                continue
         uid = None
         try:
             uid = _db.get_user_id_by_ign(ign)
@@ -99,7 +105,8 @@ def _ingest_lines(market_id: str, msg_id: str, lines: list, start_line: int = 0)
             pass
         val = core._hive_item_value(item)
         try:
-            rid = _db.add_hive_harvest(market_id, ign, uid, item, qty, val, msg_id, next_no)
+            rid = _db.add_hive_harvest(market_id, ign, uid, item, qty, val, msg_id, next_no,
+                                       sale_ts=sale_ts)
             if rid:
                 new_ids.append(rid)
                 next_no += 1
