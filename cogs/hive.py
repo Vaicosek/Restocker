@@ -46,6 +46,26 @@ def _fmt(n) -> str:
     return f"{int(round(float(n))):,}"
 
 
+async def _hive_item_autocomplete(interaction: discord.Interaction, current: str):
+    """Suggest hive-valued items for /hive set_value: the two defaults plus anything
+    already valued in config, filtered by what's typed. Free text still allowed."""
+    names = {"Honey Block", "Honeycomb Block"}
+    try:
+        import Restocker_db as _db
+        with _db.db() as _c:
+            for r in _c.execute("SELECT key FROM bot_config WHERE key LIKE 'hive_value:%'"):
+                nm = str(r[0]).split("hive_value:", 1)[-1].strip()
+                if nm:
+                    names.add(nm.title())
+    except Exception:
+        pass
+    cur = (current or "").strip().lower()
+    out = sorted(n for n in names if cur in n.lower())
+    if current and current.strip() and not any(current.strip().lower() == n.lower() for n in out):
+        out = [current.strip()] + out          # let managers set a custom item name too
+    return [app_commands.Choice(name=n, value=n) for n in out[:25]]
+
+
 def _ingest_lines(market_id: str, msg_id: str, lines: list, start_line: int = 0) -> list:
     """Insert parsed (ign, qty, item) rows for one message; returns the NEW row ids.
     Values snapshot at ingest; unregistered IGNs stored with user_id NULL.
@@ -383,6 +403,7 @@ class HiveCog(commands.Cog):
     @hive.command(name="set_value", description="Set the per-piece value of a hive product (default: Honey Block 350, Honeycomb 300)")
     @app_commands.describe(item="Item name as it appears in the feed (e.g. Honey Block)",
                            value="Coins per piece (0 removes it from hive valuation)")
+    @app_commands.autocomplete(item=_hive_item_autocomplete)
     async def hive_set_value(self, interaction: discord.Interaction, item: str,
                              value: app_commands.Range[float, 0.0, 1_000_000.0]):
         if not is_manager(interaction):
