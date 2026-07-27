@@ -13,6 +13,7 @@ FUNDS_REPORT_CHANNEL_ID = core.FUNDS_REPORT_CHANNEL_ID
 FuturesOrderView = core.FuturesOrderView
 MANAGER_ROLE_ALT = core.MANAGER_ROLE_ALT
 MANAGER_ROLE_NAME = core.MANAGER_ROLE_NAME
+OWNER_ROLE_NAME = core.OWNER_ROLE_NAME
 WEB_ORDERS_CHANNEL_ID = core.WEB_ORDERS_CHANNEL_ID
 FUTURES_CHANNEL_ID = core.FUTURES_CHANNEL_ID
 WORKER_CHANNEL_ID = core.WORKER_CHANNEL_ID
@@ -162,11 +163,10 @@ class MoneyCog(commands.Cog):
                 embed.add_field(name="Enchants / Quality", value=enchants, inline=False)
             if notes:
                 embed.add_field(name="Notes", value=notes, inline=False)
-            embed.set_footer(text="Awaiting manager review")
+            embed.set_footer(text="Awaiting owner review")
 
-            mgr_role = discord.utils.get(channel.guild.roles, name=MANAGER_ROLE_NAME) if channel.guild else None
-            alt_role  = discord.utils.get(channel.guild.roles, name=MANAGER_ROLE_ALT)  if channel.guild else None
-            ping = " ".join(r.mention for r in [mgr_role, alt_role] if r)
+            owner_role = discord.utils.get(channel.guild.roles, name=OWNER_ROLE_NAME) if channel.guild else None
+            ping = owner_role.mention if owner_role else ""
 
             try:
                 msg = await channel.send(
@@ -768,6 +768,67 @@ class MoneyCog(commands.Cog):
             f"💰 Recorded **{amount:,}** 🪙 on deal #{deal_id}. "
             f"Paid total **{new_paid:.0f}** · remaining **{o['remaining']:.0f}**."
             + (f"\n🏦 Platform fee ledgered: **{_fee:,}** 🪙." if _fee else ""), ephemeral=True)
+
+    @app_commands.command(
+        name="futures_quote",
+        description="Price gear from the futures production cost sheet (futures are quoted at CASH COST)")
+    @app_commands.describe(
+        item="Item name, e.g. 'Diamond Pickaxe' (or paste the order's item)",
+        qty="How many pieces",
+        effects="Enchants / quality, e.g. 'Efficiency V, Fortune III, Unbreaking III'",
+        order_id="Instead of item/qty: quote an existing futures order by its ID",
+        customer="The buyer — picks inner-group vs external pricing from their registered markets")
+    async def futures_quote(self, interaction: discord.Interaction,
+                            item: Optional[str] = None, qty: int = 1,
+                            effects: Optional[str] = None,
+                            order_id: Optional[int] = None,
+                            customer: Optional[discord.Member] = None):
+        if order_id is not None:
+            try:
+                import Restocker_db as _db
+                o = _db.get_futures_order(int(order_id))
+            except Exception as e:
+                return await interaction.response.send_message(f"⚠️ DB error: {e}", ephemeral=True)
+            if not o:
+                return await interaction.response.send_message(
+                    f"❌ Futures order #{order_id} not found.", ephemeral=True)
+            item, qty, effects = o.get("item"), int(o.get("quantity") or 0), o.get("enchants") or ""
+        if not item:
+            return await interaction.response.send_message(
+                "❌ Give an `item` (+ optional `effects`) or an `order_id`.", ephemeral=True)
+
+        q = core._futures_quote(item, qty, effects or "")
+        if not q:
+            return await interaction.response.send_message(
+                f"❌ No production tier matches **{item}** — the cost sheet covers tools "
+                f"(pickaxe/axe/shovel), swords and armor pieces. Price it by hand.",
+                ephemeral=True)
+
+        e = discord.Embed(title=f"🔮 Futures quote — {q['qty']}× {item}",
+                          description=f"Tier: **{q['label']}**", color=discord.Color.gold())
+        if effects:
+            e.add_field(name="Effects", value=effects, inline=False)
+        e.add_field(name="💰 Cash cost (futures, up front)",
+                    value=f"**{q['cash']:,}** ({q['unit_cash']:,}/pc)", inline=True)
+        e.add_field(name="Inner group price", value=f"{q['group']:,} ({q['unit_group']:,}/pc)", inline=True)
+        e.add_field(name="External market price", value=f"{q['sell']:,} ({q['unit_sell']:,}/pc)", inline=True)
+        e.add_field(name="Margins", value=(f"inner {q['group']-q['cash']:,} · "
+                    f"external {q['sell']-q['cash']:,}"), inline=True)
+        e.add_field(name="Cost breakdown / pc",
+                    value=f"Diamonds {q['diamonds']:,} · XP {q['xp']:,} · Worker pay {q['worker_pay']:,}",
+                    inline=False)
+        if customer is not None:
+            grp = core._pricing_group_for_user(customer.id)
+            if grp == "inner":
+                v = (f"**INNER GROUP** → group price **{q['group']:,}** total; futures "
+                     f"= {q['cash']:,} up front, {q['group']-q['cash']:,} after resale")
+            elif grp == "external":
+                v = f"**EXTERNAL** → sell price **{q['sell']:,}** total; no at-cost futures"
+            else:
+                v = f"owns no registered market → treat as EXTERNAL (**{q['sell']:,}**)"
+            e.add_field(name=f"Applies to {customer.display_name}", value=v, inline=False)
+        e.set_footer(text="Unbreaking III is included in every tier — no surcharge.")
+        await interaction.response.send_message(embed=e, ephemeral=True)
 
     @app_commands.command(name="my_futures_orders", description="Check the status of your submitted futures orders")
     async def my_futures_orders(self, interaction: discord.Interaction):

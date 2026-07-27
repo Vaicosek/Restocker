@@ -181,6 +181,104 @@ WORKER_CHANNEL_ID = _env_int("WORKER_CHANNEL_ID", 1500543204720902185)
 WELCOME_CHANNEL_ID = _env_int("WELCOME_CHANNEL_ID", 1500543301319917648)
 WEB_ORDERS_CHANNEL_ID = _env_int("WEB_ORDERS_CHANNEL_ID", 0)
 FUTURES_CHANNEL_ID = _env_int("FUTURES_CHANNEL_ID", 1524155131455737967)  # dedicated #futures approval channel
+
+# ── Futures production cost sheet ────────────────────────────────────────────
+# The real per-piece economics of making gear, by tier. FUTURES ARE PRICED AT
+# **cash_cost** (diamonds + XP + worker pay) — that is the production cost, and it is the
+# number a futures order is quoted at. group/sell are the wholesale + retail prices for
+# reference. Unbreaking III is INCLUDED in every tier — there is no Unb III surcharge.
+# Keys are matched by _futures_tier() from an item name + effects text.
+FUTURES_COST_TIERS = [
+    # (tier key, label, diamonds, xp_value, worker_pay, cash_cost, group_price, sell_price)
+    ("tool_eff5_ench",  "Pickaxe/Axe/Shovel — Eff V + Fortune III/Silk Touch",  750, 1170, 1500, 2250, 2550, 2950),
+    ("tool_eff5_clean", "Pickaxe/Axe/Shovel — Eff V, clean",                    500,  780, 1200, 1700, 2150, 2550),
+    ("tool_eff4_ench",  "Pickaxe — Eff IV + Fortune III/Silk Touch",            400,  585, 1000, 1400, 1950, 2350),
+    ("tool_eff4_clean", "Pickaxe/Axe/Shovel — Eff IV, clean",                   250,  390,  850, 1100, 1450, 1850),
+    ("sword_sharp5_ench", "Sword — Sharp V + Fire Aspect II/Knockback III",     750, 1170, 3600, 4350, 4900, 5200),
+    ("sword_sharp5",    "Sword — Sharp V, clean",                               500,  780, 1800, 2300, 3200, 3600),
+    ("armor",           "Armor piece",                                          500,  780,  675, 1175,  950, 1125),
+]
+FUTURES_TIER_BY_KEY = {t[0]: t for t in FUTURES_COST_TIERS}
+
+
+def _futures_tier(item: str, effects: str = "") -> tuple | None:
+    """Match an item name + effects text to a FUTURES_COST_TIERS row. Returns the tuple or
+    None if it isn't a gear item the sheet covers (e.g. brews, blocks)."""
+    s = f"{item or ''} {effects or ''}".lower()
+    is_sword = "sword" in s
+    is_armor = any(k in s for k in ("helmet", "chestplate", "leggings", "boots", "armor"))
+    is_tool  = any(k in s for k in ("pickaxe", "axe", "shovel", "pick"))
+    # "enchanted" here means a value enchant on top of Efficiency/Sharpness
+    ench = any(k in s for k in ("fortune", "silk", "fire aspect", "knockback"))
+    if is_sword:
+        return FUTURES_TIER_BY_KEY["sword_sharp5_ench" if ench else "sword_sharp5"]
+    if is_armor:
+        return FUTURES_TIER_BY_KEY["armor"]
+    if not is_tool:
+        return None
+    eff5 = any(k in s for k in ("eff v", "efficiency v", "eff 5", "efficiency 5"))
+    if eff5:
+        return FUTURES_TIER_BY_KEY["tool_eff5_ench" if ench else "tool_eff5_clean"]
+    return FUTURES_TIER_BY_KEY["tool_eff4_ench" if ench else "tool_eff4_clean"]
+
+
+# ── Buyer pricing groups ─────────────────────────────────────────────────────
+# Inner group (Internal MARKETS) buys at group price and may take futures at cash cost;
+# externals pay sell price. A market's group comes from bot_config 'market_group:<mid>'
+# ("inner"/"external") when set, else this default roster. A USER's group is resolved
+# from the markets they own/lead/manage — inner wins if they hold any inner market.
+_INNER_MARKET_IDS_DEFAULT = {
+    "main", "amazonia", "bnl", "brew", "brewshop", "vtech",
+    "greyhames", "dragonmart", "moosemart", "mardurak",
+}
+
+
+def _market_pricing_group(market_id: str) -> str:
+    mid = str(market_id or "").strip().lower()
+    try:
+        import Restocker_db as _db
+        ov = str(_db.get_config(f"market_group:{mid}") or "").strip().lower()
+        if ov in ("inner", "external"):
+            return ov
+    except Exception:
+        pass
+    return "inner" if mid in _INNER_MARKET_IDS_DEFAULT else "external"
+
+
+def _pricing_group_for_user(user_id) -> str | None:
+    """'inner' | 'external' from the markets a user owns/leads/manages; None if they hold
+    no market at all (treat as external unless a manager says otherwise)."""
+    try:
+        uid = str(int(user_id))
+    except Exception:
+        return None
+    groups = set()
+    try:
+        for mid, m in (_load_markets().get("markets", {}) or {}).items():
+            if not isinstance(m, dict):
+                continue
+            ids = {str(m.get("owner_id") or ""), str(m.get("leader_discord_id") or "")}
+            ids |= {str(x) for x in (m.get("manager_ids") or [])}
+            if uid in ids:
+                groups.add(_market_pricing_group(mid))
+    except Exception:
+        return None
+    if not groups:
+        return None
+    return "inner" if "inner" in groups else "external"
+
+
+def _futures_quote(item: str, qty: int, effects: str = "") -> dict | None:
+    """Price a futures line from the cost sheet. Futures are quoted at CASH COST."""
+    t = _futures_tier(item, effects)
+    if not t:
+        return None
+    key, label, dia, xp, wage, cash, group, sell = t
+    q = max(0, int(qty or 0))
+    return {"tier": key, "label": label, "qty": q,
+            "unit_cash": cash, "unit_group": group, "unit_sell": sell,
+            "diamonds": dia, "xp": xp, "worker_pay": wage,
+            "cash": cash * q, "group": group * q, "sell": sell * q}
 TICKETS_CATEGORY_ID = _env_int("TICKETS_CATEGORY_ID", 1500543271783501884)
 
 # ── SW Trade Network cross-server broadcast ──────────────────────────────────
@@ -206,6 +304,7 @@ MANAGER_DM_IDS: list[int] = _env_ids("MANAGER_DM_IDS", [1203738126850461738, 694
 EMPLOYEE_ROLE_NAME = _env_str("EMPLOYEE_ROLE_NAME", "Employee")
 MANAGER_ROLE_NAME = _env_str("MANAGER_ROLE_NAME", "Manager")
 MANAGER_ROLE_ALT  = _env_str("MANAGER_ROLE_ALT", "Admin")
+OWNER_ROLE_NAME   = _env_str("OWNER_ROLE_NAME", "Owner")   # pinged for futures-order review
 HARVESTER_ROLE_NAME = _env_str("HARVESTER_ROLE_NAME", "Hauler")
 CUSTOMER_ROLE_NAME = _env_str("CUSTOMER_ROLE_NAME", "Customer")
 AUTOROLE_CREATE_IF_MISSING = _env_str("AUTOROLE_CREATE_IF_MISSING", "1")
@@ -7736,6 +7835,53 @@ def _save_csn_for_market(market_id: str, data: dict) -> bool:
     return ok
 
 
+def _apply_market_registry_20260727() -> None:
+    """One-shot (guarded by a config flag): register market owners + report-channel
+    bindings from the 2026-07-27 roster, creating nauticalmarket/sancta if missing.
+    Runs at startup so no one has to execute a script by hand; re-running is a no-op."""
+    import secrets as _sec
+    import Restocker_db as _db
+    if str(_db.get_config("_market_registry_20260727") or "") == "done":
+        return
+    registry = [
+        ("falrija",          "Falrija",           "1529551677353627898", "1529820990857678979"),
+        ("nether_market",    "Nether market",     "1519690325273219083", "1354143289426575391"),
+        ("invictusemporium", "Invictus-emporium", "1521518107632599132", "965756490277330964"),
+        ("viridianmarket",   "ViridianMarket",    "1522883957832548382", "98468157852778496"),
+        ("generalstore",     "GeneralStore",      "1529394249353920542", "1325526839661170809"),
+        ("goblin_mart",      "Goblin Mart",       "1529503569584197772", "1362806160486432778"),
+        ("freezone",         "Freezone",          "1529538342558105651", "846469784966135819"),
+        ("nauticalmarket",   "NauticalMarket",    "1522336398101975160", "488919485462478880"),
+        ("toolshop",         "Toolshop",          "1521790087803830292", "1183543527842525264"),
+        ("sancta",           "Sancta",            "1531333510378422353", "1478196512818462861"),
+        ("amazonia",         "Amazonia",          "1510384815093059805", "1080404147368628254"),
+        ("bnl",              "BNL",               "1510943667597348994", "219181322529144833"),
+    ]
+    created, updated = [], []
+    with _db.db() as conn:
+        row = conn.execute("SELECT platform_fee_pct, COUNT(*) c FROM markets "
+                           "GROUP BY platform_fee_pct ORDER BY c DESC LIMIT 1").fetchone()
+        fee = float(row[0]) if row else 5.0
+        for mid, name, chan, owner in registry:
+            ex = conn.execute("SELECT market_id FROM markets WHERE market_id=?", (mid,)).fetchone()
+            if ex:
+                conn.execute(
+                    "UPDATE markets SET owner_id=?, report_channel_id=?, "
+                    "name=CASE WHEN name IS NULL OR name='' THEN ? ELSE name END "
+                    "WHERE market_id=?", (owner, chan, name, mid))
+                updated.append(mid)
+            else:
+                conn.execute(
+                    "INSERT INTO markets (market_id, name, owner_id, manager_ids, platform_fee_pct, "
+                    "csn_history_file, active, discord_role_name, leader_discord_id, leader_code, "
+                    "report_channel_id) VALUES (?,?,?,?,?,NULL,1,'',?,?,?)",
+                    (mid, name, owner, "[]", fee, owner, _sec.token_hex(4).upper(), chan))
+                created.append(mid)
+    _db.set_config("_market_registry_20260727", "done")
+    log.info("[market registry] applied: %d updated (%s), %d created (%s)",
+             len(updated), ", ".join(updated), len(created), ", ".join(created) or "—")
+
+
 def _backfill_csn_to_db() -> None:
     """One-time import of CSN months that exist only in the legacy YAML files into
     the DB. Idempotent: inserts only months absent from the DB, so it never
@@ -10461,6 +10607,65 @@ _AI_TOOLS = [
             "required": ["for_user", "item", "quantity"]
         }
     },
+    {
+        "name": "quote_futures",
+        "description": "Price gear from the futures production cost sheet. ALWAYS use this to answer 'how much will X cost' for tools/swords/armor — never estimate or invent surcharges. Pass 'for_user' (the BUYER) whenever known: the tool resolves their pricing group from registered market ownership — inner-group owners pay GROUP price (futures at cash cost up front), externals pay SELL price — and tells you the applicable number.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "item": {"type": "string", "description": "Item name, e.g. 'Diamond Pickaxe'."},
+                "quantity": {"type": "integer", "description": "How many pieces (default 1)."},
+                "effects": {"type": "string", "description": "Enchants/quality, e.g. 'Efficiency V, Fortune III, Unbreaking III'."},
+                "for_user": {"type": "string", "description": "Who is BUYING — @mention, user id, or display name. Used to pick inner-group vs external pricing from their registered markets."}
+            },
+            "required": ["item"]
+        }
+    },
+    {
+        "name": "get_hive_status",
+        "description": "Hive harvest state for a market: unpaid harvests per person (who's owed what), autopay on/off, wage %, and item values. Use for questions about honey/comb wages, who hasn't been paid, or hive settings.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "market": {"type": "string", "description": "Market id, e.g. 'vtech'. Default 'vtech'."}
+            },
+            "required": []
+        }
+    },
+    {
+        "name": "get_market_earnings",
+        "description": "A market's recorded CSN earnings: recent months with income/spent/net, plus lifetime totals. Use for 'how much did X make', month comparisons, or checking whether a report was recorded.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "market": {"type": "string", "description": "Market id, e.g. 'toolshop', 'main', 'vtech'."}
+            },
+            "required": ["market"]
+        }
+    },
+    {
+        "name": "get_stock_fullness",
+        "description": "Live barrel stock for a market: average fullness, low items (<=20%), and the biggest shortfalls (capacity - stock). Use for 'what needs restocking', 'how full is X', or before suggesting restock orders.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "market": {"type": "string", "description": "Market id."},
+                "low_only": {"type": "boolean", "description": "Only list items at/below 20% (default true)."}
+            },
+            "required": ["market"]
+        }
+    },
+    {
+        "name": "get_loyalty",
+        "description": "A user's loyalty points, tier, linked IGNs, and progress to the next tier. Use for 'how many points do I have', tier questions, or checking whether an IGN is registered (unregistered IGNs have wages held).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "username": {"type": "string", "description": "Discord display name, username, mention, or an in-game name."}
+            },
+            "required": ["username"]
+        }
+    },
 ]
 
 
@@ -11411,10 +11616,9 @@ async def _ai_tool_create_futures_order(guild, channel, user, args):
                 embed.add_field(name="Effects / Quality", value=effects, inline=False)
             if notes:
                 embed.add_field(name="Notes", value=notes, inline=False)
-            embed.set_footer(text=f"Placed by {user} • awaiting manager review")
-            mgr_role = discord.utils.get(post_ch.guild.roles, name=MANAGER_ROLE_NAME) if post_ch.guild else None
-            alt_role = discord.utils.get(post_ch.guild.roles, name=MANAGER_ROLE_ALT)  if post_ch.guild else None
-            ping = " ".join(r.mention for r in [mgr_role, alt_role] if r)
+            embed.set_footer(text=f"Placed by {user} • awaiting owner review")
+            owner_role = discord.utils.get(post_ch.guild.roles, name=OWNER_ROLE_NAME) if post_ch.guild else None
+            ping = owner_role.mention if owner_role else ""
             msg = await post_ch.send(
                 content=f"{ping} — new futures order!" if ping else "New futures order!",
                 embed=embed, view=FuturesOrderView(order_id))
@@ -11433,7 +11637,166 @@ async def _ai_tool_create_futures_order(guild, channel, user, args):
             + f" for **{target_name}** — {tail}.")
 
 
+async def _ai_tool_quote_futures(guild, channel, user, args):
+    item = str(args.get("item") or "").strip()
+    qty = max(1, int(args.get("quantity") or 1))
+    effects = str(args.get("effects") or "")
+    q = _futures_quote(item, qty, effects)
+    if not q:
+        return (f"No production tier matches '{item}' — the cost sheet covers tools "
+                f"(pickaxe/axe/shovel), swords and armor pieces only.")
+    # Resolve the buyer's pricing group from registered market ownership, if given.
+    buyer_line = ""
+    who = str(args.get("for_user") or "").strip()
+    if who:
+        uid = re.sub(r"[<@!>]", "", who)
+        member = None
+        if uid.isdigit():
+            member = guild.get_member(int(uid))
+        if member is None:
+            s = who.lower()
+            member = next((m for m in guild.members
+                           if s in m.display_name.lower() or s in m.name.lower()), None)
+        if member is None:
+            buyer_line = f"\nBuyer '{who}' not found — showing both price levels."
+        else:
+            grp = _pricing_group_for_user(member.id)
+            if grp == "inner":
+                buyer_line = (f"\nBuyer {member.display_name}: INNER GROUP (registered market owner) → "
+                              f"pays GROUP price {q['group']:,} total; futures = {q['cash']:,} up front, "
+                              f"{q['group']-q['cash']:,} after resale.")
+            elif grp == "external":
+                buyer_line = (f"\nBuyer {member.display_name}: EXTERNAL (owns only external markets) → "
+                              f"pays SELL price {q['sell']:,} total. No at-cost futures.")
+            else:
+                buyer_line = (f"\nBuyer {member.display_name}: owns no registered market → treat as "
+                              f"EXTERNAL ({q['sell']:,}) unless a manager says otherwise.")
+    return (f"Futures quote — {qty}× {item} ({effects or 'no effects given'})\n"
+            f"Tier: {q['label']}\n"
+            f"CASH COST (futures, paid up front): {q['cash']:,} ({q['unit_cash']:,}/pc)\n"
+            f"Inner group price (futures settle up to this): {q['group']:,} ({q['unit_group']:,}/pc) · "
+            f"External market price: {q['sell']:,} ({q['unit_sell']:,}/pc)\n"
+            f"Margins: inner {q['group']-q['cash']:,} · external {q['sell']-q['cash']:,}\n"
+            f"Per-piece breakdown: diamonds {q['diamonds']:,} · XP {q['xp']:,} · "
+            f"worker pay {q['worker_pay']:,}. Unbreaking III included — no surcharge."
+            + buyer_line)
+
+
+async def _ai_tool_get_hive_status(guild, channel, user, args):
+    import Restocker_db as _db
+    mid = str(args.get("market") or "vtech").strip().lower()
+    rows = _db.get_unpaid_hive_harvests(mid)
+    autopay = "ON" if str(_db.get_config(f"hive_autopay:{mid}") or "") == "1" else "off"
+    pct = _hive_harvester_pct()
+    with _db.db() as _conn:
+        hv = {str(r[0]).split("hive_value:", 1)[-1]: r[1] for r in
+              _conn.execute("SELECT key,value FROM bot_config WHERE key LIKE 'hive_value:%'")}
+    per = {}
+    for r in rows:
+        key = r.get("ign") or "?"
+        e = per.setdefault(key, {"qty": 0, "val": 0.0, "uid": r.get("user_id")})
+        e["qty"] += int(r.get("qty") or 0)
+        e["val"] += int(r.get("qty") or 0) * float(r.get("unit_value") or 0)
+    lines = [f"Hive — {mid}: autopay {autopay}, harvester wage {pct:g}%, "
+             f"values: " + (", ".join(f"{k} {float(v):g}/pc" for k, v in hv.items()) or "none set")]
+    if not per:
+        lines.append("No unpaid harvests.")
+    else:
+        tot = sum(e["val"] for e in per.values())
+        lines.append(f"Unpaid: {len(rows)} rows, value {tot:,.0f} (wages ≈ {tot*pct/100:,.0f}):")
+        for ign, e in sorted(per.items(), key=lambda kv: -kv[1]["val"]):
+            reg = "" if e["uid"] else " (UNREGISTERED — held until /register_ign)"
+            lines.append(f"• {ign}: {e['qty']:,} pcs, value {e['val']:,.0f}{reg}")
+    return "\n".join(lines[:25])
+
+
+async def _ai_tool_get_market_earnings(guild, channel, user, args):
+    mid = str(args.get("market") or "").strip().lower()
+    if not mid:
+        return "Give a market id."
+    months = (_load_csn_for_market(mid) or {}).get("months", {}) or {}
+    if not months:
+        return f"No recorded earnings for '{mid}'."
+    keys = sorted(months.keys())
+    tot_inc = sum(float(m.get("income", 0) or 0) for m in months.values())
+    tot_net = sum(float(m.get("net", 0) or 0) for m in months.values())
+    lines = [f"{mid}: {len(keys)} month(s) recorded · lifetime income {tot_inc:,.0f}, net {tot_net:,.0f}"]
+    for k in keys[-6:]:
+        m = months[k]
+        lines.append(f"• {m.get('label', k)}: income {float(m.get('income',0)):,.0f}, "
+                     f"spent {float(m.get('spent',0)):,.0f}, net {float(m.get('net',0)):,.0f}")
+    return "\n".join(lines)
+
+
+async def _ai_tool_get_stock_fullness(guild, channel, user, args):
+    import Restocker_db as _db
+    mid = str(args.get("market") or "").strip().lower()
+    low_only = args.get("low_only", True)
+    rows = [r for r in (_db.get_all_market_stock() or []) if (r.get("market_id") or "main") == mid]
+    if not rows:
+        return f"No stock scan recorded for '{mid}' — 0% everywhere means 'never scanned', not 'empty'."
+    tot_cap = sum(int(r.get("capacity") or 0) for r in rows)
+    tot_st = sum(int(r.get("stock") or 0) for r in rows)
+    avg = (100 * tot_st / tot_cap) if tot_cap else 0
+    items = []
+    for r in rows:
+        cap = int(r.get("capacity") or 0)
+        st = int(r.get("stock") or 0)
+        if cap <= 0:
+            continue
+        pct = 100 * st / cap
+        if (not low_only) or pct <= 20:
+            items.append((pct, r.get("item"), st, cap))
+    items.sort()
+    lines = [f"{mid}: {len(rows)} items scanned · avg fullness {avg:.0f}% · "
+             f"{sum(1 for p,_,_,_ in items if p<=20)} low (≤20%)"]
+    for pct, item, st, cap in items[:15]:
+        lines.append(f"• {item}: {pct:.0f}% ({st:,}/{cap:,}, need {cap-st:,})")
+    return "\n".join(lines)
+
+
+async def _ai_tool_get_loyalty(guild, channel, user, args):
+    import Restocker_db as _db
+    search = str(args.get("username") or "").strip().lstrip("<@!>").rstrip(">")
+    member = None
+    if search.isdigit():
+        member = guild.get_member(int(search))
+    if member is None:
+        s = search.lower()
+        for m in guild.members:
+            if s in m.display_name.lower() or s in m.name.lower():
+                member = m
+                break
+    uid = None
+    if member is not None:
+        uid = str(member.id)
+    else:
+        try:
+            uid = _db.get_user_id_by_ign(search)   # maybe they gave an IGN
+        except Exception:
+            uid = None
+    if not uid:
+        return f"No user or registered IGN matching '{search}'."
+    with _db.db() as conn:
+        row = conn.execute("SELECT points,total_earned FROM loyalty WHERE user_id=?", (uid,)).fetchone()
+        igns = [r[0] for r in conn.execute("SELECT ign FROM ign_registry WHERE user_id=?", (uid,))]
+    pts = float(row["points"]) if row else 0.0
+    tiers = [("Recruit", 0), ("Worker", 1000), ("Veteran", 5000), ("Expert", 15000), ("Elite", 40000)]
+    tier = max((t for t in tiers if pts >= t[1]), key=lambda t: t[1])[0]
+    nxt = next((t for t in tiers if t[1] > pts), None)
+    name = member.display_name if member else search
+    return (f"{name}: {pts:,.0f} pts ({tier}"
+            + (f", {nxt[1]-pts:,.0f} to {nxt[0]}" if nxt else ", max tier") + ") · "
+            f"all-time {float(row['total_earned']) if row else 0:,.0f} · "
+            f"IGNs: {', '.join(igns) if igns else 'NONE REGISTERED (wages would be held)'}")
+
+
 _AI_TOOL_MAP = {
+    "quote_futures":        _ai_tool_quote_futures,
+    "get_hive_status":      _ai_tool_get_hive_status,
+    "get_market_earnings":  _ai_tool_get_market_earnings,
+    "get_stock_fullness":   _ai_tool_get_stock_fullness,
+    "get_loyalty":          _ai_tool_get_loyalty,
     "get_item_prices":      _ai_tool_get_item_prices,
     "get_market_pricing":   _ai_tool_get_market_pricing,
     "get_open_orders":      _ai_tool_get_open_orders,
@@ -11902,6 +12265,10 @@ async def _main():
         _backfill_csn_to_db()
     except Exception as e:
         log.warning("[csn backfill] skipped: %s", e)
+    try:
+        _apply_market_registry_20260727()
+    except Exception as e:
+        log.warning("[market registry] skipped: %s", e)
     import Restocker_web as _web
     web_port = _env_int("WEB_PORT", 8080)
     try:

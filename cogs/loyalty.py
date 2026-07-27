@@ -147,10 +147,21 @@ class LoyaltyCog(commands.Cog):
         embed = discord.Embed(title="🏆 Loyalty Leaderboard", description="\n".join(lines), color=0xF1C40F)
         await interaction.response.send_message(embed=embed)
 
+    # Top-level alias — every bot message says "run /register_ign", so that exact command
+    # must exist (the /loyalty subcommand kept for compatibility). Same logic, one path.
+    @app_commands.command(name="register_ign",
+                          description="Register YOUR Minecraft in-game name so your wages reach you — run again to add alts")
+    @app_commands.describe(ign="Your Minecraft username (a main or an alt — alts pool into your one account)")
+    async def register_ign_toplevel(self, interaction: discord.Interaction, ign: str):
+        await self._register_ign_impl(interaction, ign)
+
     @loyalty.command(name="register_ign",
                      description="Register a Minecraft in-game name — run again to add alt accounts")
     @app_commands.describe(ign="Your Minecraft username (a main or an alt — alts pool into your one account)")
     async def loyalty_register_ign(self, interaction: discord.Interaction, ign: str):
+        await self._register_ign_impl(interaction, ign)
+
+    async def _register_ign_impl(self, interaction: discord.Interaction, ign: str):
         import re as _re2, Restocker_db as _db_ri
         ign = ign.strip()
         if not _re2.match(r"^[A-Za-z0-9_]{3,16}$", ign):
