@@ -202,6 +202,34 @@ class LoyaltyCog(commands.Cog):
                    f"pooling into this one account:\n" + ", ".join(f"`{g}`" for g in igns))
         await interaction.response.send_message(msg, ephemeral=True)
 
+    @loyalty.command(name="whois", description="(Manager) Who holds an IGN — the Discord account it's registered to")
+    @app_commands.describe(ign="The in-game name to look up (case-insensitive)")
+    async def loyalty_whois(self, interaction: discord.Interaction, ign: str):
+        if not is_manager(interaction):
+            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
+        import Restocker_db as _db_wi
+        ign = ign.strip()
+        uid = _db_wi.get_user_id_by_ign(ign)
+        if not uid:
+            try:
+                pend = _db_wi.ign_unpaid_value(ign)
+            except Exception:
+                pend = 0
+            extra = (f" It has **{int(pend):,}** coins of unpaid harvests waiting, so only a "
+                     f"manager can link it." if pend > 0 else "")
+            return await interaction.response.send_message(
+                f"🔎 `{ign}` is **not registered** to anyone.{extra}", ephemeral=True)
+        member = interaction.guild.get_member(int(uid)) if interaction.guild else None
+        who = (f"{member.mention} ({member.display_name})" if member
+               else f"<@{uid}> (ID `{uid}` — not in this server)")
+        others = [g for g in _db_wi.get_igns(uid) if g.lower() != ign.lower()]
+        alts = ("\nTheir other IGNs: " + ", ".join(f"`{g}`" for g in others)) if others else ""
+        return await interaction.response.send_message(
+            f"🔎 `{ign}` is registered to {who}.{alts}\n"
+            f"To move it: `/loyalty unlink user:<holder> ign:{ign}` then "
+            f"`/loyalty link user:<rightful owner> ign:{ign}`.",
+            ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+
     @loyalty.command(name="unlinked", description="(Manager) List employees who haven't linked their Minecraft IGN")
     async def loyalty_unlinked(self, interaction: discord.Interaction):
         if not is_manager(interaction):
