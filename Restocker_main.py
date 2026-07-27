@@ -3642,7 +3642,7 @@ async def _process_csn_attachment(attachment: discord.Attachment, report_channel
                 try:
                     await report_channel.send(
                         f"⛔ Stock report for `{csv_mid}` rejected: missing/invalid market code.\n"
-                        f"A manager can bind this channel with `/market set_channel market_id:{csv_mid}` "
+                        f"A manager can bind this channel with `/bind_market market_id:{csv_mid}` "
                         f"(no code needed afterwards), or share a fresh code via `/market_code market_id:{csv_mid}`."
                     )
                 except Exception:
@@ -3722,7 +3722,7 @@ async def _process_csn_attachment(attachment: discord.Attachment, report_channel
                 try:
                     await report_channel.send(
                         f"⛔ CSN report for `{csv_market_id}` rejected: missing/invalid market code.\n"
-                        f"A manager can bind this channel with `/market set_channel market_id:{csv_market_id}` "
+                        f"A manager can bind this channel with `/bind_market market_id:{csv_market_id}` "
                         f"(no code needed afterwards), or set a fresh code via `/market_code market_id:{csv_market_id}`."
                     )
                 except Exception:
@@ -10044,7 +10044,7 @@ Markets (/market subcommands):
 - /market go_private — (Manager/Owner) Delist a market from the stock exchange
 - /market set_ticker — (Manager/Owner) Set a market's short stock ticker symbol (e.g. GEX)
 - /market set_leader_role — (Managers) Set the Discord role that identifies a market's leader
-- /market set_channel / /market unset_channel — (Managers) Bind/unbind a channel so CSN reports posted there route to a market (no code needed)
+- /bind_market / /unbind_market — (Managers) Bind/unbind a channel so CSN reports posted there route to a market (no code needed)
 - /market remove_item — (Manager/Owner) Remove an item the market no longer sells
 - /market log_restock — (Manager/Owner) Log stock you bought by hand so net profit stays accurate
 - /market suggest_price — (Manager/Owner) Suggested price for an item vs the general market

@@ -27,7 +27,7 @@ ChestShop phrases everything from the **customer's** view:
 ## How a report reaches the right market
 - The CSV header carries `# MARKET,<id>,<code>`. On a channel with no binding, a **valid
   code auto-binds** the channel to that market (code = `/market_code`). Or a manager runs
-  `/market set_channel market_id:<id>` (no code needed after). Channel binding always wins.
+  `/bind_market market_id:<id>` (no code needed after). Channel binding always wins.
 - Reports posted to a bound channel are auto-imported (no command needed).
 
 ## Bot-side dedup / safety

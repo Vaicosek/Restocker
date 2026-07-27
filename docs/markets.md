@@ -9,7 +9,7 @@ Every CSN report and order belongs to a market.
 - `add` / `delete` / `list` / `info` — register, remove, list, inspect a market.
 - `earnings` — monthly income / spending / net. `report` — owner's private best-sellers +
   missing-stock + earnings view.
-- `set_channel market_id [channel]` — **bind a Discord channel to a market** so CSN reports
+- `/bind_market market_id [channel]` (top-level) — **bind a Discord channel to a market** so CSN reports
   there record to it, no in-game code needed. (Alternative to the CSV market code.)
 - `set_owner` / `add_manager` / `remove_manager` / `set_leader_role` — ownership + roles.
 - `edit` — name / fee / active. `set_ticker` — stock symbol (e.g. GEX).
@@ -29,5 +29,5 @@ Every CSN report and order belongs to a market.
 ## Gotchas the AI must know
 - Owners/managers can act on their **own** market without the global Manager role.
 - To attribute a channel's CSN reports: either the config carries `market_id`+`market_code`
-  (auto-binds on first valid report) OR a manager runs `/market set_channel`.
+  (auto-binds on first valid report) OR a manager runs `/bind_market`.
 - Deleting a market also removes its dashboard tab, stock listing, and stock rows.

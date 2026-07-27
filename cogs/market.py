@@ -799,16 +799,18 @@ class MarketCog(commands.Cog):
             ephemeral=True,
         )
 
-    @market.command(
-        name="set_channel",
-        description="(Manager) Bind a Discord channel to a market so CSN reports route there with NO code needed",
+    # Top-level (NOT under /market) — the /market group is at Discord's 25-subcommand cap,
+    # and channel-binding is discoverable under a `/bind…` search here.
+    @app_commands.command(
+        name="bind_market",
+        description="(Manager) Bind a Discord channel to a market so CSN reports route there (no code needed)",
     )
     @app_commands.describe(
         market_id="The market to bind",
         channel="The channel the CSN webhook posts in (defaults to the current channel)",
     )
     @app_commands.autocomplete(market_id=_market_autocomplete)
-    async def market_set_channel(self, 
+    async def market_set_channel(self,
         interaction: discord.Interaction,
         market_id: str,
         channel: Optional[discord.TextChannel] = None,
@@ -846,9 +848,9 @@ class MarketCog(commands.Cog):
             ephemeral=True,
         )
 
-    @market.command(
-        name="unset_channel",
-        description="(Manager) Remove the channel binding for a market",
+    @app_commands.command(
+        name="unbind_market",
+        description="(Manager) Remove a market's channel binding",
     )
     @app_commands.describe(market_id="The market to unbind")
     @app_commands.autocomplete(market_id=_market_autocomplete)
