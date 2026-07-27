@@ -7204,12 +7204,21 @@ def _market_catalog_by_category(market_id: str) -> dict:
 
 
 async def _market_autocomplete(interaction: discord.Interaction, current: str):
-    data = _load_markets()
-    return [
-        app_commands.Choice(name=f"{v.get('name', k)} [{k}]", value=k)
-        for k, v in data.get("markets", {}).items()
-        if current.lower() in k.lower() or current.lower() in v.get("name", "").lower()
-    ][:25]
+    # Must never raise — a thrown autocomplete shows Discord's "Loading options failed".
+    # Degrade to an empty list on any error so the user can still type the id by hand.
+    try:
+        cur = (current or "").lower()
+        out = []
+        for k, v in (_load_markets().get("markets", {}) or {}).items():
+            name = str((v or {}).get("name") or k)
+            if cur in str(k).lower() or cur in name.lower():
+                out.append(app_commands.Choice(name=f"{name} [{k}]", value=str(k)))
+            if len(out) >= 25:
+                break
+        return out
+    except Exception as e:
+        log.warning("[autocomplete] market list failed: %s", e)
+        return []
 
 
 

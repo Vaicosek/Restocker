@@ -52,8 +52,48 @@ AI_SYSTEM_EXTRA = (
     "shown. NEVER say you cannot see files, images, or attachments. Be direct and concise: "
     "do not ask permission-style clarifying questions or over-scope a simple request - just "
     "do the useful thing. If someone sends a CSN report CSV, the bot auto-imports it; do not "
-    "ask them to paste it."
+    "ask them to paste it. "
+    "You DO have a permission system: access to you is an allow-list, separate from Discord "
+    "command permissions — only users a manager has added can talk to you. Managers grant or "
+    "revoke access with `/ai_allow add @user`, `/ai_allow remove @user`, and `/ai_allow list`. "
+    "If asked who may use you, or to add/remove someone, point them to those commands — never "
+    "claim you have no permission system and never conflate this with the Manager role."
 )
+
+
+_AI_DOCS_CACHE = {"text": None, "sig": None}
+
+
+def _load_ai_docs() -> str:
+    """Concatenate the docs/*.md subsystem library into one block for the AI system prompt,
+    so the AI knows its own systems instead of guessing. Cached; auto-refreshes when a doc
+    changes (mtime/size) so edits apply without a restart. README.md is skipped (human index)."""
+    try:
+        docs_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "docs")
+        files = sorted(f for f in os.listdir(docs_dir)
+                       if f.lower().endswith(".md") and f.lower() != "readme.md")
+        if not files:
+            return ""
+        sig = tuple((f, os.path.getmtime(os.path.join(docs_dir, f)),
+                     os.path.getsize(os.path.join(docs_dir, f))) for f in files)
+        if _AI_DOCS_CACHE["sig"] == sig and _AI_DOCS_CACHE["text"] is not None:
+            return _AI_DOCS_CACHE["text"]
+        parts = []
+        for f in files:
+            try:
+                with open(os.path.join(docs_dir, f), encoding="utf-8") as fh:
+                    parts.append(fh.read().strip())
+            except Exception:
+                pass
+        text = "\n\n---\n\n".join(p for p in parts if p).strip()
+        if text:
+            text = ("## Bot subsystem knowledge (ground truth — never say a documented "
+                    "feature doesn't exist; cite the exact command)\n\n" + text)
+        _AI_DOCS_CACHE.update(sig=sig, text=text)
+        return text
+    except Exception as e:
+        log.warning("[ai] docs load failed: %s", e)
+        return ""
 
 
 def _looks_like_csn_csv(message: discord.Message) -> bool:
@@ -142,6 +182,9 @@ Current context:
 
 {AI_SYSTEM_EXTRA}
 """
+    _docs = _load_ai_docs()
+    if _docs:
+        system += "\n\n" + _docs
 
     hist = core._AI_CONVERSATION_HISTORY.get(channel.id, [])
     messages = hist + [{"role": "user", "content": blocks}]
