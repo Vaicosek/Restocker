@@ -4747,12 +4747,25 @@ document.getElementById('del').onclick=async()=>{const m=document.getElementById
  m.textContent='removing…';
  const d=await post('/api/owner/remove_item',{market_id:mid(),item:it,mode:'full'}).catch(()=>({}));
  m.textContent=d.ok?'removed ✓':(d.error||'failed');};
-window.addEventListener('load',()=>{setTimeout(()=>{
- const me=window.OWNERINFO;
- if(me&&me.logged_in&&(me.owned||[]).length){owned=me.owned;
+// Reveal owner tools. Don't depend on the nav's async OWNERINFO landing within a fixed
+// delay (that race left logged-in owners stuck on the locked screen) — fetch /api/me here
+// and await it, so the check can't run early.
+async function initOwner(){
+ let me=window.OWNERINFO;
+ if(!(me&&me.logged_in)){
+  try{me=await (await fetch('/api/me',{cache:'no-store'})).json();window.OWNERINFO=me;}catch(e){}
+ }
+ if(me&&me.logged_in&&(me.owned||[]).length){
+  owned=me.owned;
   document.getElementById('locked').style.display='none';
-  document.getElementById('panel').style.display='';chips();loadMk();}
- },400);});
+  document.getElementById('panel').style.display='';
+  chips();loadMk();
+ }else if(me&&me.logged_in){
+  document.getElementById('locked').textContent=
+   'Logged in as '+(me.name||'you')+" — but you don't own or manage any market yet.";
+ }
+}
+window.addEventListener('load',initOwner);
 // Collapsible panels — click any header to minimize it; remembered per panel across reloads.
 (function(){
  document.querySelectorAll('.panel>.ph').forEach(ph=>{
