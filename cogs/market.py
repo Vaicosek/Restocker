@@ -921,3 +921,7 @@ class MarketCog(commands.Cog):
             f"`{s['unit_cost']:,.1f}`/unit, target {s['margin_pct']:.0f}% margin).",
             ephemeral=True)
 
+
+
+async def setup(bot):
+    await bot.add_cog(MarketCog(bot))

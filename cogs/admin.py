@@ -727,3 +727,7 @@ class AdminCog(commands.Cog):
             + (f" — {failed} failed (missing Manage Messages?)" if failed else "") + ".",
             ephemeral=True)
 
+
+
+async def setup(bot):
+    await bot.add_cog(AdminCog(bot))

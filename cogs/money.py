@@ -248,3 +248,7 @@ class MoneyCog(commands.Cog):
                               "CSN net records — positive months only, once per market-month.")
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
+
+
+async def setup(bot):
+    await bot.add_cog(MoneyCog(bot))
