@@ -586,11 +586,33 @@ class AdminCog(commands.Cog):
         for mid, month in jobs:
             m = markets.get(mid)
             md = (_load_csn_for_market(mid) or {}).get("months", {}).get(month)
-            if not isinstance(md, dict) or not (md.get("items") or {}):
-                skipped.append(f"{mid} {month} (no data)")
-                continue
             chan_id = m.get("report_channel_id")
             channel = self.bot.get_channel(int(chan_id)) if chan_id else None
+            if not isinstance(md, dict) or not (md.get("items") or {}):
+                # The month no longer exists (e.g. a mis-routed copy was purged) but the old
+                # closing post is still sitting in the channel reporting numbers that aren't
+                # real. Delete the orphan instead of silently skipping it.
+                if channel is None:
+                    skipped.append(f"{mid} {month} (no data)")
+                    continue
+                try:
+                    from datetime import date as _d2
+                    lbl = _d2(int(month[:4]), int(month[5:7]), 1).strftime("%B %Y")
+                except Exception:
+                    lbl = month
+                killed = 0
+                try:
+                    async for msg in channel.history(limit=100):
+                        if (msg.author.id == self.bot.user.id and msg.embeds
+                                and str(msg.embeds[0].title or "").startswith("📕 Month closed")
+                                and lbl in str(msg.embeds[0].title or "")):
+                            await msg.delete()
+                            killed += 1
+                            await asyncio.sleep(0.5)
+                except Exception as e:
+                    log.warning("[fix_month_close] orphan delete %s %s: %s", mid, month, e)
+                skipped.append(f"{mid} {month} ({'deleted stale post' if killed else 'no data'})")
+                continue
             if channel is None:
                 skipped.append(f"{mid} {month} (unbound)")
                 continue
