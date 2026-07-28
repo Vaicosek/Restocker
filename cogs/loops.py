@@ -821,12 +821,71 @@ class LoopsCog(commands.Cog):
     async def _wait_ready_instance_hb(self, ):
         await bot.wait_until_ready()
 
+    @tasks.loop(hours=6)
+    async def month_close_report_loop(self):
+        """Month-end closing post: once per market per month, after a month ends, post the
+        full report (embed + workbook) for the JUST-CLOSED month to that market's bound
+        channel. Guarded per market+month in bot_config, so restarts/instances never
+        double-post. Markets with no recorded data for the month are skipped silently."""
+        try:
+            import io as _io
+            import Restocker_db as _db
+            now = datetime.now(timezone.utc)
+            first_of_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            closed = (first_of_month - timedelta(days=1)).strftime("%Y-%m")   # e.g. "2026-07"
+            # small grace period: only start posting 6h into the new month, so late
+            # final K-scans from the old month land first
+            if (now - first_of_month) < timedelta(hours=6):
+                return
+            markets = (core._load_markets().get("markets", {}) or {})
+            for mid, m in markets.items():
+                if not isinstance(m, dict) or not m.get("active", True):
+                    continue
+                flag = f"month_close:{mid}:{closed}"
+                if str(_db.get_config(flag) or "") == "done":
+                    continue
+                months = (core._load_csn_for_market(mid) or {}).get("months", {}) or {}
+                md = months.get(closed)
+                if not isinstance(md, dict) or not (md.get("items") or {}):
+                    _db.set_config(flag, "done")     # nothing recorded — don't recheck forever
+                    continue
+                chan_id = m.get("report_channel_id")
+                channel = bot.get_channel(int(chan_id)) if chan_id else None
+                if channel is None:
+                    continue                          # unbound market — leave flag unset, retry later
+                items = md.get("items") or {}
+                income = float(md.get("income", 0) or 0)
+                spent = float(md.get("spent", 0) or 0)
+                label = md.get("label", closed)
+                name = m.get("name", mid)
+                title = f"📕 Month closed — {name} · {label}"
+                try:
+                    embed = core._build_csn_compact_embed(title, items, income, spent, mid, closed)
+                    embed.set_footer(text=f"Automatic month-end closing report • {name}")
+                    files = []
+                    xb = core._build_csn_xlsx(title, name, closed, items, income, spent, market_id=mid)
+                    if xb:
+                        files = [discord.File(_io.BytesIO(xb),
+                                              filename=f"closing_{mid}_{closed}.xlsx")]
+                    await channel.send(embed=embed, files=files)
+                    _db.set_config(flag, "done")
+                except Exception as e:
+                    core.log.warning("[month close] post failed for %s: %s", mid, e)
+                await asyncio.sleep(2)               # gentle between markets
+        except Exception as e:
+            core.log.warning("[month close] loop failed: %s", e)
+
+    @month_close_report_loop.before_loop
+    async def _wait_ready_month_close(self):
+        await bot.wait_until_ready()
+
     def _all_loops(self):
         return (self.worker_announce_loop, self.claimed_dm_cleanup_loop, self.employee_batch_dispatch_loop,
                 self.dividend_report_flush_loop, self.bond_service_loop,
                 self.weekly_interest_loop, self.weekly_funds_report_loop, self.loyalty_decay_loop,
                 self.ign_deadline_loop, self.stock_reversion_loop, self.stock_dashboard_loop,
-                self.team_digest_loop, self.db_backup_loop, self.instance_heartbeat_loop)
+                self.team_digest_loop, self.db_backup_loop, self.instance_heartbeat_loop,
+                self.month_close_report_loop)
 
     def _start_loops(self):
         for _lp in self._all_loops():

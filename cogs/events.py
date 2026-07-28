@@ -224,6 +224,8 @@ class EventsCog(commands.Cog):
                             "the csn_allowed_posters config (or CSN_WEBHOOK_IDS env) to allow it.",
                             _poster_id)
                 return
+        _processed_any = False
+        _all_transport = bool(message.attachments)
         for att in message.attachments:
             name = att.filename.lower()
             report_channel = (
@@ -236,17 +238,34 @@ class EventsCog(commands.Cog):
             if name.endswith(".json") and "csn_profiles" in name:
                 try:
                     await _process_csn_profiles(att, report_channel)
+                    _processed_any = True
                 except Exception as e:
                     log.error("CSN profiles processing failed: %s", e)
+                    _all_transport = False
                 continue
-            if not name.endswith(".csv"):
-                continue
-            if "csn_monthly" not in name and "csn_export" not in name and "csn_stock" not in name:
+            if (not name.endswith(".csv")
+                    or ("csn_monthly" not in name and "csn_export" not in name
+                        and "csn_stock" not in name)):
+                _all_transport = False        # carries something that isn't CSN transport — keep
                 continue
             try:
                 await _process_csn_attachment(att, report_channel, source_channel_id=message.channel.id)
+                _processed_any = True
             except Exception as e:
                 log.error("CSN on_message processing failed: %s", e)
+                _all_transport = False        # failed ingest — keep the file for retry/debug
+
+        # De-clutter: the raw CSV/JSON webhook upload is machine transport, not something
+        # owners should read — once every attachment ingested cleanly, delete the upload so
+        # only the bot's report card remains. Human uploads are handled (and kept) above.
+        # Opt out with config csn_keep_uploads=1. Needs Manage Messages in the channel.
+        if _processed_any and _all_transport:
+            try:
+                import Restocker_db as _db_keep
+                if str(_db_keep.get_config("csn_keep_uploads") or "") != "1":
+                    await message.delete()
+            except Exception as e:
+                log.debug("[csn] upload cleanup skipped: %s", e)
 
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member):

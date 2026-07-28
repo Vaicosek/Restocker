@@ -432,7 +432,15 @@ class ReportsCog(commands.Cog):
         embed = core._build_csn_compact_embed(title, items, income, spent,
                                               market_id, month_key, extra_fields)
         embed.set_footer(text=source_label)
-        await interaction.followup.send(embed=embed)
+        # Spreadsheet edition for people who don't use the website.
+        _files = []
+        _xb = core._build_csn_xlsx(title, market_id, month_key, items, income, spent,
+                                   market_id=market_id)
+        if _xb:
+            import io as _io
+            _files = [discord.File(_io.BytesIO(_xb),
+                                   filename=f"report_{market_id}_{month_key}.xlsx")]
+        await interaction.followup.send(embed=embed, files=_files)
 
     @app_commands.command(
         name="csn_history",

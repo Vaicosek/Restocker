@@ -965,6 +965,72 @@ class AdminCog(commands.Cog):
         await interaction.response.send_message(body[:1950], ephemeral=True)
 
 
+    @admin.command(name="csn_cleanup",
+                   description="(Managers) Delete useless CSN webhook noise in THIS channel (empty stock CSVs, {} profiles)")
+    @app_commands.describe(
+        limit="How many recent messages to scan (default 200, max 500)",
+        confirm="False (default) = preview what would be deleted. True = actually delete.")
+    async def csn_cleanup(self, interaction: discord.Interaction, limit: int = 200, confirm: bool = False):
+        if not is_manager(interaction):
+            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        limit = max(10, min(int(limit or 200), 500))
+        channel = interaction.channel
+
+        def _is_noise_attachment(att) -> bool:
+            n = (att.filename or "").lower()
+            # empty stock scan: header-only CSV is well under 300 bytes
+            if n.startswith("csn_stock_") and att.size < 300:
+                return True
+            # empty brew-profiles capture ("{}")
+            if n.startswith("csn_profiles") and att.size <= 6:
+                return True
+            return False
+
+        victims = []
+        try:
+            async for msg in channel.history(limit=limit):
+                if not (msg.webhook_id or (msg.author and msg.author.bot)):
+                    continue                      # never touch human messages
+                if not msg.attachments:
+                    continue
+                if (msg.content or "").strip():
+                    continue                      # keep anything with a summary/content
+                if all(_is_noise_attachment(a) for a in msg.attachments):
+                    victims.append(msg)
+        except Exception as e:
+            return await interaction.followup.send(f"⚠️ History scan failed: {e}", ephemeral=True)
+
+        if not victims:
+            return await interaction.followup.send(
+                f"✅ Scanned {limit} messages — no CSN noise found here.", ephemeral=True)
+
+        names = {}
+        for m in victims:
+            for a in m.attachments:
+                key = "empty stock CSV" if a.filename.lower().startswith("csn_stock_") else "empty profiles.json"
+                names[key] = names.get(key, 0) + 1
+        summary = ", ".join(f"{v}× {k}" for k, v in names.items())
+
+        if not confirm:
+            return await interaction.followup.send(
+                f"🔍 Would delete **{len(victims)}** message(s) in {channel.mention} ({summary}).\n"
+                f"Data posts (monthly reports, non-empty scans, hive lines, lands feed) are untouched.\n"
+                f"Re-run with `confirm:True` to delete.", ephemeral=True)
+
+        deleted = failed = 0
+        for m in victims:
+            try:
+                await m.delete()
+                deleted += 1
+                await asyncio.sleep(0.6)          # stay friendly with the rate limit
+            except Exception:
+                failed += 1
+        await interaction.followup.send(
+            f"🧹 Deleted **{deleted}** noise message(s) ({summary})"
+            + (f" — {failed} failed (missing Manage Messages?)" if failed else "") + ".",
+            ephemeral=True)
+
     @admin.command(name="purge_brews",
                    description="(Managers) Clean brew names — strip ads, state tags, quality bars, durations")
     async def purge_brews(self, interaction: discord.Interaction):

@@ -3976,6 +3976,14 @@ async def _process_csn_attachment(attachment: discord.Attachment, report_channel
                 embed.set_image(url="attachment://csn_chart_1.png")
         except Exception as e:
             log.warning("CSN chart generation failed: %s", e)
+    _chart_name = "csn_chart_1.png" if files else None
+    # Spreadsheet edition of the report, for people who don't use the website.
+    _xlsx_name = None
+    _xb = _build_csn_xlsx(title, market_name or effective_market_id, month_key, items, income, spent,
+                          market_id=effective_market_id)
+    if _xb:
+        _xlsx_name = f"report_{effective_market_id}_{month_key}.xlsx"
+        files.append(discord.File(io.BytesIO(_xb), filename=_xlsx_name))
 
     # Deliver the finished report to the market it belongs to: prefer THAT market's
     # own bound channel, so per-market reports land in per-market channels instead of
@@ -3993,7 +4001,16 @@ async def _process_csn_attachment(attachment: discord.Attachment, report_channel
     except Exception as _e:
         log.debug("[csn] market-channel routing fell back to default: %s", _e)
 
-    await dest_channel.send(content="📥 **CSN report received:**", embed=embed, files=files)
+    # Components-V2 layout when the library supports it (accent container + media gallery
+    # + file card + link button); embed fallback otherwise. A LayoutView can't carry
+    # content/embeds, so the "report received" line lives inside the layout's container.
+    _report_url = f"https://dashboard.vaicosmarket.com/report/{effective_market_id}/{month_key}"
+    _layout = _build_csn_layout(embed, footer, _report_url,
+                                chart_filename=_chart_name, xlsx_filename=_xlsx_name)
+    if _layout is not None:
+        await dest_channel.send(view=_layout, files=files)
+    else:
+        await dest_channel.send(content="📥 **CSN report received:**", embed=embed, files=files)
     if _mgr_sales and _mgr_sales.get("owner"):
         try:
             await _team_live(
@@ -6499,6 +6516,204 @@ def _generate_charts(items: dict, title_suffix: str = "", history_months: list |
     return [buf.read()]
 
 
+def _build_csn_xlsx(title: str, market_label: str, month_key: str,
+                    items: dict, income: float, spent: float,
+                    market_id: str = None) -> bytes | None:
+    """The monthly report as a full offline workbook (for people who don't use the site):
+    Summary (headline + MoM), Items (net-sorted, margin %, red/green), Months (whole
+    recorded history + net trend chart), Restock (live low-stock shortfalls). Returns
+    file bytes, or None if openpyxl is unavailable."""
+    try:
+        import openpyxl
+        from openpyxl.styles import Font, PatternFill, Alignment
+        from openpyxl.utils import get_column_letter
+        from openpyxl.chart import LineChart, Reference
+    except Exception:
+        return None
+    try:
+        GREEN, RED = Font(color="1FA97A"), Font(color="E5484D")
+        bold = Font(bold=True)
+        head_fill = PatternFill("solid", fgColor="1F2A2E")
+        head_font = Font(bold=True, color="E6EDF3")
+        NUM = "#,##0"
+
+        def _header(ws, headers):
+            for c, h in enumerate(headers, start=1):
+                cell = ws.cell(row=1, column=c, value=h)
+                cell.font, cell.fill = head_font, head_fill
+                cell.alignment = Alignment(horizontal="center")
+            ws.freeze_panes = "A2"
+
+        wb = openpyxl.Workbook()
+        net = float(income) - float(spent)
+
+        # months history (used by Summary MoM + the Months sheet)
+        months = {}
+        try:
+            months = (_load_csn_for_market(market_id or "main") or {}).get("months", {}) or {}
+        except Exception:
+            pass
+        mom = None
+        prior = sorted(k for k in months if k < str(month_key))
+        if prior:
+            pnet = float(months[prior[-1]].get("net", 0) or 0)
+            if pnet:
+                mom = (net - pnet) / abs(pnet) * 100.0
+
+        # ── Summary ──
+        ws = wb.active
+        ws.title = "Summary"
+        top_item = max(items.items(), key=lambda kv: float(kv[1].get("net_coins", 0) or 0),
+                       default=(None, None))[0]
+        rows = [("Report", title), ("Market", market_label or ""), ("Month", str(month_key)),
+                ("Income", int(income)), ("Spent", int(spent)), ("Net", int(net)),
+                ("MoM net", (f"{mom:+.0f}%" if mom is not None else "—")),
+                ("Items sold", sum(int(v.get("sold_qty", 0) or 0) for v in items.values())),
+                ("Unique items", len(items)),
+                ("Top earner", _pretty_item_name(top_item) if top_item else "—")]
+        for i, (k, v) in enumerate(rows, start=1):
+            ws.cell(row=i, column=1, value=k).font = bold
+            cell = ws.cell(row=i, column=2, value=v)
+            if k in ("Income", "Spent", "Net"):
+                cell.number_format = NUM
+                if k == "Net":
+                    cell.font = GREEN if net >= 0 else RED
+        ws.column_dimensions["A"].width = 14
+        ws.column_dimensions["B"].width = 36
+
+        # ── Items (net-sorted, margin %, colored nets) ──
+        ws2 = wb.create_sheet("Items")
+        _header(ws2, ["Item", "Sold", "Bought", "Net ¢", "Income ¢", "Expense ¢",
+                      "Margin %", "Times sold", "Times bought"])
+        ordered = sorted(items.items(), key=lambda kv: -float(kv[1].get("net_coins", 0) or 0))
+        for r, (name, v) in enumerate(ordered, start=2):
+            inc_i = float(v.get("income_coins", 0) or 0)
+            net_i = float(v.get("net_coins", 0) or 0)
+            ws2.cell(row=r, column=1, value=_pretty_item_name(name))
+            for col, val in ((2, int(v.get("sold_qty", 0) or 0)), (3, int(v.get("bought_qty", 0) or 0)),
+                             (4, round(net_i, 2)), (5, round(inc_i, 2)),
+                             (6, round(float(v.get("expense_coins", 0) or 0), 2))):
+                cell = ws2.cell(row=r, column=col, value=val)
+                cell.number_format = NUM
+            ws2.cell(row=r, column=4).font = GREEN if net_i >= 0 else RED
+            if inc_i > 0:
+                mc = ws2.cell(row=r, column=7, value=round(net_i / inc_i * 100, 1))
+                mc.number_format = '0.0"%"'
+                mc.font = GREEN if net_i >= 0 else RED
+            ws2.cell(row=r, column=8, value=int(v.get("times_sold", 0) or 0))
+            ws2.cell(row=r, column=9, value=int(v.get("times_bought", 0) or 0))
+        ws2.auto_filter.ref = f"A1:I{max(2, len(ordered) + 1)}"
+        ws2.column_dimensions["A"].width = 32
+        for c in range(2, 10):
+            ws2.column_dimensions[get_column_letter(c)].width = 12
+
+        # ── Months (full recorded history + net trend chart) ──
+        if months:
+            ws3 = wb.create_sheet("Months")
+            _header(ws3, ["Month", "Income", "Spent", "Net", "MoM %"])
+            keys = sorted(months.keys())
+            prev = None
+            for r, k in enumerate(keys, start=2):
+                m = months[k]
+                minc, msp = float(m.get("income", 0) or 0), float(m.get("spent", 0) or 0)
+                mnet = float(m.get("net", 0) or 0)
+                ws3.cell(row=r, column=1, value=str(m.get("label", k)))
+                for col, val in ((2, int(minc)), (3, int(msp)), (4, int(mnet))):
+                    ws3.cell(row=r, column=col, value=val).number_format = NUM
+                ws3.cell(row=r, column=4).font = GREEN if mnet >= 0 else RED
+                if prev not in (None, 0):
+                    pc = ws3.cell(row=r, column=5, value=round((mnet - prev) / abs(prev) * 100, 1))
+                    pc.number_format = '0.0"%"'
+                prev = mnet
+            for c, wd in ((1, 14), (2, 12), (3, 12), (4, 12), (5, 10)):
+                ws3.column_dimensions[get_column_letter(c)].width = wd
+            chart = LineChart()
+            chart.title = "Net by month"
+            chart.height, chart.width = 8, 20
+            chart.y_axis.title = "Net ¢"
+            data = Reference(ws3, min_col=4, min_row=1, max_row=len(keys) + 1)
+            cats = Reference(ws3, min_col=1, min_row=2, max_row=len(keys) + 1)
+            chart.add_data(data, titles_from_data=True)
+            chart.set_categories(cats)
+            ws3.add_chart(chart, "G2")
+
+        # ── Restock (live barrel scan shortfalls, lowest fullness first) ──
+        try:
+            import Restocker_db as _db_x
+            low = []
+            for rrow in (_db_x.get_all_market_stock() or []):
+                if (rrow.get("market_id") or "main") != (market_id or "main"):
+                    continue
+                cap, st = int(rrow.get("capacity") or 0), int(rrow.get("stock") or 0)
+                if cap > 0 and st < cap:
+                    low.append((st / cap, rrow.get("item"), st, cap, cap - st))
+            if low:
+                low.sort()
+                ws4 = wb.create_sheet("Restock")
+                _header(ws4, ["Item", "Fullness %", "In stock", "Capacity", "Need"])
+                for r, (pct, item, st, cap, need) in enumerate(low, start=2):
+                    ws4.cell(row=r, column=1, value=_pretty_item_name(item))
+                    pc = ws4.cell(row=r, column=2, value=round(pct * 100, 1))
+                    pc.number_format = '0.0"%"'
+                    pc.font = RED if pct <= 0.2 else bold
+                    for col, val in ((3, st), (4, cap), (5, need)):
+                        ws4.cell(row=r, column=col, value=val).number_format = NUM
+                ws4.auto_filter.ref = f"A1:E{len(low) + 1}"
+                ws4.column_dimensions["A"].width = 32
+                for c in range(2, 6):
+                    ws4.column_dimensions[get_column_letter(c)].width = 12
+        except Exception:
+            pass
+
+        import io as _io
+        buf = _io.BytesIO()
+        wb.save(buf)
+        return buf.getvalue()
+    except Exception as e:
+        log.warning("[csn] xlsx build failed: %s", e)
+        return None
+
+
+def _build_csn_layout(embed: discord.Embed, footer: str, report_url: str,
+                      chart_filename: str = None, xlsx_filename: str = None):
+    """Render the CSN report as a Components-V2 LayoutView (Discord's 2025 message UI):
+    an accent-colored Container with the report text, the chart as a media gallery, the
+    workbook as an inline file card, and a real link button — instead of an embed.
+    Translated 1:1 from the already-built embed so there's one source of truth.
+    Returns None when the installed discord.py predates 2.6 (caller falls back to the
+    embed) or on any construction error."""
+    if not hasattr(discord.ui, "LayoutView"):
+        return None
+    try:
+        view = discord.ui.LayoutView(timeout=None)
+        accent = embed.color.value if embed.color else 0x3FB950
+        box = discord.ui.Container(accent_color=accent)
+        box.add_item(discord.ui.TextDisplay(
+            f"## {embed.title}\n{embed.description or ''}"))
+        for f in embed.fields:
+            name = (f.name or "").strip()
+            if not name or name == "​":          # zero-width link field → replaced by the button
+                continue
+            box.add_item(discord.ui.TextDisplay(f"**{name}**\n{f.value}"))
+        if chart_filename:
+            box.add_item(discord.ui.Separator())
+            box.add_item(discord.ui.MediaGallery(
+                discord.MediaGalleryItem(f"attachment://{chart_filename}")))
+        if xlsx_filename:
+            box.add_item(discord.ui.File(f"attachment://{xlsx_filename}"))
+        row = discord.ui.ActionRow()
+        row.add_item(discord.ui.Button(label="📊 Open full report",
+                                       style=discord.ButtonStyle.link, url=report_url))
+        box.add_item(row)
+        if footer:
+            box.add_item(discord.ui.TextDisplay(f"-# {footer}"))
+        view.add_item(box)
+        return view
+    except Exception as e:
+        log.debug("[csn] layout build fell back to embed: %s", e)
+        return None
+
+
 def _build_csn_compact_embed(title, items, income, spent, market_id, month_key,
                              extra_fields=None) -> discord.Embed:
     """Compact CSN report card: the headline numbers + a link to the full sortable web
@@ -6507,18 +6722,74 @@ def _build_csn_compact_embed(title, items, income, spent, market_id, month_key,
     items = _apply_brew_aliases(items)
     net = float(income) - float(spent)
     sold_units = sum(int(v.get("sold_qty", 0) or 0) for v in items.values())
-    top = sorted(items.items(), key=lambda kv: -float(kv[1].get("net_coins", 0) or 0))[:3]
-    top_str = " · ".join(f"**{_pretty_item_name(n)}** +{int(v.get('net_coins', 0)):,}"
-                         for n, v in top if float(v.get("net_coins", 0) or 0) > 0)
     sign = "+" if net >= 0 else ""
+
+    # Month-over-month: compare against the previous recorded month's net.
+    mom = ""
+    try:
+        months = (_load_csn_for_market(market_id) or {}).get("months", {}) or {}
+        prior = sorted(k for k in months if k < str(month_key))
+        if prior:
+            pnet = float(months[prior[-1]].get("net", 0) or 0)
+            if pnet:
+                d = (net - pnet) / abs(pnet) * 100.0
+                mom = f" · {'▲' if d >= 0 else '▼'} {d:+.0f}% vs {months[prior[-1]].get('label', prior[-1])}"
+    except Exception:
+        pass
+
     desc = (f"⚡ **{int(income):,}** in · 🌾 **{int(spent):,}** out · "
-            f"📈 **{sign}{int(net):,} net**\n"
-            f"📦 {sold_units:,} items · {len(items)} SKUs"
-            + (f"\n🥇 {top_str}" if top_str else "")
-            + f"\n\n📊 **[Open the full report]"
-              f"(https://dashboard.vaicosmarket.com/report/{market_id}/{month_key})**")
+            f"📈 **{sign}{int(net):,} net**{mom}\n"
+            f"📦 {sold_units:,} items · {len(items)} SKUs")
+
     embed = discord.Embed(title=title, description=desc,
                           color=0x3FB950 if net >= 0 else 0xF85149)
+
+    # Top earners — aligned mini-table (the part people missed from the old big card).
+    top = [kv for kv in sorted(items.items(), key=lambda kv: -float(kv[1].get("net_coins", 0) or 0))
+           if float(kv[1].get("net_coins", 0) or 0) > 0][:5]
+    if top:
+        medals = ["🥇", "🥈", "🥉", "4.", "5."]
+        w = max(len(_pretty_item_name(n)[:18]) for n, _ in top)
+        rows = [f"{medals[i]} {_pretty_item_name(n)[:18]:<{w}} {int(v.get('sold_qty', 0) or 0):>6,}x "
+                f"{int(float(v.get('net_coins', 0) or 0)):>9,}¢"
+                for i, (n, v) in enumerate(top)]
+        embed.add_field(name="🏆 Top earners", value="```\n" + "\n".join(rows) + "\n```", inline=False)
+
+    # Biggest buys (restock spend) — the expense side at a glance.
+    buys = [kv for kv in sorted(items.items(), key=lambda kv: float(kv[1].get("net_coins", 0) or 0))
+            if float(kv[1].get("net_coins", 0) or 0) < 0][:3]
+    if buys:
+        embed.add_field(
+            name="🛒 Biggest buys",
+            value=" · ".join(f"**{_pretty_item_name(n)[:18]}** {int(float(v.get('net_coins', 0))):,}¢"
+                             for n, v in buys),
+            inline=False)
+
+    # Live low-stock (from the last barrel scan) — actionable, replaces the old
+    # sold-derived "Restock Needed" guess with the real shortfall.
+    try:
+        import Restocker_db as _db_ce
+        low = []
+        for r in (_db_ce.get_all_market_stock() or []):
+            if (r.get("market_id") or "main") != market_id:
+                continue
+            cap, st = int(r.get("capacity") or 0), int(r.get("stock") or 0)
+            if cap > 0 and st / cap <= 0.20:
+                low.append((st / cap, r.get("item"), cap - st))
+        if low:
+            low.sort()
+            embed.add_field(
+                name=f"🔄 Low stock ({len(low)} item(s) ≤20%)",
+                value=" · ".join(f"**{_pretty_item_name(i)[:16]}** {p*100:.0f}% (need {n:,})"
+                                 for p, i, n in low[:5]),
+                inline=False)
+    except Exception:
+        pass
+
+    embed.add_field(
+        name="​",
+        value=f"📊 **[Open the full report](https://dashboard.vaicosmarket.com/report/{market_id}/{month_key})**",
+        inline=False)
     for name, value, inline in (extra_fields or []):
         embed.add_field(name=name, value=value, inline=inline)
     return embed
