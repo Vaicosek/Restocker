@@ -691,6 +691,8 @@ async def _refresh_or_delete_one_batch_dm(
     lines: list[str] = []
     for o in kept_orders[:25]:
         rem = remaining_to_assign(o)
+        if rem <= 0:
+            continue          # fully claimed — a "rem 0 pcs · ≈ 0c" line is just clutter
         price_piece, _, price_barrel, pieces_per_barrel = _coin_rates_for_order(o, items_data)
         total_rem = _coins_for_pieces(o, int(rem), items_data)
 
@@ -8250,6 +8252,17 @@ def _repair_june_20260728() -> None:
             _db.delete_config(f"month_close:{mid}:2026-06")
         except Exception:
             pass
+
+    # 4) armor sets are single items, not stacks of 64 — the wrong flag made a barrel read
+    # as 3,456 pieces (9.3M coins) on order cards and fullness. Fix any affected rows.
+    try:
+        with _db.db() as conn:
+            cur = conn.execute("UPDATE items SET stackable=0, stack_size=1 "
+                               "WHERE lower(name) LIKE '%armor set%' AND (stackable=1 OR stack_size>1)")
+            if cur.rowcount:
+                summary.append(f"armor sets: fixed stackability on {cur.rowcount} item(s)")
+    except Exception as e:
+        log.warning("[june repair] armor-set stack fix failed: %s", e)
 
     _db.set_config("_june_repair_20260728", "done")
     log.info("[june repair] %s", "; ".join(summary) or "nothing to repair")

@@ -302,6 +302,8 @@ class LoopsCog(commands.Cog):
                 lines: list[str] = []
                 for o in show:
                     rem = remaining_to_assign(o)
+                    if rem <= 0:
+                        continue      # fully claimed — don't announce "rem 0 pcs · ≈ 0c"
                     price_piece, _, price_barrel, _ppb = _coin_rates_for_order(o, items_data)
                     total_rem = _coins_for_pieces(o, int(rem), items_data)
 

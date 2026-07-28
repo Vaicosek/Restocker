@@ -3591,10 +3591,27 @@ def _load_teams_data(days: int = 7) -> dict:
     except Exception as e:
         print(f"[teams] DB unavailable: {e}")
         return {"teams": [], "days": days}
+    # Market-owner lookup: a "sales" perf row credits a market's monthly net to its OWNER
+    # (detail "vtech:2026-07"). When that owner IS the worker being ranked, it's the boss's
+    # own shop revenue, not team work — showing it made the owner's test-IGN "team" rank #2
+    # on pure self-credit. Exclude those rows from the leaderboard (they remain in the
+    # ledger itself for the money views).
+    _owners = {}
+    try:
+        import Restocker_main as _m_own
+        for _mid, _info in (_m_own._load_markets().get("markets", {}) or {}).items():
+            if isinstance(_info, dict):
+                _owners[str(_mid)] = str(_info.get("owner_id") or "")
+    except Exception:
+        pass
     teams: dict = {}
     for r in rows:
         m = str(r["manager_id"]); k = r["kind"]
         c = float(r["coins"] or 0); q = int(r["qty"] or 0); wid = str(r["worker_id"])
+        if k == "sales":
+            _mid = str(r["detail"] or "").split(":", 1)[0]
+            if _mid and _owners.get(_mid) == wid:
+                continue                       # owner self-credit — not team performance
         t = teams.setdefault(m, {"manager_id": m, "order_coins": 0.0, "sales_coins": 0.0,
                                  "orders": 0, "futures_qty": 0, "workers": {}})
         if k == "order":
