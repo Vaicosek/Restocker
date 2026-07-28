@@ -155,12 +155,9 @@ class LoyaltyCog(commands.Cog):
     async def register_ign_toplevel(self, interaction: discord.Interaction, ign: str):
         await self._register_ign_impl(interaction, ign)
 
-    @loyalty.command(name="register_ign",
-                     description="Register a Minecraft in-game name — run again to add alt accounts")
-    @app_commands.describe(ign="Your Minecraft username (a main or an alt — alts pool into your one account)")
-    async def loyalty_register_ign(self, interaction: discord.Interaction, ign: str):
-        await self._register_ign_impl(interaction, ign)
-
+    # NOTE: the old /loyalty register_ign subcommand was removed 2026-07-28 — every bot
+    # message points people at the top-level /register_ign, so having both was just a
+    # confusing duplicate (and it frees a slot in the 25-subcommand /loyalty group).
     async def _register_ign_impl(self, interaction: discord.Interaction, ign: str):
         import re as _re2, Restocker_db as _db_ri
         ign = ign.strip()
@@ -340,10 +337,11 @@ class LoyaltyCog(commands.Cog):
                 body = (
                     f"👋 Hi! You have an employee role in **{guild.name}**, but you haven't linked "
                     f"your **Minecraft in-game username (IGN)** yet.\n\n"
-                    f"Right now your in-game shop sales **credit nobody** — you're missing out on "
-                    f"loyalty points and payouts.\n\n"
-                    f"Just reply here with your IGN (exactly as it appears in-game), or run "
-                    f"`/loyalty register_ign` in the server."
+                    f"Right now your in-game sales and hive harvests **credit nobody** — your wages "
+                    f"and loyalty points are being held instead of paid.\n\n"
+                    f"**➡️ Go to the {guild.name} Discord and run `/register_ign ign:<your exact "
+                    f"in-game name>`** — that's it, you're linked and everything owed starts flowing.\n"
+                    f"(Run it again later to add alt accounts — they all pool into one account.)"
                 )
                 if set_deadline:
                     body += (f"\n\n⏰ Please do it within **{LOYALTY_IGN_DEADLINE_DAYS} days** — "

@@ -77,7 +77,7 @@ class MarketCog(commands.Cog):
                 "⛔ Only a manager or this market's owner can set its rewards.", ephemeral=True)
         if not _get_market(market_id):
             return await interaction.response.send_message(
-                f"❌ Market `{market_id}` not found. See `/market list`.", ephemeral=True)
+                f"❌ Market `{market_id}` not found. Use `/market info`.", ephemeral=True)
         if points_multiplier <= 0:
             return await interaction.response.send_message(
                 "❌ points_multiplier must be greater than 0 (1 = normal, 1.5 = +50%).", ephemeral=True)
@@ -143,7 +143,7 @@ class MarketCog(commands.Cog):
                 "❌ Provide a market_id to add or remove.", ephemeral=True)
         if not _get_market(market_id):
             return await interaction.response.send_message(
-                f"❌ Market `{market_id}` not found. See `/market list`.", ephemeral=True)
+                f"❌ Market `{market_id}` not found. Use `/market info`.", ephemeral=True)
         if action == "add":
             current.add(market_id)
             _set_vtech_group_markets(current)
@@ -281,31 +281,6 @@ class MarketCog(commands.Cog):
             + (f" ⚠️ {months} month(s) of sales history were kept." if months else ""),
             ephemeral=True)
 
-    @market.command(name="list", description="List all registered markets")
-    async def market_list(self, interaction: discord.Interaction):
-        data = _load_markets()
-        markets = data.get("markets") or {}
-        if not markets:
-            return await interaction.response.send_message(
-                "📭 No markets registered yet.\nUse `/market add` to register one.", ephemeral=True
-            )
-        lines = []
-        for mid, m in sorted(markets.items()):
-            owner_id = m.get("owner_id")
-            owner_str = f"<@{owner_id}>" if owner_id else "*No owner*"
-            active_str = "🟢" if m.get("active", True) else "🔴"
-            fee_pct = m.get("platform_fee_pct", PLATFORM_FEE_PCT)
-            lines.append(
-                f"{active_str} **{m.get('name', mid)}** `[{mid}]` — owner: {owner_str} — fee: `{fee_pct}%`"
-            )
-        embed = discord.Embed(
-            title=f"🏪 Markets ({len(markets)})",
-            description="\n".join(lines),
-            color=0x3498DB,
-        )
-        embed.set_footer(text="Use /market info market_id:<id> for full details and earnings summary.")
-        await interaction.response.send_message(embed=embed)
-
     @market.command(name="info", description="View details and earnings summary for a market")
     @app_commands.describe(market_id="The market to view")
     @app_commands.autocomplete(market_id=_market_autocomplete)
@@ -374,159 +349,6 @@ class MarketCog(commands.Cog):
         embed.set_footer(text=f"Created: {m.get('created_at', '?')[:10]}  ·  only you can see this")
         await interaction.followup.send(embed=embed, ephemeral=True)
 
-    @market.command(name="earnings", description="Monthly earnings report for a market — income, spending, net profit")
-    @app_commands.describe(
-        market_id="Which market to show earnings for (default: main). Use /market list to see IDs.",
-        month="Show one specific month (pick from the autocomplete list) instead of a recent-months summary.",
-        months="How many recent months to show when no specific month is picked (max 24). Default: 12",
-        charts="Show income vs net bar chart. Default: True",
-    )
-    @app_commands.autocomplete(market_id=_market_autocomplete, month=_earnings_month_autocomplete)
-    async def market_earnings(self, 
-        interaction: discord.Interaction,
-        market_id: str = DEFAULT_MARKET_ID,
-        month: str = "",
-        months: app_commands.Range[int, 1, 24] = 12,
-        charts: bool = True,
-    ):
-        mkt = _get_market(market_id)
-        if mkt is None:
-            return await interaction.response.send_message(
-                f"❌ Market `{market_id}` not found.", ephemeral=True
-            )
-        if not (is_manager(interaction) or _is_market_owner(interaction, market_id)
-                or _is_market_manager(interaction, market_id)):
-            return await interaction.response.send_message(
-                "⛔ Managers, market owners, or site managers only.", ephemeral=True
-            )
-        await interaction.response.defer(thinking=True)
-
-        history = _load_csn_for_market(market_id)
-        all_months = history.get("months") or {}
-        if not all_months:
-            return await interaction.followup.send(
-                f"📭 No earnings history for `{market_id}` yet.\nRun `/csn market_id:{market_id}` to record data."
-            )
-
-        fee_pct = float(mkt.get("platform_fee_pct", PLATFORM_FEE_PCT) or PLATFORM_FEE_PCT)
-        market_label = mkt.get("name", market_id)
-
-        if month:
-            md = all_months.get(month)
-            if md is None:
-                return await interaction.followup.send(
-                    f"📭 No data for month `{month}` in `{market_id}`. Pick a month from the autocomplete list."
-                )
-            income, spent, net = int(md["income"]), int(md["spent"]), int(md["net"])
-            est_fee = int(math.floor(net * fee_pct / 100.0)) if net > 0 else 0
-            color = 0x2ECC71 if net >= 0 else 0xE74C3C
-            embed = discord.Embed(title=f"📊 {market_label} — {md.get('label', month)}", color=color)
-            _fee_line = f"\n**Est. Platform Fee ({fee_pct}%):** `{est_fee:,}` 🪙" if PLATFORM_FEE_ACTIVE else ""
-            embed.add_field(
-                name="💰 Summary",
-                value=(
-                    f"**Income:** `{income:,}` 🪙\n"
-                    f"**Spent:**  `{spent:,}` 🪙\n"
-                    f"**Net:**    `{net:+,}` 🪙"
-                    f"{_fee_line}"
-                ),
-                inline=False,
-            )
-            items = md.get("items") or {}
-            if items:
-                top = sorted(items.items(), key=lambda kv: kv[1].get("net_coins", 0), reverse=True)[:10]
-                lines = [
-                    f"**{name}** — sold `{v.get('sold_qty', 0):,}` · bought `{v.get('bought_qty', 0):,}` · "
-                    f"`{v.get('net_coins', 0):+,.0f}` 🪙"
-                    for name, v in top
-                ]
-                embed.add_field(name="🏆 Top Items", value="\n".join(lines), inline=False)
-
-            files = []
-            if charts and _MATPLOTLIB_OK:
-                png = _generate_earnings_chart([(md.get("label", month), income, net)])
-                if png:
-                    files = [discord.File(io.BytesIO(png), filename="earnings_chart.png")]
-                    embed.set_image(url="attachment://earnings_chart.png")
-            elif charts and not _MATPLOTLIB_OK:
-                embed.set_footer(text="📊 Interactive charts on the dashboard → dashboard.vaicosmarket.com")
-
-            return await interaction.followup.send(embed=embed, files=files)
-
-        sorted_months = sorted(all_months.items())[-months:]
-        total_income = sum(md["income"] for _, md in sorted_months)
-        total_spent  = sum(md["spent"]  for _, md in sorted_months)
-        total_net    = sum(md["net"]    for _, md in sorted_months)
-        est_fee = int(math.floor(total_net * fee_pct / 100.0)) if total_net > 0 else 0
-
-        best_month  = max(sorted_months, key=lambda x: x[1]["net"])
-        worst_month = min(sorted_months, key=lambda x: x[1]["net"])
-
-        color = 0x2ECC71 if total_net >= 0 else 0xE74C3C
-        embed = discord.Embed(
-            title=f"📊 {market_label} — Last {len(sorted_months)} Month{'s' if len(sorted_months) != 1 else ''}",
-            color=color,
-        )
-        _fee_line = f"\n**Est. Platform Fee ({fee_pct}%):** `{est_fee:,}` 🪙" if PLATFORM_FEE_ACTIVE else ""
-        embed.add_field(
-            name="💰 Total Summary",
-            value=(
-                f"**Income:** `{int(total_income):,}` 🪙\n"
-                f"**Spent:**  `{int(total_spent):,}` 🪙\n"
-                f"**Net:**    `{int(total_net):+,}` 🪙"
-                f"{_fee_line}"
-            ),
-            inline=True,
-        )
-        avg_net = total_net / len(sorted_months) if sorted_months else 0
-        embed.add_field(
-            name="📈 Averages",
-            value=(
-                f"**Avg income/mo:** `{int(total_income / len(sorted_months)):,}` 🪙\n"
-                f"**Avg net/mo:**    `{int(avg_net):+,}` 🪙\n"
-                f"**Months tracked:** `{len(sorted_months)}`"
-            ),
-            inline=True,
-        )
-        embed.add_field(
-            name="🏆 Best / Worst Month",
-            value=(
-                f"🟢 **{best_month[1].get('label', best_month[0])}** — `{int(best_month[1]['net']):+,}` 🪙\n"
-                f"🔴 **{worst_month[1].get('label', worst_month[0])}** — `{int(worst_month[1]['net']):+,}` 🪙"
-            ),
-            inline=False,
-        )
-
-        rows = []
-        for mk, md in reversed(sorted_months):
-            net = int(md["net"])
-            arrow = "📈" if net >= 0 else "📉"
-            rows.append(
-                f"{arrow} **{md.get('label', mk)}** — "
-                f"`{int(md['income']):,}` in · `{int(md['spent']):,}` out · `{net:+,}` net"
-            )
-        chunk, used = [], 0
-        for row in rows:
-            if used + len(row) + 1 > 1020:
-                chunk.append("*…(older months truncated)*")
-                break
-            chunk.append(row)
-            used += len(row) + 1
-        embed.add_field(name="📅 Month-by-Month", value="\n".join(chunk), inline=False)
-
-        files = []
-        if charts:
-            if not _MATPLOTLIB_OK:
-                embed.set_footer(text="📊 Interactive charts on the dashboard → dashboard.vaicosmarket.com")
-            else:
-                chart_input = [(md.get("label", mk), md["income"], md["net"]) for mk, md in sorted_months]
-                png = _generate_earnings_chart(chart_input)
-                if png:
-                    files = [discord.File(io.BytesIO(png), filename="earnings_chart.png")]
-                    embed.set_image(url="attachment://earnings_chart.png")
-
-        await interaction.followup.send(embed=embed, files=files)
-
     @market.command(name="set_ticker", description="(Manager) Set a short stock ticker symbol for a market (e.g. GEX)")
     @app_commands.describe(market_id="Market", ticker="Symbol — 1-6 letters/digits")
     @app_commands.autocomplete(market_id=_market_autocomplete)
@@ -546,107 +368,6 @@ class MarketCog(commands.Cog):
         await interaction.response.send_message(
             f"✅ Ticker for `{market_id}` set to **{sym}**.", ephemeral=True
         )
-
-    @market.command(name="report", description="Your private market report — best sellers, missing stock, earnings")
-    @app_commands.describe(market_id="The market to report on")
-    @app_commands.autocomplete(market_id=_market_autocomplete)
-    async def market_report(self, interaction: discord.Interaction, market_id: str):
-        mkt = _get_market(market_id)
-        if mkt is None:
-            return await interaction.response.send_message(
-                f"❌ Market `{market_id}` not found.", ephemeral=True
-            )
-        if not (is_manager(interaction) or _is_market_owner(interaction, market_id)
-                or _is_market_manager(interaction, market_id)):
-            return await interaction.response.send_message(
-                "⛔ Only the market owner or managers can view this report.", ephemeral=True
-            )
-
-        await interaction.response.defer(ephemeral=True, thinking=True)
-
-        history   = _load_csn_for_market(market_id)
-        all_months = history.get("months") or {}
-
-        if not all_months:
-            return await interaction.followup.send(
-                f"📭 No sales data for `{market_id}` yet. Reports are submitted automatically via the CSN mod.",
-                ephemeral=True,
-            )
-
-        item_totals: dict[str, dict] = {}
-        for mk, md in all_months.items():
-            for iname, iv in (md.get("items") or {}).items():
-                if not isinstance(iv, dict):
-                    continue
-                e = item_totals.setdefault(iname, {"sold": 0, "bought": 0})
-                e["sold"]   += int(iv.get("sold_qty",   0))
-                e["bought"] += int(iv.get("bought_qty", 0))
-
-        item_rows = [
-            {"name": n, "sold": v["sold"], "bought": v["bought"], "missing": v["sold"] - v["bought"]}
-            for n, v in item_totals.items()
-        ]
-
-        best_seller  = max(item_rows, key=lambda r: r["sold"],    default=None)
-        most_missing = sorted([r for r in item_rows if r["missing"] > 0], key=lambda r: -r["missing"])[:5]
-        surplus      = sorted([r for r in item_rows if r["missing"] < 0], key=lambda r: r["missing"])[:5]
-
-        recent_months = sorted(all_months.items())[-3:]
-        total_net    = sum(md.get("net",    0) for _, md in recent_months)
-        total_income = sum(md.get("income", 0) for _, md in recent_months)
-
-        color = 0x2ECC71 if total_net >= 0 else 0xE74C3C
-        market_name = mkt.get("name", market_id)
-
-        embed = discord.Embed(
-            title=f"📊 {market_name} — Private Report",
-            color=color,
-        )
-        embed.set_footer(text="Only visible to you  •  /market report")
-
-        if best_seller:
-            embed.add_field(
-                name="🏆 Best Seller",
-                value=f"**{best_seller['name']}**\n`{best_seller['sold']:,}` sold to customers",
-                inline=True,
-            )
-
-        embed.add_field(
-            name=f"💰 Last {len(recent_months)} Month{'s' if len(recent_months) != 1 else ''}",
-            value=(
-                f"**Income:** `{int(total_income):,}` 🪙\n"
-                f"**Net:** `{int(total_net):+,}` 🪙"
-            ),
-            inline=True,
-        )
-        embed.add_field(name="​", value="​", inline=True)
-
-        if most_missing:
-            lines = [f"⚠️ **{r['name']}** — missing `{r['missing']:,}`" for r in most_missing]
-            embed.add_field(name="📦 Needs Restocking", value="\n".join(lines), inline=False)
-        else:
-            embed.add_field(name="📦 Needs Restocking", value="✅ Nothing — stock looks balanced!", inline=False)
-
-        if surplus:
-            lines = [f"📦 **{r['name']}** — surplus `{abs(r['missing']):,}`" for r in surplus]
-            embed.add_field(name="📈 Over-stocked", value="\n".join(lines), inline=False)
-
-        month_lines = []
-        for mk, md in reversed(recent_months):
-            net = int(md.get("net", 0))
-            arrow = "📈" if net >= 0 else "📉"
-            month_lines.append(f"{arrow} **{md.get('label', mk)}** — `{net:+,}` 🪙 net")
-        embed.add_field(name="📅 Recent Months", value="\n".join(month_lines), inline=False)
-
-        dashboard_url = os.getenv("DASHBOARD_URL", "").strip()
-        if dashboard_url:
-            embed.add_field(
-                name="🌐 Full Dashboard",
-                value=f"[View {market_name} on the website]({dashboard_url})\n*(Earnings tab → select your market)*",
-                inline=False,
-            )
-
-        await interaction.followup.send(embed=embed, ephemeral=True)
 
     @market.command(name="set_owner", description="(Manager) Set the owner of a market")
     @app_commands.describe(market_id="The market to update", owner="The new owner")
@@ -749,30 +470,6 @@ class MarketCog(commands.Cog):
             await interaction.response.send_message(
                 f"❌ {user.mention} is not a site manager of `{market_id}`.", ephemeral=True
             )
-
-    @market.command(name="platform_balance", description="(Manager) View total platform fee balance collected")
-    async def market_platform_balance(self, interaction: discord.Interaction):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
-        data = _load_platform_balance()
-        bal = int(data.get("balance", 0) or 0)
-        log_entries = list(reversed((data.get("log") or [])[-10:]))
-
-        embed = discord.Embed(title="🏦 Platform Fee Balance", color=0x9B59B6)
-        embed.add_field(name="Total Collected", value=f"`{bal:,}` 🪙", inline=False)
-
-        if log_entries:
-            lines = []
-            for entry in log_entries:
-                lines.append(
-                    f"• `{entry.get('month', '?')}` [{entry.get('market_id', '?')}] "
-                    f"→ `{int(entry.get('amount', 0)):,}` 🪙  {entry.get('note', '')}"
-                )
-            embed.add_field(name="📋 Recent Fee Collections (last 10)", value="\n".join(lines), inline=False)
-        else:
-            embed.add_field(name="📋 Fee Log", value="*No fees collected yet*", inline=False)
-
-        await interaction.response.send_message(embed=embed)
 
     @market.command(name="set_leader_role", description="(Manager) Set the Discord role that identifies the leader of a market")
     @app_commands.describe(
@@ -1224,64 +921,3 @@ class MarketCog(commands.Cog):
             f"`{s['unit_cost']:,.1f}`/unit, target {s['margin_pct']:.0f}% margin).",
             ephemeral=True)
 
-    @market.command(name="suggest_price", description="(Manager/Owner) Suggested price for an item vs the general market")
-    @app_commands.describe(market_id="Your market", item="Item name")
-    @app_commands.autocomplete(market_id=_market_autocomplete, item=any_item_autocomplete)
-    async def market_suggest_price(self, interaction: discord.Interaction, market_id: str, item: str):
-        if not _is_market_manager(interaction, market_id):
-            return await interaction.response.send_message("⛔ Managers or this market's owner only.", ephemeral=True)
-        s = _suggest_item_price(market_id, item)
-        market = _get_market(market_id) or {}
-        embed = discord.Embed(title=f"💡 Price guide — {item}", color=0x2bbf90,
-                              description=f"Market: **{market.get('name', market_id)}**")
-        embed.add_field(name="Optimal", value=f"`{s['optimal']:,}` 🪙", inline=True)
-        embed.add_field(name="General market (standard)", value=f"`{s['standard']:,.0f}` 🪙", inline=True)
-        embed.add_field(name="Your realized sell", value=f"`{s['effective']:,.1f}` 🪙", inline=True)
-        embed.add_field(name="Your cost/unit", value=f"`{s['unit_cost']:,.1f}` 🪙", inline=True)
-        embed.add_field(name="Current catalog", value=f"`{s['current']:,.0f}` 🪙", inline=True)
-        embed.add_field(name="Sold in markets", value=f"`{s['markets_selling']}`", inline=True)
-        if s["current"] and s["optimal"]:
-            diff = s["optimal"] - s["current"]
-            if abs(diff) >= max(1, 0.03 * s["current"]):
-                verb = "raise" if diff > 0 else "lower"
-                embed.add_field(name="Suggested change",
-                                value=f"**{verb}** to `{s['optimal']:,}` 🪙 ({diff:+,.0f})", inline=False)
-            else:
-                embed.add_field(name="Suggested change", value="Looks well-priced ✅", inline=False)
-        embed.set_footer(text="A guide from your own + general market history. You set the final price.")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    @market.command(name="hide_earnings",
-                    description="(Manager/Owner) Hide this market's earnings from the public dashboard (stays active)")
-    @app_commands.describe(market_id="The market",
-                           hide="True = hide earnings + CSN prices from the public dashboard; False = show again")
-    @app_commands.autocomplete(market_id=_market_autocomplete)
-    async def market_hide_earnings(self, interaction: discord.Interaction, market_id: str, hide: bool = True):
-        if not _is_market_manager(interaction, market_id):
-            return await interaction.response.send_message(
-                "⛔ Managers or this market's owner only.", ephemeral=True)
-        if _get_market(market_id) is None:
-            return await interaction.response.send_message(
-                f"❌ Market `{market_id}` not found.", ephemeral=True)
-        import Restocker_db as _db
-        raw = _db.get_config("earnings_hidden_markets") or ""
-        ids = {p.strip() for p in str(raw).replace(";", ",").split(",") if p.strip()}
-        if hide:
-            ids.add(market_id)
-        else:
-            ids.discard(market_id)
-        _db.set_config("earnings_hidden_markets", ",".join(sorted(ids)))
-        name = (_get_market(market_id) or {}).get("name", market_id)
-        if hide:
-            await interaction.response.send_message(
-                f"🙈 **{name}** (`{market_id}`) earnings + CSN prices are now **hidden** from the public dashboard. "
-                f"The market stays active and tradeable, and you still see everything in Discord. "
-                f"(Refreshes within a few seconds.)", ephemeral=True)
-        else:
-            await interaction.response.send_message(
-                f"👁️ **{name}** (`{market_id}`) earnings are **public** again on the dashboard.", ephemeral=True)
-
-
-
-async def setup(bot):
-    await bot.add_cog(MarketCog(bot))

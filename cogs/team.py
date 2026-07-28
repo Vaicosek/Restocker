@@ -246,13 +246,6 @@ class TeamCog(commands.Cog):
         db.set_team_settings(str(interaction.user.id), webhook_url="", channel_id="")
         await interaction.response.send_message("Unbound. No more team performance posts.", ephemeral=True)
 
-    @team.command(name="perf", description="Your team's performance leaderboard")
-    @app_commands.describe(days="Days to look back (default 7)")
-    async def perf(self, interaction: discord.Interaction, days: int = 7):
-        days = max(1, min(int(days or 7), 365))
-        embed = _team_perf_embed(str(interaction.user.id), days)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
     @team.command(name="leaderboard", description="See which teams are performing best (compete!)")
     @app_commands.describe(days="Days to look back (default 7)")
     async def leaderboard(self, interaction: discord.Interaction, days: int = 7):

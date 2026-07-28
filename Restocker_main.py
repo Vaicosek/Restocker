@@ -2281,7 +2281,7 @@ async def _open_assist_ticket(
         except Exception:
             ign = ""
         ign_line = (f"IGN: `{ign}`\n" if ign
-                    else "IGN: *not registered — ask the worker or have them run `/loyalty register_ign`*\n")
+                    else "IGN: *not registered — ask the worker or have them run `/register_ign`*\n")
         body = (
             f"{mention_prefix}"
             f"🔑 **Trust / Claim-Access Request**\n"
@@ -8242,10 +8242,16 @@ def _repair_june_20260728() -> None:
     # signature, so the fingerprint alone would miss it).
     for mid in ("amazonia", "nether_market"):
         try:
-            path = os.path.join("data", "restore_2026_06", f"{mid}.yml")
+            # NB: read the snapshot DIRECTLY — load_yaml() routes through
+            # _resolve_data_file(), which reduces any path to its basename and sends
+            # *.yml to data/state/, so the snapshot silently resolved to nothing.
+            path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "data", "restore_2026_06", f"{mid}.yml")
             if not os.path.exists(path):
+                log.warning("[june repair] snapshot missing: %s", path)
                 continue
-            snap = load_yaml(path, {}) or {}
+            with open(path, "r", encoding="utf-8") as _sf:
+                snap = yaml.safe_load(_sf) or {}
             real = (snap.get("months") or {}).get("2026-06")
             if not isinstance(real, dict) or not (real.get("items") or {}):
                 continue
@@ -10651,7 +10657,7 @@ Brew & Tool Codes (/brew and /tool subcommands — shared name store):
 Loyalty (/loyalty subcommands):
 - /loyalty stats — your loyalty points, tier, interest rate, and payout bonus
 - /loyalty leaderboard — top loyalty point holders
-- /loyalty register_ign — register your exact Minecraft username (run again to add alt accounts — all your IGNs pool into one account)
+- /register_ign — register your exact Minecraft username (run again to add alt accounts — all your IGNs pool into one account)
 - /loyalty set_points / /loyalty add_points — (Managers) set or add a user's loyalty points
 
 Inventory & Stock Alarms (/inventory subcommands — live barrel fullness from CSN stock scans):
@@ -11065,6 +11071,18 @@ _AI_TOOLS = [
                 "low_only": {"type": "boolean", "description": "Only list items at/below 20% (default true)."}
             },
             "required": ["market"]
+        }
+    },
+    {
+        "name": "dm_market_setup",
+        "description": "DM market owner(s) their CSN setup pack: market id, verification code, their bound channel, the webhook URL, and the steps — including filling in their LAND CLAIM NAME in the mod so land balances/teleport fees track. Use when a manager says something like 'tell all market owners how to set up', 'send everyone their code and webhook', or names one market. MANAGERS ONLY. Always call with confirm=false FIRST and show the preview list, then only send when the manager confirms.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "market": {"type": "string", "description": "One market id (e.g. 'freezone'). Omit for EVERY active market that has an owner."},
+                "confirm": {"type": "boolean", "description": "false = preview who would be DMed (default). true = actually send the DMs."}
+            },
+            "required": []
         }
     },
     {
@@ -12167,6 +12185,89 @@ async def _ai_tool_get_stock_fullness(guild, channel, user, args):
     return "\n".join(lines)
 
 
+def _build_setup_embed(mid: str, m: dict, channel, webhook_url: str = None) -> discord.Embed:
+    """The CSN onboarding pack sent to a market owner. Shared by /admin dm_setup and the
+    AI's dm_market_setup tool so the two can never drift."""
+    name = m.get("name", mid)
+    code = (m.get("leader_code") or "—")
+    hook = webhook_url or "*(ask a manager — create one in that channel's Integrations)*"
+    e = discord.Embed(
+        title=f"🛠️ CSN setup — {name}",
+        description=("Everything you need to make your shop report itself. Put these into the "
+                     "CSN mod's settings screen (in-game), then press **K** after a shop run."),
+        color=discord.Color.blurple())
+    e.add_field(name="Market ID", value=f"`{mid}`", inline=True)
+    e.add_field(name="Market Code", value=f"`{code}`", inline=True)
+    e.add_field(name="Your channel", value=(channel.mention if channel else "—"), inline=True)
+    e.add_field(name="Discord Webhook URL", value=hook, inline=False)
+    e.add_field(
+        name="🏝️ Land name (important)",
+        value=("In the mod settings, fill **\"Your Land Claim Name(s)\"** with YOUR claim name(s), "
+               "comma-separated (exactly as `/la` shows them). That's what lets the bot track your "
+               "land's balance and teleport-fee income. Leave it blank only if the claim isn't yours."),
+        inline=False)
+    e.add_field(
+        name="Steps",
+        value=("1. Open the CSN mod settings in-game\n"
+               "2. Paste the **webhook**, set **Market ID** + **Market Code**\n"
+               "3. Fill in your **land claim name(s)**\n"
+               "4. Press **K** to export — your report posts to your channel automatically\n"
+               "5. (Optional) bind the stock-scan key, click your shops, toggle off — that's what "
+               "fills the fullness bars on the website"),
+        inline=False)
+    e.set_footer(text="Questions? Reply here or ping a manager.")
+    return e
+
+
+async def _ai_tool_dm_market_setup(guild, channel, user, args):
+    if not _ai_is_manager(user):
+        return "❌ Only Managers can send setup DMs."
+    want = str(args.get("market") or "").strip().lower()
+    confirm = bool(args.get("confirm"))
+    markets = (_load_markets().get("markets", {}) or {})
+    plan, skipped = [], []
+    for mid, m in markets.items():
+        if want and str(mid).lower() != want:
+            continue
+        if not isinstance(m, dict) or not m.get("active", True):
+            continue
+        owner = m.get("owner_id") or m.get("leader_discord_id")
+        if not owner:
+            skipped.append(f"{mid} (no owner)")
+            continue
+        ch = bot.get_channel(int(m["report_channel_id"])) if m.get("report_channel_id") else None
+        plan.append((mid, m, str(owner), ch))
+    if not plan:
+        return ("No matching market with an owner." if want else "No active markets have an owner set.") + \
+               (f" Skipped: {', '.join(skipped)}" if skipped else "")
+    if not confirm:
+        lines = [f"• {mid} → <@{o}>" + ("" if ch else "  (⚠ no bound channel)") for mid, _m, o, ch in plan]
+        return ("PREVIEW — would DM these owners (nothing sent yet):\n" + "\n".join(lines[:25])
+                + (f"\nSkipped: {', '.join(skipped)}" if skipped else "")
+                + "\nAsk me to confirm and I'll send them.")
+    sent, failed = [], []
+    for mid, m, owner, ch in plan:
+        hook = None
+        if ch is not None:
+            try:
+                for w in await ch.webhooks():
+                    if w.token:
+                        hook = w.url
+                        break
+            except Exception:
+                pass
+        try:
+            u = bot.get_user(int(owner)) or await bot.fetch_user(int(owner))
+            await u.send(embed=_build_setup_embed(mid, m, ch, hook))
+            sent.append(mid)
+            await asyncio.sleep(1.0)
+        except Exception as ex:
+            failed.append(f"{mid} ({type(ex).__name__})")
+    return (f"📨 Setup DMs sent for {len(sent)}: {', '.join(sent) or '—'}"
+            + (f" · failed: {', '.join(failed)}" if failed else "")
+            + (f" · skipped: {', '.join(skipped)}" if skipped else ""))
+
+
 async def _ai_tool_get_loyalty(guild, channel, user, args):
     import Restocker_db as _db
     search = str(args.get("username") or "").strip().lstrip("<@!>").rstrip(">")
@@ -12209,6 +12310,7 @@ _AI_TOOL_MAP = {
     "get_market_earnings":  _ai_tool_get_market_earnings,
     "get_stock_fullness":   _ai_tool_get_stock_fullness,
     "get_loyalty":          _ai_tool_get_loyalty,
+    "dm_market_setup":      _ai_tool_dm_market_setup,
     "get_item_prices":      _ai_tool_get_item_prices,
     "get_market_pricing":   _ai_tool_get_market_pricing,
     "get_open_orders":      _ai_tool_get_open_orders,
@@ -12246,7 +12348,7 @@ _AI_SENSITIVE_TOOLS = {
     "assign_role", "remove_role", "kick_user", "ban_user", "timeout_user",
     "delete_messages", "create_role", "setup_market_owner", "send_dm", "dm_role",
     "send_channel_message", "ping_user", "propose_code_change", "set_item_price",
-    "add_item", "get_market_code", "create_futures_order",
+    "add_item", "get_market_code", "create_futures_order", "dm_market_setup",
 }
 
 
@@ -12698,9 +12800,11 @@ async def _main():
     if not token:
         print("❌ DISCORD_TOKEN not set.", flush=True)
         return
-    for _ext in ("cogs.loyalty", "cogs.brew", "cogs.admin", "cogs.market", "cogs.stock",
+    # cogs.brew retired 2026-07-28 — the mod auto-learns brew names from item lore, and the
+    # AI still has set_alias / remove_alias / list_aliases for the rare manual fix.
+    for _ext in ("cogs.loyalty", "cogs.admin", "cogs.market", "cogs.stock",
                  "cogs.shop", "cogs.orders", "cogs.money", "cogs.reports", "cogs.misc",
-                 "cogs.loops", "cogs.events", "cogs.config", "cogs.team", "cogs.inventory", "cogs.projects", "cogs.tool",
+                 "cogs.loops", "cogs.events", "cogs.config", "cogs.team", "cogs.inventory", "cogs.projects",
                  "cogs.devassist", "cogs.hive", "cogs.lands", "cogs.bonds", "cogs.voting",
                  "cogs.land_exchange"):
         try:

@@ -325,10 +325,5 @@ async def setup(bot):
         pass
     except Exception as _e:
         log.error("[events] failed to load cogs.ai: %s", _e)
-    for _ext in ("cogs.enchant",):
-        try:
-            await bot.load_extension(_ext)
-        except commands.ExtensionAlreadyLoaded:
-            pass
-        except Exception as _e:
-            log.error("[events] failed to load %s: %s", _ext, _e)
+    # (cogs.enchant / the /enchant_area roster was retired 2026-07-28 — ask the AI to note
+    # who runs which enchant area instead of maintaining a command group for it.)

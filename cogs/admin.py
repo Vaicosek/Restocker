@@ -131,93 +131,6 @@ class AdminCog(commands.Cog):
 
     admin = app_commands.Group(name="admin", description="(Managers) Destructive maintenance — guarded by confirm", default_permissions=discord.Permissions(manage_guild=True))
 
-    @admin.command(name="value_free_stock",
-                   description="(Managers) Count 0-coin acquired stock (combs / deposits) as profit at market value")
-    @app_commands.describe(market_id="Limit to one market (blank = every market)",
-                           apply="Write the changes (default: dry-run preview only)")
-    @app_commands.autocomplete(market_id=_market_autocomplete)
-    async def value_free_stock(self, interaction: discord.Interaction,
-                               market_id: Optional[str] = None, apply: bool = False):
-        """Back-fill stored CSN months: an item BOUGHT at ~0 coins (worker deposits into
-        0-coin collection shops) is worth its market value, so credit bought_qty x rate to
-        that month's profit. Rate = config 'acq_value:<item>' (e.g. combs) else catalog price.
-        Idempotent (once valued, net_coins != 0 so a re-run skips it). New reports already do
-        this at ingest. Does NOT retroactively pay dividends or charge platform fees."""
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        import Restocker_db as _db
-        try:
-            mids = [market_id] if market_id else list(_db.csn_all_market_ids())
-        except Exception as e:
-            return await interaction.followup.send(f"❌ Couldn't list markets: {e}", ephemeral=True)
-
-        report_lines = []
-        grand_added = 0.0
-        for mid in mids:
-            def _price(name):
-                # SCOPED to combs / explicitly-priced stock: config "acq_value:<item>" first,
-                # else the code-default _ACQ_VALUE_PER_PIECE map. No generic catalog fallback,
-                # so incidental 0-coin buys of other items are never revalued.
-                try:
-                    ov = float(_db.get_config("acq_value:" + name) or 0)
-                except Exception:
-                    ov = 0.0
-                if ov:
-                    return ov
-                try:
-                    return float(getattr(core, "_ACQ_VALUE_PER_PIECE", {}).get(name, 0.0) or 0.0)
-                except Exception:
-                    return 0.0
-
-            try:
-                data = _db.csn_get_market(mid)
-            except Exception:
-                continue
-            months = (data or {}).get("months", {}) or {}
-            mid_added = 0.0
-            changed = []
-            for mk, md in months.items():
-                if not isinstance(md, dict):
-                    continue
-                m_add = 0.0
-                for it, iv in (md.get("items") or {}).items():
-                    if not isinstance(iv, dict):
-                        continue
-                    bq = int(iv.get("bought_qty", 0) or 0)
-                    nc = float(iv.get("net_coins", 0) or 0)
-                    if bq > 0 and abs(nc) < 1.0:
-                        pp = _price(it)
-                        if pp > 0:
-                            val = bq * pp
-                            iv["net_coins"] = round(val, 2)
-                            m_add += val
-                            changed.append(f"{mk} · {it}: {bq:,}x{pp:g} = +{val:,.0f}")
-                if m_add:
-                    md["income"] = round(float(md.get("income", 0) or 0) + m_add, 2)
-                    md["net"] = round(float(md.get("net", 0) or 0) + m_add, 2)
-                    mid_added += m_add
-            if mid_added:
-                grand_added += mid_added
-                report_lines.append(f"**{mid}** +{mid_added:,.0f}")
-                report_lines.extend(f"  · {c}" for c in changed[:6])
-                if apply:
-                    try:
-                        _db.csn_save_market(mid, data)
-                        _recompute_share_price(mid, reason="value_free_stock")
-                    except Exception as e:
-                        report_lines.append(f"  ⚠️ save failed for {mid}: {e}")
-
-        if grand_added == 0:
-            return await interaction.followup.send(
-                "Nothing to value — no 0-coin acquired stock found (or it's already valued).",
-                ephemeral=True)
-        head = (("✅ **Applied**" if apply else "🔍 **Dry-run** (nothing written)")
-                + f" — total profit added: **{grand_added:,.0f}** coins\n\n")
-        body = "\n".join(report_lines)[:1700]
-        tail = "" if apply else "\n\nRe-run with **apply: True** to write it. New reports do this automatically."
-        await interaction.followup.send(head + body + tail, ephemeral=True)
-
     @admin.command(name="wipe", description="(Managers) Destructive wipe — requires confirm")
     @app_commands.describe(
         target="What to wipe",
@@ -438,500 +351,6 @@ class AdminCog(commands.Cog):
         return await interaction.response.send_message("❌ Unknown target.", ephemeral=True)
 
 
-    @admin.command(
-        name="migrate_stock",
-        description="(Managers) Move recent live stock from one market to another (fix mis-routed scans)")
-    @app_commands.describe(
-        from_market="Source market the scans landed in (usually the default, e.g. main)",
-        to_market="Destination market id (e.g. viridianmarket)",
-        since_minutes="Only move rows updated within the last N minutes (0 = move ALL rows)",
-    )
-    @app_commands.autocomplete(from_market=_market_autocomplete, to_market=_market_autocomplete)
-    async def migrate_stock(self, interaction: discord.Interaction,
-                            from_market: str, to_market: str, since_minutes: int = 60):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
-        if not _get_market(to_market):
-            return await interaction.response.send_message(
-                f"❌ Destination market `{to_market}` isn't registered. Create it with "
-                f"`/market add market_id:{to_market}` first.", ephemeral=True)
-        from datetime import datetime, timezone, timedelta
-        since_iso = None
-        if since_minutes and since_minutes > 0:
-            since_iso = (datetime.now(timezone.utc) - timedelta(minutes=int(since_minutes))).isoformat()
-        import Restocker_db as _db
-        moved = _db.migrate_market_stock(from_market, to_market, since_iso)
-        window = f"updated in the last {since_minutes} min" if since_iso else "ALL rows"
-        await interaction.response.send_message(
-            f"✅ Moved **{moved}** stock item(s) from `{from_market}` → `{to_market}` ({window}).\n"
-            f"Check `/inventory stock market_id:{to_market}`"
-            + (" or the website's STOCK column." if moved else " (nothing matched — widen `since_minutes`?)."),
-            ephemeral=True)
-
-
-    @admin.command(
-        name="backfill_team_perf",
-        description="(Managers) Recover past fulfillments missing from the team ledger")
-    @app_commands.describe(
-        apply="false = dry-run preview (default); true = actually write the ledger rows")
-    async def backfill_team_perf(self, interaction: discord.Interaction, apply: bool = False):
-        # Recovers team-ledger rows that were dropped when an order was approved BEFORE the
-        # worker was linked to a team (or when a manager self-fulfilled). Attributes each to
-        # the worker's CURRENT team. Idempotent — skips any order already in the ledger, so
-        # it never double-counts.
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        import Restocker_db as _db
-        try:
-            items_data = core._load_items()
-            orders = _db.load_orders()
-        except Exception as e:
-            return await interaction.followup.send(f"⚠️ Couldn't load orders: {e}", ephemeral=True)
-        plan, to_write = {}, []
-        for o in orders:
-            req  = int(o.get("requested", 0) or 0)
-            prod = int(o.get("produced", 0) or 0)
-            status = str(o.get("status", "")).lower()
-            fulfilled = ("fulfil" in status or status in ("complete", "done", "closed")
-                         or (req > 0 and prod >= req))
-            if not fulfilled:
-                continue
-            claims = o.get("claims") or []
-            if claims:
-                pairs = [(str(c.get("user_id") or ""), int(c.get("qty") or 0)) for c in claims]
-            elif o.get("claimed_by"):
-                pairs = [(str(o.get("claimed_by")), prod or req)]   # no per-user rows: whole order
-            else:
-                pairs = []
-            for wid, qty in pairs:
-                if not wid or qty <= 0:
-                    continue
-                detail = f"order#{o.get('id')}"
-                # Attribute to the worker's CURRENT team: their manager if they're a worker,
-                # else themselves if they own a team. No team affiliation → can't attribute.
-                mgr = _db.get_manager_of(wid)
-                if mgr:
-                    manager_id = str(mgr)
-                elif _db.get_team(wid):
-                    manager_id = wid
-                else:
-                    continue
-                # Idempotent: rows are keyed on manager_id, so the check MUST use it — checking
-                # with wid never matched for managed workers, double-counting every re-run.
-                if _db.team_perf_exists(manager_id, detail, "order"):
-                    continue
-                try:
-                    coins = int(core._coins_for_pieces(o, qty, items_data))
-                except Exception:
-                    coins = 0
-                if coins <= 0:
-                    continue
-                to_write.append((manager_id, wid, qty, coins, detail))
-                p = plan.setdefault(wid, {"orders": 0, "coins": 0})
-                p["orders"] += 1; p["coins"] += coins
-        if not to_write:
-            return await interaction.followup.send(
-                "✅ Nothing to backfill — no manager self-fulfillments are missing from the ledger.",
-                ephemeral=True)
-        lines = []
-        for mid, p in sorted(plan.items(), key=lambda kv: -kv[1]["coins"]):
-            try:
-                ign = _db.get_ign(mid) or mid
-            except Exception:
-                ign = mid
-            lines.append(f"• **{ign}** — {p['orders']} order(s) → +{p['coins']:,} coins")
-        summary = "\n".join(lines)
-        if not apply:
-            return await interaction.followup.send(
-                f"**Dry run** — {len(to_write)} ledger row(s) would be written:\n{summary}\n\n"
-                f"Review the amounts, then re-run with `apply:true` to commit.", ephemeral=True)
-        n = 0
-        for manager_id, wid, qty, coins, detail in to_write:
-            try:
-                _db.record_team_perf(manager_id, wid, "order", coins=float(coins), qty=qty, detail=detail)
-                n += 1
-            except Exception as e:
-                log.warning("[backfill] write failed for %s %s: %s", wid, detail, e)
-        await interaction.followup.send(
-            f"✅ Backfilled **{n}** ledger row(s):\n{summary}\n\n"
-            f"They now show on the team leaderboard (7-day window).", ephemeral=True)
-
-    @admin.command(
-        name="repair_payouts",
-        description="(Managers) Find & repay workers who were paid 0 by the price-lookup bug")
-    @app_commands.describe(
-        apply="false = dry-run preview (default); true = actually pay the workers")
-    async def repair_payouts(self, interaction: discord.Interaction, apply: bool = False):
-        """Repairs orders broken by the old exact-match price lookup.
-
-        An order is only touched when it is *provably* a victim of that bug:
-          • it is fulfilled, and has a claim, and
-          • the OLD exact-key lookup priced it at 0 (so the worker was silently skipped), and
-          • the NEW tolerant lookup prices it > 0 (so we know what they were owed).
-
-        That pairing is what makes this safe to run repeatedly: an order that priced fine
-        under the old logic was already paid, fails the filter, and is never re-paid. It is
-        NOT a blanket "pay everyone again" — it can't double-pay.
-        """
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        import Restocker_db as _db
-        try:
-            items_data = core._load_items()
-            orders = _db.load_orders()
-        except Exception as e:
-            return await interaction.followup.send(f"⚠️ Couldn't load orders: {e}", ephemeral=True)
-
-        catalog = (items_data or {}).get("items", {}) or {}
-
-        def _old_price(item_name):
-            """Exactly the old buggy lookup: exact key only, int()-truncated."""
-            try:
-                info = catalog.get(item_name) or {}
-                return int(info.get("coin", 0) or 0)
-            except Exception:
-                return 0
-
-        plan = []          # (order, uid, qty, owed)
-        for o in orders:
-            status = str(o.get("status", "")).lower()
-            if "fulfil" not in status and status not in ("complete", "done", "closed"):
-                continue
-            item = o.get("item", "")
-            if _old_price(item) > 0:
-                continue                       # priced fine before → was paid → never touch
-            claims = o.get("claims") or []
-            pairs = [(str(c.get("user_id") or ""), int(c.get("qty") or 0)) for c in claims]
-            if not pairs and o.get("claimed_by"):
-                pairs = [(str(o.get("claimed_by")), int(o.get("produced") or o.get("requested") or 0))]
-            for uid, qty in pairs:
-                if not uid or qty <= 0:
-                    continue
-                # Idempotency: a previous repair tags the ledger with repair:order#N. Without
-                # this check the filter below stays true forever and a second run would pay
-                # the same worker again.
-                try:
-                    if (_db.coin_ledger_has(uid, f"repair:order#{o.get('id')}")
-                        or _db.coin_ledger_has(uid, f"order#{o.get('id')}")):  # AUDIT FIX: normal payout counts as paid
-                        continue
-                except Exception:
-                    continue                   # can't verify → don't risk a double payment
-                try:
-                    owed = int(core._coins_for_pieces(o, qty, items_data))
-                except Exception:
-                    owed = 0
-                if owed > 0:                   # tolerant lookup found a real price → was underpaid
-                    plan.append((o, uid, qty, owed))
-
-        if not plan:
-            return await interaction.followup.send(
-                "✅ Nothing to repair — no fulfilled order was paid 0 by the price bug.\n"
-                "(If a worker is still short, their item may have **no catalog price at all** — "
-                "set one with `/item_set_price`, then re-run this.)", ephemeral=True)
-
-        lines, total = [], 0
-        for o, uid, qty, owed in plan[:20]:
-            try:
-                ign = _db.get_ign(uid) or uid
-            except Exception:
-                ign = uid
-            lines.append(f"• **#{o.get('id')}** {o.get('item','?')} — {ign} × {qty} pcs → **+{owed:,}c**")
-            total += owed
-        more = f"\n… and {len(plan) - 20} more" if len(plan) > 20 else ""
-        summary = "\n".join(lines) + more
-
-        if not apply:
-            return await interaction.followup.send(
-                f"**Dry run** — {len(plan)} unpaid claim(s), **{sum(p[3] for p in plan):,} coins** owed:\n"
-                f"{summary}\n\nRe-run with `apply:true` to pay them.", ephemeral=True)
-
-        paid_n, paid_c = 0, 0
-        for o, uid, qty, owed in plan:
-            try:
-                uid_i = int(uid)
-            except Exception:
-                continue
-            detail = f"order#{o.get('id')}"
-            # Re-check the ledger AT PAY TIME, not just at plan time: the apply loop awaits
-            # Discord between payments, so an overlapping repair run (e.g. repair_all while
-            # this is mid-loop) could otherwise pay claims both plans captured. Check→pay
-            # here is synchronous, so this closes the window.
-            try:
-                if _db.coin_ledger_has(uid, f"repair:{detail}") or _db.coin_ledger_has(uid, detail):
-                    continue               # AUDIT FIX: a normal `order#N` payout also counts as paid
-            except Exception:
-                continue                       # can't verify → never risk a double payment
-            try:
-                _mkt_mult, _mkt_bonus, _mkt_pct = core._market_loyalty_cfg(o.get("market_id"))
-                bonus_pct = core._loyalty_payout_bonus_pct(uid_i)
-                bonus = int(owed * bonus_pct / 100) if bonus_pct > 0 else 0
-                _mkt_pct_coins = int(owed * _mkt_pct / 100) if _mkt_pct > 0 else 0
-                total_payout = owed + bonus + _mkt_bonus + _mkt_pct_coins
-                core.add_coins(uid_i, total_payout, counts_as_principal=True,
-                               reason=f"repair:{detail}")
-                paid_n += 1
-                paid_c += total_payout
-            except Exception as e:
-                log.warning("[repair] payout failed for %s %s: %s", uid, detail, e)
-                continue
-            # Team ledger — idempotent, so this is safe even if backfill already ran.
-            # (Check keyed on manager_id — rows are stored under the manager, not the worker.)
-            try:
-                mgr = _db.get_manager_of(uid)
-                manager_id = str(mgr) if mgr else (uid if _db.get_team(uid) else None)
-                if manager_id and not _db.team_perf_exists(manager_id, detail, "order"):
-                    _db.record_team_perf(manager_id, uid, "order",
-                                         coins=float(total_payout), qty=qty, detail=detail)
-            except Exception as e:
-                log.warning("[repair] team ledger failed for %s %s: %s", uid, detail, e)
-            try:
-                u = await interaction.client.fetch_user(uid_i)
-                await u.send(
-                    f"💰 **Payment correction** — Order **#{o.get('id')}** ({o.get('item','')}) "
-                    f"was approved but a pricing bug paid you **0 coins**.\n"
-                    f"You've now been paid **{total_payout:,} coins** for {qty} pcs. Sorry about that!")
-            except Exception:
-                pass
-
-        await interaction.followup.send(
-            f"✅ Repaired **{paid_n}** claim(s) — paid **{paid_c:,} coins** total.\n{summary}\n\n"
-            f"Workers were DM'd. Ledger rows are tagged `repair:order#N`.", ephemeral=True)
-
-    @admin.command(
-        name="repair_all",
-        description="(Managers) Run every repair at once — payouts, team ledger, brew names")
-    @app_commands.describe(apply="false = dry-run preview (default); true = actually apply everything")
-    async def repair_all(self, interaction: discord.Interaction, apply: bool = False):
-        """One button for the lot: repays workers the price bug zeroed, recovers dropped team
-        ledger rows, cleans brew names, and flags orphaned orders that need a human."""
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        import Restocker_db as _db
-        try:
-            items_data = core._load_items()
-            orders = _db.load_orders()
-        except Exception as e:
-            return await interaction.followup.send(f"⚠️ Couldn't load orders: {e}", ephemeral=True)
-
-        pay_plan = _payout_repair_plan(_db, items_data, orders)
-        team_rows, team_sum = _team_backfill_plan(_db, items_data, orders)
-        orphans = _orphaned_orders(orders)
-        pay_total = sum(p[3] for p in pay_plan)
-
-        def _ign(uid):
-            try:
-                return _db.get_ign(uid) or uid
-            except Exception:
-                return uid
-
-        parts = []
-        # 1) payouts
-        if pay_plan:
-            lines = [f"• **#{o.get('id')}** {o.get('item','?')} — {_ign(u)} × {q} → **+{c:,}c**"
-                     for o, u, q, c in pay_plan[:10]]
-            parts.append(f"**💰 Unpaid claims ({len(pay_plan)}, {pay_total:,}c)**\n" + "\n".join(lines)
-                         + (f"\n… +{len(pay_plan)-10} more" if len(pay_plan) > 10 else ""))
-        else:
-            parts.append("**💰 Payouts** — nothing owed. ✅")
-        # 2) team ledger
-        if team_rows:
-            lines = [f"• **{_ign(w)}** — {p['orders']} order(s) → +{p['coins']:,}c"
-                     for w, p in sorted(team_sum.items(), key=lambda kv: -kv[1]["coins"])[:10]]
-            parts.append(f"**📊 Team ledger ({len(team_rows)} row(s))**\n" + "\n".join(lines))
-        else:
-            parts.append("**📊 Team ledger** — nothing missing. ✅")
-        # 3) orphans (informational — needs a human decision)
-        if orphans:
-            lines = [f"• **#{o.get('id')}** {o.get('item','?')} — fulfilled, nobody attached"
-                     for o in orphans[:10]]
-            parts.append(f"**🚨 Orphaned orders ({len(orphans)})** — can't auto-repair, no worker "
-                         f"on record:\n" + "\n".join(lines)
-                         + "\nUse `/admin repair_order` to attach the worker who actually did it.")
-
-        if not apply:
-            return await interaction.followup.send(
-                "**Dry run — nothing changed.**\n\n" + "\n\n".join(parts)
-                + "\n\nRe-run with `apply:true` to commit.", ephemeral=True)
-
-        # ── apply ──
-        paid_n = paid_c = 0
-        for o, uid, qty, owed in pay_plan:
-            try:
-                uid_i = int(uid)
-            except Exception:
-                continue
-            detail = f"order#{o.get('id')}"
-            # Pay-time ledger re-check (see repair_payouts): closes the overlapping-run window.
-            try:
-                if _db.coin_ledger_has(uid, f"repair:{detail}") or _db.coin_ledger_has(uid, detail):
-                    continue               # AUDIT FIX: a normal `order#N` payout also counts as paid
-            except Exception:
-                continue                       # can't verify → never risk a double payment
-            try:
-                _mult, _mkt_bonus, _mkt_pct = core._market_loyalty_cfg(o.get("market_id"))
-                bonus_pct = core._loyalty_payout_bonus_pct(uid_i)
-                bonus = int(owed * bonus_pct / 100) if bonus_pct > 0 else 0
-                total_payout = owed + bonus + _mkt_bonus + (int(owed * _mkt_pct / 100) if _mkt_pct > 0 else 0)
-                core.add_coins(uid_i, total_payout, counts_as_principal=True,
-                               reason=f"repair:{detail}")
-                paid_n += 1
-                paid_c += total_payout
-            except Exception as e:
-                log.warning("[repair_all] payout failed %s %s: %s", uid, detail, e)
-                continue
-            try:
-                u = await interaction.client.fetch_user(uid_i)
-                await u.send(f"💰 **Payment correction** — Order **#{o.get('id')}** "
-                             f"({o.get('item','')}) was approved but a pricing bug paid you 0. "
-                             f"You've now been paid **{total_payout:,} coins**. Sorry about that!")
-            except Exception:
-                pass
-
-        team_n = 0
-        for manager_id, wid, qty, coins, detail in team_rows:
-            try:
-                _db.record_team_perf(manager_id, wid, "order", coins=float(coins),
-                                     qty=qty, detail=detail)
-                team_n += 1
-            except Exception as e:
-                log.warning("[repair_all] ledger write failed %s %s: %s", wid, detail, e)
-
-        try:
-            brews_n = core._purge_garbage_brew_aliases()
-        except Exception as e:
-            log.warning("[repair_all] brew clean failed: %s", e)
-            brews_n = 0
-
-        done = [f"💰 Paid **{paid_n}** claim(s) — **{paid_c:,} coins**",
-                f"📊 Wrote **{team_n}** team-ledger row(s)",
-                f"🧪 Cleaned **{brews_n}** brew name(s)"]
-        if orphans:
-            done.append(f"🚨 **{len(orphans)}** orphaned order(s) still need `/admin repair_order`")
-        await interaction.followup.send("✅ **Repair complete.**\n" + "\n".join(done), ephemeral=True)
-
-    @admin.command(
-        name="repair_order",
-        description="(Managers) Attach a worker to an orphaned order and pay them")
-    @app_commands.describe(
-        order_id="The order that has nobody attached (see /admin repair_all)",
-        worker="The person who actually did the work",
-        qty="How many pieces they made (leave 0 to use the order's full amount)",
-        apply="false = preview (default); true = attach, pay and credit")
-    @app_commands.autocomplete(order_id=order_id_autocomplete)
-    async def repair_order(self, interaction: discord.Interaction, order_id: int,
-                           worker: discord.User, qty: int = 0, apply: bool = False):
-        """For orders that closed with no claim on record — nothing else can attribute them,
-        so a manager names the worker. Idempotent via the repair:order#N ledger tag."""
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        import Restocker_db as _db
-        try:
-            items_data = core._load_items()
-            orders = _db.load_orders()
-        except Exception as e:
-            return await interaction.followup.send(f"⚠️ Couldn't load orders: {e}", ephemeral=True)
-
-        o = next((x for x in orders if int(x.get("id", 0) or 0) == int(order_id)), None)
-        if not o:
-            return await interaction.followup.send(f"❌ No order #{order_id}.", ephemeral=True)
-
-        uid = str(worker.id)
-        detail = f"order#{order_id}"
-        # AUDIT FIX (high): this tool is for orders that closed with NO claim on
-        # record. It used to accept any order and only check the repair: tag, so
-        # (a) a normally-paid worker could be paid again, and (b) because the
-        # attachment was never written back, repair_all kept flagging the order
-        # and a second manager could repair it AGAIN to a different account.
-        try:
-            if core._order_worker_pairs(o):
-                return await interaction.followup.send(
-                    f"❌ Order #{order_id} already has worker(s) attached — it isn't orphaned. "
-                    f"If someone was underpaid use the normal repair_payouts flow.", ephemeral=True)
-        except Exception:
-            pass
-        if str(o.get("status", "")).lower() != "fulfilled":
-            return await interaction.followup.send(
-                f"❌ Order #{order_id} is `{o.get('status','?')}` — only FULFILLED orders can be "
-                f"repair-attached.", ephemeral=True)
-        try:
-            if _db.coin_ledger_has(uid, f"repair:{detail}") or _db.coin_ledger_has(uid, detail):
-                return await interaction.followup.send(
-                    f"⚠️ {worker.mention} was already paid for order #{order_id} (normal payout or "
-                    f"prior repair) — refusing to pay twice.", ephemeral=True)
-        except Exception:
-            return await interaction.followup.send(
-                "⚠️ Couldn't verify the ledger — refusing to pay in case it double-pays.",
-                ephemeral=True)
-
-        _max_pieces = int(o.get("produced") or o.get("requested") or 0)
-        pieces = int(qty) if qty > 0 else _max_pieces
-        if pieces <= 0:
-            return await interaction.followup.send("❌ Quantity must be > 0.", ephemeral=True)
-        if _max_pieces > 0 and pieces > _max_pieces:
-            return await interaction.followup.send(
-                f"❌ qty `{pieces:,}` exceeds the order's own quantity (`{_max_pieces:,}`).",
-                ephemeral=True)
-        try:
-            owed = int(core._coins_for_pieces(o, pieces, items_data))
-        except Exception:
-            owed = 0
-        if owed <= 0:
-            return await interaction.followup.send(
-                f"❌ `{o.get('item','?')}` has no catalog price, so the payout would be 0.\n"
-                f"Set one with `/item_set_price item:{o.get('item','?')} coin:<amount>` and re-run.",
-                ephemeral=True)
-
-        _mult, _mkt_bonus, _mkt_pct = core._market_loyalty_cfg(o.get("market_id"))
-        bonus_pct = core._loyalty_payout_bonus_pct(worker.id)
-        bonus = int(owed * bonus_pct / 100) if bonus_pct > 0 else 0
-        total_payout = owed + bonus + _mkt_bonus + (int(owed * _mkt_pct / 100) if _mkt_pct > 0 else 0)
-
-        if not apply:
-            return await interaction.followup.send(
-                f"**Dry run** — order **#{order_id}** ({o.get('item','?')})\n"
-                f"• Worker: {worker.mention}\n• Pieces: **{pieces}**\n"
-                f"• Payout: **{owed:,}** + {bonus:,} loyalty + {_mkt_bonus:,} market = "
-                f"**{total_payout:,} coins**\n\nRe-run with `apply:true` to commit.",
-                ephemeral=True)
-
-        try:
-            core.add_coins(worker.id, total_payout, counts_as_principal=True,
-                           reason=f"repair:{detail}")
-        except Exception as e:
-            return await interaction.followup.send(f"⚠️ Payout failed: {e}", ephemeral=True)
-        # AUDIT FIX: write the attachment BACK so the order stops showing as orphaned
-        # (previously repair_all re-flagged it forever, inviting a second repair).
-        try:
-            o["claimed_by"] = uid
-            _db.save_order(o)
-        except Exception as e:
-            log.warning("[repair_order] couldn't write attachment back on #%s: %s", order_id, e)
-        try:
-            if not _db.team_perf_exists(uid, detail, "order"):
-                mgr = _db.get_manager_of(uid)
-                manager_id = str(mgr) if mgr else (uid if _db.get_team(uid) else None)
-                if manager_id:
-                    _db.record_team_perf(manager_id, uid, "order", coins=float(total_payout),
-                                         qty=pieces, detail=detail)
-        except Exception as e:
-            log.warning("[repair_order] ledger failed: %s", e)
-        try:
-            await worker.send(
-                f"💰 **Payment correction** — you've been paid **{total_payout:,} coins** for "
-                f"Order **#{order_id}** ({o.get('item','')}), which closed without your claim "
-                f"recorded. Sorry about that!")
-        except Exception:
-            pass
-        log.info("[repair_order] %s attached %s to order#%s for %s coins",
-                 interaction.user, uid, order_id, total_payout)
-        await interaction.followup.send(
-            f"✅ Attached {worker.mention} to order **#{order_id}** and paid "
-            f"**{total_payout:,} coins** ({pieces} pcs). They've been DM'd.", ephemeral=True)
-
     @admin.command(name="ai_audit", description="(Managers) Recent AI tool actions — who ran what")
     @app_commands.describe(limit="How many recent entries (default 15)", sensitive_only="Only moderation/destructive actions")
     async def ai_audit(self, interaction: discord.Interaction, limit: int = 15, sensitive_only: bool = False):
@@ -965,57 +384,173 @@ class AdminCog(commands.Cog):
         await interaction.response.send_message(body[:1950], ephemeral=True)
 
 
-    @admin.command(name="csn_provenance",
-                   description="(Managers) Scan EVERY channel's history: who posted which CSN file/report, and where")
-    @app_commands.describe(month="Month to trace, e.g. 2026-06",
-                           limit="Messages to scan per channel (default 400, max 2000)")
-    async def csn_provenance(self, interaction: discord.Interaction, month: str, limit: int = 400):
+    @admin.command(name="dm_setup",
+                   description="(Managers) DM market owners their market id, CSN code, webhook + setup steps")
+    @app_commands.describe(market_id="One market (blank = every active market with an owner)",
+                           confirm="False (default) = preview who'd be DMed. True = actually send.")
+    @app_commands.autocomplete(market_id=_market_autocomplete)
+    async def dm_setup(self, interaction: discord.Interaction,
+                       market_id: Optional[str] = None, confirm: bool = False):
         if not is_manager(interaction):
             return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
-        import re as _re
-        month = (month or "").strip()
-        if not _re.match(r"^\d{4}-\d{2}$", month):
-            return await interaction.response.send_message("❌ Month must look like `2026-06`.", ephemeral=True)
         await interaction.response.defer(ephemeral=True, thinking=True)
-        limit = max(50, min(int(limit or 400), 2000))
-        # what a June file/report looks like
-        fpat = _re.compile(rf"csn_(monthly|export)_{_re.escape(month)}", _re.I)
-        try:
-            from datetime import date as _d
-            label = _d(int(month[:4]), int(month[5:7]), 1).strftime("%B %Y")
-        except Exception:
-            label = month
-        hits = []
-        for ch in interaction.guild.text_channels:
-            perms = ch.permissions_for(interaction.guild.me)
-            if not (perms.read_message_history and perms.view_channel):
+        markets = (_load_markets().get("markets", {}) or {})
+        targets = ([market_id] if market_id else list(markets.keys()))
+        plan, sent, failed = [], [], []
+        for mid in targets:
+            m = markets.get(mid)
+            if not isinstance(m, dict) or not m.get("active", True):
                 continue
-            try:
-                async for msg in ch.history(limit=limit):
-                    who = (msg.author.display_name or str(msg.author))[:18]
-                    stamp = msg.created_at.strftime("%m-%d %H:%M")
-                    # 1) raw CSV uploads (the source of truth for who fed what)
-                    for a in msg.attachments:
-                        if fpat.search(a.filename or ""):
-                            hits.append((msg.created_at, f"`{stamp}` **#{ch.name}** 📎 `{a.filename}` "
-                                                         f"({a.size//1024}KB) by *{who}*"))
-                    # 2) the bot's own report embeds for that month (where it LANDED)
-                    for e in (msg.embeds or []):
-                        blob = f"{e.title or ''} {e.description or ''}"
-                        if label in blob and ("Sales Report" in blob or "Month closed" in blob):
-                            m2 = _re.search(r"/report/([a-z0-9_]+)/", blob, _re.I)
-                            tgt = f" → recorded to `{m2.group(1)}`" if m2 else ""
-                            hits.append((msg.created_at, f"`{stamp}` **#{ch.name}** 📊 report embed{tgt}"))
-            except Exception:
+            owner = m.get("owner_id") or m.get("leader_discord_id")
+            if not owner:
+                failed.append(f"{mid} (no owner set)")
                 continue
-        if not hits:
+            chan_id = m.get("report_channel_id")
+            channel = self.bot.get_channel(int(chan_id)) if chan_id else None
+            plan.append((mid, m, str(owner), channel))
+
+        if not confirm:
+            lines = [f"• `{mid}` → <@{o}>" + (f" · {ch.mention}" if ch else " · ⚠️ no bound channel")
+                     for mid, _m, o, ch in plan]
             return await interaction.followup.send(
-                f"🔎 No `{month}` CSN files or reports found in the last {limit} messages per channel.",
-                ephemeral=True)
-        hits.sort(key=lambda x: x[0])
-        body = f"🔎 **CSN provenance for {label}** — {len(hits)} event(s), oldest first:\n" + "\n".join(h[1] for h in hits)
-        for i in range(0, min(len(body), 5800), 1900):
-            await interaction.followup.send(body[i:i + 1900], ephemeral=True)
+                f"🔍 Would DM **{len(plan)}** owner(s):\n" + "\n".join(lines[:20])
+                + (f"\n(+{len(plan)-20} more)" if len(plan) > 20 else "")
+                + (f"\nSkipped: {', '.join(failed)}" if failed else "")
+                + "\n\nRe-run with `confirm:True` to send.", ephemeral=True)
+
+        for mid, m, owner, channel in plan:
+            name = m.get("name", mid)
+            code = (m.get("leader_code") or "—")
+            hook = "*(ask a manager — create one in that channel's Integrations)*"
+            if channel is not None:
+                try:   # reuse an existing bot webhook if we're allowed to see them
+                    for w in await channel.webhooks():
+                        if w.token:
+                            hook = w.url
+                            break
+                except Exception:
+                    pass
+            # one shared builder with the AI's dm_market_setup tool
+            e = core._build_setup_embed(mid, m, channel,
+                                        None if hook.startswith("*(") else hook)
+            try:
+                user = self.bot.get_user(int(owner)) or await self.bot.fetch_user(int(owner))
+                await user.send(embed=e)
+                sent.append(mid)
+                await asyncio.sleep(1.0)
+            except Exception as ex:
+                failed.append(f"{mid} (DM failed: {type(ex).__name__})")
+        return await interaction.followup.send(
+            f"📨 Sent setup DMs for **{len(sent)}**: {', '.join(sent) or '—'}"
+            + (f"\nFailed: {', '.join(failed[:10])}" if failed else ""), ephemeral=True)
+
+    @admin.command(name="rebuild_market_channel",
+                   description="(Managers) WIPE this market's channel and repost a clean report for every month")
+    @app_commands.describe(
+        market_id="Market whose bound channel to rebuild (blank = the market bound to THIS channel)",
+        confirm="False (default) = preview. True = delete messages and repost.",
+        keep_humans="True (default) = only delete bot/webhook messages, keep what people wrote",
+        limit="How many messages to scan for deletion (default 500, max 2000)")
+    @app_commands.autocomplete(market_id=_market_autocomplete)
+    async def rebuild_market_channel(self, interaction: discord.Interaction,
+                                     market_id: Optional[str] = None, confirm: bool = False,
+                                     keep_humans: bool = True, limit: int = 500):
+        if not is_manager(interaction):
+            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        import io as _io
+        markets = (_load_markets().get("markets", {}) or {})
+        # resolve the market from the arg, else from the channel we're standing in
+        mid = market_id
+        if not mid:
+            for _k, _m in markets.items():
+                if isinstance(_m, dict) and str(_m.get("report_channel_id") or "") == str(interaction.channel_id):
+                    mid = _k
+                    break
+        if not mid or mid not in markets:
+            return await interaction.followup.send(
+                "❌ No market given and this channel isn't bound to one. Pass `market_id:`.", ephemeral=True)
+        m = markets[mid]
+        chan_id = m.get("report_channel_id")
+        channel = self.bot.get_channel(int(chan_id)) if chan_id else None
+        if channel is None:
+            return await interaction.followup.send(
+                f"❌ `{mid}` has no bound channel (set one with `/bind_market`).", ephemeral=True)
+        perms = channel.permissions_for(interaction.guild.me)
+        if not perms.manage_messages:
+            return await interaction.followup.send(
+                f"❌ I need **Manage Messages** in {channel.mention} to clear it.", ephemeral=True)
+
+        months = (_load_csn_for_market(mid) or {}).get("months", {}) or {}
+        keys = sorted(k for k, v in months.items() if isinstance(v, dict) and (v.get("items") or {}))
+        limit = max(50, min(int(limit or 500), 2000))
+
+        # count what would be deleted
+        victims = []
+        try:
+            async for msg in channel.history(limit=limit):
+                if keep_humans and not (msg.webhook_id or (msg.author and msg.author.bot)):
+                    continue
+                victims.append(msg)
+        except Exception as e:
+            return await interaction.followup.send(f"⚠️ Couldn't read history: {e}", ephemeral=True)
+
+        if not confirm:
+            return await interaction.followup.send(
+                f"🔍 **Preview — {m.get('name', mid)}** ({channel.mention})\n"
+                f"• would delete **{len(victims)}** message(s)"
+                + (" (bot/webhook only — human messages kept)" if keep_humans else " (**everything**, humans included)")
+                + f"\n• would repost **{len(keys)}** monthly report(s): "
+                + (", ".join(keys) or "none")
+                + f"\n\nRe-run with `confirm:True` to do it.", ephemeral=True)
+
+        deleted = 0
+        # bulk delete is far faster but only works on messages <14 days old
+        try:
+            fresh = [msg for msg in victims if (discord.utils.utcnow() - msg.created_at).days < 14]
+            old = [msg for msg in victims if msg not in fresh]
+            for i in range(0, len(fresh), 100):
+                try:
+                    await channel.delete_messages(fresh[i:i + 100])
+                    deleted += len(fresh[i:i + 100])
+                except Exception:
+                    for msg in fresh[i:i + 100]:
+                        try:
+                            await msg.delete(); deleted += 1; await asyncio.sleep(0.4)
+                        except Exception:
+                            pass
+            for msg in old:
+                try:
+                    await msg.delete(); deleted += 1; await asyncio.sleep(0.7)
+                except Exception:
+                    pass
+        except Exception as e:
+            log.warning("[rebuild_market_channel] delete phase: %s", e)
+
+        posted = 0
+        for mk in keys:
+            md = months.get(mk) or {}
+            items = md.get("items") or {}
+            income = float(md.get("income", 0) or 0)
+            spent = float(md.get("spent", 0) or 0)
+            name = m.get("name", mid)
+            title = f"📕 {name} · {md.get('label', mk)}"
+            try:
+                embed = core._build_csn_compact_embed(title, items, income, spent, mid, mk)
+                embed.set_footer(text=f"Monthly report • {name}")
+                files = []
+                xb = core._build_csn_xlsx(title, name, mk, items, income, spent, market_id=mid)
+                if xb:
+                    files = [discord.File(_io.BytesIO(xb), filename=f"report_{mid}_{mk}.xlsx")]
+                await channel.send(embed=embed, files=files)
+                posted += 1
+                await asyncio.sleep(1.5)
+            except Exception as e:
+                log.warning("[rebuild_market_channel] %s %s post failed: %s", mid, mk, e)
+        log.info("[rebuild_market_channel] %s: deleted %d, posted %d", mid, deleted, posted)
+        return await interaction.followup.send(
+            f"🧹 **{m.get('name', mid)}** rebuilt — deleted **{deleted}**, posted **{posted}** monthly report(s) "
+            f"in {channel.mention}.", ephemeral=True)
 
     @admin.command(name="fix_month_close",
                    description="(Managers) EDIT the existing month-closing posts in place with the CURRENT data")
@@ -1104,50 +639,6 @@ class AdminCog(commands.Cog):
                    + (" …" if len(skipped) > 8 else "") if skipped else ""))
         return await interaction.followup.send(body[:1900], ephemeral=True)
 
-    @admin.command(name="csn_delete_month",
-                   description="(Managers) Delete ONE recorded month from a market's CSN history (fix mis-routed imports)")
-    @app_commands.describe(
-        market_id="The market whose month should be deleted",
-        month="Month key, e.g. 2026-06",
-        confirm="False (default) = preview. True = delete the month's totals + items.")
-    @app_commands.autocomplete(market_id=_market_autocomplete)
-    async def csn_delete_month(self, interaction: discord.Interaction, market_id: str,
-                               month: str, confirm: bool = False):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
-        month = (month or "").strip()
-        import re as _re
-        if not _re.match(r"^\d{4}-\d{2}$", month):
-            return await interaction.response.send_message(
-                "❌ Month must look like `2026-06`.", ephemeral=True)
-        data = _load_csn_for_market(market_id) or {}
-        months = data.get("months", {}) or {}
-        md = months.get(month)
-        if not isinstance(md, dict):
-            return await interaction.response.send_message(
-                f"❌ `{market_id}` has no recorded month `{month}`.", ephemeral=True)
-        inc, sp = float(md.get("income", 0) or 0), float(md.get("spent", 0) or 0)
-        n_items = len(md.get("items") or {})
-        desc = (f"`{market_id}` · `{month}` — income {inc:,.0f}, spent {sp:,.0f}, "
-                f"net {inc - sp:,.0f}, {n_items} item(s), source `{md.get('source', '?')}`")
-        if not confirm:
-            return await interaction.response.send_message(
-                f"🔍 Would delete: {desc}\nRe-run with `confirm:True` to remove it. "
-                f"(Re-importing the correct CSV afterwards restores the month cleanly.)",
-                ephemeral=True)
-        months.pop(month, None)
-        _save_csn_for_market(market_id, {"months": months})
-        # let the month-close loop re-post if a correct month gets re-imported later
-        try:
-            import Restocker_db as _db_dm
-            _db_dm.delete_config(f"month_close:{market_id}:{month}")
-        except Exception:
-            pass
-        log.info("[csn_delete_month] %s removed %s from %s", interaction.user.id, month, market_id)
-        return await interaction.response.send_message(
-            f"🗑️ Deleted {desc}\nShare prices reprice on the next report; re-import the "
-            f"correct CSV (or `/import_earnings`) to restore real data.", ephemeral=True)
-
     @admin.command(name="csn_cleanup",
                    description="(Managers) Delete useless CSN webhook noise in THIS channel (empty stock CSVs, {} profiles)")
     @app_commands.describe(
@@ -1214,171 +705,3 @@ class AdminCog(commands.Cog):
             + (f" — {failed} failed (missing Manage Messages?)" if failed else "") + ".",
             ephemeral=True)
 
-    @admin.command(name="purge_brews",
-                   description="(Managers) Clean brew names — strip ads, state tags, quality bars, durations")
-    async def purge_brews(self, interaction: discord.Interaction):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
-        try:
-            n = core._purge_garbage_brew_aliases()
-        except Exception as e:
-            return await interaction.response.send_message(f"⚠️ Failed: {e}", ephemeral=True)
-        await interaction.response.send_message(
-            (f"🧪 Cleaned **{n}** brew name(s) — stripped ads, 'Barrel aged'/'Distilled', "
-             f"the quality bar, durations, emoji and flavour text, keeping only real effects. "
-             f"Names also clean live on reports and the website." if n
-             else "✅ All brew names already clean."),
-            ephemeral=True)
-
-
-    @admin.command(
-        name="hive_audit",
-        description="(Managers) Detect hive-feed double counting — same sale ingested under many messages")
-    @app_commands.describe(
-        market_id="(optional) limit to one hive market",
-        show="How many repeated-sale rows to list (default 12)")
-    @app_commands.autocomplete(market_id=_market_autocomplete)
-    async def hive_audit(self, interaction: discord.Interaction,
-                         market_id: Optional[str] = None, show: int = 12):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
-        import Restocker_db as _db
-        show = max(1, min(int(show or 12), 40))
-        where = "WHERE market_id=?" if market_id else ""
-        params = (market_id,) if market_id else ()
-
-        def _fmt(n):
-            return f"{int(round(float(n or 0))):,}"
-
-        try:
-            with _db.db() as conn:
-                # table may not exist on an old DB
-                if not conn.execute(
-                        "SELECT name FROM sqlite_master WHERE type='table' AND name='hive_harvests'"
-                ).fetchone():
-                    return await interaction.response.send_message(
-                        "ℹ️ No `hive_harvests` table yet — the hive engine hasn't recorded anything.",
-                        ephemeral=True)
-
-                tot = conn.execute(
-                    f"SELECT COUNT(*) c, COUNT(DISTINCT msg_id) m, "
-                    f"COALESCE(SUM(qty*unit_value),0) v, COALESCE(SUM(paid),0) paid "
-                    f"FROM hive_harvests {where}", params).fetchone()
-                rows_total, msgs, val_total, paid_rows = tot["c"], tot["m"], tot["v"], tot["paid"]
-                if not rows_total:
-                    return await interaction.response.send_message(
-                        "🐝 No hive rows recorded" + (f" for `{market_id}`." if market_id else "."),
-                        ephemeral=True)
-
-                # The fullest single message ≈ the true set of sales when the feed re-posts a
-                # cumulative list; total across all messages minus that ≈ duplicated rows.
-                full = conn.execute(
-                    f"SELECT COUNT(*) lines, COALESCE(SUM(qty*unit_value),0) v "
-                    f"FROM hive_harvests {where} GROUP BY msg_id ORDER BY lines DESC LIMIT 1",
-                    params).fetchone()
-                full_lines, full_val = (full["lines"], full["v"]) if full else (rows_total, val_total)
-                est_dupe_rows = max(0, rows_total - full_lines)
-                est_dupe_val = max(0.0, val_total - full_val)
-
-                # fingerprint: the same (ign, item, qty) appearing under >1 message
-                fp = conn.execute(
-                    f"SELECT ign, item, qty, COUNT(DISTINCT msg_id) msgs, COUNT(*) rows "
-                    f"FROM hive_harvests {where} "
-                    f"GROUP BY ign, item, qty COLLATE NOCASE HAVING msgs > 1 "
-                    f"ORDER BY msgs DESC, rows DESC LIMIT ?", (*params, show)).fetchall()
-
-                # lines-per-message shape (edit-in-place → 1 big msg; re-post → many msgs)
-                dist = conn.execute(
-                    f"SELECT lines, COUNT(*) n FROM "
-                    f"(SELECT msg_id, COUNT(*) lines FROM hive_harvests {where} GROUP BY msg_id) "
-                    f"GROUP BY lines ORDER BY lines DESC LIMIT 6", params).fetchall()
-        except Exception as e:
-            return await interaction.response.send_message(
-                f"⚠️ Audit failed: `{type(e).__name__}: {e}`", ephemeral=True)
-
-        # verdict
-        spanning = len(fp)
-        if msgs <= 2 and est_dupe_rows == 0:
-            verdict = ("✅ **Looks clean.** The feed reads as one message edited in place — "
-                       "no sale appears under a second message, so nothing is double-counted.")
-        elif est_dupe_rows > 0 and (est_dupe_rows >= 0.15 * rows_total or spanning):
-            verdict = (f"🚨 **Likely double-counting.** ~**{_fmt(est_dupe_rows)}** duplicate row(s) "
-                       f"(~**{_fmt(est_dupe_val)}** coins of harvest value) look re-ingested across "
-                       f"**{msgs}** separate messages. Fix: make the CSN export **edit one message "
-                       f"in place**, or run `/csn clear` after each export so only new sales post.")
-        else:
-            verdict = (f"⚠️ **Some repeats found** across {msgs} messages "
-                       f"(~{_fmt(est_dupe_rows)} suspect row(s)). Could be genuine repeat sales — "
-                       f"check the fingerprint list below.")
-
-        head = market_id or "ALL markets"
-        body = [
-            f"🐝 **Hive-feed audit — {head}**",
-            f"Rows recorded **{_fmt(rows_total)}** · feed messages **{_fmt(msgs)}** · "
-            f"paid rows **{_fmt(paid_rows)}** · fullest single message **{_fmt(full_lines)}** lines",
-            f"Recorded harvest value **{_fmt(val_total)}** coins",
-            "",
-            verdict,
-        ]
-        if dist:
-            body.append("")
-            body.append("**Lines per message** (few big messages = safe; many messages = re-posted):")
-            body.append(" · ".join(f"`{d['lines']}`×{d['n']}msg" for d in dist))
-        if fp:
-            body.append("")
-            body.append("**Same sale under multiple messages** (the double-count fingerprint):")
-            for r in fp:
-                body.append(f"• `{r['ign']}` {r['qty']}×{r['item']} — in **{r['msgs']}** messages "
-                            f"({r['rows']} rows)")
-        note = ("\n\n_Estimate assumes the feed re-posts a cumulative list; if you `/csn clear` "
-                "between exports it may over-state duplicates. Cross-check with the message shape above._")
-        await interaction.response.send_message(("\n".join(body) + note)[:1990], ephemeral=True)
-
-
-    @admin.command(
-        name="dedupe_perflog",
-        description="(Managers) Remove duplicate team-performance rows (re-logged orders inflating stats)")
-    @app_commands.describe(confirm="Set true to actually delete the duplicates (default: preview only)")
-    async def dedupe_perflog(self, interaction: discord.Interaction, confirm: bool = False):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
-        import Restocker_db as _db
-        try:
-            with _db.db() as conn:
-                groups = conn.execute(
-                    "SELECT worker_id, kind, detail, COUNT(*) n, MIN(id) keep_id "
-                    "FROM team_perf_log GROUP BY worker_id, kind, detail HAVING n > 1 "
-                    "ORDER BY n DESC").fetchall()
-                if not groups:
-                    return await interaction.response.send_message(
-                        "✅ No duplicate performance-log rows — nothing to clean.", ephemeral=True)
-                extra = sum(int(g["n"]) - 1 for g in groups)
-                lines = [f"• `{g['detail']}` ({g['kind']}) — {int(g['n'])} rows, remove {int(g['n'])-1}"
-                         for g in groups[:15]]
-                preview = ("🧹 **Perf-log dedupe**\n"
-                           f"{len(groups)} duplicated group(s), **{extra}** row(s) to remove — keeping the "
-                           f"earliest of each (which matches the actual coin payment; coins paid are NOT touched):\n"
-                           + "\n".join(lines))
-                if not confirm:
-                    return await interaction.response.send_message(
-                        preview[:1900] + "\n\n*Preview only — re-run with `confirm:True` to delete these.*",
-                        ephemeral=True)
-                removed = 0
-                for g in groups:
-                    cur = conn.execute(
-                        "DELETE FROM team_perf_log WHERE worker_id IS ? AND kind IS ? AND detail IS ? AND id <> ?",
-                        (g["worker_id"], g["kind"], g["detail"], g["keep_id"]))
-                    removed += cur.rowcount
-                await interaction.response.send_message(
-                    f"✅ Removed **{removed}** duplicate perf-log row(s) across {len(groups)} group(s). "
-                    f"Coins already paid are unaffected — this only fixes inflated worker/manager stats.",
-                    ephemeral=True)
-        except Exception as e:
-            try:
-                await interaction.response.send_message(f"⚠️ Failed: `{type(e).__name__}: {e}`", ephemeral=True)
-            except Exception:
-                pass
-
-
-async def setup(bot):
-    await bot.add_cog(AdminCog(bot))
