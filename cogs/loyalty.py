@@ -505,7 +505,7 @@ class LoyaltyCog(commands.Cog):
         # otherwise every global manager as before.
         note = (f"🎟️ **New loyalty redemption #{rid}**{f' — {pool_name}' if market else ''}\n"
                 f"{interaction.user.mention} wants **{points:,}** pts → *{reward}*\n"
-                f"Pay them, then run `/loyalty approve id:{rid}` (or `/loyalty deny id:{rid}`).")
+                f"Pay them, then use the **Approve / Reject** buttons on the redemption ticket.")
         notify_ids = set(MANAGER_DM_IDS)
         if market:
             owner_id = (_get_market(market) or {}).get("owner_id")
@@ -555,67 +555,8 @@ class LoyaltyCog(commands.Cog):
             lines.append(f"**#{r['id']}** — <@{r['user_id']}> · **{int(r['points']):,}** pts → *{r['reward']}*{tag}")
         await interaction.response.send_message(
             "🎟️ **Pending redemptions**\n" + "\n".join(lines) +
-            "\n\nApprove with `/loyalty approve id:<#>` (deducts points) or `/loyalty deny id:<#>`.",
+            "\n\nUse the **Approve / Reject** buttons on each redemption ticket — approving deducts the points.",
             ephemeral=True)
-
-    @loyalty.command(name="approve", description="(Manager/market owner) Approve a redemption — deducts the points")
-    @app_commands.describe(id="Redemption ID from /loyalty redemptions")
-    async def loyalty_approve(self, interaction: discord.Interaction, id: int):
-        import Restocker_db as _db
-        reds = _load_redemptions()
-        r = reds.get(str(id))
-        if not r:
-            return await interaction.response.send_message(f"❌ No redemption #{id}.", ephemeral=True)
-        if not self._can_action_redemption(interaction, r):
-            return await interaction.response.send_message(
-                "⛔ Managers only, or the owner of the market this redemption is scoped to.", ephemeral=True)
-        if r.get("status") != "pending":
-            return await interaction.response.send_message(
-                f"⚠️ Redemption #{id} is already **{r.get('status')}**.", ephemeral=True)
-        uid = str(r["user_id"]); pts = int(r["points"]); mid = r.get("market_id")
-        pool_name = (_get_market(mid) or {}).get("name", mid) if mid else "V Tech pool"
-        have = (float(_db.get_market_loyalty(uid, mid).get("points", 0) or 0) if mid
-                else float(_db.get_loyalty(uid).get("points", 0) or 0))
-        if have < pts:
-            return await interaction.response.send_message(
-                f"❌ <@{uid}> now only has **{have:,.0f}** pts in **{pool_name}** — can't deduct **{pts:,}**. "
-                f"Deny it or ask them to re-submit.", ephemeral=True)
-        new_total = (_db.add_market_loyalty_points(uid, mid, -pts, update_activity=False) if mid
-                    else _db.add_loyalty_points(uid, -pts, update_activity=False))
-        r["status"] = "approved"; r["approved_by"] = str(interaction.user.id)
-        _save_redemptions(reds)
-        await interaction.response.send_message(
-            f"✅ Approved **#{id}** — deducted **{pts:,}** pts from <@{uid}>'s **{pool_name}** balance "
-            f"(now `{new_total:,.0f}`).", ephemeral=True)
-        try:
-            u = await interaction.client.fetch_user(int(uid))
-            await u.send(f"✅ Your redemption **#{id}** (*{r['reward']}*) was approved — "
-                         f"**{pts:,}** points deducted from **{pool_name}**. Enjoy your reward!")
-        except Exception:
-            pass
-
-    @loyalty.command(name="deny", description="(Manager/market owner) Deny a redemption (no points deducted)")
-    @app_commands.describe(id="Redemption ID", reason="Optional reason shown to the user")
-    async def loyalty_deny(self, interaction: discord.Interaction, id: int, reason: str = ""):
-        reds = _load_redemptions()
-        r = reds.get(str(id))
-        if not r:
-            return await interaction.response.send_message(f"❌ No redemption #{id}.", ephemeral=True)
-        if not self._can_action_redemption(interaction, r):
-            return await interaction.response.send_message(
-                "⛔ Managers only, or the owner of the market this redemption is scoped to.", ephemeral=True)
-        if r.get("status") != "pending":
-            return await interaction.response.send_message(
-                f"⚠️ Redemption #{id} is already **{r.get('status')}**.", ephemeral=True)
-        r["status"] = "denied"; r["denied_by"] = str(interaction.user.id); r["deny_reason"] = reason.strip()
-        _save_redemptions(reds)
-        await interaction.response.send_message(f"❌ Denied redemption **#{id}**. No points deducted.", ephemeral=True)
-        try:
-            u = await interaction.client.fetch_user(int(r["user_id"]))
-            await u.send(f"❌ Your redemption **#{id}** (*{r['reward']}*) was denied."
-                         + (f"\nReason: {reason.strip()}" if reason.strip() else ""))
-        except Exception:
-            pass
 
 
 async def setup(bot: commands.Bot):

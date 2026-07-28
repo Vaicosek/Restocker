@@ -6,14 +6,12 @@ toggle ON, click each shop, toggle OFF). Drives fullness bars, low-stock alerts 
 shortfall-based restock orders.
 
 ## Commands
-- `/inventory stock [market] [low_only]` — live fullness per item, lowest first.
 - `/inventory restock_deficit market` — (manager) create restock orders from the **real
   shortfall** (capacity − current stock), not just what sold.
 - `/inventory set_capacity market item cap` — define an item's "full".
 - `/inventory set_alarm|alarms|clear_alarm` — owner stock alarms (per item or `*` default,
   by pct or pieces). On import the owner is DM'd what's past the alarm, with a one-click
   "Create restock orders" button.
-- `/inventory clear_stock` — (manager) flush stale / mis-routed scan rows.
 - `/item_edit item [coin] [stackable] [stack_size]` — (manager) fix an item's price or
   stackability. `/item_info` shows price, stock, barrel size and stackability.
 

@@ -33,6 +33,28 @@ update the doc in the same commit.
 - These cover every major subsystem. If something genuinely isn't here, say so and offer to
   check, rather than guessing.
 
+## Retired commands (2026-07-28) — never tell anyone to run these
+The command surface was cut from ~205 to ~135. These **no longer exist**; use the
+replacement, or just answer from your own tools:
+
+| Gone | Use instead |
+|---|---|
+| `/hive status` | your `get_hive_status` tool |
+| `/hive ingest`, `/hive settle` | the mod posts harvest lines itself; `/hive payout` settles |
+| `/inventory stock`, `/inventory clear_stock` | your `get_stock_fullness` tool, or the website |
+| `/market list`, `/market report`, `/market earnings` | `/market info` + your `get_market_earnings` tool |
+| `/market suggest_price`, `platform_balance`, `hide_earnings` | answer from tools / the website |
+| `/csn_audit`, `/import_earnings` | `get_market_earnings`; imports come from the mod |
+| `/stock list/price/portfolio/index_fund/dashboard` | the website Exchange page |
+| `/brew set|remove|list`, `/tool set|remove|list` | the mod auto-names items from lore; you still have `set_alias` / `remove_alias` / `list_aliases` |
+| `/enchant_area …`, `/escrow …`, `/suggest …`, `/network …` | retired entirely (unused) |
+| `/fees …`, `/investor sync|payout|set_pool|apply_roles|liquidate` | rare admin — say a manager must do it manually |
+| `/admin` repair tools (repair_all/payouts/order, backfill_team_perf, dedupe_perflog, migrate_stock, hive_audit, purge_brews, value_free_stock, csn_provenance, csn_delete_month) | one-off fixes, already done |
+| `/loyalty register_ign`, `/team perf` | `/register_ign`, `/team leaderboard` |
+
+`/admin` now holds only: `wipe`, `ai_audit`, `dm_setup`, `rebuild_market_channel`,
+`fix_month_close`, `csn_cleanup`.
+
 ## Conventions
 - **Verb semantics (critical):** in ChestShop/CSN, `bought` = a customer bought FROM you =
   **your income/sale**; `sold` = you bought FROM someone = **your expense**. This is the

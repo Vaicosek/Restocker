@@ -6,7 +6,7 @@ Workers belong to a manager's team; performance is tracked per team.
 - `add` / `remove` / `list` / `name` — (manager) roster + team display name.
 - `mine` — who your manager is + your registered IGN.
 - `csn` — (manager) your team's chest-shop sales for the latest CSN month.
-- `perf` — your team's performance leaderboard. `leaderboard` — how teams compare.
+- `leaderboard` — how teams compare (per-team + cross-team).
 - `webhook` / `channel` / `unbind` — where the team's performance feed posts.
 
 ## Projects (`/project …`)
