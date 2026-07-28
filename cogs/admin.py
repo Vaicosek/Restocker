@@ -444,10 +444,87 @@ class AdminCog(commands.Cog):
             f"📨 Sent setup DMs for **{len(sent)}**: {', '.join(sent) or '—'}"
             + (f"\nFailed: {', '.join(failed[:10])}" if failed else ""), ephemeral=True)
 
+    async def _rebuild_one(self, interaction, m, mid, confirm, keep_humans, limit):
+        """Rebuild one market's channel. Returns (deleted, posted, human_readable_note)."""
+        import io as _io
+        chan_id = m.get("report_channel_id")
+        channel = self.bot.get_channel(int(chan_id)) if chan_id else None
+        if channel is None:
+            return 0, 0, "❌ no bound channel"
+        try:
+            perms = channel.permissions_for(channel.guild.me)
+        except Exception:
+            perms = None
+        if perms is not None and not perms.manage_messages:
+            return 0, 0, f"❌ no Manage Messages in {channel.mention}"
+
+        months = (_load_csn_for_market(mid) or {}).get("months", {}) or {}
+        keys = sorted(k for k, v in months.items() if isinstance(v, dict) and (v.get("items") or {}))
+        limit = max(50, min(int(limit or 500), 2000))
+
+        victims = []
+        try:
+            async for msg in channel.history(limit=limit):
+                if keep_humans and not (msg.webhook_id or (msg.author and msg.author.bot)):
+                    continue
+                victims.append(msg)
+        except Exception as e:
+            return 0, 0, f"⚠️ history unreadable: {e}"
+
+        if not confirm:
+            return len(victims), len(keys), (
+                f"{channel.mention}: would delete {len(victims)}, post {len(keys)} "
+                f"({', '.join(keys) or 'no months'})")
+
+        deleted = 0
+        try:
+            fresh = [msg for msg in victims if (discord.utils.utcnow() - msg.created_at).days < 14]
+            old = [msg for msg in victims if msg not in fresh]
+            for i in range(0, len(fresh), 100):
+                try:
+                    await channel.delete_messages(fresh[i:i + 100])
+                    deleted += len(fresh[i:i + 100])
+                except Exception:
+                    for msg in fresh[i:i + 100]:
+                        try:
+                            await msg.delete(); deleted += 1; await asyncio.sleep(0.4)
+                        except Exception:
+                            pass
+            for msg in old:
+                try:
+                    await msg.delete(); deleted += 1; await asyncio.sleep(0.7)
+                except Exception:
+                    pass
+        except Exception as e:
+            log.warning("[rebuild_all] %s delete phase: %s", mid, e)
+
+        posted = 0
+        for mk in keys:
+            md = months.get(mk) or {}
+            items = md.get("items") or {}
+            income = float(md.get("income", 0) or 0)
+            spent = float(md.get("spent", 0) or 0)
+            name = m.get("name", mid)
+            title = f"📕 {name} · {md.get('label', mk)}"
+            try:
+                embed = core._build_csn_compact_embed(title, items, income, spent, mid, mk)
+                embed.set_footer(text=f"Monthly report • {name}")
+                files = []
+                xb = core._build_csn_xlsx(title, name, mk, items, income, spent, market_id=mid)
+                if xb:
+                    files = [discord.File(_io.BytesIO(xb), filename=f"report_{mid}_{mk}.xlsx")]
+                await channel.send(embed=embed, files=files)
+                posted += 1
+                await asyncio.sleep(1.5)
+            except Exception as e:
+                log.warning("[rebuild_all] %s %s post failed: %s", mid, mk, e)
+        log.info("[rebuild_all] %s: deleted %d, posted %d", mid, deleted, posted)
+        return deleted, posted, f"{channel.mention}: deleted {deleted}, posted {posted}"
+
     @admin.command(name="rebuild_market_channel",
                    description="(Managers) WIPE this market's channel and repost a clean report for every month")
     @app_commands.describe(
-        market_id="Market whose bound channel to rebuild (blank = the market bound to THIS channel)",
+        market_id="Market to rebuild — or `all` for every bound market (blank = THIS channel's market)",
         confirm="False (default) = preview. True = delete messages and repost.",
         keep_humans="True (default) = only delete bot/webhook messages, keep what people wrote",
         limit="How many messages to scan for deletion (default 500, max 2000)")
@@ -460,6 +537,34 @@ class AdminCog(commands.Cog):
         await interaction.response.defer(ephemeral=True, thinking=True)
         import io as _io
         markets = (_load_markets().get("markets", {}) or {})
+
+        # ── ALL markets at once ──────────────────────────────────────────────
+        if (market_id or "").strip().lower() == "all":
+            targets = [k for k, v in markets.items()
+                       if isinstance(v, dict) and v.get("report_channel_id") and v.get("active", True)]
+            if not targets:
+                return await interaction.followup.send("❌ No markets have a bound channel.", ephemeral=True)
+            lines, tot_d, tot_p = [], 0, 0
+            for _mid in sorted(targets):
+                try:
+                    d, p, note = await self._rebuild_one(
+                        interaction, markets[_mid], _mid, confirm, keep_humans, limit)
+                    tot_d += d; tot_p += p
+                    lines.append(f"• `{_mid}` — {note}")
+                except Exception as ex:
+                    lines.append(f"• `{_mid}` — ⚠️ {type(ex).__name__}: {ex}")
+                await asyncio.sleep(1.0)
+            head = (f"🧹 **Rebuilt {len(targets)} market channel(s)** — deleted {tot_d}, posted {tot_p}."
+                    if confirm else
+                    f"🔍 **Preview — {len(targets)} market(s)**: would delete {tot_d}, post {tot_p}.\n"
+                    f"Re-run with `confirm:True` to do it.")
+            body = "\n".join(lines)
+            if len(head) + len(body) > 1900:
+                return await interaction.followup.send(
+                    head, ephemeral=True,
+                    file=discord.File(_io.BytesIO(body.encode()), filename="rebuild_all.txt"))
+            return await interaction.followup.send(f"{head}\n{body}", ephemeral=True)
+
         # resolve the market from the arg, else from the channel we're standing in
         mid = market_id
         if not mid:
@@ -469,7 +574,8 @@ class AdminCog(commands.Cog):
                     break
         if not mid or mid not in markets:
             return await interaction.followup.send(
-                "❌ No market given and this channel isn't bound to one. Pass `market_id:`.", ephemeral=True)
+                "❌ No market given and this channel isn't bound to one. Pass `market_id:` (or `all`).",
+                ephemeral=True)
         m = markets[mid]
         chan_id = m.get("report_channel_id")
         channel = self.bot.get_channel(int(chan_id)) if chan_id else None
