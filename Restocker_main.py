@@ -8138,8 +8138,9 @@ def _apply_market_registry_20260727() -> None:
     Runs at startup so no one has to execute a script by hand; re-running is a no-op."""
     import secrets as _sec
     import Restocker_db as _db
-    if str(_db.get_config("_market_registry_20260727") or "") == "done":
-        return
+    # NOT flag-guarded: every update here is idempotent, and a partially-failed first run
+    # (observed 2026-07-28: freezone stayed unbound) must self-heal on the next boot.
+    # Runs every startup; cost is a dozen cheap UPSERTs.
     registry = [
         ("falrija",          "Falrija",           "1529551677353627898", "1529820990857678979"),
         ("nether_market",    "Nether market",     "1519690325273219083", "1354143289426575391"),
@@ -8154,29 +8155,38 @@ def _apply_market_registry_20260727() -> None:
         ("amazonia",         "Amazonia",          "1510384815093059805", "1080404147368628254"),
         ("bnl",              "BNL",               "1510943667597348994", "219181322529144833"),
     ]
-    created, updated = [], []
-    with _db.db() as conn:
-        row = conn.execute("SELECT platform_fee_pct, COUNT(*) c FROM markets "
-                           "GROUP BY platform_fee_pct ORDER BY c DESC LIMIT 1").fetchone()
-        fee = float(row[0]) if row else 5.0
-        for mid, name, chan, owner in registry:
-            ex = conn.execute("SELECT market_id FROM markets WHERE market_id=?", (mid,)).fetchone()
-            if ex:
-                conn.execute(
-                    "UPDATE markets SET owner_id=?, report_channel_id=?, "
-                    "name=CASE WHEN name IS NULL OR name='' THEN ? ELSE name END "
-                    "WHERE market_id=?", (owner, chan, name, mid))
-                updated.append(mid)
-            else:
-                conn.execute(
-                    "INSERT INTO markets (market_id, name, owner_id, manager_ids, platform_fee_pct, "
-                    "csn_history_file, active, discord_role_name, leader_discord_id, leader_code, "
-                    "report_channel_id) VALUES (?,?,?,?,?,NULL,1,'',?,?,?)",
-                    (mid, name, owner, "[]", fee, owner, _sec.token_hex(4).upper(), chan))
-                created.append(mid)
-    _db.set_config("_market_registry_20260727", "done")
-    log.info("[market registry] applied: %d updated (%s), %d created (%s)",
-             len(updated), ", ".join(updated), len(created), ", ".join(created) or "—")
+    created, updated, failed = [], [], []
+    try:
+        with _db.db() as conn:
+            row = conn.execute("SELECT platform_fee_pct, COUNT(*) c FROM markets "
+                               "GROUP BY platform_fee_pct ORDER BY c DESC LIMIT 1").fetchone()
+            fee = float(row[0]) if row else 5.0
+    except Exception:
+        fee = 5.0
+    for mid, name, chan, owner in registry:
+        # one transaction PER market — a single failure can't roll back the whole roster
+        try:
+            with _db.db() as conn:
+                ex = conn.execute("SELECT market_id FROM markets WHERE market_id=?", (mid,)).fetchone()
+                if ex:
+                    conn.execute(
+                        "UPDATE markets SET owner_id=?, report_channel_id=?, "
+                        "name=CASE WHEN name IS NULL OR name='' THEN ? ELSE name END "
+                        "WHERE market_id=?", (owner, chan, name, mid))
+                    updated.append(mid)
+                else:
+                    conn.execute(
+                        "INSERT INTO markets (market_id, name, owner_id, manager_ids, platform_fee_pct, "
+                        "csn_history_file, active, discord_role_name, leader_discord_id, leader_code, "
+                        "report_channel_id) VALUES (?,?,?,?,?,NULL,1,'',?,?,?)",
+                        (mid, name, owner, "[]", fee, owner, _sec.token_hex(4).upper(), chan))
+                    created.append(mid)
+        except Exception as e:
+            failed.append(mid)
+            log.warning("[market registry] %s failed: %s", mid, e)
+    log.info("[market registry] applied: %d updated (%s), %d created (%s)%s",
+             len(updated), ", ".join(updated), len(created), ", ".join(created) or "—",
+             f", FAILED: {', '.join(failed)}" if failed else "")
 
 
 def _repair_june_20260728() -> None:
@@ -8188,8 +8198,9 @@ def _repair_june_20260728() -> None:
     in data/restore_2026_06/, and restores main's June summary from the earnings sheet.
     toolshop keeps its own June; bnl was never polluted. Idempotent via config flag."""
     import Restocker_db as _db
-    if str(_db.get_config("_june_repair_20260728") or "") == "done":
-        return
+    # NOT flag-guarded (same lesson as the registry): every step is conditional on the data
+    # still being wrong, so re-running is a no-op once repaired — but a boot where it failed
+    # or was skipped self-heals on the next start instead of being locked out by a flag.
     POLLUTED_SIG = 96273          # toolshop's June income — the copied row's fingerprint
     summary = []
 
@@ -8264,8 +8275,7 @@ def _repair_june_20260728() -> None:
     except Exception as e:
         log.warning("[june repair] armor-set stack fix failed: %s", e)
 
-    _db.set_config("_june_repair_20260728", "done")
-    log.info("[june repair] %s", "; ".join(summary) or "nothing to repair")
+    log.info("[june repair] %s", "; ".join(summary) or "nothing to repair (already clean)")
 
 
 def _backfill_csn_to_db() -> None:

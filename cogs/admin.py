@@ -965,6 +965,81 @@ class AdminCog(commands.Cog):
         await interaction.response.send_message(body[:1950], ephemeral=True)
 
 
+    @admin.command(name="fix_month_close",
+                   description="(Managers) EDIT the existing month-closing posts in place with the CURRENT data")
+    @app_commands.describe(market_id="Market to fix (blank = every active market)",
+                           month="Month key, e.g. 2026-06",
+                           repost="True = post a new message instead of editing the old one")
+    @app_commands.autocomplete(market_id=_market_autocomplete)
+    async def repost_month_close(self, interaction: discord.Interaction,
+                                 month: str, market_id: Optional[str] = None,
+                                 repost: bool = False):
+        if not is_manager(interaction):
+            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
+        import re as _re
+        if not _re.match(r"^\d{4}-\d{2}$", (month or "").strip()):
+            return await interaction.response.send_message("❌ Month must look like `2026-06`.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        month = month.strip()
+        import io as _io
+        markets = (_load_markets().get("markets", {}) or {})
+        targets = ([market_id] if market_id else list(markets.keys()))
+        done, skipped = [], []
+        for mid in targets:
+            m = markets.get(mid)
+            if not isinstance(m, dict) or not m.get("active", True):
+                continue
+            md = (_load_csn_for_market(mid) or {}).get("months", {}).get(month)
+            if not isinstance(md, dict) or not (md.get("items") or {}):
+                skipped.append(f"{mid} (no data)")
+                continue
+            chan_id = m.get("report_channel_id")
+            channel = self.bot.get_channel(int(chan_id)) if chan_id else None
+            if channel is None:
+                skipped.append(f"{mid} (unbound)")
+                continue
+            items = md.get("items") or {}
+            income = float(md.get("income", 0) or 0)
+            spent = float(md.get("spent", 0) or 0)
+            name = m.get("name", mid)
+            title = f"📕 Month closed — {name} · {md.get('label', month)}"
+            try:
+                embed = core._build_csn_compact_embed(title, items, income, spent, mid, month)
+                files = []
+                xb = core._build_csn_xlsx(title, name, month, items, income, spent, market_id=mid)
+                if xb:
+                    files = [discord.File(_io.BytesIO(xb), filename=f"closing_{mid}_{month}.xlsx")]
+
+                # Prefer EDITING the bot's own existing closing post for this month — the
+                # channel keeps one truthful message instead of a wrong one plus a correction.
+                target_msg = None
+                if not repost:
+                    try:
+                        async for msg in channel.history(limit=60):
+                            if (msg.author.id == self.bot.user.id and msg.embeds
+                                    and str(msg.embeds[0].title or "").startswith("📕 Month closed")
+                                    and md.get("label", month) in str(msg.embeds[0].title or "")):
+                                target_msg = msg
+                                break
+                    except Exception:
+                        target_msg = None
+
+                if target_msg is not None:
+                    embed.set_footer(text=f"Month-end closing report (corrected) • {name}")
+                    # attachments= replaces the stale workbook with the rebuilt one
+                    await target_msg.edit(embed=embed, attachments=files)
+                    done.append(f"{mid} (edited)")
+                else:
+                    embed.set_footer(text=f"Corrected month-end closing report • {name}")
+                    await channel.send(embed=embed, files=files)
+                    done.append(f"{mid} (posted)")
+                await asyncio.sleep(1.5)
+            except Exception as e:
+                skipped.append(f"{mid} ({e})")
+        return await interaction.followup.send(
+            f"📕 Fixed `{month}` for **{len(done)}**: {', '.join(done) or '—'}"
+            + (f"\nSkipped: {', '.join(skipped[:10])}" if skipped else ""), ephemeral=True)
+
     @admin.command(name="csn_delete_month",
                    description="(Managers) Delete ONE recorded month from a market's CSN history (fix mis-routed imports)")
     @app_commands.describe(
