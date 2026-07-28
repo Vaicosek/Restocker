@@ -658,6 +658,71 @@ class AdminCog(commands.Cog):
             f"🧹 **{m.get('name', mid)}** rebuilt — deleted **{deleted}**, posted **{posted}** monthly report(s) "
             f"in {channel.mention}.", ephemeral=True)
 
+    @admin.command(name="purge_channel",
+                   description="(Managers) Delete EVERY message in the channel you run this in")
+    @app_commands.describe(
+        confirm="False (default) = just count. True = actually delete.",
+        keep_humans="False (default) = delete everything. True = keep messages people typed.",
+        limit="How many messages to scan (default 1000, max 5000)")
+    async def purge_channel(self, interaction: discord.Interaction, confirm: bool = False,
+                            keep_humans: bool = False, limit: int = 1000):
+        if not is_manager(interaction):
+            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        channel = interaction.channel
+        perms = channel.permissions_for(interaction.guild.me)
+        if not perms.manage_messages:
+            return await interaction.followup.send(
+                "❌ I need **Manage Messages** here to clear the channel.", ephemeral=True)
+        limit = max(50, min(int(limit or 1000), 5000))
+
+        victims = []
+        try:
+            async for msg in channel.history(limit=limit):
+                if keep_humans and not (msg.webhook_id or (msg.author and msg.author.bot)):
+                    continue
+                if msg.pinned:
+                    continue          # pins are deliberate — never nuke them
+                victims.append(msg)
+        except Exception as e:
+            return await interaction.followup.send(f"⚠️ Couldn't read history: {e}", ephemeral=True)
+
+        if not confirm:
+            return await interaction.followup.send(
+                f"🔍 **Preview — {channel.mention}**\n"
+                f"• would delete **{len(victims)}** message(s)"
+                + (" (bot/webhook only)" if keep_humans else " (**everything**, including human messages)")
+                + "\n• pinned messages are always kept\n\n"
+                f"Re-run with `confirm:True` to do it.", ephemeral=True)
+
+        deleted = 0
+        try:
+            fresh = [m for m in victims if (discord.utils.utcnow() - m.created_at).days < 14]
+            old = [m for m in victims if m not in fresh]
+            for i in range(0, len(fresh), 100):
+                try:
+                    await channel.delete_messages(fresh[i:i + 100])
+                    deleted += len(fresh[i:i + 100])
+                except Exception:
+                    for m in fresh[i:i + 100]:
+                        try:
+                            await m.delete(); deleted += 1; await asyncio.sleep(0.4)
+                        except Exception:
+                            pass
+            for m in old:
+                try:
+                    await m.delete(); deleted += 1; await asyncio.sleep(0.7)
+                except Exception:
+                    pass
+        except Exception as e:
+            log.warning("[purge_channel] %s: %s", channel.id, e)
+        log.info("[purge_channel] %s (%s): deleted %d", channel.id, interaction.user.id, deleted)
+        return await interaction.followup.send(
+            f"🧹 Deleted **{deleted}** message(s) in {channel.mention}."
+            + ("" if deleted >= len(victims) else
+               f" ({len(victims) - deleted} couldn't be removed — older than 14 days often rate-limits;"
+               " run it again to continue.)"), ephemeral=True)
+
     @admin.command(name="fix_month_close",
                    description="(Managers) EDIT the existing month-closing posts in place with the CURRENT data")
     @app_commands.describe(month="Month key e.g. 2026-06 — or `all` / blank for EVERY recorded month",

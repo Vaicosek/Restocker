@@ -4183,20 +4183,21 @@ async def on_ready():
                     print("🌍 Discord reports 0 registered commands — forcing a resync.")
             except Exception as _fe:
                 log.debug("[sync] live-command check failed: %s", _fe)
+        # Guild-scoped copies show up ALONGSIDE the global ones, so every command appears
+        # twice in the picker. An older build used copy_global_to() for instant registration;
+        # clear those out. Global is the single source of truth.
+        for _g in bot.guilds:
+            try:
+                if await bot.tree.fetch_commands(guild=_g):
+                    bot.tree.clear_commands(guild=_g)
+                    await bot.tree.sync(guild=_g)
+                    print(f"🧽 Removed duplicate guild-scoped commands in {_g.name}.")
+            except Exception as _ge:
+                log.warning("[sync] guild dedupe failed for %s: %s", _g.id, _ge)
         if _needs:
             await bot.tree.sync()
             _db_sync.set_config("_cmd_sync_sig", _sig)
             print("🌍 Global slash commands synced.")
-            # Global commands can take up to an HOUR to appear (and vanish entirely after a
-            # kick/re-invite). Copying the tree to each guild and syncing there registers
-            # them instantly, so a restart always gives working commands right away.
-            for _g in bot.guilds:
-                try:
-                    bot.tree.copy_global_to(guild=_g)
-                    await bot.tree.sync(guild=_g)
-                    print(f"⚡ Commands synced instantly to {_g.name}.")
-                except Exception as _ge:
-                    log.warning("[sync] guild sync failed for %s: %s", _g.id, _ge)
         else:
             print("🌍 Slash commands unchanged — sync skipped (avoids rate limits).")
     except Exception as e:
