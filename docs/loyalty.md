@@ -22,8 +22,8 @@ redeemed for rewards.
 
 ## IGN registry (critical for pay)
 - `/register_ign` — a worker links their Minecraft name. **Run again to add alts.**
-- `/link` / `/unlink` — (manager) link or remove a member's IGN(s).
-- `/unlinked` — (manager) employees with no IGN. `/remind_unlinked` — DM them all.
+- `/loyalty link` / `/loyalty unlink` — (manager) link or remove a member's IGN(s).
+- `/loyalty unlinked` — (manager) employees with no IGN. `/loyalty remind_unlinked` — DM them all.
 
 ## Gotchas the AI must know
 - **Pay routes through the IGN registry.** Hive wages and order payouts resolve the

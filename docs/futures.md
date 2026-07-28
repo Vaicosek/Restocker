@@ -7,7 +7,7 @@ pickaxe"). It's reviewed, approved, then produced and delivered.
 ## Pricing — THE RULE
 **Futures are quoted at `cash_cost`** — the production cost (diamonds + XP value + worker
 pay). There IS a fixed cost sheet; pricing is NOT ad-hoc "set by the manager at approval".
-Use `/futures_quote` — never estimate.
+Ask the AI to quote it (`quote_futures` tool) — never estimate.
 
 **Settlement model:** the customer pays **cash cost up front**, then after they resell the
 goods they pay the remainder up to **price to group** — i.e. total paid = group price, and
@@ -33,13 +33,12 @@ armor; pickaxe/axe/shovel → tool. "Enchanted" = has Fortune / Silk Touch / Fir
 Knockback. Eff V vs Eff IV picks the tier band.
 
 ## Commands
-- `/futures_quote item qty [effects]` or `/futures_quote order_id:<id>` — price from the
-  sheet (cash cost + group + sell + breakdown). **Use this instead of guessing.**
 - `/futures_order` — a customer files a request; posts a review card to the futures channel
   pinging **@Owner**.
-- `/futures_orders [status]` — (managers) list by status. `/my_futures_orders` — customer view.
-- `/futures_deals`, `/futures_view`, `/futures_price`, `/futures_sold`, `/futures_bill`,
-  `/futures_pay` — consignment/bulk deal tracking and billing.
+- `/futures_bulk` — file several lines at once as one bulk request.
+- **Quoting is AI-side**: ask the bot and it runs the `quote_futures` tool against the sheet
+  above (cash cost + group + sell + breakdown). There is no `/futures_quote` command.
+- Listing/billing commands were retired — ask the AI for order status instead.
 
 ## Approval → fulfillment flow
 1. Order posts to the futures channel with **Approve & Ping Workers / Approve (no ping) /
@@ -52,6 +51,6 @@ Knockback. Eff V vs Eff IV picks the tier band.
 
 ## Gotchas the AI must know
 - Never invent surcharges or say "price is set case-by-case" — the sheet above is
-  authoritative and `/futures_quote` computes it.
+  authoritative and the `quote_futures` tool computes it.
 - Catalog `coin` is the **retail shop price**, not the futures price. Don't quote futures
   from the catalog.

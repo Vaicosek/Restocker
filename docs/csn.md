@@ -32,7 +32,7 @@ ChestShop phrases everything from the **customer's** view:
 
 ## Bot-side dedup / safety
 - `_parse_monthly_csv` de-dups duplicate `# RUN` timestamps and auto-detects
-  cumulative-vs-delta files. `/csn_audit` verifies a month; `_csn_anomaly_check` flags a
+  cumulative-vs-delta files. Ask the AI to audit a month; `_csn_anomaly_check` flags a
   net >3× the recent average (possible un-cleared/duplicate report).
 
 ## Gotchas the AI must know

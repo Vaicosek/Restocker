@@ -2,29 +2,26 @@
 
 ## Balances
 - `/balance [user]` — coin balance (others require Manager).
-- `/balance_history` — recent coin movements.
-- `/deposit` — (manager) credit a user. `/withdraw_request` — a user requests a payout;
-  opens a **manager ticket** with Approve & mark paid / Reject buttons.
+- Balance history, manual credits and withdrawal requests are handled by the AI (ask it) or
+  through the ticket flow — the old `/balance_history`, `/deposit` and `/withdraw_request`
+  commands were retired.
 - Balances carry `coins`, `principal` (for interest) and `lp`. Every movement writes a
   `coin_ledger` row with a reason — an unreasoned entry means it was paid by hand outside
   the normal flow.
 
 ## Investors (GEX.PR preferred shareholders)
-- `/investor sync` — rebuild the register from a pasted Crimson Banking cap-table export.
 - `/investor status` — register, pool %, recent distributions.
-- `/investor set_pool` — % of V Tech monthly net that goes to investors.
-- `/investor payout` — manual extra payout. `/investor apply_roles` — grant the Investor role.
-- `/investor liquidate` — a gone-for-good holder's equity returns to the company.
+- Pool %, manual payouts, role grants, liquidation and cap-table sync are AI-side now — ask
+  the bot; distributions still run automatically when a V Tech market's monthly CSN net
+  records (positive months only, once per market-month).
 
 ## Platform fees
-- `/fees status` — are fees on, balance, recent charges. `/fees toggle` — on/off at runtime.
-- `/fees charge` — manually charge a user (e.g. tool/factory rental) into the platform balance.
+Fees are configured in the DB and charged automatically. The `/fees` command group was
+retired — ask the AI for fee status or the platform balance.
 
 ## Consignment futures (bulk deals)
-`/futures deals` · `view` · `price` · `sold` · `bill` · `pay` — track a bulk consignment:
-price each line against a catalog item, record customer resales, post an invoice, and log
-payments against the running balance. (Custom build requests are a different thing — see
-[futures.md](futures.md).)
+Bulk consignment tracking is AI-side. For custom build requests see [futures.md](futures.md)
+(`/futures_order`, `/futures_bulk`).
 
 ## Gotchas the AI must know
 - Coin movements should always carry a reason; hand-paid credits are the ones that break

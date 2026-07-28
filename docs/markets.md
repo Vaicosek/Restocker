@@ -6,20 +6,23 @@ tab, an owner + managers, and optionally a public stock listing (see [stock.md](
 Every CSN report and order belongs to a market.
 
 ## Commands (`/market …`)
-- `add` / `delete` / `list` / `info` — register, remove, list, inspect a market.
-- `earnings` — monthly income / spending / net. `report` — owner's private best-sellers +
-  missing-stock + earnings view.
+- `add` / `delete` / `info` — register, remove, inspect a market. (`/create_market` is the
+  top-level shortcut.)
+- Earnings, monthly reports and market lists are AI-side or on the website dashboard —
+  `/market earnings`, `/market report` and `/market list` were retired. `/market_rollup` and
+  `/monthly_report` still exist top-level.
 - `/bind_market market_id [channel]` (top-level) — **bind a Discord channel to a market** so CSN reports
   there record to it, no in-game code needed. (Alternative to the CSV market code.)
 - `set_owner` / `add_manager` / `remove_manager` / `set_leader_role` — ownership + roles.
 - `edit` — name / fee / active. `set_ticker` — stock symbol (e.g. GEX).
 - `treasury` / `treasury_withdraw` — view/withdraw a public market's excess treasury.
-- `remove_item` / `log_restock` / `suggest_price` — catalog upkeep; `log_restock` keeps net
-  profit honest when stock is added by hand.
-- `platform_balance` — total platform fee collected (manager).
-- Related, separate groups: `/market_code` (get a market's CSN verification code),
-  `/inventory …` (live barrel fullness, capacities, restock deficit), `/shop …` &
-  `/item_edit` (catalog item price + stackability).
+- `remove_item` / `log_restock` — catalog upkeep; `log_restock` keeps net profit honest when
+  stock is added by hand. Price suggestions are AI-side.
+- `go_public` / `go_private` / `loyalty` / `vtech_group` / `set_code` — listing, loyalty
+  opt-in, group membership, CSN code.
+- Related, separate commands: `/market_code` (a market's CSN verification code),
+  `/inventory restock_deficit`, and `/add_item` · `/item_edit` · `/item_info` ·
+  `/item_set_price` (catalog price + stackability).
 
 ## Data / binding
 - Markets store `owner_id`, `manager_ids`, `leader_code` (CSN code), `report_channel_id`

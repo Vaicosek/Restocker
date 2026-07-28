@@ -15,16 +15,12 @@ Hand a manager a budget to build something; they pay their team and keep the res
 - Hive harvest wages are logged as project work (`project:hive-harvesting`) so the cost of
   harvesting is always visible.
 
-## Enchant areas (`/enchant_area …`)
-Roster of which employees operate which enchant-table area: `set` / `list` / `remove` /
-`clear`, binding IGNs to an area.
-
 ## Name aliases
-- `/brew set|remove|list` — map potion codes (`Potion#32L`) to readable names.
-- `/tool set|remove|list` — same for tool/equipment codes (`Diamond Pickaxe#ahc`).
-  These make CSN reports readable; the mod can also learn brew names from captured lore.
+The CSN mod learns potion and tool names from captured item lore automatically — the old
+`/brew` and `/tool` alias commands were retired.
 
 ## Gotchas the AI must know
 - A worker's team IGN must match their in-game name **exactly** or their sales won't
   attribute to the team.
-- Team performance can be inflated by re-logged orders — `/dedupe_perflog` cleans that.
+- Team performance can be inflated by re-logged orders — ask the AI to check for duplicate
+  performance rows if a total looks too high.

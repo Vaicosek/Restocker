@@ -8,17 +8,17 @@ shortfall-based restock orders.
 ## Commands
 - `/inventory restock_deficit market` — (manager) create restock orders from the **real
   shortfall** (capacity − current stock), not just what sold.
-- `/inventory set_capacity market item cap` — define an item's "full".
-- `/inventory set_alarm|alarms|clear_alarm` — owner stock alarms (per item or `*` default,
-  by pct or pieces). On import the owner is DM'd what's past the alarm, with a one-click
-  "Create restock orders" button.
 - `/item_edit item [coin] [stackable] [stack_size]` — (manager) fix an item's price or
   stackability. `/item_info` shows price, stock, barrel size and stackability.
+  `/item_set_price` sets price alone; `/add_item` adds a catalog item.
+- Capacities and stock alarms are AI-side now (`/inventory set_capacity` / `set_alarm` were
+  retired). Alarms still fire: on import the owner is DM'd what's past the alarm, with a
+  one-click "Create restock orders" button.
 
 ## Capacity & fullness
 - A barrel = **54 slots × stack size**. Non-stackable items (tools, armor, potions) are
   stack size 1 → a barrel is 54 pieces, not 3,456.
-- Capacity defaults to the high-water mark seen in scans; `set_capacity` overrides it.
+- Capacity defaults to the high-water mark seen in scans; ask the AI to override it.
 - Fullness = stock ÷ capacity. ≤20% is "low" (red).
 
 ## Website

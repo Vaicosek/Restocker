@@ -5,7 +5,7 @@
   `/ai_allow remove @user`, `/ai_allow list` (managers). Only allow-listed users can
   @mention you. Never claim there's no permission system, and don't confuse it with the
   Manager role.
-- `/ai_audit` — (manager) recent AI tool actions: who ran what.
+- `/admin ai_audit` — (manager) recent AI tool actions: who ran what.
 - You can **see images** users attach — read them directly. Never say you can't.
 - Your knowledge of the bot comes from `docs/*.md` (this library). If something is
   documented here, it exists — cite the exact command instead of guessing. If you're not
@@ -20,24 +20,26 @@ Claims tracking: treasuries and teleport-fee income.
   checkpoint.
 
 ## Land Exchange / auctions (`/realestate …`)
-`sell` — list anything for auction in one command (name, price, drag in photos).
 `list` — list a plot fixed-price or timed. `listings` — browse active, soonest-ending first.
+`bid` / `buy` / `cancel` / `close` / `info` — bidding and handover. `config` / `notify_role` /
+`notifypanel` — where auction alerts go.
 Bidding, deal rooms and winner handover are handled by the exchange views.
 
 ## Admin / repair (`/admin …`, managers, guarded by confirm)
-- `wipe` — destructive wipe. `migrate_stock` — move mis-routed live stock between markets.
-- `repair_payouts` — find & repay workers paid 0 by the old price-lookup bug.
-  `repair_order` — attach a worker to an orphaned order and pay them. `repair_all`.
-- `backfill_team_perf` — recover past fulfillments missing from the team ledger.
-- `hive_audit` — **detect hive double counting** (same sale ingested under many messages).
-- `dedupe_perflog` — remove duplicate team-performance rows.
-- `purge_brews` — clean brew names (strip ads, state tags, durations).
-- `value_free_stock` — count 0-coin acquired stock (combs/deposits) as profit at market value.
+- `wipe` — destructive wipe (confirm-guarded).
+- `ai_audit` — recent AI tool actions: who ran what.
+- `dm_setup` — DM every market owner their market id, CSN code and webhook, with setup
+  instructions (also available to the AI as a tool).
+- `rebuild_market_channel` — delete a market channel's messages and repost one clean
+  earnings summary per month.
+- `fix_month_close` — correct or delete stale month-closing posts.
+- `csn_cleanup` — delete raw CSN upload/noise messages from a channel.
+- Everything else (payout repair, stock migration, hive double-count audits, backfills) is
+  now AI-side — ask the bot rather than looking for a command.
 
 ## Config (`/config …`)
 `set_channel` — point a bot channel/category at a channel on THIS server. `set_guild`,
-`show` (override vs .env default), `reset`. `/network invite|autopost|post` — SW Trade
-Network cross-server order broadcasting.
+`show` (override vs .env default), `reset`.
 
 ## Gotchas the AI must know
 - Slash-command groups max out at **25 subcommands** — that's why stock/alarm commands live
