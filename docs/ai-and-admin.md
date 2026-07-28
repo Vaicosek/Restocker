@@ -30,8 +30,15 @@ Bidding, deal rooms and winner handover are handled by the exchange views.
 - `ai_audit` — recent AI tool actions: who ran what.
 - `dm_setup` — DM every market owner their market id, CSN code and webhook, with setup
   instructions (also available to the AI as a tool).
-- `rebuild_market_channel` — delete a market channel's messages and repost one clean
-  earnings summary per month.
+- `rebuild_market_channel` — wipe a market channel and repost one clean earnings summary per
+  month. `market_id:all` does every bound market in one run.
+- `purge_channel` — wipe the channel you run it in.
+- **How the wipe works:** a full wipe (`keep_humans:False`, the default) **clones the channel
+  and deletes the original** — instant at any size, and the bot rebinds any market pointing
+  at it. The cost is a new channel ID and the loss of pins/history. With `keep_humans:True`
+  it instead deletes bot/webhook messages one at a time; Discord blocks bulk-delete past 14
+  days, so that path runs ~0.7s per message and can outlive the 15-minute interaction token.
+  Both commands preview first and need `confirm:True`.
 - `fix_month_close` — correct or delete stale month-closing posts.
 - `csn_cleanup` — delete raw CSN upload/noise messages from a channel.
 - Everything else (payout repair, stock migration, hive double-count audits, backfills) is

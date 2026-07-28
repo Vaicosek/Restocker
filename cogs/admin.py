@@ -444,6 +444,38 @@ class AdminCog(commands.Cog):
             f"📨 Sent setup DMs for **{len(sent)}**: {', '.join(sent) or '—'}"
             + (f"\nFailed: {', '.join(failed[:10])}" if failed else ""), ephemeral=True)
 
+    async def _nuke_by_clone(self, channel):
+        """Wipe a channel INSTANTLY by cloning it and deleting the original.
+
+        Deleting messages one-by-one is ~0.7s each once they're older than 14 days
+        (Discord forbids bulk-delete past that), so a busy channel can't be cleared
+        inside an interaction's 15-minute token. Cloning is a single API call and
+        keeps name, topic, permissions, category and slowmode.
+
+        Returns (new_channel, [market_ids_rebound]).
+        """
+        new = await channel.clone(reason="Restocker: channel purge")
+        try:
+            await new.edit(position=channel.position)
+        except Exception:
+            pass
+        old_id = int(channel.id)
+        await channel.delete(reason="Restocker: channel purge")
+
+        rebound = []
+        try:
+            data = _load_markets() or {}
+            for k, v in (data.get("markets") or {}).items():
+                if isinstance(v, dict) and str(v.get("report_channel_id") or "") == str(old_id):
+                    v["report_channel_id"] = int(new.id)
+                    rebound.append(k)
+            if rebound:
+                _save_markets(data)
+                log.info("[purge] rebound %s to new channel %s", ", ".join(rebound), new.id)
+        except Exception as e:
+            log.warning("[purge] rebind failed: %s", e)
+        return new, rebound
+
     async def _rebuild_one(self, interaction, m, mid, confirm, keep_humans, limit):
         """Rebuild one market's channel. Returns (deleted, posted, human_readable_note)."""
         import io as _io
@@ -472,31 +504,42 @@ class AdminCog(commands.Cog):
             return 0, 0, f"⚠️ history unreadable: {e}"
 
         if not confirm:
+            how = ("wipe everything by recreating the channel (instant, new channel ID, "
+                   "pins/history lost)" if not keep_humans else
+                   f"delete {len(victims)} bot/webhook message(s), keeping human ones")
             return len(victims), len(keys), (
-                f"{channel.mention}: would delete {len(victims)}, post {len(keys)} "
+                f"{channel.mention}: would {how}; then post {len(keys)} report(s) "
                 f"({', '.join(keys) or 'no months'})")
 
         deleted = 0
-        try:
-            fresh = [msg for msg in victims if (discord.utils.utcnow() - msg.created_at).days < 14]
-            old = [msg for msg in victims if msg not in fresh]
-            for i in range(0, len(fresh), 100):
-                try:
-                    await channel.delete_messages(fresh[i:i + 100])
-                    deleted += len(fresh[i:i + 100])
-                except Exception:
-                    for msg in fresh[i:i + 100]:
-                        try:
-                            await msg.delete(); deleted += 1; await asyncio.sleep(0.4)
-                        except Exception:
-                            pass
-            for msg in old:
-                try:
-                    await msg.delete(); deleted += 1; await asyncio.sleep(0.7)
-                except Exception:
-                    pass
-        except Exception as e:
-            log.warning("[rebuild_all] %s delete phase: %s", mid, e)
+        if not keep_humans:
+            # Instant: recreate the channel instead of deleting message-by-message.
+            try:
+                channel, _rb = await self._nuke_by_clone(channel)
+                deleted = len(victims)
+            except Exception as e:
+                return 0, 0, f"⚠️ wipe failed: {e}"
+        else:
+            try:
+                fresh = [msg for msg in victims if (discord.utils.utcnow() - msg.created_at).days < 14]
+                old = [msg for msg in victims if msg not in fresh]
+                for i in range(0, len(fresh), 100):
+                    try:
+                        await channel.delete_messages(fresh[i:i + 100])
+                        deleted += len(fresh[i:i + 100])
+                    except Exception:
+                        for msg in fresh[i:i + 100]:
+                            try:
+                                await msg.delete(); deleted += 1; await asyncio.sleep(0.4)
+                            except Exception:
+                                pass
+                for msg in old:
+                    try:
+                        await msg.delete(); deleted += 1; await asyncio.sleep(0.7)
+                    except Exception:
+                        pass
+            except Exception as e:
+                log.warning("[rebuild_all] %s delete phase: %s", mid, e)
 
         posted = 0
         for mk in keys:
@@ -577,86 +620,19 @@ class AdminCog(commands.Cog):
                 "❌ No market given and this channel isn't bound to one. Pass `market_id:` (or `all`).",
                 ephemeral=True)
         m = markets[mid]
-        chan_id = m.get("report_channel_id")
-        channel = self.bot.get_channel(int(chan_id)) if chan_id else None
-        if channel is None:
-            return await interaction.followup.send(
-                f"❌ `{mid}` has no bound channel (set one with `/bind_market`).", ephemeral=True)
-        perms = channel.permissions_for(interaction.guild.me)
-        if not perms.manage_messages:
-            return await interaction.followup.send(
-                f"❌ I need **Manage Messages** in {channel.mention} to clear it.", ephemeral=True)
-
-        months = (_load_csn_for_market(mid) or {}).get("months", {}) or {}
-        keys = sorted(k for k, v in months.items() if isinstance(v, dict) and (v.get("items") or {}))
-        limit = max(50, min(int(limit or 500), 2000))
-
-        # count what would be deleted
-        victims = []
+        name = m.get("name", mid)
         try:
-            async for msg in channel.history(limit=limit):
-                if keep_humans and not (msg.webhook_id or (msg.author and msg.author.bot)):
-                    continue
-                victims.append(msg)
+            deleted, posted, note = await self._rebuild_one(
+                interaction, m, mid, confirm, keep_humans, limit)
         except Exception as e:
-            return await interaction.followup.send(f"⚠️ Couldn't read history: {e}", ephemeral=True)
-
-        if not confirm:
-            return await interaction.followup.send(
-                f"🔍 **Preview — {m.get('name', mid)}** ({channel.mention})\n"
-                f"• would delete **{len(victims)}** message(s)"
-                + (" (bot/webhook only — human messages kept)" if keep_humans else " (**everything**, humans included)")
-                + f"\n• would repost **{len(keys)}** monthly report(s): "
-                + (", ".join(keys) or "none")
-                + f"\n\nRe-run with `confirm:True` to do it.", ephemeral=True)
-
-        deleted = 0
-        # bulk delete is far faster but only works on messages <14 days old
+            return await interaction.followup.send(f"⚠️ Rebuild failed: {e}", ephemeral=True)
+        head = f"🔍 **Preview — {name}**" if not confirm else f"🧹 **{name}** rebuilt"
         try:
-            fresh = [msg for msg in victims if (discord.utils.utcnow() - msg.created_at).days < 14]
-            old = [msg for msg in victims if msg not in fresh]
-            for i in range(0, len(fresh), 100):
-                try:
-                    await channel.delete_messages(fresh[i:i + 100])
-                    deleted += len(fresh[i:i + 100])
-                except Exception:
-                    for msg in fresh[i:i + 100]:
-                        try:
-                            await msg.delete(); deleted += 1; await asyncio.sleep(0.4)
-                        except Exception:
-                            pass
-            for msg in old:
-                try:
-                    await msg.delete(); deleted += 1; await asyncio.sleep(0.7)
-                except Exception:
-                    pass
-        except Exception as e:
-            log.warning("[rebuild_market_channel] delete phase: %s", e)
-
-        posted = 0
-        for mk in keys:
-            md = months.get(mk) or {}
-            items = md.get("items") or {}
-            income = float(md.get("income", 0) or 0)
-            spent = float(md.get("spent", 0) or 0)
-            name = m.get("name", mid)
-            title = f"📕 {name} · {md.get('label', mk)}"
-            try:
-                embed = core._build_csn_compact_embed(title, items, income, spent, mid, mk)
-                embed.set_footer(text=f"Monthly report • {name}")
-                files = []
-                xb = core._build_csn_xlsx(title, name, mk, items, income, spent, market_id=mid)
-                if xb:
-                    files = [discord.File(_io.BytesIO(xb), filename=f"report_{mid}_{mk}.xlsx")]
-                await channel.send(embed=embed, files=files)
-                posted += 1
-                await asyncio.sleep(1.5)
-            except Exception as e:
-                log.warning("[rebuild_market_channel] %s %s post failed: %s", mid, mk, e)
-        log.info("[rebuild_market_channel] %s: deleted %d, posted %d", mid, deleted, posted)
-        return await interaction.followup.send(
-            f"🧹 **{m.get('name', mid)}** rebuilt — deleted **{deleted}**, posted **{posted}** monthly report(s) "
-            f"in {channel.mention}.", ephemeral=True)
+            return await interaction.followup.send(
+                f"{head}\n{note}"
+                + ("" if confirm else "\n\nRe-run with `confirm:True` to do it."), ephemeral=True)
+        except Exception:
+            return None   # channel was recreated under us; the reports are already posted
 
     @admin.command(name="purge_channel",
                    description="(Managers) Delete EVERY message in the channel you run this in")
@@ -671,15 +647,48 @@ class AdminCog(commands.Cog):
         await interaction.response.defer(ephemeral=True, thinking=True)
         channel = interaction.channel
         perms = channel.permissions_for(interaction.guild.me)
+        limit = max(50, min(int(limit or 1000), 5000))
+
+        # ── FAST PATH: total wipe = clone the channel and delete the original ────
+        # No history scan, no per-message deletes — one API call regardless of size.
+        if not keep_humans:
+            if not perms.manage_channels:
+                return await interaction.followup.send(
+                    "❌ I need **Manage Channels** to do a full wipe (I clone the channel and "
+                    "delete the old one — it's instant). Either grant it, or use "
+                    "`keep_humans:True` for the slow message-by-message mode.", ephemeral=True)
+            if not confirm:
+                return await interaction.followup.send(
+                    f"🔍 **Preview — {channel.mention}**\n"
+                    f"• would delete **every message** here, instantly, by recreating the channel\n"
+                    f"• name, topic, permissions, category and slowmode are preserved\n"
+                    f"• ⚠️ the channel gets a **new ID** — I'll rebind any market pointing at it\n"
+                    f"• ⚠️ **pins and all history are gone** (this is a true wipe)\n\n"
+                    f"Re-run with `confirm:True` to do it.", ephemeral=True)
+            try:
+                new, rebound = await self._nuke_by_clone(channel)
+            except discord.Forbidden:
+                return await interaction.followup.send(
+                    "❌ Missing permissions to recreate the channel.", ephemeral=True)
+            except Exception as e:
+                return await interaction.followup.send(f"⚠️ Wipe failed: {e}", ephemeral=True)
+            log.info("[purge_channel] cloned %s → %s by %s", channel.id, new.id, interaction.user.id)
+            note = (f"🧹 Channel wiped — recreated as {new.mention}."
+                    + (f"\n🔗 Rebound market(s): {', '.join(f'`{r}`' for r in rebound)}." if rebound else ""))
+            try:
+                return await interaction.followup.send(note, ephemeral=True)
+            except Exception:
+                # the original channel is gone, so the followup can fail — say it in the new one
+                return await new.send(note)
+
+        # ── SLOW PATH: keep human messages, delete bot/webhook posts one by one ──
         if not perms.manage_messages:
             return await interaction.followup.send(
                 "❌ I need **Manage Messages** here to clear the channel.", ephemeral=True)
-        limit = max(50, min(int(limit or 1000), 5000))
-
         victims = []
         try:
             async for msg in channel.history(limit=limit):
-                if keep_humans and not (msg.webhook_id or (msg.author and msg.author.bot)):
+                if not (msg.webhook_id or (msg.author and msg.author.bot)):
                     continue
                 if msg.pinned:
                     continue          # pins are deliberate — never nuke them
@@ -688,12 +697,15 @@ class AdminCog(commands.Cog):
             return await interaction.followup.send(f"⚠️ Couldn't read history: {e}", ephemeral=True)
 
         if not confirm:
+            old = sum(1 for m in victims if (discord.utils.utcnow() - m.created_at).days >= 14)
             return await interaction.followup.send(
                 f"🔍 **Preview — {channel.mention}**\n"
-                f"• would delete **{len(victims)}** message(s)"
-                + (" (bot/webhook only)" if keep_humans else " (**everything**, including human messages)")
-                + "\n• pinned messages are always kept\n\n"
-                f"Re-run with `confirm:True` to do it.", ephemeral=True)
+                f"• would delete **{len(victims)}** bot/webhook message(s), keeping human ones\n"
+                f"• pinned messages are always kept\n"
+                + (f"• ⚠️ **{old}** are older than 14 days → deleted one-by-one, roughly "
+                   f"**{old * 0.7 / 60:.0f} min**. If that's over ~13 min, run it in batches with "
+                   f"`limit:`, or drop `keep_humans` for the instant wipe.\n" if old else "")
+                + f"\nRe-run with `confirm:True` to do it.", ephemeral=True)
 
         deleted = 0
         try:
