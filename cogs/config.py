@@ -121,10 +121,10 @@ class ConfigCog(commands.Cog):
         await interaction.response.send_message(
             f"✅ Cleared **{which.name}** override. Restart to revert to the .env default.", ephemeral=True)
 
-    # ── SW Trade Network broadcast (invite / toggle / manual post) — live, no restart ──
-    network = app_commands.Group(
-        name="network",
-        description="(Managers) SW Trade Network cross-server order broadcasting",
+    # ── Who may talk to the bot's AI ─────────────────────────────────────────────
+    ai_allow = app_commands.Group(
+        name="ai_allow",
+        description="(Managers) Manage who may @mention the bot's AI",
         default_permissions=discord.Permissions(manage_guild=True),
     )
 

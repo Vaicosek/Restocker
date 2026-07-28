@@ -4187,6 +4187,16 @@ async def on_ready():
             await bot.tree.sync()
             _db_sync.set_config("_cmd_sync_sig", _sig)
             print("🌍 Global slash commands synced.")
+            # Global commands can take up to an HOUR to appear (and vanish entirely after a
+            # kick/re-invite). Copying the tree to each guild and syncing there registers
+            # them instantly, so a restart always gives working commands right away.
+            for _g in bot.guilds:
+                try:
+                    bot.tree.copy_global_to(guild=_g)
+                    await bot.tree.sync(guild=_g)
+                    print(f"⚡ Commands synced instantly to {_g.name}.")
+                except Exception as _ge:
+                    log.warning("[sync] guild sync failed for %s: %s", _g.id, _ge)
         else:
             print("🌍 Slash commands unchanged — sync skipped (avoids rate limits).")
     except Exception as e:
