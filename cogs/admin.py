@@ -7,6 +7,8 @@ from discord.ext import commands
 from typing import Optional
 import asyncio
 
+import Restocker_db as _db
+
 core = sys.modules.get("Restocker_main") or sys.modules["__main__"]
 DEFAULT_MARKET_ID = core.DEFAULT_MARKET_ID
 EMPLOYEE_ROLE_NAME = core.EMPLOYEE_ROLE_NAME
@@ -421,18 +423,11 @@ class AdminCog(commands.Cog):
         for mid, m, owner, channel in plan:
             name = m.get("name", mid)
             code = (m.get("leader_code") or "—")
-            hook = "*(ask a manager — create one in that channel's Integrations)*"
-            if channel is not None:
-                try:   # reuse an existing bot webhook if we're allowed to see them
-                    for w in await channel.webhooks():
-                        if w.token:
-                            hook = w.url
-                            break
-                except Exception:
-                    pass
+            # Only ever a webhook THIS bot owns — creating one if needed. Never hand out
+            # another integration's webhook (that's how reports end up under the wrong name).
+            hook = await core._csn_webhook_for(channel, name)
             # one shared builder with the AI's dm_market_setup tool
-            e = core._build_setup_embed(mid, m, channel,
-                                        None if hook.startswith("*(") else hook)
+            e = core._build_setup_embed(mid, m, channel, hook)
             try:
                 user = self.bot.get_user(int(owner)) or await self.bot.fetch_user(int(owner))
                 await user.send(embed=e)
@@ -491,7 +486,16 @@ class AdminCog(commands.Cog):
             return 0, 0, f"❌ no Manage Messages in {channel.mention}"
 
         months = (_load_csn_for_market(mid) or {}).get("months", {}) or {}
-        keys = sorted(k for k, v in months.items() if isinstance(v, dict) and (v.get("items") or {}))
+        # A month is worth reposting if it has an item breakdown OR any money moved.
+        # Markets imported from the earnings sheet (e.g. Greyhames/`main`) carry
+        # income/spent with no item rows — filtering on items alone silently skipped them.
+        def _has_data(v):
+            if not isinstance(v, dict):
+                return False
+            if v.get("items"):
+                return True
+            return bool(float(v.get("income", 0) or 0) or float(v.get("spent", 0) or 0))
+        keys = sorted(k for k, v in months.items() if _has_data(v))
         limit = max(50, min(int(limit or 500), 2000))
 
         victims = []
@@ -553,9 +557,10 @@ class AdminCog(commands.Cog):
                 embed = core._build_csn_compact_embed(title, items, income, spent, mid, mk)
                 embed.set_footer(text=f"Monthly report • {name}")
                 files = []
-                xb = core._build_csn_xlsx(title, name, mk, items, income, spent, market_id=mid)
-                if xb:
-                    files = [discord.File(_io.BytesIO(xb), filename=f"report_{mid}_{mk}.xlsx")]
+                if items:      # nothing to tabulate for sheet-imported months
+                    xb = core._build_csn_xlsx(title, name, mk, items, income, spent, market_id=mid)
+                    if xb:
+                        files = [discord.File(_io.BytesIO(xb), filename=f"report_{mid}_{mk}.xlsx")]
                 await channel.send(embed=embed, files=files)
                 posted += 1
                 await asyncio.sleep(1.5)
@@ -734,6 +739,155 @@ class AdminCog(commands.Cog):
             + ("" if deleted >= len(victims) else
                f" ({len(victims) - deleted} couldn't be removed — older than 14 days often rate-limits;"
                " run it again to continue.)"), ephemeral=True)
+
+    async def _hive_feeds(self):
+        """[(channel_id, market_id)] for every channel bound as a hive harvest feed."""
+        out = []
+        for k, v in (_db.get_config_prefix("hive_feed:") or {}).items():
+            try:
+                out.append((int(k.split(":", 1)[1]), str(v)))
+            except Exception:
+                continue
+        return out
+
+    def _hive_month_embed(self, site_name, mid, mk, md):
+        value = float(md.get("value", 0) or 0)
+        paid = float(md.get("paid_value", 0) or 0)
+        owed = max(0.0, value - paid)
+        qty = int(md.get("qty", 0) or 0)
+        igns = md.get("by_ign") or {}
+        items = md.get("by_item") or {}
+
+        desc = (f"🍯 **{qty:,}** pieces harvested · worth **{int(value):,}**🪙\n"
+                f"💸 paid out **{int(paid):,}**🪙"
+                + (f" · ⏳ **{int(owed):,}**🪙 still owed" if owed >= 1 else " · ✅ all settled")
+                + f"\n👷 {len(igns)} harvester(s) · {len(items)} item type(s)")
+        e = discord.Embed(title=f"🐝 {site_name} · {mk}", description=desc,
+                          color=0x3FB950 if owed < 1 else 0xE3B341)
+
+        top = sorted(igns.items(), key=lambda kv: -kv[1]["value"])[:10]
+        if top:
+            w = max(len(n[:16]) for n, _ in top)
+            rows = [f"{i+1:>2}. {n[:16]:<{w}} {v['qty']:>6,}x {int(v['value']):>9,}🪙"
+                    for i, (n, v) in enumerate(top)]
+            e.add_field(name="👷 Harvesters", value="```\n" + "\n".join(rows) + "\n```", inline=False)
+
+        ti = sorted(items.items(), key=lambda kv: -kv[1]["value"])[:6]
+        if ti:
+            w = max(len(core._pretty_item_name(n)[:18]) for n, _ in ti)
+            rows = [f"{core._pretty_item_name(n)[:18]:<{w}} {v['qty']:>6,}x {int(v['value']):>9,}🪙"
+                    for n, v in ti]
+            e.add_field(name="📦 Harvested", value="```\n" + "\n".join(rows) + "\n```", inline=False)
+        e.set_footer(text=f"Hive site • {site_name}")
+        return e
+
+    @admin.command(name="rebuild_hive_channel",
+                   description="(Managers) Clean a hive-site feed channel and repost a tidy harvest summary")
+    @app_commands.describe(
+        site="Hive market id — or `all` for every bound hive feed (blank = THIS channel's site)",
+        confirm="False (default) = preview. True = wipe and repost.",
+        keep_humans="False (default) = wipe everything. True = keep messages people typed.",
+        limit="How many messages to scan when keeping humans (default 500, max 2000)")
+    @app_commands.autocomplete(site=_market_autocomplete)
+    async def rebuild_hive_channel(self, interaction: discord.Interaction,
+                                   site: Optional[str] = None, confirm: bool = False,
+                                   keep_humans: bool = False, limit: int = 500):
+        if not is_manager(interaction):
+            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        feeds = await self._hive_feeds()
+        if not feeds:
+            return await interaction.followup.send(
+                "❌ No hive feed channels are bound. Run `/hive bind market_id:<id>` in each "
+                "hive-site channel first.", ephemeral=True)
+
+        want = (site or "").strip().lower()
+        if want == "all":
+            targets = feeds
+        elif want:
+            targets = [(c, m) for c, m in feeds if m.lower() == want]
+            if not targets:
+                return await interaction.followup.send(
+                    f"❌ No hive feed bound to `{site}`.", ephemeral=True)
+        else:
+            targets = [(c, m) for c, m in feeds if c == interaction.channel_id]
+            if not targets:
+                return await interaction.followup.send(
+                    "❌ This channel isn't a hive feed. Pass `site:` (or `all`).", ephemeral=True)
+
+        markets = (_load_markets().get("markets", {}) or {})
+        lines, tot_d, tot_p = [], 0, 0
+        for chid, mid in sorted(targets, key=lambda t: t[1]):
+            channel = self.bot.get_channel(int(chid))
+            if channel is None:
+                lines.append(f"• `{mid}` — ❌ channel {chid} not visible"); continue
+            name = (markets.get(mid) or {}).get("name", mid)
+            months = _db.get_hive_harvest_summary(mid) or {}
+            keys = sorted(k for k, v in months.items() if (v.get("qty") or 0))
+
+            if not confirm:
+                lines.append(f"• `{mid}` — {channel.mention}: would post **{len(keys)}** month(s) "
+                             f"({', '.join(keys) or 'no harvests recorded'})")
+                tot_p += len(keys)
+                continue
+
+            deleted = 0
+            try:
+                if keep_humans:
+                    perms = channel.permissions_for(channel.guild.me)
+                    if not perms.manage_messages:
+                        lines.append(f"• `{mid}` — ❌ need Manage Messages"); continue
+                    victims = []
+                    async for msg in channel.history(limit=max(50, min(int(limit or 500), 2000))):
+                        if msg.pinned or not (msg.webhook_id or (msg.author and msg.author.bot)):
+                            continue
+                        victims.append(msg)
+                    fresh = [m for m in victims if (discord.utils.utcnow() - m.created_at).days < 14]
+                    for i in range(0, len(fresh), 100):
+                        try:
+                            await channel.delete_messages(fresh[i:i + 100]); deleted += len(fresh[i:i + 100])
+                        except Exception:
+                            pass
+                    for m in [x for x in victims if x not in fresh]:
+                        try:
+                            await m.delete(); deleted += 1; await asyncio.sleep(0.7)
+                        except Exception:
+                            pass
+                else:
+                    channel, _rb = await self._nuke_by_clone(channel)
+                    _db.set_config(f"hive_feed:{channel.id}", str(mid))
+                    _db.delete_config(f"hive_feed:{chid}")
+                    deleted = 1
+            except Exception as e:
+                lines.append(f"• `{mid}` — ⚠️ wipe failed: {e}"); continue
+
+            posted = 0
+            for mk in keys:
+                try:
+                    await channel.send(embed=self._hive_month_embed(name, mid, mk, months[mk]))
+                    posted += 1
+                    await asyncio.sleep(1.2)
+                except Exception as e:
+                    log.warning("[rebuild_hive] %s %s post failed: %s", mid, mk, e)
+            tot_d += deleted; tot_p += posted
+            lines.append(f"• `{mid}` — {channel.mention}: posted **{posted}** month(s)")
+            log.info("[rebuild_hive] %s: posted %d", mid, posted)
+            await asyncio.sleep(1.0)
+
+        head = (f"🐝 **Rebuilt {len(targets)} hive feed(s)** — posted {tot_p} summary card(s)."
+                if confirm else
+                f"🔍 **Preview — {len(targets)} hive feed(s)**: would post {tot_p} card(s).\n"
+                f"Re-run with `confirm:True` to do it.")
+        body = "\n".join(lines)
+        try:
+            if len(head) + len(body) > 1900:
+                import io as _io2
+                return await interaction.followup.send(
+                    head, ephemeral=True,
+                    file=discord.File(_io2.BytesIO(body.encode()), filename="rebuild_hive.txt"))
+            return await interaction.followup.send(f"{head}\n{body}", ephemeral=True)
+        except Exception:
+            return None
 
     @admin.command(name="fix_month_close",
                    description="(Managers) EDIT the existing month-closing posts in place with the CURRENT data")

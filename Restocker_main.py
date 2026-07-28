@@ -3827,12 +3827,34 @@ async def _process_csn_attachment(attachment: discord.Attachment, report_channel
             # toolshop's June 2026 got copied into 7 other markets). Channel binding only
             # decides when the declaration is absent/unverifiable.
             if _verify_market_code(csv_market_id, csv_market_code):
+                _bound_id = bound_market.get("market_id")
                 effective_market_id = csv_market_id
                 market_warning = (
-                    f"ℹ️ This channel is bound to `{bound_market.get('market_id')}`, but the CSV "
+                    f"ℹ️ This channel is bound to `{_bound_id}`, but the CSV "
                     f"declares `{csv_market_id}` with a valid code — recorded to "
                     f"`{csv_market_id}` (the file identifies its own market)."
                 )
+                # The data lands correctly, but the finished report is delivered to the
+                # DECLARED market's channel — so the people standing in THIS channel never
+                # learn their scanner is misconfigured, and the mistake runs for weeks
+                # (freezone scanning under vtech's market_id is exactly this). Say it here.
+                try:
+                    await report_channel.send(
+                        f"⚠️ **This scanner is configured for the wrong market.**\n"
+                        f"This channel belongs to **`{_bound_id}`**, but the uploaded report declares "
+                        f"**`{csv_market_id}`** (code verified) — so it was recorded to "
+                        f"**`{csv_market_id}`**, not `{_bound_id}`.\n\n"
+                        f"If this machine really scans **{_bound_id}**, open "
+                        f"`.minecraft/sales/csn_config.json` and set:\n"
+                        f"```json\n\"market_id\": \"{_bound_id}\",\n\"market_code\": \"<from /market_code "
+                        f"market_id:{_bound_id}>\"\n```\n"
+                        f"then press **K** again to re-scan. Until then every scan from this machine "
+                        f"is credited to `{csv_market_id}`."
+                    )
+                except Exception as _we:
+                    log.debug("[csn] mismatch warning failed: %s", _we)
+                log.warning("[csn] MARKET MISMATCH: channel %s is bound to %s but CSV declared %s",
+                            source_channel_id, _bound_id, csv_market_id)
             else:
                 market_warning = (
                     f"⚠️ CSV declared market `{csv_market_id}` but its code doesn't verify — "
@@ -4202,6 +4224,42 @@ async def on_ready():
             print("🌍 Slash commands unchanged — sync skipped (avoids rate limits).")
     except Exception as e:
         print(f"❌ Sync failed: {e}")
+
+    # ── Hive feed auto-registration ──────────────────────────────────────────────
+    # These channels are the V Tech hive sites; their harvests all belong to `vtech`
+    # (a partner owner's cut is a percentage via /hive set_split, NOT a separate
+    # market). Bound by NAME so it works without hardcoded channel ids, and never
+    # overwrites a binding someone set deliberately.
+    _HIVE_FEED_DEFAULTS = {
+        "vtech": "vtech",
+        "amazonia-hive-site": "vtech",
+        "parastun-hive-site": "vtech",
+        "sapidorf-hive-site": "vtech",
+        "nda-market": "vtech",
+        "nda-farm": "vtech",
+    }
+    try:
+        import Restocker_db as _db_hf
+        _added, _kept = [], []
+        for _g in bot.guilds:
+            for _ch in getattr(_g, "text_channels", []):
+                _want = _HIVE_FEED_DEFAULTS.get((_ch.name or "").lower())
+                if not _want:
+                    continue
+                _cur = _db_hf.get_config(f"hive_feed:{_ch.id}")
+                if _cur:
+                    if str(_cur) != _want:
+                        _kept.append(f"#{_ch.name}→{_cur}")
+                    continue
+                _db_hf.set_config(f"hive_feed:{_ch.id}", _want)
+                _added.append(f"#{_ch.name}")
+        if _added:
+            log.info("[hive feeds] bound %d channel(s) to vtech: %s", len(_added), ", ".join(_added))
+            print(f"🐝 Hive feeds registered: {', '.join(_added)}")
+        if _kept:
+            log.info("[hive feeds] left existing bindings alone: %s", ", ".join(_kept))
+    except Exception as _hfe:
+        log.warning("[hive feeds] auto-registration failed: %s", _hfe)
 
 
     try:
@@ -12209,6 +12267,78 @@ async def _ai_tool_get_stock_fullness(guild, channel, user, args):
     return "\n".join(lines)
 
 
+CSN_WEBHOOK_PREFIX = "Restocker CSN"
+
+
+async def _csn_webhook_for(channel, label: str, create: bool = True):
+    """The webhook a market/hive owner should paste into the CSN mod, for `channel`.
+
+    "First webhook in the channel wins" is only safe while each channel has exactly
+    one. As soon as a channel picks up a second webhook (another integration, or one
+    made for a different feed) the choice becomes arbitrary. But most of these hooks
+    were hand-made by the server owner, so we must NOT ignore them and mint duplicates
+    that nobody has pasted into their mod. Order of preference:
+
+      1. a webhook this bot created named `Restocker CSN · <label>`;
+      2. any webhook this bot created;
+      3. the channel's ONLY webhook, whoever made it — the normal, already-working case;
+      4. of several, the one whose name best matches the market/site label;
+      5. otherwise CREATE a correctly-named one (needs Manage Webhooks).
+
+    Only step 5 changes anything the owner already has.
+    """
+    if channel is None:
+        return None
+    want = f"{CSN_WEBHOOK_PREFIX} · {label}"[:80]
+    me = getattr(bot, "user", None)
+    try:
+        hooks = await channel.webhooks()
+    except Exception as e:
+        log.debug("[csn webhook] can't list webhooks in %s: %s", getattr(channel, "id", "?"), e)
+        hooks = []
+
+    usable = [w for w in hooks if w.token]
+    mine = [w for w in usable if me is not None
+            and getattr(w.user, "id", None) == getattr(me, "id", None)]
+    for w in mine:
+        if w.name == want:
+            return w.url
+    for w in mine:
+        if (w.name or "").startswith(CSN_WEBHOOK_PREFIX):
+            return w.url
+    if mine:
+        return mine[0].url
+
+    if len(usable) == 1:
+        return usable[0].url                      # the existing, already-configured hook
+
+    if usable:                                    # ambiguous — match on name
+        def _norm(s):
+            return "".join(ch for ch in str(s or "").lower() if ch.isalnum())
+        tgt = _norm(label)
+        for w in usable:
+            if _norm(w.name) == tgt:
+                return w.url
+        for w in usable:
+            n = _norm(w.name)
+            if n and (n in tgt or tgt in n):
+                return w.url
+        log.warning("[csn webhook] #%s has %d webhooks, none matching %r — creating one",
+                    getattr(channel, "id", "?"), len(usable), label)
+
+    if not create:
+        return None
+    try:
+        w = await channel.create_webhook(name=want, reason="Restocker: CSN report feed")
+        log.info("[csn webhook] created %r in #%s", want, getattr(channel, "id", "?"))
+        return w.url
+    except discord.Forbidden:
+        log.warning("[csn webhook] missing Manage Webhooks in #%s", getattr(channel, "id", "?"))
+    except Exception as e:
+        log.warning("[csn webhook] create failed in #%s: %s", getattr(channel, "id", "?"), e)
+    return None
+
+
 def _build_setup_embed(mid: str, m: dict, channel, webhook_url: str = None) -> discord.Embed:
     """The CSN onboarding pack sent to a market owner. Shared by /admin dm_setup and the
     AI's dm_market_setup tool so the two can never drift."""
@@ -12271,15 +12401,7 @@ async def _ai_tool_dm_market_setup(guild, channel, user, args):
                 + "\nAsk me to confirm and I'll send them.")
     sent, failed = [], []
     for mid, m, owner, ch in plan:
-        hook = None
-        if ch is not None:
-            try:
-                for w in await ch.webhooks():
-                    if w.token:
-                        hook = w.url
-                        break
-            except Exception:
-                pass
+        hook = await _csn_webhook_for(ch, m.get("name", mid))
         try:
             u = bot.get_user(int(owner)) or await bot.fetch_user(int(owner))
             await u.send(embed=_build_setup_embed(mid, m, ch, hook))

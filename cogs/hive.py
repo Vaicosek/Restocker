@@ -358,31 +358,95 @@ class HiveCog(commands.Cog):
         await self._handle_feed_message(after, start_line=already)
 
     # ── config commands ───────────────────────────────────────────────────────
-    @hive.command(name="bind", description="Bind THIS channel as a market's hive harvest feed")
-    @app_commands.describe(market_id="The hive market these harvests belong to (e.g. vtech)")
+    @hive.command(name="bind", description="Bind a channel as a market's hive harvest feed")
+    @app_commands.describe(market_id="The hive market these harvests belong to (e.g. vtech)",
+                           channel="Which channel to bind (leave empty to bind THIS one)")
     @app_commands.autocomplete(market_id=_market_autocomplete)
-    async def hive_bind(self, interaction: discord.Interaction, market_id: str):
+    async def hive_bind(self, interaction: discord.Interaction, market_id: str,
+                        channel: discord.TextChannel = None):
         if not is_manager(interaction):
             return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
         markets = (_load_markets() or {}).get("markets") or {}
         if market_id not in markets:
             return await interaction.response.send_message(f"❌ Market `{market_id}` not found.", ephemeral=True)
         import Restocker_db as _db
-        _db.set_config(f"hive_feed:{interaction.channel_id}", str(market_id))
+        target = channel or interaction.channel
+        _db.set_config(f"hive_feed:{target.id}", str(market_id))
         await interaction.response.send_message(
-            f"🐝 This channel now feeds **{markets[market_id].get('name', market_id)}**'s hive project. "
-            f"Every \"X sold you …\" line here is recorded automatically.\n"
-            f"Next: `/hive settle` once to write off the already-paid backlog, then "
+            f"🐝 {target.mention} now feeds **{markets[market_id].get('name', market_id)}**'s hive project. "
+            f"Every \"X sold you …\" line there is recorded automatically.\n"
+            f"Next: check `/hive info` that the item values aren't 0, then "
             f"`/hive autopay market_id:{market_id} enabled:True` — from then on harvesters "
             f"are paid the moment their sale posts.", ephemeral=True)
 
-    @hive.command(name="unbind", description="Stop treating THIS channel as a hive feed")
-    async def hive_unbind(self, interaction: discord.Interaction):
+    @hive.command(name="unbind", description="Stop treating a channel as a hive feed")
+    @app_commands.describe(channel="Which channel to unbind (leave empty for THIS one)")
+    async def hive_unbind(self, interaction: discord.Interaction, channel: discord.TextChannel = None):
         if not is_manager(interaction):
             return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
         import Restocker_db as _db
-        _db.delete_config(f"hive_feed:{interaction.channel_id}")
-        await interaction.response.send_message("✅ Channel unbound — no longer a hive feed.", ephemeral=True)
+        target = channel or interaction.channel
+        _db.delete_config(f"hive_feed:{target.id}")
+        await interaction.response.send_message(
+            f"✅ {target.mention} unbound — no longer a hive feed.", ephemeral=True)
+
+    @hive.command(name="info",
+                  description="Every hive feed: market, webhook, payout settings and unpaid backlog")
+    async def hive_info(self, interaction: discord.Interaction):
+        if not is_manager(interaction):
+            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True, thinking=True)   # shows webhook URLs
+        import Restocker_db as _db
+        markets = (_load_markets() or {}).get("markets") or {}
+        feeds = []
+        for k, v in (_db.get_config_prefix("hive_feed:") or {}).items():
+            try:
+                feeds.append((int(k.split(":", 1)[1]), str(v)))
+            except Exception:
+                continue
+
+        embed = discord.Embed(
+            title="🐝 Hive sites",
+            description=(f"Harvesters get **{core._hive_harvester_pct():g}%** of harvested value "
+                         f"(`/hive set_wage`)."),
+            color=0xE3B341)
+
+        if not feeds:
+            embed.description += "\n\n⚠️ **No channels are bound yet** — run `/hive bind market_id:<id> channel:#…`"
+        for chid, mid in sorted(feeds, key=lambda t: t[1]):
+            ch = self.bot.get_channel(int(chid))
+            name = (markets.get(mid) or {}).get("name", mid)
+            hook = None
+            try:
+                hook = await core._csn_webhook_for(ch, f"{name} hive")
+            except Exception:
+                pass
+            autopay = str(_db.get_config(f"hive_autopay:{mid}") or "").lower() in ("1", "true", "yes")
+            owner_pct = core._hive_owner_pct(mid)
+            try:
+                backlog = len(_db.get_unpaid_hive_harvests(mid) or [])
+            except Exception:
+                backlog = "?"
+            bits = [f"market **{name}** (`{mid}`)",
+                    ("✅ autopay on" if autopay else "⏸️ autopay off"),
+                    f"⏳ {backlog} unpaid line(s)"]
+            if owner_pct:
+                bits.append(f"partner owner **{owner_pct:g}%**")
+            val = " · ".join(bits)
+            if hook:
+                val += f"\nwebhook: ||{hook}||"
+            else:
+                val += "\n⚠️ no webhook — the site can't post"
+            embed.add_field(name=f"#{getattr(ch, 'name', chid)}", value=val, inline=False)
+
+        # Values matter more than anything else here: a 0 value silently pays nothing.
+        vals = []
+        for item in ("honey block", "honeycomb block"):
+            vals.append(f"{item.title()} **{core._hive_item_value(item):,.0f}**🪙")
+        embed.add_field(name="Item values (`/hive set_value`)",
+                        value=" · ".join(vals) + "\n*A value of 0 means harvesters are paid nothing.*",
+                        inline=False)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
     @hive.command(name="autopay", description="Pay harvesters INSTANTLY when their sale posts to the feed")
     @app_commands.describe(market_id="The hive market",

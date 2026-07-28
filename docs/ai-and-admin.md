@@ -33,6 +33,9 @@ Bidding, deal rooms and winner handover are handled by the exchange views.
 - `rebuild_market_channel` — wipe a market channel and repost one clean earnings summary per
   month. `market_id:all` does every bound market in one run.
 - `purge_channel` — wipe the channel you run it in.
+- `rebuild_hive_channel` — clean a hive-site feed channel (the one bound with `/hive bind`)
+  and repost one tidy card per month: pieces harvested, value, paid vs still owed, a
+  harvester leaderboard and an item breakdown. `site:all` does every bound hive feed.
 - **How the wipe works:** a full wipe (`keep_humans:False`, the default) **clones the channel
   and deletes the original** — instant at any size, and the bot rebinds any market pointing
   at it. The cost is a new channel ID and the loss of pins/history. With `keep_humans:True`

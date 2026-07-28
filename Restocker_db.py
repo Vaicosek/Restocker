@@ -2870,6 +2870,54 @@ def get_hive_months(market_id: str) -> dict:
         return {r["month"]: float(r["net"] or 0) for r in rows}
 
 
+def get_config_prefix(prefix: str) -> dict:
+    """Every bot_config row whose key starts with `prefix` → {key: value}.
+
+    Used to enumerate bindings that are stored as one key per channel, e.g.
+    `hive_feed:<channel_id>` → market_id.
+    """
+    with db() as conn:
+        rows = conn.execute("SELECT key, value FROM bot_config WHERE key LIKE ?",
+                            (f"{prefix}%",)).fetchall()
+        return {r["key"]: r["value"] for r in rows}
+
+
+def get_hive_harvest_summary(market_id: str) -> dict:
+    """Per-month harvest rollup for one hive site.
+
+    {month: {"qty", "value", "paid_value", "by_ign": {ign: {"qty","value"}},
+             "by_item": {item: {"qty","value"}}}}
+
+    Month comes from the in-game sale timestamp when the CSN mod supplied one,
+    else from when the line was recorded.
+    """
+    out = {}
+    with db() as conn:
+        rows = conn.execute("""
+            SELECT COALESCE(substr(sale_ts,1,7), substr(recorded_at,1,7)) AS month,
+                   ign, item,
+                   SUM(qty)                                      AS qty,
+                   SUM(qty * unit_value)                          AS value,
+                   SUM(CASE WHEN paid=1 THEN qty*unit_value ELSE 0 END) AS paid_value
+            FROM hive_harvests
+            WHERE market_id=?
+            GROUP BY month, ign, item
+        """, (str(market_id),)).fetchall()
+    for r in rows:
+        mk = r["month"] or "unknown"
+        m = out.setdefault(mk, {"qty": 0, "value": 0.0, "paid_value": 0.0,
+                                "by_ign": {}, "by_item": {}})
+        q, v = int(r["qty"] or 0), float(r["value"] or 0)
+        m["qty"] += q
+        m["value"] += v
+        m["paid_value"] += float(r["paid_value"] or 0)
+        g = m["by_ign"].setdefault(r["ign"], {"qty": 0, "value": 0.0})
+        g["qty"] += q; g["value"] += v
+        i = m["by_item"].setdefault(r["item"], {"qty": 0, "value": 0.0})
+        i["qty"] += q; i["value"] += v
+    return out
+
+
 def add_land_entry(land: str, entry_no: int, ts: str, kind: str,
                    amount: float, new_balance, body: str) -> bool:
     """Store one land-inbox entry. Returns True if it was NEW (dedup by PK)."""

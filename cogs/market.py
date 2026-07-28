@@ -318,6 +318,22 @@ class MarketCog(commands.Cog):
         embed.add_field(name="Market Code", value=f"`{code}`" if code else "*Not set — /market_code*", inline=True)
         rc = m.get("report_channel_id")
         embed.add_field(name="Report Channel", value=(f"<#{rc}>" if rc else "*Not bound*"), inline=True)
+        # The third thing an owner needs for the mod, alongside id + code. Resolved from the
+        # bound channel's own webhook (created if missing), so it's always the RIGHT one for
+        # this market. Spoiler-tagged: this response is ephemeral, but it's still a secret.
+        _hook = None
+        if rc:
+            try:
+                _ch = self.bot.get_channel(int(rc)) or await self.bot.fetch_channel(int(rc))
+                _hook = await core._csn_webhook_for(_ch, m.get("name", market_id))
+            except Exception as _he:
+                log.debug("[market info] webhook lookup failed for %s: %s", market_id, _he)
+        embed.add_field(
+            name="CSN Webhook",
+            value=(f"||{_hook}||" if _hook
+                   else ("*couldn't resolve — I may lack Manage Webhooks in that channel*"
+                         if rc else "*bind a channel first (`/bind_market`)*")),
+            inline=False)
         try:
             _pm, _cb, _pct = _market_loyalty_cfg(market_id)
         except Exception:
