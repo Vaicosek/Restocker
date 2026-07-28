@@ -3714,16 +3714,26 @@ async def _process_csn_attachment(attachment: discord.Attachment, report_channel
         except Exception:
             bm = None
         if bm:
-            # Channel binding wins — the channel itself identifies the market, no code needed.
             mid = bm.get("market_id", DEFAULT_MARKET_ID)
             if csv_mid and csv_mid != mid:
-                try:
-                    await report_channel.send(
-                        f"ℹ️ Stock CSV declared market `{csv_mid}`, but this channel is bound to "
-                        f"`{mid}`. Recorded to `{mid}` (channel binding)."
-                    )
-                except Exception:
-                    pass
+                # Same rule as monthly reports: a declared market with a VALID code beats the
+                # channel binding, so a scan posted in the wrong channel can't overwrite
+                # another market's live stock.
+                if _verify_market_code(csv_mid, csv_code):
+                    mid = csv_mid
+                    try:
+                        await report_channel.send(
+                            f"ℹ️ Channel is bound to `{bm.get('market_id')}`, but the stock CSV "
+                            f"declares `{csv_mid}` with a valid code — recorded to `{csv_mid}`.")
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        await report_channel.send(
+                            f"⚠️ Stock CSV declared `{csv_mid}` but its code doesn't verify — "
+                            f"recorded to `{mid}` (channel binding).")
+                    except Exception:
+                        pass
         elif csv_mid:
             declared = _get_market(csv_mid)
             if not declared:
@@ -3809,10 +3819,24 @@ async def _process_csn_attachment(attachment: discord.Attachment, report_channel
     if bound_market:
         effective_market_id = bound_market.get("market_id", DEFAULT_MARKET_ID)
         if csv_market_id and csv_market_id != effective_market_id:
-            market_warning = (
-                f"ℹ️ CSV declared market `{csv_market_id}`, but this channel is bound to "
-                f"`{effective_market_id}`. Recorded to `{effective_market_id}` (channel binding)."
-            )
+            # THE FILE KNOWS ITS MARKET. When the CSV declares a different market AND its
+            # code verifies, the declaration wins — a re-posted file in the wrong channel
+            # must never overwrite that channel's market history (this is exactly how
+            # toolshop's June 2026 got copied into 7 other markets). Channel binding only
+            # decides when the declaration is absent/unverifiable.
+            if _verify_market_code(csv_market_id, csv_market_code):
+                effective_market_id = csv_market_id
+                market_warning = (
+                    f"ℹ️ This channel is bound to `{bound_market.get('market_id')}`, but the CSV "
+                    f"declares `{csv_market_id}` with a valid code — recorded to "
+                    f"`{csv_market_id}` (the file identifies its own market)."
+                )
+            else:
+                market_warning = (
+                    f"⚠️ CSV declared market `{csv_market_id}` but its code doesn't verify — "
+                    f"recorded to `{effective_market_id}` (channel binding). If this file really "
+                    f"belongs to `{csv_market_id}`, fix the mod config's market_code."
+                )
     elif csv_market_id:
         declared_market = _get_market(csv_market_id)
         if declared_market:
@@ -8151,6 +8175,84 @@ def _apply_market_registry_20260727() -> None:
     _db.set_config("_market_registry_20260727", "done")
     log.info("[market registry] applied: %d updated (%s), %d created (%s)",
              len(updated), ", ".join(updated), len(created), ", ".join(created) or "—")
+
+
+def _repair_june_20260728() -> None:
+    """One-shot (guarded): undo the June-2026 cross-market pollution. Toolshop's June CSV
+    was re-imported under other markets while channels were being set up ("channel binding
+    wins"), overwriting real history. This deletes the copied June rows from markets that
+    never had a real June (60, falrija, invictusemporium, vtech), restores amazonia +
+    nether_market's REAL June (with items) from the pristine pre-pollution YAML snapshots
+    in data/restore_2026_06/, and restores main's June summary from the earnings sheet.
+    toolshop keeps its own June; bnl was never polluted. Idempotent via config flag."""
+    import Restocker_db as _db
+    if str(_db.get_config("_june_repair_20260728") or "") == "done":
+        return
+    POLLUTED_SIG = 96273          # toolshop's June income — the copied row's fingerprint
+    summary = []
+
+    def _june_is_copy(mid) -> bool:
+        m = (_load_csn_for_market(mid) or {}).get("months", {}).get("2026-06") or {}
+        return abs(float(m.get("income", 0) or 0) - POLLUTED_SIG) < 2
+
+    # 1) markets that never had a real June — delete the copied row
+    for mid in ("60", "falrija", "invictusemporium", "vtech"):
+        try:
+            data = _load_csn_for_market(mid) or {}
+            months = data.get("months", {}) or {}
+            if "2026-06" in months and _june_is_copy(mid):
+                months.pop("2026-06", None)
+                _save_csn_for_market(mid, {"months": months})
+                summary.append(f"{mid}: deleted copied June")
+        except Exception as e:
+            log.warning("[june repair] %s delete failed: %s", mid, e)
+
+    # 2) amazonia + nether_market — restore the real June from the pristine snapshot.
+    # The snapshot IS ground truth for these two: restore whenever the stored June differs
+    # from it (nether's polluted row is a PARTIAL copy at 83,312, not the exact toolshop
+    # signature, so the fingerprint alone would miss it).
+    for mid in ("amazonia", "nether_market"):
+        try:
+            path = os.path.join("data", "restore_2026_06", f"{mid}.yml")
+            if not os.path.exists(path):
+                continue
+            snap = load_yaml(path, {}) or {}
+            real = (snap.get("months") or {}).get("2026-06")
+            if not isinstance(real, dict) or not (real.get("items") or {}):
+                continue
+            cur = (_load_csn_for_market(mid) or {}).get("months", {}).get("2026-06") or {}
+            if abs(float(cur.get("income", 0) or 0) - float(real.get("income", 0) or 0)) < 2:
+                continue                      # already the real data — nothing to do
+            data = _load_csn_for_market(mid) or {}
+            months = data.get("months", {}) or {}
+            months["2026-06"] = real
+            _save_csn_for_market(mid, {"months": months})
+            summary.append(f"{mid}: restored real June (net {float(real.get('net', 0)):,.0f})")
+        except Exception as e:
+            log.warning("[june repair] %s restore failed: %s", mid, e)
+
+    # 3) main — June summary from the earnings sheet (Jun 2026: 2.9M in, 1.8M net)
+    try:
+        if _june_is_copy("main"):
+            data = _load_csn_for_market("main") or {}
+            months = data.get("months", {}) or {}
+            months["2026-06"] = {"label": "Jun 2026", "source": "restore:earnings_extended.xlsx",
+                                 "recorded_at": utcnow_iso(), "income": 2900000.0,
+                                 "spent": 1100000.0, "net": 1800000.0, "items": {}}
+            _save_csn_for_market("main", {"months": months})
+            summary.append("main: restored June summary (net 1,800,000)")
+    except Exception as e:
+        log.warning("[june repair] main restore failed: %s", e)
+
+    # let corrected month-close posts go out for the repaired markets
+    for mid in ("60", "falrija", "invictusemporium", "vtech", "amazonia", "nether_market", "main"):
+        try:
+            _db.delete_config(f"month_close:{mid}:2026-06")
+        except Exception:
+            pass
+
+    _db.set_config("_june_repair_20260728", "done")
+    log.info("[june repair] %s", "; ".join(summary) or "nothing to repair")
 
 
 def _backfill_csn_to_db() -> None:
@@ -12540,6 +12642,10 @@ async def _main():
         _apply_market_registry_20260727()
     except Exception as e:
         log.warning("[market registry] skipped: %s", e)
+    try:
+        _repair_june_20260728()
+    except Exception as e:
+        log.warning("[june repair] skipped: %s", e)
     import Restocker_web as _web
     web_port = _env_int("WEB_PORT", 8080)
     try:

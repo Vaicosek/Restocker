@@ -1,0 +1,773 @@
+months:
+  2026-06:
+    income: 2483699.15
+    items:
+      Acacia Leaves:
+        bought_qty: 0
+        net_coins: 185.0
+        sold_qty: 64
+      Acacia Log:
+        bought_qty: 2145
+        net_coins: -6711.33
+        sold_qty: 384
+      Acacia Sapling:
+        bought_qty: 0
+        net_coins: 600.0
+        sold_qty: 128
+      Amethyst Block:
+        bought_qty: 908
+        net_coins: 227.16
+        sold_qty: 929
+      Amethyst Cluster:
+        bought_qty: 66
+        net_coins: 5410.0
+        sold_qty: 400
+      Ancient Debris:
+        bought_qty: 56
+        net_coins: -57210.0
+        sold_qty: 18
+      Andesite:
+        bought_qty: 15699
+        net_coins: -5524.7
+        sold_qty: 11869
+      Apple:
+        bought_qty: 434
+        net_coins: 742.0
+        sold_qty: 448
+      Azalea:
+        bought_qty: 48
+        net_coins: 5361.0
+        sold_qty: 2304
+      Baked Potato:
+        bought_qty: 5702
+        net_coins: 670.35
+        sold_qty: 6016
+      Bamboo:
+        bought_qty: 1586
+        net_coins: 271.86
+        sold_qty: 1600
+      Basalt:
+        bought_qty: 256
+        net_coins: 700.0
+        sold_qty: 448
+      Beacon:
+        bought_qty: 24
+        net_coins: 102000.0
+        sold_qty: 25
+      Beetroot:
+        bought_qty: 1995
+        net_coins: -3117.19
+        sold_qty: 0
+      Big Dripleaf:
+        bought_qty: 0
+        net_coins: 96.0
+        sold_qty: 64
+      Birch Log:
+        bought_qty: 421
+        net_coins: -1194.32
+        sold_qty: 64
+      Birch Sapling:
+        bought_qty: 0
+        net_coins: 440.0
+        sold_qty: 128
+      Black Concrete Powder:
+        bought_qty: 2048
+        net_coins: -2040.0
+        sold_qty: 768
+      Black Terracotta:
+        bought_qty: 108
+        net_coins: 8.44
+        sold_qty: 108
+      Black Wool:
+        bought_qty: 640
+        net_coins: -1590.0
+        sold_qty: 384
+      Blackstone:
+        bought_qty: 4399
+        net_coins: 2231.01
+        sold_qty: 4655
+      Blaze Powder:
+        bought_qty: 70
+        net_coins: 150.0
+        sold_qty: 50
+      Blaze Rod:
+        bought_qty: 448
+        net_coins: 94020.0
+        sold_qty: 1930
+      Blue Concrete Powder:
+        bought_qty: 0
+        net_coins: 110.0
+        sold_qty: 64
+      Blue Ice:
+        bought_qty: 108
+        net_coins: 1425.0
+        sold_qty: 128
+      Blue Wool:
+        bought_qty: 1927
+        net_coins: -4334.22
+        sold_qty: 1216
+      Bone Block:
+        bought_qty: 9456
+        net_coins: 60737.5
+        sold_qty: 9587
+      Book:
+        bought_qty: 1384
+        net_coins: -2276.0
+        sold_qty: 1140
+      Bricks:
+        bought_qty: 108
+        net_coins: 30475.62
+        sold_qty: 4976
+      Brown Concrete Powder:
+        bought_qty: 0
+        net_coins: 110.0
+        sold_qty: 64
+      Brown Terracotta:
+        bought_qty: 416
+        net_coins: -569.07
+        sold_qty: 196
+      Brown Wool:
+        bought_qty: 152
+        net_coins: 2326.24
+        sold_qty: 448
+      Cactus:
+        bought_qty: 963
+        net_coins: 551.49
+        sold_qty: 1344
+      Calcite:
+        bought_qty: 2450
+        net_coins: -3960.3
+        sold_qty: 1408
+      Carrot:
+        bought_qty: 256
+        net_coins: -36.0
+        sold_qty: 192
+      Cherry Leaves:
+        bought_qty: 791
+        net_coins: -1698.9
+        sold_qty: 64
+      Cherry Log:
+        bought_qty: 647
+        net_coins: 8592.72
+        sold_qty: 3771
+      Cherry Sapling:
+        bought_qty: 104
+        net_coins: 143.75
+        sold_qty: 128
+      Clay:
+        bought_qty: 9
+        net_coins: 1004.15
+        sold_qty: 256
+      Coal Block:
+        bought_qty: 766
+        net_coins: 51769.53
+        sold_qty: 4173
+      Coarse Dirt:
+        bought_qty: 256
+        net_coins: 2350.0
+        sold_qty: 1600
+      Cobbled Deepslate:
+        bought_qty: 21094
+        net_coins: -4694.7
+        sold_qty: 9055
+      Cobblestone:
+        bought_qty: 7366
+        net_coins: -452.5
+        sold_qty: 6592
+      Cobweb:
+        bought_qty: 514
+        net_coins: -5200.0
+        sold_qty: 70
+      Cocoa Beans:
+        bought_qty: 5558
+        net_coins: 1131.34
+        sold_qty: 6920
+      Cooked Beef:
+        bought_qty: 3093
+        net_coins: 49705.85
+        sold_qty: 5111
+      Copper Block:
+        bought_qty: 2349
+        net_coins: -19590.0
+        sold_qty: 384
+      Crimson Nylium:
+        bought_qty: 17
+        net_coins: -19.13
+        sold_qty: 0
+      Crying Obsidian:
+        bought_qty: 0
+        net_coins: 240.0
+        sold_qty: 4
+      Cyan Concrete Powder:
+        bought_qty: 0
+        net_coins: 742.5
+        sold_qty: 432
+      Cyan Wool:
+        bought_qty: 394
+        net_coins: -1800.32
+        sold_qty: 128
+      Dark Oak Leaves:
+        bought_qty: 154
+        net_coins: 568.74
+        sold_qty: 320
+      Dark Oak Log:
+        bought_qty: 10592
+        net_coins: -10477.54
+        sold_qty: 6336
+      Dark Oak Sapling:
+        bought_qty: 2354
+        net_coins: -6240.62
+        sold_qty: 128
+      Dark Prismarine:
+        bought_qty: 0
+        net_coins: 87000.0
+        sold_qty: 5568
+      Deepslate:
+        bought_qty: 0
+        net_coins: 2275.01
+        sold_qty: 2240
+      Deepslate Bricks:
+        bought_qty: 1472
+        net_coins: 1560.0
+        sold_qty: 2688
+      Deepslate Tiles:
+        bought_qty: 510
+        net_coins: 221.88
+        sold_qty: 640
+      Diamond:
+        bought_qty: 77
+        net_coins: 102979.0
+        sold_qty: 2080
+      Diorite:
+        bought_qty: 317
+        net_coins: 624.01
+        sold_qty: 614
+      Dirt:
+        bought_qty: 21620
+        net_coins: -9299.86
+        sold_qty: 17691
+      Dripstone Block:
+        bought_qty: 4320
+        net_coins: 3409.97
+        sold_qty: 4732
+      Egg:
+        bought_qty: 727
+        net_coins: 281.25
+        sold_qty: 512
+      Emerald:
+        bought_qty: 0
+        net_coins: 2940.0
+        sold_qty: 14
+      Ender Pearl:
+        bought_qty: 148
+        net_coins: 8640.0
+        sold_qty: 176
+      Experience Bottle:
+        bought_qty: 48713
+        net_coins: -36533.94
+        sold_qty: 24597
+      Feather:
+        bought_qty: 1095
+        net_coins: 9081.25
+        sold_qty: 1894
+      Fern:
+        bought_qty: 6
+        net_coins: 1022.49
+        sold_qty: 169
+      Flint:
+        bought_qty: 0
+        net_coins: 78.0
+        sold_qty: 64
+      Flowering Azalea:
+        bought_qty: 276
+        net_coins: 263.14
+        sold_qty: 320
+      Gilded Blackstone:
+        bought_qty: 12
+        net_coins: 11800.0
+        sold_qty: 68
+      Glass:
+        bought_qty: 62066
+        net_coins: -17103.13
+        sold_qty: 48073
+      Glow Berries:
+        bought_qty: 0
+        net_coins: 3178.94
+        sold_qty: 2677
+      Glowstone:
+        bought_qty: 298
+        net_coins: 1370.0
+        sold_qty: 294
+      Gold Ingot:
+        bought_qty: 578
+        net_coins: 39440.0
+        sold_qty: 959
+      Granite:
+        bought_qty: 1894
+        net_coins: -490.85
+        sold_qty: 1344
+      Grass Block:
+        bought_qty: 94
+        net_coins: 23491.42
+        sold_qty: 5082
+      Gravel:
+        bought_qty: 576
+        net_coins: 432.0
+        sold_qty: 576
+      Gray Terracotta:
+        bought_qty: 88
+        net_coins: -113.45
+        sold_qty: 44
+      Gray Wool:
+        bought_qty: 186
+        net_coins: 2572.18
+        sold_qty: 512
+      Green Concrete Powder:
+        bought_qty: 0
+        net_coins: 440.0
+        sold_qty: 256
+      Green Wool:
+        bought_qty: 384
+        net_coins: 694.99
+        sold_qty: 448
+      Gunpowder:
+        bought_qty: 1099
+        net_coins: 18463.2
+        sold_qty: 1068
+      Hay Block:
+        bought_qty: 7097
+        net_coins: 15370.37
+        sold_qty: 7371
+      Honey Block:
+        bought_qty: 1026
+        net_coins: 81725.01
+        sold_qty: 5175
+      Honeycomb Block:
+        bought_qty: 6461
+        net_coins: 41557.34
+        sold_qty: 10133
+      Ink Sac:
+        bought_qty: 2062
+        net_coins: -4510.0
+        sold_qty: 1147
+      Iron Ingot:
+        bought_qty: 846
+        net_coins: 247398.0
+        sold_qty: 9792
+      Item Frame:
+        bought_qty: 700
+        net_coins: -6100.0
+        sold_qty: 60
+      Jungle Log:
+        bought_qty: 0
+        net_coins: 1150.0
+        sold_qty: 320
+      Jungle Sapling:
+        bought_qty: 0
+        net_coins: 840.0
+        sold_qty: 256
+      Lantern:
+        bought_qty: 0
+        net_coins: 19500.0
+        sold_qty: 640
+      Lapis Block:
+        bought_qty: 358
+        net_coins: -286.71
+        sold_qty: 320
+      Leather:
+        bought_qty: 2959
+        net_coins: 25789.84
+        sold_qty: 5422
+      Light Blue Wool:
+        bought_qty: 375
+        net_coins: -211.72
+        sold_qty: 320
+      Light Gray Concrete Powder:
+        bought_qty: 2176
+        net_coins: -3020.0
+        sold_qty: 320
+      Light Gray Terracotta:
+        bought_qty: 10
+        net_coins: -12.89
+        sold_qty: 5
+      Light Gray Wool:
+        bought_qty: 2557
+        net_coins: 8135.31
+        sold_qty: 3446
+      Lime Wool:
+        bought_qty: 1091
+        net_coins: -5731.09
+        sold_qty: 256
+      Lodestone:
+        bought_qty: 0
+        net_coins: 174988.0
+        sold_qty: 2134
+      Magenta Wool:
+        bought_qty: 67
+        net_coins: 13.91
+        sold_qty: 64
+      Magma Block:
+        bought_qty: 1201
+        net_coins: -1290.54
+        sold_qty: 758
+      Mangrove Leaves:
+        bought_qty: 0
+        net_coins: 465.0
+        sold_qty: 192
+      Mangrove Log:
+        bought_qty: 6040
+        net_coins: -34553.13
+        sold_qty: 2304
+      Mangrove Propagule:
+        bought_qty: 0
+        net_coins: 900.0
+        sold_qty: 128
+      Melon Slice:
+        bought_qty: 320
+        net_coins: 25.0
+        sold_qty: 320
+      Moss Block:
+        bought_qty: 26
+        net_coins: 16.24
+        sold_qty: 26
+      Mossy Cobblestone:
+        bought_qty: 1265
+        net_coins: -1466.79
+        sold_qty: 763
+      Mossy Stone Bricks:
+        bought_qty: 8
+        net_coins: 3.14
+        sold_qty: 8
+      Mud:
+        bought_qty: 762
+        net_coins: 4731.22
+        sold_qty: 1522
+      Mycelium:
+        bought_qty: 0
+        net_coins: 6890.0
+        sold_qty: 3392
+      Name Tag:
+        bought_qty: 3
+        net_coins: 105.0
+        sold_qty: 6
+      Nether Bricks:
+        bought_qty: 320
+        net_coins: -50.0
+        sold_qty: 256
+      Nether Wart Block:
+        bought_qty: 69
+        net_coins: 26.63
+        sold_qty: 86
+      Netherite Ingot:
+        bought_qty: 67
+        net_coins: 550.0
+        sold_qty: 63
+      Netherite Scrap:
+        bought_qty: 163
+        net_coins: -4150.0
+        sold_qty: 152
+      Netherrack:
+        bought_qty: 64
+        net_coins: 5.0
+        sold_qty: 64
+      Oak Leaves:
+        bought_qty: 1114
+        net_coins: 60.28
+        sold_qty: 1105
+      Oak Log:
+        bought_qty: 2916
+        net_coins: -1875.95
+        sold_qty: 2304
+      Oak Sapling:
+        bought_qty: 894
+        net_coins: -2793.76
+        sold_qty: 0
+      Obsidian:
+        bought_qty: 988
+        net_coins: -1978.14
+        sold_qty: 768
+      Ochre Froglight:
+        bought_qty: 16
+        net_coins: 37.5
+        sold_qty: 16
+      Orange Terracotta:
+        bought_qty: 336
+        net_coins: 26.24
+        sold_qty: 336
+      Orange Wool:
+        bought_qty: 324
+        net_coins: -1793.13
+        sold_qty: 64
+      Pale Oak Leaves:
+        bought_qty: 0
+        net_coins: 160.0
+        sold_qty: 64
+      Pale Oak Log:
+        bought_qty: 1540
+        net_coins: -254.38
+        sold_qty: 1408
+      Pale Oak Sapling:
+        bought_qty: 0
+        net_coins: 8200.0
+        sold_qty: 2624
+      Pearlescent Froglight:
+        bought_qty: 30
+        net_coins: 539.08
+        sold_qty: 90
+      Phantom Membrane:
+        bought_qty: 0
+        net_coins: 3420.0
+        sold_qty: 18
+      Pink Concrete Powder:
+        bought_qty: 0
+        net_coins: 1100.0
+        sold_qty: 640
+      Pink Wool:
+        bought_qty: 156
+        net_coins: -126.88
+        sold_qty: 128
+      Podzol:
+        bought_qty: 0
+        net_coins: 6150.0
+        sold_qty: 1920
+      Pointed Dripstone:
+        bought_qty: 428
+        net_coins: 965.89
+        sold_qty: 1239
+      Polished Deepslate:
+        bought_qty: 2684
+        net_coins: 3363.74
+        sold_qty: 5376
+      Popped Chorus Fruit:
+        bought_qty: 6
+        net_coins: -2400.0
+        sold_qty: 0
+      Potato:
+        bought_qty: 1105
+        net_coins: 915.7
+        sold_qty: 2560
+      Prismarine:
+        bought_qty: 289
+        net_coins: 40213.91
+        sold_qty: 6716
+      Prismarine Bricks:
+        bought_qty: 1588
+        net_coins: 32904.68
+        sold_qty: 4290
+      Pumpkin:
+        bought_qty: 322
+        net_coins: 228.44
+        sold_qty: 256
+      Purple Concrete Powder:
+        bought_qty: 0
+        net_coins: 110.0
+        sold_qty: 64
+      Purple Terracotta:
+        bought_qty: 916
+        net_coins: -2433.12
+        sold_qty: 0
+      Purple Wool:
+        bought_qty: 384
+        net_coins: -1245.0
+        sold_qty: 192
+      Quartz Block:
+        bought_qty: 4567
+        net_coins: 109225.52
+        sold_qty: 14703
+      Red Concrete Powder:
+        bought_qty: 0
+        net_coins: 110.0
+        sold_qty: 64
+      Red Mushroom Block:
+        bought_qty: 128
+        net_coins: -570.0
+        sold_qty: 0
+      Red Nether Bricks:
+        bought_qty: 794
+        net_coins: -4342.18
+        sold_qty: 0
+      Red Sand:
+        bought_qty: 0
+        net_coins: 100.0
+        sold_qty: 64
+      Red Terracotta:
+        bought_qty: 586
+        net_coins: -55.41
+        sold_qty: 549
+      Red Wool:
+        bought_qty: 1676
+        net_coins: -4463.91
+        sold_qty: 966
+      Redstone Block:
+        bought_qty: 2963
+        net_coins: 9536.34
+        sold_qty: 3392
+      Resin Brick:
+        bought_qty: 44
+        net_coins: 706.25
+        sold_qty: 108
+      Resin Clump:
+        bought_qty: 0
+        net_coins: 130.0
+        sold_qty: 64
+      Rooted Dirt:
+        bought_qty: 0
+        net_coins: 6960.0
+        sold_qty: 3712
+      Sand:
+        bought_qty: 10850
+        net_coins: -4823.42
+        sold_qty: 6678
+      Sandstone:
+        bought_qty: 3941
+        net_coins: -3855.48
+        sold_qty: 2673
+      Scaffolding:
+        bought_qty: 0
+        net_coins: 800.0
+        sold_qty: 512
+      Sculk:
+        bought_qty: 1086
+        net_coins: 1793.61
+        sold_qty: 1616
+      Sculk Catalyst:
+        bought_qty: 429
+        net_coins: -226050.0
+        sold_qty: 10
+      Sculk Sensor:
+        bought_qty: 134
+        net_coins: -630.0
+        sold_qty: 114
+      Sculk Vein:
+        bought_qty: 639
+        net_coins: -1996.89
+        sold_qty: 0
+      Sea Lantern:
+        bought_qty: 67
+        net_coins: 221220.0
+        sold_qty: 1232
+      Shroomlight:
+        bought_qty: 1
+        net_coins: 3485.0
+        sold_qty: 61
+      Shulker Box:
+        bought_qty: 4
+        net_coins: 421800.0
+        sold_qty: 47
+      Slime Ball:
+        bought_qty: 285
+        net_coins: 32056.5
+        sold_qty: 1177
+      Smooth Basalt:
+        bought_qty: 757
+        net_coins: 6397.82
+        sold_qty: 2560
+      Smooth Sandstone:
+        bought_qty: 1538
+        net_coins: -3124.07
+        sold_qty: 769
+      Smooth Stone:
+        bought_qty: 15936
+        net_coins: 10340.0
+        sold_qty: 16064
+      Snow Block:
+        bought_qty: 1152
+        net_coins: 2780.0
+        sold_qty: 1856
+      Soul Sand:
+        bought_qty: 342
+        net_coins: 709.5
+        sold_qty: 512
+      Soul Soil:
+        bought_qty: 386
+        net_coins: 1687.03
+        sold_qty: 640
+      Spider Eye:
+        bought_qty: 1631
+        net_coins: -26911.5
+        sold_qty: 0
+      Sponge:
+        bought_qty: 2
+        net_coins: 45800.0
+        sold_qty: 20
+      Spore Blossom:
+        bought_qty: 2
+        net_coins: 59900.0
+        sold_qty: 173
+      Spruce Leaves:
+        bought_qty: 192
+        net_coins: 15.0
+        sold_qty: 192
+      Spruce Log:
+        bought_qty: 12448
+        net_coins: -7883.44
+        sold_qty: 9114
+      Spruce Sapling:
+        bought_qty: 0
+        net_coins: 170.0
+        sold_qty: 64
+      Stone:
+        bought_qty: 20483
+        net_coins: 12695.18
+        sold_qty: 22133
+      Stone Bricks:
+        bought_qty: 12300
+        net_coins: 12943.11
+        sold_qty: 16128
+      String:
+        bought_qty: 1370
+        net_coins: 2129.68
+        sold_qty: 2048
+      Sugar Cane:
+        bought_qty: 14482
+        net_coins: 1680.5
+        sold_qty: 12930
+      Sweet Berries:
+        bought_qty: 1474
+        net_coins: -289.79
+        sold_qty: 704
+      Terracotta:
+        bought_qty: 1995
+        net_coins: -4500.94
+        sold_qty: 384
+      Tuff:
+        bought_qty: 18660
+        net_coins: 39731.21
+        sold_qty: 31880
+      Turtle Scute:
+        bought_qty: 233
+        net_coins: -20236.0
+        sold_qty: 12
+      Verdant Froglight:
+        bought_qty: 18
+        net_coins: 323.45
+        sold_qty: 54
+      Warped Nylium:
+        bought_qty: 58
+        net_coins: -65.25
+        sold_qty: 0
+      Warped Wart Block:
+        bought_qty: 159
+        net_coins: -161.48
+        sold_qty: 0
+      Wheat Seeds:
+        bought_qty: 1728
+        net_coins: 297.0
+        sold_qty: 2304
+      White Wool:
+        bought_qty: 1656
+        net_coins: -1640.62
+        sold_qty: 1320
+      Wildflowers:
+        bought_qty: 0
+        net_coins: 2240.0
+        sold_qty: 448
+      Yellow Wool:
+        bought_qty: 220
+        net_coins: -576.88
+        sold_qty: 128
+    label: June 2026
+    net: 1892960.59
+    recorded_at: '2026-06-30T18:11:04.290517+00:00'
+    source: csn_monthly_2026-06.csv
+    spent: 590738.56

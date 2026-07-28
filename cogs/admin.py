@@ -965,6 +965,50 @@ class AdminCog(commands.Cog):
         await interaction.response.send_message(body[:1950], ephemeral=True)
 
 
+    @admin.command(name="csn_delete_month",
+                   description="(Managers) Delete ONE recorded month from a market's CSN history (fix mis-routed imports)")
+    @app_commands.describe(
+        market_id="The market whose month should be deleted",
+        month="Month key, e.g. 2026-06",
+        confirm="False (default) = preview. True = delete the month's totals + items.")
+    @app_commands.autocomplete(market_id=_market_autocomplete)
+    async def csn_delete_month(self, interaction: discord.Interaction, market_id: str,
+                               month: str, confirm: bool = False):
+        if not is_manager(interaction):
+            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
+        month = (month or "").strip()
+        import re as _re
+        if not _re.match(r"^\d{4}-\d{2}$", month):
+            return await interaction.response.send_message(
+                "❌ Month must look like `2026-06`.", ephemeral=True)
+        data = _load_csn_for_market(market_id) or {}
+        months = data.get("months", {}) or {}
+        md = months.get(month)
+        if not isinstance(md, dict):
+            return await interaction.response.send_message(
+                f"❌ `{market_id}` has no recorded month `{month}`.", ephemeral=True)
+        inc, sp = float(md.get("income", 0) or 0), float(md.get("spent", 0) or 0)
+        n_items = len(md.get("items") or {})
+        desc = (f"`{market_id}` · `{month}` — income {inc:,.0f}, spent {sp:,.0f}, "
+                f"net {inc - sp:,.0f}, {n_items} item(s), source `{md.get('source', '?')}`")
+        if not confirm:
+            return await interaction.response.send_message(
+                f"🔍 Would delete: {desc}\nRe-run with `confirm:True` to remove it. "
+                f"(Re-importing the correct CSV afterwards restores the month cleanly.)",
+                ephemeral=True)
+        months.pop(month, None)
+        _save_csn_for_market(market_id, {"months": months})
+        # let the month-close loop re-post if a correct month gets re-imported later
+        try:
+            import Restocker_db as _db_dm
+            _db_dm.delete_config(f"month_close:{market_id}:{month}")
+        except Exception:
+            pass
+        log.info("[csn_delete_month] %s removed %s from %s", interaction.user.id, month, market_id)
+        return await interaction.response.send_message(
+            f"🗑️ Deleted {desc}\nShare prices reprice on the next report; re-import the "
+            f"correct CSV (or `/import_earnings`) to restore real data.", ephemeral=True)
+
     @admin.command(name="csn_cleanup",
                    description="(Managers) Delete useless CSN webhook noise in THIS channel (empty stock CSVs, {} profiles)")
     @app_commands.describe(

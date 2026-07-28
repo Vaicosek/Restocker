@@ -3481,6 +3481,10 @@ def _load_inventory_data() -> dict:
     for mid in (set(catalog) | set(scan) | set(names)):
         cat = catalog.get(mid, {})
         sc = scan.get(mid, {})
+        # The TEST fallback market self-recreates (unattributed uploads land there by
+        # design, so /market delete never sticks) — hide its tab whenever it's empty.
+        if str(mid).lower() == "test" and not cat and not sc:
+            continue
         items = []
         for it in (set(cat) | set(sc)):
             r = sc.get(it) or {}
