@@ -965,38 +965,99 @@ class AdminCog(commands.Cog):
         await interaction.response.send_message(body[:1950], ephemeral=True)
 
 
+    @admin.command(name="csn_provenance",
+                   description="(Managers) Scan EVERY channel's history: who posted which CSN file/report, and where")
+    @app_commands.describe(month="Month to trace, e.g. 2026-06",
+                           limit="Messages to scan per channel (default 400, max 2000)")
+    async def csn_provenance(self, interaction: discord.Interaction, month: str, limit: int = 400):
+        if not is_manager(interaction):
+            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
+        import re as _re
+        month = (month or "").strip()
+        if not _re.match(r"^\d{4}-\d{2}$", month):
+            return await interaction.response.send_message("❌ Month must look like `2026-06`.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        limit = max(50, min(int(limit or 400), 2000))
+        # what a June file/report looks like
+        fpat = _re.compile(rf"csn_(monthly|export)_{_re.escape(month)}", _re.I)
+        try:
+            from datetime import date as _d
+            label = _d(int(month[:4]), int(month[5:7]), 1).strftime("%B %Y")
+        except Exception:
+            label = month
+        hits = []
+        for ch in interaction.guild.text_channels:
+            perms = ch.permissions_for(interaction.guild.me)
+            if not (perms.read_message_history and perms.view_channel):
+                continue
+            try:
+                async for msg in ch.history(limit=limit):
+                    who = (msg.author.display_name or str(msg.author))[:18]
+                    stamp = msg.created_at.strftime("%m-%d %H:%M")
+                    # 1) raw CSV uploads (the source of truth for who fed what)
+                    for a in msg.attachments:
+                        if fpat.search(a.filename or ""):
+                            hits.append((msg.created_at, f"`{stamp}` **#{ch.name}** 📎 `{a.filename}` "
+                                                         f"({a.size//1024}KB) by *{who}*"))
+                    # 2) the bot's own report embeds for that month (where it LANDED)
+                    for e in (msg.embeds or []):
+                        blob = f"{e.title or ''} {e.description or ''}"
+                        if label in blob and ("Sales Report" in blob or "Month closed" in blob):
+                            m2 = _re.search(r"/report/([a-z0-9_]+)/", blob, _re.I)
+                            tgt = f" → recorded to `{m2.group(1)}`" if m2 else ""
+                            hits.append((msg.created_at, f"`{stamp}` **#{ch.name}** 📊 report embed{tgt}"))
+            except Exception:
+                continue
+        if not hits:
+            return await interaction.followup.send(
+                f"🔎 No `{month}` CSN files or reports found in the last {limit} messages per channel.",
+                ephemeral=True)
+        hits.sort(key=lambda x: x[0])
+        body = f"🔎 **CSN provenance for {label}** — {len(hits)} event(s), oldest first:\n" + "\n".join(h[1] for h in hits)
+        for i in range(0, min(len(body), 5800), 1900):
+            await interaction.followup.send(body[i:i + 1900], ephemeral=True)
+
     @admin.command(name="fix_month_close",
                    description="(Managers) EDIT the existing month-closing posts in place with the CURRENT data")
-    @app_commands.describe(market_id="Market to fix (blank = every active market)",
-                           month="Month key, e.g. 2026-06",
+    @app_commands.describe(month="Month key e.g. 2026-06 — or `all` / blank for EVERY recorded month",
+                           market_id="Market to fix (blank = every active market)",
                            repost="True = post a new message instead of editing the old one")
     @app_commands.autocomplete(market_id=_market_autocomplete)
     async def repost_month_close(self, interaction: discord.Interaction,
-                                 month: str, market_id: Optional[str] = None,
+                                 month: Optional[str] = None, market_id: Optional[str] = None,
                                  repost: bool = False):
         if not is_manager(interaction):
             return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
         import re as _re
-        if not _re.match(r"^\d{4}-\d{2}$", (month or "").strip()):
-            return await interaction.response.send_message("❌ Month must look like `2026-06`.", ephemeral=True)
+        month = (month or "").strip().lower()
+        all_months = month in ("", "all", "*")
+        if not all_months and not _re.match(r"^\d{4}-\d{2}$", month):
+            return await interaction.response.send_message(
+                "❌ Month must look like `2026-06`, or use `all`.", ephemeral=True)
         await interaction.response.defer(ephemeral=True, thinking=True)
-        month = month.strip()
         import io as _io
         markets = (_load_markets().get("markets", {}) or {})
         targets = ([market_id] if market_id else list(markets.keys()))
         done, skipped = [], []
+        # (market, month) pairs to fix
+        jobs = []
         for mid in targets:
             m = markets.get(mid)
             if not isinstance(m, dict) or not m.get("active", True):
                 continue
+            recorded = (_load_csn_for_market(mid) or {}).get("months", {}) or {}
+            for mk in (sorted(recorded.keys()) if all_months else [month]):
+                jobs.append((mid, mk))
+        for mid, month in jobs:
+            m = markets.get(mid)
             md = (_load_csn_for_market(mid) or {}).get("months", {}).get(month)
             if not isinstance(md, dict) or not (md.get("items") or {}):
-                skipped.append(f"{mid} (no data)")
+                skipped.append(f"{mid} {month} (no data)")
                 continue
             chan_id = m.get("report_channel_id")
             channel = self.bot.get_channel(int(chan_id)) if chan_id else None
             if channel is None:
-                skipped.append(f"{mid} (unbound)")
+                skipped.append(f"{mid} {month} (unbound)")
                 continue
             items = md.get("items") or {}
             income = float(md.get("income", 0) or 0)
@@ -1028,17 +1089,20 @@ class AdminCog(commands.Cog):
                     embed.set_footer(text=f"Month-end closing report (corrected) • {name}")
                     # attachments= replaces the stale workbook with the rebuilt one
                     await target_msg.edit(embed=embed, attachments=files)
-                    done.append(f"{mid} (edited)")
+                    done.append(f"{mid} {month} ✏️")
                 else:
                     embed.set_footer(text=f"Corrected month-end closing report • {name}")
                     await channel.send(embed=embed, files=files)
-                    done.append(f"{mid} (posted)")
+                    done.append(f"{mid} {month} 📤")
                 await asyncio.sleep(1.5)
             except Exception as e:
-                skipped.append(f"{mid} ({e})")
-        return await interaction.followup.send(
-            f"📕 Fixed `{month}` for **{len(done)}**: {', '.join(done) or '—'}"
-            + (f"\nSkipped: {', '.join(skipped[:10])}" if skipped else ""), ephemeral=True)
+                skipped.append(f"{mid} {month} ({e})")
+        scope = "ALL months" if all_months else f"`{month}`"
+        body = (f"📕 Fixed {scope} — **{len(done)}** post(s): {', '.join(done[:20]) or '—'}"
+                + (f" (+{len(done) - 20} more)" if len(done) > 20 else "")
+                + (f"\nSkipped {len(skipped)}: {', '.join(skipped[:8])}"
+                   + (" …" if len(skipped) > 8 else "") if skipped else ""))
+        return await interaction.followup.send(body[:1900], ephemeral=True)
 
     @admin.command(name="csn_delete_month",
                    description="(Managers) Delete ONE recorded month from a market's CSN history (fix mis-routed imports)")

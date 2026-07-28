@@ -8202,19 +8202,35 @@ def _repair_june_20260728() -> None:
     # still being wrong, so re-running is a no-op once repaired — but a boot where it failed
     # or was skipped self-heals on the next start instead of being locked out by a flag.
     POLLUTED_SIG = 96273          # toolshop's June income — the copied row's fingerprint
+    OWNER_OF_SIG = "toolshop"     # the market the copied data actually belongs to
     summary = []
 
     def _june_is_copy(mid) -> bool:
         m = (_load_csn_for_market(mid) or {}).get("months", {}).get("2026-06") or {}
         return abs(float(m.get("income", 0) or 0) - POLLUTED_SIG) < 2
 
-    # 1) markets that never had a real June — delete the copied row
-    for mid in ("60", "falrija", "invictusemporium", "vtech"):
+    # 1) DATA-DRIVEN: any market (other than toolshop) whose June carries toolshop's exact
+    # income fingerprint is holding a copy. Scanning beats a hardcoded list — new markets
+    # kept acquiring the copy (freezone did, after the first repair was written).
+    # A market with a pristine snapshot or an earnings-sheet figure is restored below;
+    # everything else simply loses the bogus month.
+    RESTORABLE = {"amazonia", "nether_market", "main"}
+    try:
+        import Restocker_db as _db_scan
+        with _db_scan.db() as _c:
+            polluted = [r[0] for r in _c.execute(
+                "SELECT market_id FROM csn_history WHERE month='2026-06' "
+                "AND market_id<>? AND ABS(income-?)<2", (OWNER_OF_SIG, POLLUTED_SIG))]
+    except Exception as e:
+        polluted = []
+        log.warning("[june repair] scan failed: %s", e)
+    for mid in polluted:
+        if mid in RESTORABLE:
+            continue                      # handled by the restore steps below
         try:
             data = _load_csn_for_market(mid) or {}
             months = data.get("months", {}) or {}
-            if "2026-06" in months and _june_is_copy(mid):
-                months.pop("2026-06", None)
+            if months.pop("2026-06", None) is not None:
                 _save_csn_for_market(mid, {"months": months})
                 summary.append(f"{mid}: deleted copied June")
         except Exception as e:
