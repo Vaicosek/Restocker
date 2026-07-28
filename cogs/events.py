@@ -268,6 +268,17 @@ class EventsCog(commands.Cog):
                 log.debug("[csn] upload cleanup skipped: %s", e)
 
     @commands.Cog.listener()
+    async def on_guild_join(self, guild: discord.Guild):
+        """Re-invited to a server → push the command tree immediately. Without this the
+        startup signature guard sees an unchanged tree and skips the sync, so a freshly
+        re-added bot sits there with no slash commands until the tree happens to change."""
+        try:
+            await bot.tree.sync()
+            log.info("[sync] joined %s — command tree pushed", guild.name)
+        except Exception as e:
+            log.warning("[sync] on_guild_join sync failed: %s", e)
+
+    @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member):
         try:
 

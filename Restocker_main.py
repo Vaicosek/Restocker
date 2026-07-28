@@ -4170,7 +4170,20 @@ async def on_ready():
             (str(getattr(bot.user, "id", "")) + "|" +
              "|".join(sorted(_cmd_fingerprint(c) for c in bot.tree.walk_commands()))).encode()
         ).hexdigest()
-        if _db_sync.get_config("_cmd_sync_sig") != _sig:
+        # The signature guard alone is NOT enough: if the bot is kicked and re-invited (or
+        # Discord drops the registration for any reason) the tree is unchanged, the stored
+        # signature still matches, and the sync is skipped — leaving the server with NO
+        # commands at all. So verify Discord actually still has them before skipping.
+        _needs = _db_sync.get_config("_cmd_sync_sig") != _sig
+        if not _needs:
+            try:
+                _live = await bot.tree.fetch_commands()
+                if not _live:
+                    _needs = True
+                    print("🌍 Discord reports 0 registered commands — forcing a resync.")
+            except Exception as _fe:
+                log.debug("[sync] live-command check failed: %s", _fe)
+        if _needs:
             await bot.tree.sync()
             _db_sync.set_config("_cmd_sync_sig", _sig)
             print("🌍 Global slash commands synced.")
