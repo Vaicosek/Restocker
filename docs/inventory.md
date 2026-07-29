@@ -6,8 +6,8 @@ toggle ON, click each shop, toggle OFF). Drives fullness bars, low-stock alerts 
 shortfall-based restock orders.
 
 ## Commands
-- `/inventory restock_deficit market` — (manager) create restock orders from the **real
-  shortfall** (capacity − current stock), not just what sold.
+- Restock orders from the **real shortfall** (capacity − current stock, not just what sold)
+  are AI-side: ask the bot (`create_restock_orders`). The `/inventory` group was retired.
 - `/item_edit item [coin] [stackable] [stack_size]` — (manager) fix an item's price or
   stackability. `/item_info` shows price, stock, barrel size and stackability.
   `/item_set_price` sets price alone; `/add_item` adds a catalog item.

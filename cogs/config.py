@@ -51,75 +51,10 @@ class ConfigCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    config = app_commands.Group(
-        name="config",
-        description="(Managers) Rebind channels/category/guild for this server",
-        default_permissions=discord.Permissions(manage_guild=True),
-    )
 
-    @config.command(name="set_channel", description="Point a bot channel/category at a channel on THIS server")
-    @app_commands.describe(which="Which channel/category to bind", channel="Target channel (use a category for Tickets)")
-    @app_commands.choices(which=[app_commands.Choice(name=n, value=k) for (n, k) in _CHANNEL_KEYS])
-    async def set_channel(self, interaction: discord.Interaction,
-                          which: app_commands.Choice[str], channel: discord.abc.GuildChannel):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
-        key = which.value
-        db.set_config(key, int(channel.id))
-        try:
-            setattr(core, key, int(channel.id))   # live update for main's own reads
-        except Exception:
-            pass
-        await interaction.response.send_message(
-            f"✅ **{which.name}** → {channel.mention} (`{channel.id}`).\n"
-            f"⚠️ Restart the bot to fully apply (cogs/views cache these at load).",
-            ephemeral=True,
-        )
 
-    @config.command(name="set_guild", description="Set the funds-report guild (defaults to this server)")
-    @app_commands.describe(guild_id="Guild ID — leave empty to use this server")
-    async def set_guild(self, interaction: discord.Interaction, guild_id: str = ""):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
-        gid = (guild_id or "").strip() or str(interaction.guild_id or "")
-        if not gid.isdigit():
-            return await interaction.response.send_message("❌ Invalid guild id.", ephemeral=True)
-        db.set_config("FUNDS_REPORT_GUILD_ID", gid)
-        try:
-            setattr(core, "FUNDS_REPORT_GUILD_ID", int(gid))
-        except Exception:
-            pass
-        await interaction.response.send_message(
-            f"✅ Funds-report guild → `{gid}`. Restart to fully apply.", ephemeral=True)
 
-    @config.command(name="show", description="Show current channel/guild config (override vs .env default)")
-    async def show(self, interaction: discord.Interaction):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
-        lines = []
-        for n, k in _CHANNEL_KEYS + [_GUILD_KEY]:
-            cur = getattr(core, k, None)
-            ov = db.get_config(k)
-            src = "DB override" if ov not in (None, "") else ".env / default"
-            if k.endswith("CHANNEL_ID") and cur:
-                disp = f"<#{cur}>"
-            else:
-                disp = f"`{cur}`"
-            lines.append(f"**{n}** — {disp}  ·  _{src}_")
-        embed = discord.Embed(title="⚙️ Channel configuration",
-                              description="\n".join(lines), color=0x22FF7A)
-        embed.set_footer(text="Set with /config set_channel · changes apply fully on restart")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @config.command(name="reset", description="Clear a DB override (revert to .env default on next restart)")
-    @app_commands.describe(which="Which override to clear")
-    @app_commands.choices(which=[app_commands.Choice(name=n, value=k) for (n, k) in _CHANNEL_KEYS + [_GUILD_KEY]])
-    async def reset(self, interaction: discord.Interaction, which: app_commands.Choice[str]):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
-        db.delete_config(which.value)
-        await interaction.response.send_message(
-            f"✅ Cleared **{which.name}** override. Restart to revert to the .env default.", ephemeral=True)
 
     # ── Who may talk to the bot's AI ─────────────────────────────────────────────
     ai_allow = app_commands.Group(

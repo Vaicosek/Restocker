@@ -1035,120 +1035,6 @@ class OrdersCog(commands.Cog):
         )
         await interaction.response.send_message(embed=embed, view=ManagerPanelView(), ephemeral=True)
 
-    @app_commands.command(
-        name="orders_clear_all",
-        description="(Managers) DELETE ALL orders (testing only)."
-    )
-
-
-    @app_commands.describe(
-        confirm="Type YES to confirm (required)"
-    )
-    @app_commands.default_permissions(manage_guild=True)
-    async def orders_clear_all(self, interaction: discord.Interaction, confirm: str):
-        if not is_manager(interaction):
-            return await interaction.response.send_message(
-                "⛔ Managers only.",
-                **ephemeral_kwargs(interaction)
-            )
-
-        if confirm.strip().upper() != "YES":
-            return await interaction.response.send_message(
-                "❌ Confirmation failed.\nType `YES` exactly to delete all orders.",
-                **ephemeral_kwargs(interaction)
-            )
-
-        await interaction.response.defer(**ephemeral_kwargs(interaction), thinking=True)
-
-        data = load_orders()
-        orders = list(data.get("orders", []))
-        total = len(orders)
-
-        deleted_msgs = 0
-        deleted_channels = 0
-        deleted_dms = 0
-
-        import asyncio as _aio
-        client = interaction.client
-
-        for o in orders:
-
-            # Delete the employee DMs this order sent (messages.dms = {user_id: message_id}).
-            # A bot can delete its own DMs; do this BEFORE the records are wiped, since the
-            # message IDs live inside the order record. Throttled to respect rate limits.
-            try:
-                dms = ((o.get("messages") or {}).get("dms") or {})
-                for uid_str, mid in list(dms.items()):
-                    try:
-                        user = client.get_user(int(uid_str)) or await client.fetch_user(int(uid_str))
-                        if not user:
-                            continue
-                        dm = user.dm_channel or await user.create_dm()
-                        msg = await dm.fetch_message(int(mid))
-                        await msg.delete()
-                        deleted_dms += 1
-                        await _aio.sleep(0.35)
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-
-            try:
-                msg_meta = o.get("messages") or {}
-                ch_id = msg_meta.get("channel_id")
-                msg_id = msg_meta.get("message_id")
-                if ch_id and msg_id:
-                    ch = interaction.client.get_channel(int(ch_id))
-                    if ch:
-                        msg = await ch.fetch_message(int(msg_id))
-                        await msg.delete()
-                        deleted_msgs += 1
-            except Exception:
-                pass
-
-
-            try:
-                vid = o.get("verification_ticket_id")
-                if vid:
-                    ch = interaction.client.get_channel(int(vid))
-                    if ch:
-                        await ch.delete(reason="Orders cleared (testing)")
-                        deleted_channels += 1
-            except Exception:
-                pass
-
-
-        data["orders"] = []
-        # prune=True is REQUIRED: since the SQLite migration, save_orders only upserts the
-        # rows present in the list — saving an empty list without prune deletes NOTHING,
-        # leaving every order alive while their Discord messages/tickets are already gone.
-        save_orders(data, prune=True)
-
-        # Refresh/delete the interactive "New Production Requests (batch)" digest DMs — a
-        # separate per-employee message (tracked in the UI store), NOT in each order's
-        # messages.dms. With no orders left, every digest is deleted.
-        try:
-            await cleanup_batch_dms_for_closed_order(interaction.client, 0)
-        except Exception:
-            pass
-        # And the plain-text "🔔 New restock requests:" pings (channel + DMs), which are sent
-        # un-tracked — removed by history scan. No id filter: the board is empty now.
-        try:
-            _pc, _pd = await _purge_worker_ping_messages(interaction.client, None)
-            deleted_msgs += _pc
-            deleted_dms += _pd
-        except Exception:
-            pass
-
-        await interaction.followup.send(
-            f"🧨 **ALL ORDERS DELETED**\n\n"
-            f"• Orders removed: **{total}**\n"
-            f"• Public messages deleted: **{deleted_msgs}**\n"
-            f"• Employee DMs deleted: **{deleted_dms}**\n"
-            f"• Verification channels deleted: **{deleted_channels}**\n\n"
-            f"Ready for fresh testing ✅",
-            **ephemeral_kwargs(interaction)
-        )
 
     @app_commands.command(
         name="orders_purge",
@@ -1176,7 +1062,7 @@ class OrdersCog(commands.Cog):
             return await interaction.response.send_message(
                 "❌ Give at least one filter (`since_minutes` / `market_id` / `min_id` / `max_id`), "
                 "or set `clear_dms:True` to just sweep leftover announcement DMs. "
-                "To wipe the whole board, that's `/orders_clear_all`.", **ephemeral_kwargs(interaction))
+                "To wipe the whole board, ask the bot.", **ephemeral_kwargs(interaction))
         await interaction.response.defer(**ephemeral_kwargs(interaction), thinking=True)
         client = interaction.client
         data = load_orders()

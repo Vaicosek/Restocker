@@ -10760,7 +10760,6 @@ Orders & Workers:
 - /order — (Managers) Order an existing catalog item from workers. Leave the worker field blank to ask ALL workers (batched ping); set a worker to assign it directly to ONE person via DM with no mass ping. Item must exist (/add_item) and have a price (/item_set_price).
 - /cancel_order — (Managers) Cancel a restock order by ID
 - /ping_unclaimed — (Managers) Ping workers about unclaimed orders
-- /orders_clear_all — (Managers) Delete ALL orders (testing only)
 
 Futures Orders (custom item + enchant requests, separate from the regular catalog /orders board):
 - /futures_order — Request a custom item with specific enchants/quality (e.g. "Fortune III, Unbreaking" picks,
@@ -10799,7 +10798,6 @@ Markets (/market subcommands):
 - /market set_leader_role — (Managers) Set the Discord role that identifies a market's leader
 - /bind_market / /unbind_market — (Managers) Bind/unbind a channel so CSN reports posted there route to a market (no code needed)
 - /market remove_item — (Manager/Owner) Remove an item the market no longer sells
-- /market log_restock — (Manager/Owner) Log stock you bought by hand so net profit stays accurate
 - /market suggest_price — (Manager/Owner) Suggested price for an item vs the general market
 - /market_code — Get your CSN mod verification code
 - /create_market — (Managers) Create a new market
@@ -10851,7 +10849,6 @@ Loyalty (/loyalty subcommands):
 
 Inventory & Stock Alarms (/inventory subcommands — live barrel fullness from CSN stock scans):
 - /inventory stock — live shop stock / barrel fullness for a market (lowest first)
-- /inventory restock_deficit — (Managers) create restock orders from the real shortfall (capacity − current stock)
   (Barrel capacity and low-stock alarms are managed on the dashboard website.)
 
 Items & Setup:
@@ -11284,6 +11281,66 @@ _AI_TOOLS = [
                 "limit": {"type": "integer", "description": "How many messages to scan (default 200)."}
             },
             "required": []
+        }
+    },
+    {
+        "name": "set_hive_autopay",
+        "description": "Turn instant harvester payment on or off for a hive market. ON pays each harvester the moment their sale posts. Managers only. Warn about any unpaid backlog — autopay only touches NEW lines.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "market": {"type": "string", "description": "Hive market id, e.g. 'vtech'."},
+                "enabled": {"type": "boolean", "description": "true = pay on ingest, false = record only."}
+            },
+            "required": ["market", "enabled"]
+        }
+    },
+    {
+        "name": "create_restock_orders",
+        "description": "Create restock orders from the REAL shortfall (capacity minus current stock) for a market, using the last barrel scan. Managers only. This creates real work orders — say how many and confirm first.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "market": {"type": "string", "description": "Market id."},
+                "min_deficit": {"type": "integer", "description": "Ignore items short by less than this (default 1)."}
+            },
+            "required": ["market"]
+        }
+    },
+    {
+        "name": "get_land_status",
+        "description": "Land claims: treasury balances, which market each land is bound to, and recent inferred teleport-fee income per month. Managers only.",
+        "input_schema": {"type": "object", "properties": {}, "required": []}
+    },
+    {
+        "name": "log_manual_restock",
+        "description": "Record stock added by hand (bought outside the shop) so a market's net profit stays honest, and get a suggested sell price back. Managers or that market's owner.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "market": {"type": "string", "description": "Market id."},
+                "item": {"type": "string", "description": "Item name as it appears in the catalog."},
+                "qty": {"type": "integer", "description": "How many pieces were added."},
+                "cost": {"type": "integer", "description": "Total coins paid for them (0 if free)."}
+            },
+            "required": ["market", "item", "qty", "cost"]
+        }
+    },
+    {
+        "name": "get_channel_config",
+        "description": "Show which Discord channel each bot function posts to (worker cards, funds report, CSN reports, tickets, etc.) and whether each is a DB override or the .env default. Managers only, home server only.",
+        "input_schema": {"type": "object", "properties": {}, "required": []}
+    },
+    {
+        "name": "set_channel_config",
+        "description": "Point a bot function at a different channel, or clear the override to fall back to .env. Managers only, home server only. Changing this moves where real money reports and worker cards post — always state which function and which channel, and confirm, before applying.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "key": {"type": "string", "description": "e.g. WORKER_CHANNEL_ID, FUNDS_REPORT_CHANNEL_ID, CSN_REPORT_CHANNEL_ID, TICKETS_CATEGORY_ID, FUNDS_REPORT_GUILD_ID. Call get_channel_config first for the exact list."},
+                "channel_id": {"type": "string", "description": "Target channel/category/guild id. Omit or leave blank to CLEAR the override."}
+            },
+            "required": ["key"]
         }
     },
     {
@@ -12575,6 +12632,163 @@ async def _ai_tool_csn_cleanup(guild, channel, user, args):
     return f"Deleted {deleted} noise message(s) in #{getattr(channel,'name','?')}."
 
 
+async def _ai_tool_set_hive_autopay(guild, channel, user, args):
+    if not _ai_is_manager(user):
+        return "❌ Managers only."
+    import Restocker_db as _db
+    mid = str(args.get("market") or "").strip().lower()
+    if not mid:
+        return "❌ Which market?"
+    on = bool(args.get("enabled"))
+    _db.set_config(f"hive_autopay:{mid}", "1" if on else "0")
+    if not on:
+        return f"Autopay OFF for {mid} — harvest lines record only; pay with run_hive_payout."
+    backlog = len(_db.get_unpaid_hive_harvests(mid) or [])
+    return (f"Autopay ON for {mid} — harvesters are paid the moment their sale posts."
+            + (f" NOTE: {backlog} unpaid line(s) already in the backlog — autopay only touches "
+               f"NEW lines, so those still need run_hive_payout." if backlog else ""))
+
+
+async def _ai_tool_create_restock_orders(guild, channel, user, args):
+    if not _ai_is_manager(user):
+        return "❌ Managers only."
+    import Restocker_db as _db
+    mid = str(args.get("market") or "").strip().lower()
+    try:
+        min_def = max(1, int(args.get("min_deficit") or 1))
+    except Exception:
+        min_def = 1
+    st = _db.get_market_stock(mid)
+    if not st:
+        return f"No live stock scan for {mid} — nothing to compute a shortfall from."
+    known = (_load_items().get("items") or {})
+    to_order, skipped = [], 0
+    for it, x in st.items():
+        deficit = int(x.get("capacity") or 0) - int(x.get("stock") or 0)
+        if deficit < min_def:
+            continue
+        if it not in known:
+            skipped += 1
+            continue
+        to_order.append((it, deficit, known[it]))
+    if not to_order:
+        return (f"Nothing short by >= {min_def} for {mid}."
+                + (f" ({skipped} scanned item(s) aren't in the catalog.)" if skipped else ""))
+    created = _create_restock_orders(to_order)
+    top = ", ".join(f"{it} ({d:,})" for it, d, _ in sorted(to_order, key=lambda r: -r[1])[:8])
+    return (f"Created {created} restock order(s) for {mid} from real deficit."
+            + (f" {skipped} skipped (not in catalog)." if skipped else "")
+            + f" Biggest shortfalls: {top}")
+
+
+async def _ai_tool_get_land_status(guild, channel, user, args):
+    if not _ai_is_manager(user):
+        return "❌ Managers only."
+    import sys as _sys, Restocker_db as _db
+    lands_mod = _sys.modules.get("cogs.lands")
+    _land_market = getattr(lands_mod, "_land_market", lambda l: None) if lands_mod else (lambda l: None)
+    rows = _db.get_all_land_fees() or []
+    lands = {}
+    for r in rows:
+        lands.setdefault(r["land"], {})[r["month"]] = float(r["fees"])
+    if not lands:
+        return "No land data yet — run the mod's lands sweep or open a land inbox in-game."
+    out = []
+    for land in sorted(lands):
+        snap = _db.get_land_balance(land)
+        mid = _land_market(land)
+        bits = [f"balance {float(snap['balance']):,.0f}" if snap else "no balance"]
+        bits.append(f"→ {mid}" if mid else "unbound")
+        recent = sorted((lands.get(land) or {}).items())[-3:]
+        if recent:
+            bits.append("fees: " + ", ".join(f"{m} {f:,.0f}" for m, f in recent))
+        out.append(f"{land}: " + " · ".join(bits))
+    return "\n".join(out[:25])
+
+
+async def _ai_tool_log_manual_restock(guild, channel, user, args):
+    mid = str(args.get("market") or "").strip().lower()
+    item = str(args.get("item") or "").strip()
+    if not mid or not item:
+        return "❌ I need a market and an item."
+    _own = _market_owner_id(mid)
+    if not (_ai_is_manager(user) or (_own and int(_own) == int(getattr(user, "id", 0) or 0))):
+        return f"❌ Only Managers or {mid}'s owner can log a restock."
+    try:
+        qty = int(args.get("qty") or 0)
+        cost = int(args.get("cost") or 0)
+    except Exception:
+        return "❌ qty and cost must be whole numbers."
+    if qty < 1:
+        return "❌ qty must be at least 1."
+    r = _log_manual_restock(mid, item, qty, cost)
+    s = _suggest_item_price(mid, item)
+    stock = f" Catalog stock now {r['new_stock']:,}." if r.get("new_stock") is not None else ""
+    return (f"Logged {qty:,}x {item} at {cost:,} coins to {mid} ({r['month']}).{stock} "
+            f"Suggested sell price ~{s['optimal']:,} (your cost {s['unit_cost']:,.1f}/unit, "
+            f"target {s['margin_pct']:.0f}% margin).")
+
+
+def _config_keys():
+    """(label, key) for everything /config used to rebind, read from the cog so the two
+    can't drift. Falls back to the guild key if the cog isn't loaded."""
+    import sys as _sys
+    mod = _sys.modules.get("cogs.config")
+    keys = list(getattr(mod, "_CHANNEL_KEYS", []) or [])
+    gk = getattr(mod, "_GUILD_KEY", ("Funds-report guild", "FUNDS_REPORT_GUILD_ID"))
+    return keys + [gk]
+
+
+def _config_home_ok(guild) -> bool:
+    """These keys decide where funds reports and worker cards land. The old /config was
+    pinned to the home guild so an admin of any other server the bot joined couldn't
+    re-point them at themselves — keep that pin."""
+    import os as _os
+    home = int(_os.getenv("HOME_GUILD_ID", "954487497411403806") or 0)
+    return (not home) or (getattr(guild, "id", None) == home)
+
+
+async def _ai_tool_get_channel_config(guild, channel, user, args):
+    if not _ai_is_manager(user):
+        return "❌ Managers only."
+    if not _config_home_ok(guild):
+        return "❌ Channel config can only be read on the home server."
+    import Restocker_db as _db
+    out = []
+    for label, key in _config_keys():
+        cur = globals().get(key)
+        ov = _db.get_config(key)
+        src = "DB override" if ov not in (None, "") else ".env default"
+        out.append(f"{label} [{key}] = {cur} ({src})")
+    return "\n".join(out) or "No channel config keys."
+
+
+async def _ai_tool_set_channel_config(guild, channel, user, args):
+    if not _ai_is_manager(user):
+        return "❌ Managers only."
+    if not _config_home_ok(guild):
+        return "❌ Channel config can only be changed on the home server."
+    import Restocker_db as _db
+    key = str(args.get("key") or "").strip().upper()
+    valid = {k for _l, k in _config_keys()}
+    if key not in valid:
+        return f"❌ Unknown key `{key}`. Valid: {', '.join(sorted(valid))}"
+    raw = str(args.get("channel_id") or "").strip().strip("<#>")
+    if not raw:
+        _db.delete_config(key)
+        return (f"Cleared the override for {key} — it reverts to the .env default on the "
+                f"next restart.")
+    if not raw.isdigit():
+        return "❌ channel_id must be a numeric id (or blank to clear)."
+    _db.set_config(key, raw if key.endswith("GUILD_ID") else int(raw))
+    try:
+        globals()[key] = int(raw)          # live update for this module's own reads
+    except Exception:
+        pass
+    return (f"{key} → {raw}. Applied live for the bot's own reads; a restart is needed "
+            f"for cogs and views that cached it at load.")
+
+
 async def _ai_tool_fix_month_close(guild, channel, user, args):
     if not _ai_is_manager(user):
         return "❌ Only Managers can fix month-closing posts."
@@ -12951,6 +13165,12 @@ _AI_TOOL_MAP = {
     "csn_cleanup":          _ai_tool_csn_cleanup,
     "get_ai_audit":         _ai_tool_get_ai_audit,
     "fix_month_close":      _ai_tool_fix_month_close,
+    "set_hive_autopay":     _ai_tool_set_hive_autopay,
+    "create_restock_orders": _ai_tool_create_restock_orders,
+    "get_land_status":      _ai_tool_get_land_status,
+    "log_manual_restock":   _ai_tool_log_manual_restock,
+    "get_channel_config":   _ai_tool_get_channel_config,
+    "set_channel_config":   _ai_tool_set_channel_config,
     "propose_code_change":  _ai_tool_propose_code_change,
     "create_futures_order": _ai_tool_create_futures_order,
 }
@@ -12961,7 +13181,8 @@ _AI_SENSITIVE_TOOLS = {
     "delete_messages", "create_role", "setup_market_owner", "send_dm", "dm_role",
     "send_channel_message", "ping_user", "propose_code_change", "set_item_price",
     "run_hive_payout", "rebuild_market_channel", "rebuild_hive_channel",
-    "purge_channel", "csn_cleanup", "fix_month_close",
+    "purge_channel", "csn_cleanup", "fix_month_close", "set_channel_config", "set_hive_autopay",
+    "create_restock_orders", "log_manual_restock",
     "add_item", "get_market_code", "create_futures_order", "dm_market_setup",
 }
 

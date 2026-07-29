@@ -920,22 +920,6 @@ class MarketCog(commands.Cog):
         cat = " Catalog entry removed." if r["catalog_removed"] else ""
         await interaction.response.send_message(f"🗑️ Removed **{item}** from `{market_id}`.{extra}{cat}", ephemeral=True)
 
-    @market.command(name="log_restock", description="(Manager/Owner) Log stock you added by hand so net profit stays accurate")
-    @app_commands.describe(market_id="Your market", item="Item name", qty="Units you added", cost="Total coins you paid")
-    @app_commands.autocomplete(market_id=_market_autocomplete, item=any_item_autocomplete)
-    async def market_log_restock(self, interaction: discord.Interaction, market_id: str, item: str,
-                                 qty: app_commands.Range[int, 1, 1_000_000],
-                                 cost: app_commands.Range[int, 0, 1_000_000_000]):
-        if not _is_market_manager(interaction, market_id):
-            return await interaction.response.send_message("⛔ Managers or this market's owner only.", ephemeral=True)
-        r = _log_manual_restock(market_id, item, qty, cost)
-        stock = f" Catalog stock now `{r['new_stock']:,}`." if r.get("new_stock") is not None else ""
-        s = _suggest_item_price(market_id, item)
-        await interaction.response.send_message(
-            f"📦 Logged `{qty:,}`x **{item}** at `{cost:,}` 🪙 to `{market_id}` ({r['month']}).{stock}\n"
-            f"💡 Optimal sell price ~`{s['optimal']:,}` 🪙 (general avg `{s['standard']:,.0f}`, your cost "
-            f"`{s['unit_cost']:,.1f}`/unit, target {s['margin_pct']:.0f}% margin).",
-            ephemeral=True)
 
 
 

@@ -59,9 +59,16 @@ Bidding, deal rooms and winner handover are handled by the exchange views.
 - Everything else (payout repair, stock migration, hive double-count audits, backfills) is
   now AI-side — ask the bot rather than looking for a command.
 
-## Config (`/config …`)
-`set_channel` — point a bot channel/category at a channel on THIS server. `set_guild`,
-`show` (override vs .env default), `reset`.
+## Channel config (AI tools — `/config` was retired)
+`get_channel_config` lists every bot function (worker cards, funds report, CSN reports,
+tickets, …), which channel it posts to, and whether that's a DB override or the `.env`
+default. `set_channel_config` points one at a different channel, or clears the override
+when `channel_id` is blank.
+
+- **Home server only.** These decide where money reports and worker cards land, so an
+  admin of any other server the bot joins must never be able to re-point them.
+- Changes apply live to the bot's own reads; cogs and views cache the ids at load, so a
+  restart is needed for those. Say so when you change one.
 
 ## Gotchas the AI must know
 - Slash-command groups max out at **25 subcommands** — that's why stock/alarm commands live

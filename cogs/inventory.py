@@ -24,38 +24,6 @@ class InventoryCog(commands.Cog):
     inventory = app_commands.Group(name="inventory",
                                    description="Live barrel stock: fullness, capacity, deficit restock, low-stock alarms")
 
-    @inventory.command(name="restock_deficit",
-                    description="(Manager) Create restock orders from the real shortfall (capacity - current stock)")
-    @app_commands.describe(market_id="Market", min_deficit="Only items short by at least this many pieces")
-    @app_commands.autocomplete(market_id=_market_autocomplete)
-    async def restock_deficit(self, interaction: discord.Interaction, market_id: str, min_deficit: int = 1):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("Managers only.", ephemeral=True)
-        import Restocker_db as _db
-        st = _db.get_market_stock(market_id)
-        if not st:
-            return await interaction.response.send_message(f"No live stock for `{market_id}`.", ephemeral=True)
-        known = (_load_items().get("items") or {})
-        to_order = []
-        skipped = 0
-        for it, x in st.items():
-            deficit = int(x.get("capacity") or 0) - int(x.get("stock") or 0)
-            if deficit < max(1, int(min_deficit)):
-                continue
-            if it not in known:
-                skipped += 1
-                continue
-            to_order.append((it, deficit, known[it]))
-        if not to_order:
-            return await interaction.response.send_message(
-                f"Nothing short by >= {min_deficit} for `{market_id}`"
-                + (f" ({skipped} not in catalog)." if skipped else "."), ephemeral=True)
-        created = _create_restock_orders(to_order)
-        top = ", ".join(f"{it} ({d:,})" for it, d, _ in sorted(to_order, key=lambda r: -r[1])[:8])
-        await interaction.response.send_message(
-            f"Created **{created}** restock order(s) from real deficit for `{market_id}`."
-            + (f" {skipped} item(s) skipped (not in catalog)." if skipped else "")
-            + f"\nTop shortfalls: {top}", ephemeral=True)
 
 
 

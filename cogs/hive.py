@@ -416,8 +416,8 @@ class HiveCog(commands.Cog):
         await interaction.response.send_message(
             f"🐝 {target.mention} now feeds **{markets[market_id].get('name', market_id)}**'s hive project. "
             f"Every \"X sold you …\" line there is recorded automatically.\n"
-            f"Next: check `/hive info` that the item values aren't 0, then "
-            f"`/hive autopay market_id:{market_id} enabled:True` — from then on harvesters "
+            f"Next: check `/hive info` that the item values aren't 0, then ask the bot to "
+            f"turn autopay on for `{market_id}` — from then on harvesters "
             f"are paid the moment their sale posts.", ephemeral=True)
 
     @hive.command(name="unbind", description="Stop treating a channel as a hive feed")
@@ -489,28 +489,6 @@ class HiveCog(commands.Cog):
                         inline=False)
         await interaction.followup.send(embed=embed, ephemeral=True)
 
-    @hive.command(name="autopay", description="Pay harvesters INSTANTLY when their sale posts to the feed")
-    @app_commands.describe(market_id="The hive market",
-                           enabled="True = pay on ingest (run /hive settle FIRST). False = record only.")
-    @app_commands.autocomplete(market_id=_market_autocomplete)
-    async def hive_autopay(self, interaction: discord.Interaction, market_id: str, enabled: bool):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
-        import Restocker_db as _db
-        if enabled:
-            backlog = len(_db.get_unpaid_hive_harvests(market_id))
-            _db.set_config(f"hive_autopay:{market_id}", "1")
-            warn = (f"\n⚠ **{backlog} unpaid row(s) are sitting in the backlog** — autopay only "
-                    f"touches NEW lines, so settle or pay those explicitly (`/hive settle` for "
-                    f"already-paid-by-hand, `/hive payout` to pay them)." if backlog else "")
-            return await interaction.response.send_message(
-                f"⚡ Autopay **ON** for `{market_id}` — harvesters are paid the moment their "
-                f"sale posts, wages logged under the hive-harvesting project, value booked to "
-                f"the stock automatically.{warn}", ephemeral=True)
-        _db.set_config(f"hive_autopay:{market_id}", "0")
-        await interaction.response.send_message(
-            f"⏸ Autopay **off** for `{market_id}` — lines record only; settle with `/hive payout`.",
-            ephemeral=True)
 
     @hive.command(name="set_value", description="Set the per-piece value of a hive product (default: Honey Block 350, Honeycomb 300)")
     @app_commands.describe(item="Item name as it appears in the feed (e.g. Honey Block)",

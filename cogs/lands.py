@@ -245,37 +245,6 @@ class LandsCog(commands.Cog):
             f"🔒 LANDS FEED now only accepted from **webhook posts in {channel.mention}**. "
             f"Everything else is rejected and logged.", ephemeral=True)
 
-    @land.command(name="status", description="Balances, bindings and inferred teleport fees per land")
-    async def land_status(self, interaction: discord.Interaction):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
-        import Restocker_db as _db
-        rows = _db.get_all_land_fees()
-        lands = {}
-        for r in rows:
-            lands.setdefault(r["land"], {})[r["month"]] = float(r["fees"])
-        # also show lands that have balances but no fees yet
-        embed = discord.Embed(title="🏦 Lands — treasuries & teleport fees", color=0x3498DB)
-        seen = set()
-        for land in sorted(set(list(lands.keys()))):
-            seen.add(land)
-            snap = _db.get_land_balance(land)
-            mid = _land_market(land)
-            months = lands.get(land) or {}
-            val = []
-            if snap:
-                val.append(f"balance `{float(snap['balance']):,.0f}` 🪙")
-            val.append(f"→ `{mid}`" if mid else "*unbound*")
-            if months:
-                recent = sorted(months.items())[-3:]
-                val.append("fees: " + " · ".join(f"`{m}` **{f:,.0f}**" for m, f in recent))
-            else:
-                val.append("fees: none inferred yet")
-            embed.add_field(name=land, value="\n".join(val), inline=False)
-        if not seen:
-            embed.description = ("No land data yet — run the mod's lands sweep or open a "
-                                 "land inbox in-game, then the feed posts land here.")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 async def setup(bot):

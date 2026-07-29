@@ -16,12 +16,13 @@ Every CSN report and order belongs to a market.
 - `set_owner` / `add_manager` / `remove_manager` / `set_leader_role` — ownership + roles.
 - `edit` — name / fee / active. `set_ticker` — stock symbol (e.g. GEX).
 - `treasury` / `treasury_withdraw` — view/withdraw a public market's excess treasury.
-- `remove_item` / `log_restock` — catalog upkeep; `log_restock` keeps net profit honest when
+- `remove_item` — catalog upkeep. Logging a hand-bought restock (which keeps net profit
+  honest) is AI-side now; ask the bot. It applies when
   stock is added by hand. Price suggestions are AI-side.
 - `go_public` / `go_private` / `loyalty` / `vtech_group` / `set_code` — listing, loyalty
   opt-in, group membership, CSN code.
 - Related, separate commands: `/market_code` (a market's CSN verification code),
-  `/inventory restock_deficit`, and `/add_item` · `/item_edit` · `/item_info` ·
+  and `/add_item` · `/item_edit` · `/item_info` ·
   `/item_set_price` (catalog price + stackability).
 
 ## Data / binding
