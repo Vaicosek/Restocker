@@ -10818,7 +10818,6 @@ AVAILABLE SLASH COMMANDS (share these when asked):
 Orders & Workers:
 - /orders — Show open production requests
 - /order — (Managers) Order an existing catalog item from workers. Leave the worker field blank to ask ALL workers (batched ping); set a worker to assign it directly to ONE person via DM with no mass ping. Item must exist (/add_item) and have a price (/item_set_price).
-- /cancel_order — (Managers) Cancel a restock order by ID
 - /ping_unclaimed — (Managers) Ping workers about unclaimed orders
 
 Futures Orders (custom item + enchant requests, separate from the regular catalog /orders board):

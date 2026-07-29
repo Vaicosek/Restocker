@@ -879,6 +879,64 @@ class EscalateModal(discord.ui.Modal, title="Escalate Order (repost)"):
         )
 
 
+async def cancel_order_by_id(client, order_id: int) -> str:
+    """Cancel one order and refresh its cards. Lifted out of the retired /cancel_order
+    command so the Manager Panel can reuse it verbatim — same status guards, same
+    update_order_messages() refresh, so worker cards don't go stale."""
+    data = load_orders()
+    order = next((o for o in data.get("orders", []) if int(o.get("id", 0) or 0) == int(order_id)), None)
+    if not order:
+        return f"❌ Order #{order_id} not found."
+    if order.get("status") == "fulfilled":
+        return f"⚠️ Order #{order_id} is already fulfilled and can't be cancelled."
+    if order.get("status") == "cancelled":
+        return f"⚠️ Order #{order_id} is already cancelled."
+    order["status"] = "cancelled"
+    save_orders(data)
+    try:
+        await update_order_messages(client, order)
+    except Exception as e:
+        log.warning("[cancel] card refresh failed for #%s: %s", order_id, e)
+    return f"❌ Order #{order_id} has been cancelled."
+
+
+class CancelPickView(discord.ui.View):
+    """Pick an open order and cancel it — no typing IDs (mirrors EscalatePickView)."""
+
+    def __init__(self):
+        super().__init__(timeout=180)
+        data = load_orders()
+        candidates = [o for o in (data.get("orders", []) or [])
+                      if str(o.get("status", "")).lower() not in ("fulfilled", "cancelled")]
+        candidates.sort(key=lambda o: int(o.get("id", 0) or 0), reverse=True)
+        candidates = candidates[:25]
+        if candidates:
+            options = [discord.SelectOption(
+                label=f"#{int(o.get('id', 0) or 0)} {str(o.get('item', '') or '')}"[:100],
+                description=f"{str(o.get('status', '') or '').upper()} · "
+                            f"rem {fmt_qty(o, remaining_to_assign(o))}"[:100],
+                value=str(int(o.get("id", 0) or 0))) for o in candidates]
+        else:
+            options = [discord.SelectOption(label="No cancellable orders", value="none", default=True)]
+        self.select = discord.ui.Select(placeholder="Pick an order to cancel…",
+                                        min_values=1, max_values=1, options=options,
+                                        custom_id="mp_cancel_pick")
+        self.select.callback = self._on_select
+        self.add_item(self.select)
+
+    async def _on_select(self, interaction: discord.Interaction):
+        if not is_manager(interaction):
+            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
+        v = (self.select.values or ["none"])[0]
+        if v == "none":
+            return await interaction.response.send_message("Nothing to cancel.", ephemeral=True)
+        # update_order_messages edits/deletes several cards — defer so we don't blow the
+        # 3s interaction window (the old command hit "Unknown interaction" doing this).
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        msg = await cancel_order_by_id(interaction.client, int(v))
+        await interaction.followup.send(msg, ephemeral=True)
+
+
 class EscalatePickView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=180)
@@ -1987,6 +2045,18 @@ class ManagerPanelView(discord.ui.View):
             color=discord.Color.red()
         )
         return await interaction.response.send_message(embed=embed, view=EscalatePickView(), ephemeral=True)
+
+    @discord.ui.button(label="🚫 Cancel order…", style=discord.ButtonStyle.secondary)
+    async def cancel_order_btn(self, interaction: discord.Interaction, button: Button):
+        if not is_manager(interaction):
+            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
+        embed = discord.Embed(
+            title="🚫 Cancel an order",
+            description="Pick an open order from the dropdown. Fulfilled orders can't be "
+                        "cancelled — they're kept as history.",
+            color=discord.Color.orange())
+        return await interaction.response.send_message(embed=embed, view=CancelPickView(),
+                                                       ephemeral=True)
 
     @discord.ui.button(label="🧹 Prune Cancelled", style=discord.ButtonStyle.danger)
     async def prune_closed(self, interaction: discord.Interaction, button: Button):
