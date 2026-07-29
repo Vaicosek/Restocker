@@ -16,12 +16,12 @@
 
 ## How a buyer's group is resolved (automatic)
 A user's group comes from the markets **registered to them** (owner_id / leader /
-manager_ids — set with `/market set_owner` etc.): holding any inner market → **inner**;
+manager_ids — set in `/market settings`): holding any inner market → **inner**;
 only external markets → **external**; no market at all → treat as external unless a
 manager says otherwise. A market's group can be overridden with the config key
 `market_group:<market_id>` = `inner`|`external`. The `quote_futures` AI tool
 accept the buyer (`for_user` / `customer`) and state the applicable price — pass the buyer
-whenever known. **Keep owners registered** (`/market set_owner`) or resolution falls back
+whenever known. **Keep owners registered** (`/market settings` → Set owner) or resolution falls back
 to "no market → external".
 
 ## The three price levels (low → high)

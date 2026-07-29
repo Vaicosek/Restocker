@@ -10,7 +10,7 @@
   the normal flow.
 
 ## Investors (GEX.PR preferred shareholders)
-- `/investor status` — register, pool %, recent distributions.
+- Investor register, pool % and recent distributions are AI-side (`get_investor_status`).
 - Pool %, manual payouts, role grants, liquidation and cap-table sync are AI-side now — ask
   the bot; distributions still run automatically when a V Tech market's monthly CSN net
   records (positive months only, once per market-month).

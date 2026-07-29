@@ -31,41 +31,6 @@ is_manager = core.is_manager
 timezone = core.timezone
 
 
-async def _liquidate_target_autocomplete(interaction: discord.Interaction, current: str):
-    """Suggest anyone the bot knows as an investor or shareholder (register + cached
-    holder names), so people who already LEFT Discord are still pickable."""
-    import Restocker_db as _db
-    seen = {}
-    try:
-        for uid, name in (core.load_yaml("stock_names.yml", {}) or {}).items():
-            seen[str(uid)] = str(name or uid)
-    except Exception:
-        pass
-    try:
-        for uid, inv in (_db.get_investors() or {}).items():
-            seen[str(uid)] = str(inv.get("name") or seen.get(str(uid)) or uid)
-    except Exception:
-        pass
-    # ACTUAL shareholders too — the reclaim keys off the ID that holds the shares, and a
-    # holder missing from stock_names.yml would otherwise be unpickable (an @mention of
-    # their Discord account can be a different ID than the one on the cap table).
-    try:
-        for mid in (_db.get_public_markets() or {}):
-            for h in _db.get_holders(mid):
-                huid = str(h.get("user_id"))
-                label = seen.get(huid) or f"holder …{huid[-4:]}"
-                seen[huid] = f"{label} · {float(h.get('shares') or 0):,.0f} sh {mid}"
-    except Exception:
-        pass
-    cur = (current or "").lower()
-    out = []
-    for uid, name in sorted(seen.items(), key=lambda kv: kv[1].lower()):
-        if cur and cur not in name.lower() and cur not in uid:
-            continue
-        out.append(app_commands.Choice(name=f"{name} ({uid})"[:100], value=uid))
-        if len(out) >= 25:
-            break
-    return out
 
 
 class MoneyCog(commands.Cog):
@@ -211,42 +176,7 @@ class MoneyCog(commands.Cog):
             market_id=market_id or "", created_by=interaction.user.id))
 
     # ── Investors (/investor ...) — GEX.PR preferred shareholders, profit-share engine ──
-    investor = app_commands.Group(
-        name="investor",
-        description="(Managers) V Tech investors — sync the GEX.PR cap table, pool %, payouts",
-        default_permissions=discord.Permissions(manage_guild=True))
 
-    @investor.command(name="status", description="Investor register, pool %, and recent distributions")
-    async def investor_status(self, interaction: discord.Interaction):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
-        import Restocker_db as _db
-        invs = sorted((_db.get_investors() or {}).values(),
-                      key=lambda i: -float(i.get("share_pct") or 0))
-        pool = core._investor_pool_pct()
-        embed = discord.Embed(title="V Tech investors (GEX.PR)", color=discord.Color.gold())
-        embed.add_field(name="Profit pool", value=f"`{pool:g}%` of each V Tech market's monthly net "
-                        f"(change: `/investor set_pool`)", inline=False)
-        if invs:
-            lines = [f"• <@{i['user_id']}> **{i.get('name') or '?'}** — "
-                     f"{float(i.get('pref_shares') or 0):,.0f} pref · **{float(i.get('share_pct') or 0):g}%** · "
-                     f"received `{float(i.get('total_received') or 0):,.0f}`"
-                     for i in invs[:20]]
-            embed.add_field(name=f"Register ({len(invs)})", value="\n".join(lines)[:1000], inline=False)
-        else:
-            embed.add_field(name="Register", value="*empty — run `/investor sync` with the GEX.PR "
-                            "cap-table export from Crimson Banking*", inline=False)
-        try:
-            recent = _db.get_investor_payout_log(6)
-        except Exception:
-            recent = []
-        if recent:
-            embed.add_field(name="Recent distributions", value="\n".join(
-                f"• <@{r['user_id']}> +`{float(r['amount']):,.0f}` · {r.get('note') or ''}"
-                for r in recent)[:1000], inline=False)
-        embed.set_footer(text="Distributions run automatically when a V Tech market's monthly "
-                              "CSN net records — positive months only, once per market-month.")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 

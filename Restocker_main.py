@@ -2464,7 +2464,7 @@ def _set_market_loyalty(market_id, pts_mult: float, coin_bonus: int, pct_bonus: 
 # ── V Tech group (Stage 4) ────────────────────────────────────────────────────────────
 def _vtech_group_markets() -> set:
     """Market IDs V Tech itself owns (Greyhames, Bank, Dragonmart, ...) — configurable via
-    /market vtech_group instead of hardcoded, since the group can grow. These markets'
+    /market settings instead of hardcoded, since the group can grow. These markets'
     workers get the FULL point award credited to the shared V Tech pool (today's global
     `loyalty` table), because working a V Tech market IS working for V Tech."""
     try:
@@ -10072,7 +10072,7 @@ def _do_stock_trade(side, user_id, market_id, shares, name=None):
         if not listing:
             return {**res, "code": "not_listed", "msg": f"❌ `{market_id}` has never been public."}
         if not listing.get("active"):
-            # Delisted = frozen (matches /market go_private's promise). Without this,
+            # Delisted = frozen (matches the delist promise). Without this,
             # holders could still sell at the frozen price — minting coins from a
             # market that no longer exists on the exchange.
             return {**res, "code": "not_public",
@@ -10702,7 +10702,7 @@ def _build_market_dashboard_embed() -> discord.Embed:
     public = _db.get_public_markets()
     embed = discord.Embed(title="📈 Market Exchange — Live", color=0x3FB950)
     if not public:
-        embed.description = "No public markets yet. A market owner can list one with `/market go_public`."
+        embed.description = "No public markets yet. A market owner can list one from `/market settings`."
         embed.set_footer(text="Auto-updates every few minutes")
         embed.timestamp = discord.utils.utcnow()
         return embed
@@ -10846,17 +10846,8 @@ Markets (/market subcommands):
 - /market earnings — Earnings report for a market; pick a specific month or a recent-months summary
 - /market report — Your private market report (best sellers, missing stock, earnings)
 - /market add — (Managers) Register a new market
-- /market set_owner — (Managers) Set the owner of a market
-- /market edit — (Manager) Edit a market's name, fee %, or active status
-- /market add_manager — (Manager/Owner) Add a site manager to a market
-- /market remove_manager — (Manager/Owner) Remove a site manager from a market
 - /market platform_balance — (Managers) View total platform fee balance collected
-- /market go_public — (Manager/Owner) List a market on the stock exchange so its shares can be traded
-- /market go_private — (Manager/Owner) Delist a market from the stock exchange
-- /market set_ticker — (Manager/Owner) Set a market's short stock ticker symbol (e.g. GEX)
-- /market set_leader_role — (Managers) Set the Discord role that identifies a market's leader
 - /bind_market / /unbind_market — (Managers) Bind/unbind a channel so CSN reports posted there route to a market (no code needed)
-- /market remove_item — (Manager/Owner) Remove an item the market no longer sells
 - /market suggest_price — (Manager/Owner) Suggested price for an item vs the general market
 - /market_code — Get your CSN mod verification code
 - /create_market — (Managers) Create a new market
@@ -11427,6 +11418,11 @@ _AI_TOOLS = [
             "properties": {"channel_id": {"type": "string", "description": "Channel id to accept the feed from."}},
             "required": ["channel_id"]
         }
+    },
+    {
+        "name": "get_investor_status",
+        "description": "V Tech investor register (GEX.PR): who holds preferred shares, each holder's %, what they've received, the profit-pool rate, and recent distributions. Managers only.",
+        "input_schema": {"type": "object", "properties": {}, "required": []}
     },
     {
         "name": "get_land_status",
@@ -12944,6 +12940,36 @@ async def _ai_tool_create_restock_orders(guild, channel, user, args):
             + f" Biggest shortfalls: {top}")
 
 
+async def _ai_tool_get_investor_status(guild, channel, user, args):
+    if not _ai_is_manager(user):
+        return "❌ Managers only."
+    import Restocker_db as _db
+    invs = sorted((_db.get_investors() or {}).values(),
+                  key=lambda i: -float(i.get("share_pct") or 0))
+    pool = _investor_pool_pct()
+    out = [f"V Tech investors (GEX.PR) — profit pool {pool:g}% of each V Tech market's monthly net."]
+    if invs:
+        out.append(f"Register ({len(invs)}):")
+        for i in invs[:20]:
+            out.append(f"• {i.get('name') or '?'} ({i['user_id']}) — "
+                       f"{float(i.get('pref_shares') or 0):,.0f} pref · "
+                       f"{float(i.get('share_pct') or 0):g}% · "
+                       f"received {float(i.get('total_received') or 0):,.0f}")
+    else:
+        out.append("Register is EMPTY — needs the GEX.PR cap-table export from Crimson Banking.")
+    try:
+        recent = _db.get_investor_payout_log(6) or []
+    except Exception:
+        recent = []
+    if recent:
+        out.append("Recent distributions:")
+        for r in recent:
+            out.append(f"• {r['user_id']} +{float(r['amount']):,.0f} · {r.get('note') or ''}")
+    out.append("Distributions run automatically when a V Tech market's monthly CSN net records "
+               "— positive months only, once per market-month.")
+    return "\n".join(out[:30])
+
+
 async def _ai_tool_set_lands_feed_channel(guild, channel, user, args):
     if not _ai_is_manager(user):
         return "❌ Managers only."
@@ -13475,6 +13501,7 @@ _AI_TOOL_MAP = {
     "set_hive_autopay":     _ai_tool_set_hive_autopay,
     "create_restock_orders": _ai_tool_create_restock_orders,
     "get_land_status":      _ai_tool_get_land_status,
+    "get_investor_status":  _ai_tool_get_investor_status,
     "set_lands_feed_channel": _ai_tool_set_lands_feed_channel,
     "log_manual_restock":   _ai_tool_log_manual_restock,
     "get_channel_config":   _ai_tool_get_channel_config,
@@ -13947,7 +13974,7 @@ async def _main():
     # AI still has set_alias / remove_alias / list_aliases for the rare manual fix.
     for _ext in ("cogs.loyalty", "cogs.admin", "cogs.market", "cogs.stock",
                  "cogs.shop", "cogs.orders", "cogs.money", "cogs.reports", "cogs.misc",
-                 "cogs.loops", "cogs.events", "cogs.config", "cogs.team", "cogs.inventory", "cogs.projects",
+                 "cogs.loops", "cogs.events", "cogs.config", "cogs.team",  "cogs.projects",
                  "cogs.devassist", "cogs.hive", "cogs.lands", "cogs.bonds", "cogs.voting",
                  "cogs.land_exchange"):
         try:

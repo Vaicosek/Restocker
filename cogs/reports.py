@@ -309,7 +309,7 @@ class ReportsCog(commands.Cog):
             await _record_stock_report(rows, mid, interaction.channel, source_label)
             return await interaction.followup.send(
                 f"✅ Live stock snapshot recorded for `{mid}` — **{len(rows)}** item(s).\n"
-                f"See `/inventory stock market_id:{mid}` or the website's STOCK column.")
+                f"See the website's Inventory page for {mid}'s live barrel stock.")
 
         if csv_type == "monthly":
             items, income, spent = _parse_monthly_csv(csv_text)

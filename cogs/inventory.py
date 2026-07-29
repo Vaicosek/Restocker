@@ -21,8 +21,8 @@ class InventoryCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    inventory = app_commands.Group(name="inventory",
-                                   description="Live barrel stock: fullness, capacity, deficit restock, low-stock alarms")
+    # /inventory retired — restock_deficit is the AI tool create_restock_orders,
+    # and live barrel stock is on the dashboard Inventory page.
 
 
 

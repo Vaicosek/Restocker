@@ -43,16 +43,6 @@ log = core.log
 save_yaml = core.save_yaml
 utcnow_iso = core.utcnow_iso
 
-async def _earnings_month_autocomplete(interaction: discord.Interaction, current: str):
-    market_id = getattr(interaction.namespace, "market_id", None) or DEFAULT_MARKET_ID
-    history = _load_csn_for_market(market_id)
-    months = history.get("months") or {}
-    out = []
-    for mk, md in sorted(months.items(), reverse=True):
-        label = md.get("label", mk)
-        if current.lower() in mk.lower() or current.lower() in label.lower():
-            out.append(app_commands.Choice(name=label, value=mk))
-    return out[:25]
 
 class MarketCog(commands.Cog):
     def __init__(self, bot):
@@ -60,101 +50,31 @@ class MarketCog(commands.Cog):
 
     market = app_commands.Group(name="market", description="Manage multiple markets — register, track earnings, and configure per-market settings")
 
-    @market.command(name="loyalty",
-                    description="(Owner/Manager) Set this market's restock rewards: loyalty points multiplier + coin bonus")
-    @app_commands.describe(
-        market_id="Which market to configure",
-        points_multiplier="Loyalty-point multiplier for orders fulfilled in this market (e.g. 1.5). 1 = normal.",
-        coin_bonus="Flat extra coins paid per fulfilled order in this market (e.g. 500). 0 = none.",
-        percent_bonus="Extra pay as a % of the order's value (e.g. 20 = +20%). Scales with order size. 0 = none.",
-    )
+    @market.command(name="settings",
+                    description="(Owner/Manager) MarketSettings — one panel for everything about a market")
+    @app_commands.describe(market_id="Market to open on (blank = the first you can manage)")
     @app_commands.autocomplete(market_id=_market_autocomplete)
-    async def market_loyalty(self, interaction: discord.Interaction, market_id: str,
-                             points_multiplier: float = 1.0, coin_bonus: int = 0,
-                             percent_bonus: float = 0.0):
-        if not (is_manager(interaction) or market_id in _markets_owned_by(interaction.user.id)):
+    async def market_settings(self, interaction: discord.Interaction, market_id: str = None):
+        """One panel replacing edit/loyalty/set_*/add_manager/remove_manager/go_public/
+        go_private/treasury/treasury_withdraw/remove_item/vtech_group/delete."""
+        from views.market_settings import MarketSettingsView, build_embed, _may_manage
+        mid = (market_id or "").strip()
+        markets = (_load_markets().get("markets", {}) or {})
+        if not mid:
+            mine = [k for k in markets if _may_manage(interaction.user, k)]
+            mid = mine[0] if mine else (next(iter(markets), DEFAULT_MARKET_ID))
+        if mid not in markets:
             return await interaction.response.send_message(
-                "⛔ Only a manager or this market's owner can set its rewards.", ephemeral=True)
-        if not _get_market(market_id):
+                f"❌ Market `{mid}` not found.", ephemeral=True)
+        if not _may_manage(interaction.user, mid):
             return await interaction.response.send_message(
-                f"❌ Market `{market_id}` not found. Use `/market info`.", ephemeral=True)
-        if points_multiplier <= 0:
-            return await interaction.response.send_message(
-                "❌ points_multiplier must be greater than 0 (1 = normal, 1.5 = +50%).", ephemeral=True)
-        if coin_bonus < 0 or percent_bonus < 0:
-            return await interaction.response.send_message(
-                "❌ coin_bonus and percent_bonus can't be negative.", ephemeral=True)
-        # AUDIT FIX (critical): bonuses were unbounded and owner-settable — a market
-        # owner could set coin_bonus 50,000,000 and mint it to an accomplice on a
-        # 1-item order the moment a manager clicked approve. Owners get sane caps;
-        # only a full server manager may exceed them.
-        if not is_manager(interaction):
-            _CAP_COIN, _CAP_PCT, _CAP_MULT = 5_000, 50.0, 3.0
-            if coin_bonus > _CAP_COIN or percent_bonus > _CAP_PCT or points_multiplier > _CAP_MULT:
-                return await interaction.response.send_message(
-                    f"❌ Owner caps: coin_bonus ≤ `{_CAP_COIN:,}`, percent_bonus ≤ `{_CAP_PCT:g}%`, "
-                    f"points_multiplier ≤ `{_CAP_MULT:g}×`. Ask a manager for anything above.",
-                    ephemeral=True)
-        _set_market_loyalty(market_id, points_multiplier, coin_bonus, percent_bonus)
-        mname = (_get_market(market_id) or {}).get("name", market_id)
-        parts = []
-        if points_multiplier != 1.0:
-            parts.append(f"**{points_multiplier:g}×** loyalty points")
-        if coin_bonus > 0:
-            parts.append(f"**+{coin_bonus:,}** coins per fulfilled order")
-        if percent_bonus > 0:
-            parts.append(f"**+{percent_bonus:g}%** of order value")
-        reward = " and ".join(parts) if parts else "normal rewards (no bonus)"
-        await interaction.response.send_message(
-            f"✅ **{mname}** (`{market_id}`) now grants {reward} to restockers.\n"
-            f"Applies when a manager approves an order tagged to this market.", ephemeral=True)
-
-    @market.command(name="vtech_group",
-                    description="(Manager) View/add/remove markets in the V Tech group (shared loyalty pool)")
-    @app_commands.describe(
-        action="view the group, or add/remove one market",
-        market_id="Market to add/remove (ignored for 'view')",
-    )
-    @app_commands.choices(action=[
-        app_commands.Choice(name="view", value="view"),
-        app_commands.Choice(name="add", value="add"),
-        app_commands.Choice(name="remove", value="remove"),
-    ])
-    @app_commands.autocomplete(market_id=_market_autocomplete)
-    async def market_vtech_group(self, interaction: discord.Interaction, action: str,
-                                 market_id: Optional[str] = None):
-        """V Tech-owned markets (Greyhames, Bank, Dragonmart, ...) share ONE loyalty pool:
-        working any of them credits the FULL point award to the shared V Tech ledger, instead
-        of the smaller slice every other market's orders contribute. Configurable here since
-        the group can grow — see VTECH_SLICE_PCT for the non-member slice."""
-        if not is_manager(interaction):
-            return await interaction.response.send_message(
-                "⛔ Managers only — this is a V Tech-wide setting, not a single market's.", ephemeral=True)
-        current = _vtech_group_markets()
-        if action == "view":
-            if not current:
-                return await interaction.response.send_message(
-                    "🏭 V Tech group is empty — no market gets the full-credit slice yet.", ephemeral=True)
-            lines = [f"• **{(_get_market(mid) or {}).get('name', mid)}** (`{mid}`)" for mid in sorted(current)]
-            return await interaction.response.send_message(
-                "🏭 **V Tech group** (shared loyalty pool):\n" + "\n".join(lines), ephemeral=True)
-        if not market_id:
-            return await interaction.response.send_message(
-                "❌ Provide a market_id to add or remove.", ephemeral=True)
-        if not _get_market(market_id):
-            return await interaction.response.send_message(
-                f"❌ Market `{market_id}` not found. Use `/market info`.", ephemeral=True)
-        if action == "add":
-            current.add(market_id)
-            _set_vtech_group_markets(current)
-            return await interaction.response.send_message(
-                f"✅ Added `{market_id}` to the V Tech group — its orders now credit the shared pool in full.",
+                "⛔ You need to be this market's owner, a site manager, or a server manager.",
                 ephemeral=True)
-        current.discard(market_id)
-        _set_vtech_group_markets(current)
+        view = MarketSettingsView(mid, interaction.user.id)
         await interaction.response.send_message(
-            f"✅ Removed `{market_id}` from the V Tech group — its orders now credit only a slice.",
-            ephemeral=True)
+            embed=await build_embed(mid, interaction.user), view=view, ephemeral=True)
+
+
 
     @market.command(name="add", description="(Manager) Register a new market")
     @app_commands.describe(
@@ -209,77 +129,6 @@ class MarketCog(commands.Cog):
         embed.set_footer(text=f"Use /csn market_id:{market_id} to record sales data for this market.")
         await interaction.response.send_message(embed=embed)
 
-    @market.command(name="delete", description="(Manager) Delete a market — removes its dashboard tab, stock, and share listing")
-    @app_commands.describe(
-        market_id="Exact market ID to delete (e.g. TEST). Resolves case-insensitively if only one variant exists.",
-        confirm="Set True to actually delete. Leave off first to preview what will be removed.",
-    )
-    @app_commands.autocomplete(market_id=_market_autocomplete)
-    async def market_delete(self, interaction: discord.Interaction, market_id: str, confirm: bool = False):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
-
-        import Restocker_db as _db
-        markets = (_load_markets().get("markets", {}) or {})
-        if market_id in markets:
-            real_id = market_id                                  # exact match wins
-        else:
-            cands = [mid for mid in markets if str(mid).strip().lower() == market_id.strip().lower()]
-            if len(cands) == 1:
-                real_id = cands[0]
-            elif len(cands) > 1:
-                return await interaction.response.send_message(
-                    f"⚠️ Multiple markets match `{market_id}` by case: "
-                    + ", ".join(f"`{c}`" for c in cands) + ". Pass the exact one.", ephemeral=True)
-            else:
-                return await interaction.response.send_message(
-                    f"❌ No market `{market_id}`. Use `/market list` to see them.", ephemeral=True)
-
-        try:
-            n_stock = sum(1 for r in (_db.get_all_market_stock() or [])
-                          if str(r.get("market_id")) == str(real_id))
-        except Exception:
-            n_stock = 0
-        try:
-            months = len((_load_csn_for_market(real_id) or {}).get("months", {}) or {})
-        except Exception:
-            months = 0
-        info = markets.get(real_id) if isinstance(markets.get(real_id), dict) else {}
-        name = info.get("name") or real_id
-
-        if not confirm:
-            return await interaction.response.send_message(
-                f"🗑️ **Delete market `{real_id}`** ({name})?\n"
-                f"• Stock items: **{n_stock}**\n"
-                f"• Sales-history months: **{months}** *(kept for audit)*\n\n"
-                f"Removes its dashboard tab, stock, alarms and share listing. "
-                f"Re-run with **`confirm:True`** to delete.",
-                ephemeral=True)
-
-        # AUDIT FIX (high): deleting a public market with live holders silently
-        # destroyed their shares AND the treasury. Delist first — /stock delist pays
-        # holders out of the market's real backing; delete is for the empty shell.
-        try:
-            _held = sum(float(h.get("shares") or 0) for h in (_db.get_holders(real_id) or []))
-        except Exception:
-            _held = 0.0
-        _listing = _db.get_market_shares(real_id)
-        if _listing and _held > 0:
-            return await interaction.response.send_message(
-                f"⛔ `{real_id}` still has **{_held:,.0f}** share(s) in holders' hands — "
-                f"deleting would wipe their money. Run `/stock delist market_id:{real_id}` "
-                f"first (it pays holders from the treasury/fund), then delete.", ephemeral=True)
-        _tre = float(_db.get_treasury(real_id) or 0)
-        if _tre > 0:
-            log.warning("[market] deleting %s with %s coins still in treasury", real_id, _tre)
-        counts = _db.delete_market(real_id)
-        log.info("[market] %s deleted market '%s' -> %s", interaction.user, real_id, counts)
-        await interaction.response.send_message(
-            f"✅ Deleted market **`{real_id}`** ({name}) — removed "
-            f"{counts.get('market_stock', 0)} stock row(s), {counts.get('stock_alarms', 0)} alarm(s), "
-            f"{counts.get('market_shares', 0)} share listing(s)."
-            + (f" ⚠️ {months} month(s) of sales history were kept." if months else ""),
-            ephemeral=True)
 
     @market.command(name="info", description="View details and earnings summary for a market")
     @app_commands.describe(market_id="The market to view")
@@ -365,171 +214,11 @@ class MarketCog(commands.Cog):
         embed.set_footer(text=f"Created: {m.get('created_at', '?')[:10]}  ·  only you can see this")
         await interaction.followup.send(embed=embed, ephemeral=True)
 
-    @market.command(name="set_ticker", description="(Manager) Set a short stock ticker symbol for a market (e.g. GEX)")
-    @app_commands.describe(market_id="Market", ticker="Symbol — 1-6 letters/digits")
-    @app_commands.autocomplete(market_id=_market_autocomplete)
-    async def market_set_ticker(self, interaction: discord.Interaction, market_id: str, ticker: str):
-        if not _is_market_manager(interaction, market_id):
-            return await interaction.response.send_message(
-                "⛔ Managers or this market's owner only.", ephemeral=True
-            )
-        sym = "".join(ch for ch in ticker.upper() if ch.isalnum())[:6]
-        if not sym:
-            return await interaction.response.send_message(
-                "❌ A ticker needs at least one letter or digit.", ephemeral=True
-            )
-        tickers = load_yaml("market_tickers.yml", {}) or {}
-        tickers[market_id] = sym
-        save_yaml("market_tickers.yml", tickers)
-        await interaction.response.send_message(
-            f"✅ Ticker for `{market_id}` set to **{sym}**.", ephemeral=True
-        )
 
-    @market.command(name="set_owner", description="(Manager) Set the owner of a market")
-    @app_commands.describe(market_id="The market to update", owner="The new owner")
-    @app_commands.autocomplete(market_id=_market_autocomplete)
-    async def market_set_owner(self, interaction: discord.Interaction, market_id: str, owner: discord.Member):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
-        data = _load_markets()
-        markets = data.get("markets") or {}
-        if market_id not in markets:
-            return await interaction.response.send_message(f"❌ Market `{market_id}` not found.", ephemeral=True)
-        markets[market_id]["owner_id"] = owner.id
-        _save_markets(data)
-        await interaction.response.send_message(
-            f"✅ **{markets[market_id].get('name', market_id)}** owner set to {owner.mention}."
-        )
 
-    @market.command(name="edit", description="(Manager) Edit a market's name, fee, or active status")
-    @app_commands.describe(
-        market_id="The market to edit",
-        name="New display name",
-        fee_pct="New platform fee % (0–50)",
-        active="Whether this market is active",
-        land="Land claim to bind to this market — its balance becomes the treasury (blank name unbinds)",
-    )
-    @app_commands.autocomplete(market_id=_market_autocomplete)
-    async def market_edit(self, 
-        interaction: discord.Interaction,
-        market_id: str,
-        name: Optional[str] = None,
-        fee_pct: Optional[app_commands.Range[float, 0.0, 50.0]] = None,
-        active: Optional[bool] = None,
-        land: Optional[str] = None,
-    ):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
-        data = _load_markets()
-        markets = data.get("markets") or {}
-        if market_id not in markets:
-            return await interaction.response.send_message(f"❌ Market `{market_id}` not found.", ephemeral=True)
-        if name is None and fee_pct is None and active is None and land is None:
-            return await interaction.response.send_message(
-                "❌ Provide at least one field to update: `name`, `fee_pct`, `active` or `land`.",
-                ephemeral=True)
 
-        mkt = markets[market_id]
-        changes = []
-        if name is not None:
-            mkt["name"] = name.strip()
-            changes.append(f"Name → `{name.strip()}`")
-        if fee_pct is not None:
-            mkt["platform_fee_pct"] = round(fee_pct, 4)
-            changes.append(f"Platform Fee → `{fee_pct}%`")
-        if active is not None:
-            mkt["active"] = active
-            changes.append(f"Active → `{active}`")
-        # Land binding folded in from the retired /land bind: a land's balance IS this
-        # market's treasury, so it belongs with the market's other settings.
-        if land is not None:
-            import Restocker_db as _db
-            lname = land.strip()
-            if not lname:
-                changes.append("Land → *unchanged (blank name)*")
-            else:
-                _db.set_config(f"land_map:{lname.lower()}", market_id)
-                snap = _db.get_land_balance(lname)
-                if snap:
-                    _db.upsert_market_shares(market_id, treasury_coins=float(snap["balance"]))
-                    core._recompute_share_price(market_id, reason="land_treasury")
-                    changes.append(f"Land → `{lname}` (treasury synced "
-                                   f"`{float(snap['balance']):,.0f}` 🪙)")
-                else:
-                    changes.append(f"Land → `{lname}` (no balance seen yet)")
 
-        _save_markets(data)
 
-        embed = discord.Embed(title=f"✅ Market Updated — {mkt.get('name', market_id)}", color=0x3498DB)
-        embed.add_field(name="Market ID", value=f"`{market_id}`", inline=True)
-        embed.add_field(name="Changes", value="\n".join(changes), inline=False)
-        await interaction.response.send_message(embed=embed)
-
-    @market.command(name="add_manager", description="(Manager/Owner) Add a site manager to a market")
-    @app_commands.describe(market_id="The market", user="The user to add as site manager")
-    @app_commands.autocomplete(market_id=_market_autocomplete)
-    async def market_add_manager(self, interaction: discord.Interaction, market_id: str, user: discord.Member):
-        if not (is_manager(interaction) or _is_market_owner(interaction, market_id)):
-            return await interaction.response.send_message("⛔ Managers or market owners only.", ephemeral=True)
-        data = _load_markets()
-        markets = data.get("markets") or {}
-        if market_id not in markets:
-            return await interaction.response.send_message(f"❌ Market `{market_id}` not found.", ephemeral=True)
-        mgr_ids = markets[market_id].setdefault("manager_ids", [])
-        if user.id not in mgr_ids:
-            mgr_ids.append(user.id)
-        _save_markets(data)
-        await interaction.response.send_message(
-            f"✅ {user.mention} added as site manager for **{markets[market_id].get('name', market_id)}**."
-        )
-
-    @market.command(name="remove_manager", description="(Manager/Owner) Remove a site manager from a market")
-    @app_commands.describe(market_id="The market", user="The user to remove")
-    @app_commands.autocomplete(market_id=_market_autocomplete)
-    async def market_remove_manager(self, interaction: discord.Interaction, market_id: str, user: discord.Member):
-        if not (is_manager(interaction) or _is_market_owner(interaction, market_id)):
-            return await interaction.response.send_message("⛔ Managers or market owners only.", ephemeral=True)
-        data = _load_markets()
-        markets = data.get("markets") or {}
-        if market_id not in markets:
-            return await interaction.response.send_message(f"❌ Market `{market_id}` not found.", ephemeral=True)
-        mgr_ids = markets[market_id].get("manager_ids") or []
-        if user.id in mgr_ids:
-            mgr_ids.remove(user.id)
-            markets[market_id]["manager_ids"] = mgr_ids
-            _save_markets(data)
-            await interaction.response.send_message(
-                f"✅ {user.mention} removed as site manager from **{markets[market_id].get('name', market_id)}**."
-            )
-        else:
-            await interaction.response.send_message(
-                f"❌ {user.mention} is not a site manager of `{market_id}`.", ephemeral=True
-            )
-
-    @market.command(name="set_leader_role", description="(Manager) Set the Discord role that identifies the leader of a market")
-    @app_commands.describe(
-        market_id="The market to update",
-        role="The Discord role whose holder is the market leader",
-    )
-    @app_commands.autocomplete(market_id=_market_autocomplete)
-    async def market_set_leader_role(self, 
-        interaction: discord.Interaction,
-        market_id: str,
-        role: discord.Role,
-    ):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
-        data = _load_markets()
-        markets = data.get("markets") or {}
-        if market_id not in markets:
-            return await interaction.response.send_message(f"❌ Market `{market_id}` not found.", ephemeral=True)
-        markets[market_id]["discord_role_name"] = role.name
-        _save_markets(data)
-        await interaction.response.send_message(
-            f"✅ Leader role for **{markets[market_id].get('name', market_id)}** set to **{role.name}**.\n"
-            f"Whoever holds this role can now run `/market_code market_id:{market_id}` to get their CSN code.",
-            ephemeral=True,
-        )
 
     # Top-level (NOT under /market) — the /market group is at Discord's 25-subcommand cap,
     # and channel-binding is discoverable under a `/bind…` search here.
@@ -613,49 +302,6 @@ class MarketCog(commands.Cog):
             ephemeral=True,
         )
 
-    @market.command(
-        name="set_code",
-        description="(Manager) Set a market's CSN verification code to an exact value, without rotating it",
-    )
-    @app_commands.describe(
-        market_id="The market to set the code for",
-        code="The exact code to store — must match what's typed into the CSN mod's Market Code field",
-    )
-    @app_commands.autocomplete(market_id=_market_autocomplete)
-    async def market_set_code(self,
-        interaction: discord.Interaction,
-        market_id: str,
-        code: str,
-    ):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
-
-        code = code.strip().upper()
-        if not code or not code.isalnum() or len(code) > 32:
-            return await interaction.response.send_message(
-                "❌ Code must be letters/digits only (no spaces or symbols).", ephemeral=True
-            )
-
-        data = _load_markets()
-        markets = data.get("markets") or {}
-        if market_id not in markets:
-            return await interaction.response.send_message(
-                f"❌ Market `{market_id}` not found.", ephemeral=True
-            )
-
-        # Unlike /market_code, this NEVER touches leader_discord_id — it only overwrites
-        # the stored code so a manager can sync it to whatever the shop owner already has
-        # typed into their mod, instead of forcing a rotate-and-redistribute cycle.
-        markets[market_id]["leader_code"] = code
-        _save_markets(data)
-
-        await interaction.response.send_message(
-            f"✅ **{markets[market_id].get('name', market_id)}** (`{market_id}`) code set to `{code}`.\n"
-            f"Make sure the CSN mod's **Market Code** field for this shop is set to exactly this value "
-            f"(case-insensitive). To check the currently-stored code without changing it, use "
-            f"`/market info market_id:{market_id}`.",
-            ephemeral=True,
-        )
 
     @app_commands.command(
         name="market_set_location",
@@ -748,196 +394,10 @@ class MarketCog(commands.Cog):
             f"That stock's price is now driven by its own net plus this (and any other rolled-in market).",
             ephemeral=True)
 
-    @market.command(
-        name="go_public",
-        description="(Manager/Owner) List a market on the stock exchange so its shares can be traded",
-    )
-    @app_commands.describe(
-        market_id="The market to take public",
-        shares_outstanding="Total shares to issue (default 1000, only used on first listing)",
-        pe_multiplier="Price multiplier applied to monthly net profit per share (default 12)",
-        initial_price="Override the computed launch price (optional — otherwise priced off real CSN profit)",
-    )
-    @app_commands.autocomplete(market_id=_market_autocomplete)
-    async def market_go_public(self, 
-        interaction: discord.Interaction,
-        market_id: str,
-        shares_outstanding: Optional[float] = None,
-        pe_multiplier: Optional[float] = None,
-        initial_price: Optional[float] = None,
-    ):
-        if not _is_market_manager(interaction, market_id):
-            return await interaction.response.send_message(
-                "⛔ Managers or this market's owner/managers only.", ephemeral=True
-            )
-        market = _get_market(market_id)
-        if not market:
-            return await interaction.response.send_message(f"❌ Market `{market_id}` not found.", ephemeral=True)
 
-        import Restocker_db as _db
-        existing = _db.get_market_shares(market_id)
-        if existing and existing.get("active"):
-            return await interaction.response.send_message(
-                f"❌ `{market_id}` is already public at `{existing['share_price']:,.2f}` 🪙/share. "
-                f"Use `/stock set_params` to adjust it instead.", ephemeral=True
-            )
 
-        _db.upsert_market_shares(
-            market_id,
-            active=1,
-            shares_outstanding=shares_outstanding,
-            pe_multiplier=pe_multiplier,
-        )
-        price = _recompute_share_price(market_id, reason="ipo")
-        if initial_price is not None and initial_price > 0:
-            # AUDIT FIX (critical): initial_price was unbounded and reachable by site
-            # managers — relist your own market at 1,000,000/share and sell into the
-            # treasury. House rule: price is HARD DATA. The override may not exceed
-            # 2× the computed fundamental (or 2× the floor with no history) unless a
-            # full server manager sets it.
-            _fund_cap = 2.0 * float(price or MIN_SHARE_PRICE)
-            if float(initial_price) > _fund_cap and not is_manager(interaction):
-                return await interaction.response.send_message(
-                    f"❌ initial_price `{float(initial_price):,.2f}` exceeds 2× the computed "
-                    f"fundamental (`{_fund_cap:,.2f}`). Launch prices are earned from real "
-                    f"CSN history — record earnings or set assets, don't type a number.",
-                    ephemeral=True)
-            price = round(initial_price, 2)
-            _db.upsert_market_shares(market_id, share_price=price)
-            _db.log_stock_price(market_id, price, "ipo_override")
-        listing = _db.get_market_shares(market_id)
 
-        embed = discord.Embed(
-            title=f"📈 {market.get('name', market_id)} Just Went Public!",
-            description=f"Shares of `{market_id}` are now tradeable with server currency.",
-            color=0x2ECC71,
-        )
-        embed.add_field(name="Share Price", value=f"`{listing['share_price']:,.2f}` 🪙", inline=True)
-        embed.add_field(name="Shares Outstanding", value=f"`{listing['shares_outstanding']:,.0f}`", inline=True)
-        embed.add_field(name="P/E Multiplier", value=f"`{listing['pe_multiplier']:,.1f}x`", inline=True)
-        if price is None:
-            embed.add_field(
-                name="⚠️ No CSN history yet",
-                value=f"Price set to the floor (`{MIN_SHARE_PRICE:,.2f}` 🪙) until a monthly report is recorded.",
-                inline=False,
-            )
-        embed.set_footer(text=f"Buy in on the dashboard exchange · market {market_id}")
-        await interaction.response.send_message(embed=embed)
 
-    @market.command(
-        name="go_private",
-        description="(Manager/Owner) Delist a market from the stock exchange",
-    )
-    @app_commands.describe(
-        market_id="The market to delist",
-        confirm="Required if anyone holds shares — type the market ID again to confirm",
-    )
-    @app_commands.autocomplete(market_id=_market_autocomplete)
-    async def market_go_private(self, interaction: discord.Interaction, market_id: str, confirm: Optional[str] = None):
-        if not _is_market_manager(interaction, market_id):
-            return await interaction.response.send_message(
-                "⛔ Managers or this market's owner/managers only.", ephemeral=True
-            )
-
-        import Restocker_db as _db
-        listing = _db.get_market_shares(market_id)
-        if not listing or not listing.get("active"):
-            return await interaction.response.send_message(f"❌ `{market_id}` isn't public.", ephemeral=True)
-
-        holders = _db.get_holders(market_id)
-        if holders and (not confirm or confirm.strip().lower() != market_id.strip().lower()):
-            total_held = sum(h["shares"] for h in holders)
-            return await interaction.response.send_message(
-                f"⚠️ {len(holders)} holder(s) own `{total_held:,.2f}` shares of `{market_id}`. "
-                f"Delisting freezes their shares at the last price (`{listing['share_price']:,.2f}` 🪙) "
-                f"until you go public again. Type `confirm:{market_id}` to proceed anyway.",
-                ephemeral=True,
-            )
-
-        _db.upsert_market_shares(market_id, active=0)
-        market = _get_market(market_id) or {}
-        await interaction.response.send_message(
-            f"✅ **{market.get('name', market_id)}** (`{market_id}`) delisted from the stock exchange. "
-            f"Existing holdings are kept and will unfreeze if it goes public again.",
-            ephemeral=True,
-        )
-
-    @market.command(name="treasury", description="(Manager/Owner) View a public market's treasury and buyback cover")
-    @app_commands.describe(market_id="The public market")
-    @app_commands.autocomplete(market_id=_market_autocomplete)
-    async def market_treasury(self, interaction: discord.Interaction, market_id: str):
-        if not _is_market_manager(interaction, market_id):
-            return await interaction.response.send_message("⛔ Managers or this market's owner only.", ephemeral=True)
-        import Restocker_db as _db
-        listing = _db.get_market_shares(market_id)
-        if not listing:
-            return await interaction.response.send_message(f"❌ `{market_id}` isn't listed.", ephemeral=True)
-        treasury = float(listing.get("treasury_coins") or 0)
-        price = float(listing.get("share_price") or 0)
-        held = sum(float(h.get("shares") or 0) for h in _db.get_holders(market_id))
-        liability = held * price
-        excess = max(0.0, treasury - liability)
-        market = _get_market(market_id) or {}
-        embed = discord.Embed(title=f"🏦 {market.get('name', market_id)} — Treasury", color=0x1ABC9C)
-        embed.add_field(name="Treasury", value=f"`{treasury:,.0f}` 🪙", inline=True)
-        embed.add_field(name="Buyback cover", value=f"`{liability:,.0f}` 🪙", inline=True)
-        embed.add_field(name="Withdrawable", value=f"`{excess:,.0f}` 🪙", inline=True)
-        embed.set_footer(text="Buys pay into the treasury; sells are funded from it. Withdraw the excess with /market treasury_withdraw.")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    @market.command(name="treasury_withdraw", description="(Manager/Owner) Withdraw a market's EXCESS treasury to your wallet")
-    @app_commands.describe(market_id="The public market", amount="Coins to withdraw (must be within the withdrawable excess)")
-    @app_commands.autocomplete(market_id=_market_autocomplete)
-    async def market_treasury_withdraw(self, interaction: discord.Interaction, market_id: str,
-                                       amount: app_commands.Range[int, 1, 1_000_000_000]):
-        if not _is_market_manager(interaction, market_id):
-            return await interaction.response.send_message("⛔ Managers or this market's owner only.", ephemeral=True)
-        import Restocker_db as _db
-        listing = _db.get_market_shares(market_id)
-        if not listing:
-            return await interaction.response.send_message(f"❌ `{market_id}` isn't listed.", ephemeral=True)
-        treasury = float(listing.get("treasury_coins") or 0)
-        price = float(listing.get("share_price") or 0)
-        held = sum(float(h.get("shares") or 0) for h in _db.get_holders(market_id))
-        liability = held * price
-        excess = max(0.0, treasury - liability)
-        amt = int(amount)
-        if amt > excess:
-            return await interaction.response.send_message(
-                f"❌ Only `{excess:,.0f}` 🪙 is withdrawable (treasury `{treasury:,.0f}` minus buyback cover `{liability:,.0f}`).",
-                ephemeral=True)
-        applied = _db.adjust_treasury(market_id, -float(amt), allow_negative=False)
-        moved = int(round(-applied))
-        add_coins(interaction.user.id, moved, counts_as_principal=True)
-        market = _get_market(market_id) or {}
-        await interaction.response.send_message(
-            f"✅ Withdrew `{moved:,}` 🪙 from **{market.get('name', market_id)}**'s treasury to your wallet.", ephemeral=True)
-
-    @market.command(name="remove_item", description="(Manager/Owner) Remove an item your market no longer sells")
-    @app_commands.describe(
-        market_id="Your market",
-        item="Exact item name to remove",
-        mode="full = also adjust historical income/net (default); hide = keep totals, just hide it",
-    )
-    @app_commands.choices(mode=[
-        app_commands.Choice(name="full - adjust totals (moves share price)", value="full"),
-        app_commands.Choice(name="hide - keep totals (cosmetic)", value="hide"),
-    ])
-    @app_commands.autocomplete(market_id=_market_autocomplete, item=any_item_autocomplete)
-    async def market_remove_item(self, interaction: discord.Interaction, market_id: str, item: str,
-                                 mode: Optional[app_commands.Choice[str]] = None):
-        if not _is_market_manager(interaction, market_id):
-            return await interaction.response.send_message("⛔ Managers or this market's owner only.", ephemeral=True)
-        adjust = (mode.value if mode else "full") != "hide"
-        r = _remove_market_item(market_id, item, adjust_totals=adjust)
-        if not r["months_touched"] and not r["catalog_removed"]:
-            return await interaction.response.send_message(f"❌ `{item}` not found in `{market_id}`.", ephemeral=True)
-        if adjust:
-            extra = f" Adjusted net by `{-r['removed_net']:,.0f}` 🪙 across `{r['months_touched']}` month(s)."
-        else:
-            extra = f" Hidden from `{r['months_touched']}` month(s); totals kept."
-        cat = " Catalog entry removed." if r["catalog_removed"] else ""
-        await interaction.response.send_message(f"🗑️ Removed **{item}** from `{market_id}`.{extra}{cat}", ephemeral=True)
 
 
 

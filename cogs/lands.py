@@ -187,7 +187,7 @@ class LandsCog(commands.Cog):
                     core._recompute_share_price(mid, reason="land_treasury")
                     line += f" → treasury of `{mid}` updated"
             else:
-                line += " · *(unbound — `/market edit land:<name>` links it)*"
+                line += " · *(unbound — `/market settings` → Edit links it)*"
             report.append(line)
         if new_entries or balances:
             try:

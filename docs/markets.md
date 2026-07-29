@@ -5,25 +5,27 @@ A "market" is a shop/business with its own sales history (from CSN), a website d
 tab, an owner + managers, and optionally a public stock listing (see [stock.md](stock.md)).
 Every CSN report and order belongs to a market.
 
-## Commands (`/market …`)
-- `add` / `delete` / `info` — register, remove, inspect a market. (`/create_market` is the
-  top-level shortcut.)
-- Earnings, monthly reports and market lists are AI-side or on the website dashboard —
-  `/market earnings`, `/market report` and `/market list` were retired. `/market_rollup` and
-  `/monthly_report` still exist top-level.
-- `/bind_market market_id [channel]` (top-level) — **bind a Discord channel to a market** so CSN reports
-  there record to it, no in-game code needed. (Alternative to the CSV market code.)
-- `set_owner` / `add_manager` / `remove_manager` / `set_leader_role` — ownership + roles.
-- `edit` — name / fee / active. `set_ticker` — stock symbol (e.g. GEX).
-- `treasury` / `treasury_withdraw` — view/withdraw a public market's excess treasury.
-- `remove_item` — catalog upkeep. Logging a hand-bought restock (which keeps net profit
-  honest) is AI-side now; ask the bot. It applies when
-  stock is added by hand. Price suggestions are AI-side.
-- `go_public` / `go_private` / `loyalty` / `vtech_group` / `set_code` — listing, loyalty
-  opt-in, group membership, CSN code.
-- Related, separate commands: `/market_code` (a market's CSN verification code),
-  and `/add_item` · `/item_edit` · `/item_info` ·
-  `/item_set_price` (catalog price + stackability).
+## MarketSettings — one panel (`/market settings`)
+Everything about a market lives on one ephemeral panel. Seventeen subcommands used to do
+this; the panel replaced them.
+
+- **Market selector**, then: **Edit** (name · fee · active · bind a land), **Rewards**
+  (restock loyalty), **Ticker**, **CSN code**, **Leader role**.
+- **Set owner** · **Add manager** · **Remove manager** · **Remove item** · **V Tech group**.
+- **Go public / Delist** · **Withdraw treasury** · **Delete market**.
+- The card shows owner, status, fee, code, bound channel, site managers, listing state
+  (price, shares, treasury, **withdrawable excess**) and the CSN webhook (spoilered).
+
+Still separate commands: `/market add` (registering a new market) and `/market info`.
+
+### Guards the panel keeps
+- **Launch price** may not exceed **2x the computed fundamental** unless a server manager
+  sets it — otherwise a site manager could list at any price and sell into the treasury.
+- **Withdrawable treasury** is `treasury - (shares held x price)`. That subtraction is the
+  buyback cover; without it you drain the money backing shareholders.
+- **Reward caps for owners**: coin bonus <= 5,000, percent <= 50%, multiplier <= 3x.
+- **Delete** and **delist-with-holders** need the market id typed back.
+
 
 ## Data / binding
 - Markets store `owner_id`, `manager_ids`, `leader_code` (CSN code), `report_channel_id`
