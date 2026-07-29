@@ -11287,6 +11287,19 @@ _AI_TOOLS = [
         }
     },
     {
+        "name": "fix_month_close",
+        "description": "Rebuild the month-closing posts from CURRENT data — edits the existing post in place rather than adding a correction, and deletes stale posts for months that no longer exist. Managers only. Use after repairing a market's history so the channel stops showing old numbers.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "month": {"type": "string", "description": "e.g. '2026-06', or 'all' for every recorded month."},
+                "market": {"type": "string", "description": "Market id. Blank = every active market."},
+                "repost": {"type": "boolean", "description": "true = post a new message instead of editing the old one."}
+            },
+            "required": []
+        }
+    },
+    {
         "name": "get_ai_audit",
         "description": "Recent AI tool actions — who ran what, and whether it was a sensitive tool. Use when asked who changed something, or to check what the AI has been doing.",
         "input_schema": {
@@ -12562,6 +12575,21 @@ async def _ai_tool_csn_cleanup(guild, channel, user, args):
     return f"Deleted {deleted} noise message(s) in #{getattr(channel,'name','?')}."
 
 
+async def _ai_tool_fix_month_close(guild, channel, user, args):
+    if not _ai_is_manager(user):
+        return "❌ Only Managers can fix month-closing posts."
+    cog = _admin_cog()
+    if cog is None:
+        return "❌ The admin engine isn't loaded."
+    try:
+        return await cog.fix_month_close(
+            month=str(args.get("month") or "").strip() or None,
+            market_id=str(args.get("market") or "").strip() or None,
+            repost=bool(args.get("repost")))
+    except Exception as ex:
+        return f"❌ fix_month_close failed: {type(ex).__name__}: {ex}"
+
+
 async def _ai_tool_get_ai_audit(guild, channel, user, args):
     if not _ai_is_manager(user):
         return "❌ Managers only."
@@ -12922,6 +12950,7 @@ _AI_TOOL_MAP = {
     "purge_channel":        _ai_tool_purge_channel,
     "csn_cleanup":          _ai_tool_csn_cleanup,
     "get_ai_audit":         _ai_tool_get_ai_audit,
+    "fix_month_close":      _ai_tool_fix_month_close,
     "propose_code_change":  _ai_tool_propose_code_change,
     "create_futures_order": _ai_tool_create_futures_order,
 }
@@ -12932,7 +12961,7 @@ _AI_SENSITIVE_TOOLS = {
     "delete_messages", "create_role", "setup_market_owner", "send_dm", "dm_role",
     "send_channel_message", "ping_user", "propose_code_change", "set_item_price",
     "run_hive_payout", "rebuild_market_channel", "rebuild_hive_channel",
-    "purge_channel", "csn_cleanup",
+    "purge_channel", "csn_cleanup", "fix_month_close",
     "add_item", "get_market_code", "create_futures_order", "dm_market_setup",
 }
 

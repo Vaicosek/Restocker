@@ -542,24 +542,15 @@ class AdminCog(commands.Cog):
         return e
 
 
-    @admin.command(name="fix_month_close",
-                   description="(Managers) EDIT the existing month-closing posts in place with the CURRENT data")
-    @app_commands.describe(month="Month key e.g. 2026-06 — or `all` / blank for EVERY recorded month",
-                           market_id="Market to fix (blank = every active market)",
-                           repost="True = post a new message instead of editing the old one")
-    @app_commands.autocomplete(market_id=_market_autocomplete)
-    async def repost_month_close(self, interaction: discord.Interaction,
-                                 month: Optional[str] = None, market_id: Optional[str] = None,
-                                 repost: bool = False):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
+    async def fix_month_close(self, month=None, market_id=None, repost: bool = False) -> str:
+        """Rebuild the month-closing posts from CURRENT data, editing in place where a
+        post already exists. Was /admin fix_month_close; the slash surface was retired,
+        so this returns a summary STRING for the AI instead of replying to an interaction."""
         import re as _re
         month = (month or "").strip().lower()
         all_months = month in ("", "all", "*")
         if not all_months and not _re.match(r"^\d{4}-\d{2}$", month):
-            return await interaction.response.send_message(
-                "❌ Month must look like `2026-06`, or use `all`.", ephemeral=True)
-        await interaction.response.defer(ephemeral=True, thinking=True)
+            return "❌ Month must look like `2026-06`, or use `all`."
         import io as _io
         markets = (_load_markets().get("markets", {}) or {})
         targets = ([market_id] if market_id else list(markets.keys()))
@@ -649,7 +640,7 @@ class AdminCog(commands.Cog):
                 + (f" (+{len(done) - 20} more)" if len(done) > 20 else "")
                 + (f"\nSkipped {len(skipped)}: {', '.join(skipped[:8])}"
                    + (" …" if len(skipped) > 8 else "") if skipped else ""))
-        return await interaction.followup.send(body[:1900], ephemeral=True)
+        return body[:1900]
 
 
 
