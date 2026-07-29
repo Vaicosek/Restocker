@@ -12254,6 +12254,9 @@ async def _ai_tool_get_hive_harvester_detail(guild, channel, user, args):
     lines.append(f"TOTAL: {d['qty']:,} pcs, {d['value']:,.0f} value.")
     lines.append(f"At the {pct:g}% harvester wage that's {d['value']*pct/100:,.0f} coins earned; "
                  f"{d['paid_value']*pct/100:,.0f} paid, {d['unpaid_value']*pct/100:,.0f} outstanding.")
+    if d.get("last_paid_at"):
+        lines.append(f"Last payment recorded {str(d['last_paid_at'])[:19]} "
+                     f"(autopay on ingest, the 6-hourly sweep, or a manual /hive payout).")
     lines.append("NOTE: 'value' is the market worth of the goods, NOT the wage. The harvester "
                  f"receives {pct:g}% of it; the rest stays with the company.")
     return "\n".join(lines[:30])
