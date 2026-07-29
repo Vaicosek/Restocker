@@ -11133,6 +11133,18 @@ _AI_TOOLS = [
         }
     },
     {
+        "name": "run_hive_payout",
+        "description": "ACTUALLY pay outstanding hive wages for a market (managers only). Preview by default; set apply=true to move real coins. Use this instead of telling someone to run /hive payout — you cannot invoke slash commands yourself.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "market": {"type": "string", "description": "Market id, e.g. 'vtech'. Default 'vtech'."},
+                "apply": {"type": "boolean", "description": "false (default) = preview only. true = pay."}
+            },
+            "required": []
+        }
+    },
+    {
         "name": "get_hive_harvester_detail",
         "description": "ONE harvester's item-level hive breakdown: exactly how many Honeycomb Blocks / Honey Blocks they delivered, the per-piece value used, what's paid vs still held, and the first/last sale date. Use whenever someone asks what a specific person actually harvested, or to check whether a payout figure is right.",
         "input_schema": {
@@ -12234,6 +12246,44 @@ async def _ai_tool_get_hive_status(guild, channel, user, args):
     return "\n".join(lines[:25])
 
 
+async def _ai_tool_run_hive_payout(guild, channel, user, args):
+    """Really settle hive wages. The AI used to 'trigger' this by typing the slash
+    command into chat, which does nothing — a bot can't invoke slash commands."""
+    if not _ai_is_manager(user):
+        return "❌ Only Managers can run a hive payout."
+    import sys as _sys, Restocker_db as _db
+    mid = str(args.get("market") or "vtech").strip().lower()
+    apply = bool(args.get("apply"))
+    cog = bot.get_cog("HiveCog")
+    hive_mod = _sys.modules.get("cogs.hive")
+    if cog is None or hive_mod is None:
+        return "❌ The hive engine isn't loaded — I can't pay right now."
+    rows = _db.get_unpaid_hive_harvests(mid)
+    if not rows:
+        return f"Nothing unpaid on {mid}."
+    groups, unregistered, unvalued = hive_mod._group_rows(rows)
+    pct = _hive_harvester_pct()
+    held = ""
+    if unregistered:
+        held += "\nHeld (unregistered, needs /register_ign): " + ", ".join(
+            f"{i} ({v:,.0f} value)" for i, v in list(unregistered.items())[:6])
+    if unvalued:
+        held += "\nSkipped (no value set): " + ", ".join(
+            f"{it} x{q}" for it, q in list(unvalued.items())[:6])
+    if not groups:
+        return f"Nothing payable on {mid}.{held}"
+    total = sum(g["value"] for g in groups.values())
+    if not apply:
+        who = ", ".join(f"{g['ign']} {g['value']*pct/100:,.0f}"
+                        for g in sorted(groups.values(), key=lambda g: -g["value"])[:8])
+        return (f"PREVIEW {mid}: {total:,.0f} value → {total*pct/100:,.0f} in wages "
+                f"across {len(groups)} harvester(s): {who}.{held}\n"
+                f"Nothing paid. Say so and ask before re-running with apply=true.")
+    res = await cog._settle_groups(mid, groups, batch=f"ai-{getattr(user,'id','?')}")
+    return (f"PAID {mid}: value {res['value_total']:,.0f}, wages {res['harv_total']:,.0f}, "
+            f"V Tech keeps {res['net']:,.0f}. Booked to the {res['month']} hive ledger.{held}")
+
+
 async def _ai_tool_get_hive_harvester_detail(guild, channel, user, args):
     import Restocker_db as _db
     ign = str(args.get("ign") or "").strip()
@@ -12526,6 +12576,7 @@ _AI_TOOL_MAP = {
     "list_aliases":         _ai_tool_list_aliases,
     "get_market_code":      _ai_tool_get_market_code,
     "get_hive_harvester_detail": _ai_tool_get_hive_harvester_detail,
+    "run_hive_payout":      _ai_tool_run_hive_payout,
     "propose_code_change":  _ai_tool_propose_code_change,
     "create_futures_order": _ai_tool_create_futures_order,
 }
@@ -12535,6 +12586,7 @@ _AI_SENSITIVE_TOOLS = {
     "assign_role", "remove_role", "kick_user", "ban_user", "timeout_user",
     "delete_messages", "create_role", "setup_market_owner", "send_dm", "dm_role",
     "send_channel_message", "ping_user", "propose_code_change", "set_item_price",
+    "run_hive_payout",
     "add_item", "get_market_code", "create_futures_order", "dm_market_setup",
 }
 
