@@ -277,3 +277,143 @@ class LoyaltySettingsView(discord.ui.View):
             + "\n\nThis panel only previews. To actually send, ask the bot to remind "
               "unlinked employees — and it will confirm before touching deadlines.",
             ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+
+
+# ── member-facing hub ────────────────────────────────────────────────────────
+def build_hub_embed(user, guild=None) -> discord.Embed:
+    """What /loyalty stats used to show, for the person who opened the panel."""
+    d = _db()
+    rec = d.get_loyalty(str(user.id))
+    pts = float(rec.get("points", 0))
+    total = float(rec.get("total_earned", 0))
+    tier = core._loyalty_tier(pts)
+    tiers = getattr(core, "LOYALTY_TIERS", []) or []
+    nxt = next((t for t in tiers if t["min_pts"] > pts), None)
+    igns = d.get_igns(str(user.id))
+    em = _tier_emojis()
+    e = discord.Embed(
+        title=f"{em.get(tier['tier'], '⭐')} {getattr(user, 'display_name', user)} — {tier['name']}",
+        color=0xF1C40F)
+    e.add_field(name="Points", value=f"`{pts:,.0f}`", inline=True)
+    e.add_field(name="All-time", value=f"`{total:,.0f}`", inline=True)
+    e.add_field(name=(f"IGNs ({len(igns)})" if len(igns) > 1 else "IGN"),
+                value=(", ".join((f"`{g}` ★" if i == 0 else f"`{g}`") for i, g in enumerate(igns))
+                       if igns else "*not registered — /register_ign*"),
+                inline=(len(igns) <= 1))
+    e.add_field(name="Interest", value=f"`{tier['interest_weekly_pct']}%/wk`", inline=True)
+    e.add_field(name="Payout bonus", value=f"`+{tier['payout_bonus_pct']}%`", inline=True)
+    if nxt:
+        e.add_field(name=f"Next: {em.get(nxt['tier'], '')} {nxt['name']}",
+                    value=f"`{nxt['min_pts'] - pts:,.0f}` pts away", inline=True)
+    else:
+        e.add_field(name="Tier", value="🏆 max", inline=True)
+    try:
+        rows = d.get_all_market_loyalty_for_user(str(user.id)) or []
+        if rows:
+            lines = [f"• **{(core._get_market(r['market_id']) or {}).get('name', r['market_id'])}** — "
+                     f"`{float(r.get('points', 0) or 0):,.0f}` pts" for r in rows[:8]]
+            if len(rows) > 8:
+                lines.append(f"… +{len(rows) - 8} more")
+            e.add_field(name="🏪 Market points", value="\n".join(lines), inline=False)
+    except Exception:
+        pass
+    e.set_footer(text="Buttons: leaderboard · redeem · (managers) settings")
+    return e
+
+
+class _RedeemModal(discord.ui.Modal, title="Redeem loyalty points"):
+    def __init__(self, hub):
+        super().__init__(timeout=300)
+        self.hub = hub
+        self.points = discord.ui.TextInput(label="Points to spend", required=True)
+        self.reward = discord.ui.TextInput(label="What you want", required=True, max_length=100)
+        self.market = discord.ui.TextInput(label="Market id (blank = V Tech pool)", required=False)
+        self.add_item(self.points); self.add_item(self.reward); self.add_item(self.market)
+
+    async def on_submit(self, i: discord.Interaction):
+        loy = _loy()
+        if loy is None or not hasattr(loy, "submit_redemption"):
+            return await i.response.send_message(
+                "Redemptions are handled by `/loyalty redeem` — ask a manager if it's missing.",
+                ephemeral=True)
+        try:
+            pts = int(float(str(self.points.value).strip()))
+        except Exception:
+            return await i.response.send_message("❌ Points must be a number.", ephemeral=True)
+        msg = await loy.submit_redemption(i, pts, str(self.reward.value).strip(),
+                                          str(self.market.value or "").strip() or None)
+        if msg:
+            await i.response.send_message(msg, ephemeral=True)
+
+
+class LoyaltyHubView(discord.ui.View):
+    """One entry point for everyone. Members get stats/leaderboard/redeem; managers also
+    get the settings panel. Replaces /loyalty stats|leaderboard|redeem|redemptions|settings."""
+
+    def __init__(self, user_id: int, is_manager: bool):
+        super().__init__(timeout=300)
+        self.user_id = int(user_id)
+        for label, style, cb, row in (
+            ("My stats", discord.ButtonStyle.primary, self._stats, 0),
+            ("Leaderboard", discord.ButtonStyle.secondary, self._board, 0),
+            ("Redeem", discord.ButtonStyle.success, self._redeem, 0),
+        ):
+            b = discord.ui.Button(label=label, style=style, row=row); b.callback = cb
+            self.add_item(b)
+        if is_manager:
+            for label, cb in (("Pending redemptions", self._pending), ("Manager settings", self._settings)):
+                b = discord.ui.Button(label=label, style=discord.ButtonStyle.secondary, row=1)
+                b.callback = cb
+                self.add_item(b)
+
+    async def interaction_check(self, i: discord.Interaction) -> bool:
+        if int(i.user.id) != self.user_id:
+            await i.response.send_message("This panel isn't yours.", ephemeral=True)
+            return False
+        return True
+
+    async def _stats(self, i: discord.Interaction):
+        await i.response.edit_message(embed=build_hub_embed(i.user, i.guild), view=self)
+
+    async def _board(self, i: discord.Interaction):
+        d = _db()
+        rows = d.get_loyalty_leaderboard(15) or []
+        if not rows:
+            return await i.response.send_message("No loyalty data yet.", ephemeral=True)
+        em = _tier_emojis()
+        lines = []
+        for n, r in enumerate(rows, 1):
+            uid = r["user_id"]; pts = float(r.get("points", 0))
+            t = core._loyalty_tier(pts)
+            medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(n, f"`{n}.`")
+            lines.append(f"{medal} <@{uid}> (`{d.get_ign(uid) or '—'}`) — **{pts:,.0f}** pts "
+                         f"{em.get(t['tier'], '')} {t['name']}")
+        await i.response.send_message(
+            embed=discord.Embed(title="🏆 Loyalty leaderboard", description="\n".join(lines),
+                                color=0xF1C40F),
+            ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+
+    async def _redeem(self, i: discord.Interaction):
+        await i.response.send_modal(_RedeemModal(self))
+
+    async def _pending(self, i: discord.Interaction):
+        if not _is_mgr(i.user):
+            return await i.response.send_message("⛔ Managers only.", ephemeral=True)
+        loy = _loy()
+        reds = ((loy._load_redemptions() if loy else {}) or {}).values()
+        pend = sorted([r for r in reds if r.get("status") == "pending"],
+                      key=lambda r: int(r.get("id", 0)))
+        if not pend:
+            return await i.response.send_message("✅ No pending redemptions.", ephemeral=True)
+        lines = [f"**#{r['id']}** — <@{r['user_id']}> · **{int(r['points']):,}** pts → *{r['reward']}*"
+                 for r in pend[:25]]
+        await i.response.send_message(
+            "🎟️ **Pending redemptions**\n" + "\n".join(lines)
+            + "\n\nApprove / Reject on each ticket — approving deducts the points.",
+            ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+
+    async def _settings(self, i: discord.Interaction):
+        if not _is_mgr(i.user):
+            return await i.response.send_message("⛔ Managers only.", ephemeral=True)
+        await i.response.send_message(embed=build_embed(i.guild),
+                                      view=LoyaltySettingsView(i.user.id), ephemeral=True)
