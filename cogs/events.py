@@ -226,6 +226,12 @@ class EventsCog(commands.Cog):
                 return
         _processed_any = False
         _all_transport = bool(message.attachments)
+        # The mod posts the monthly aggregate AND the per-transaction period file in one
+        # message. Both describe the same sales, so only the monthly one may book earnings
+        # — otherwise every coin is counted twice. The period file still gets ingested for
+        # its per-customer / per-day detail.
+        _has_monthly = any(a.filename.lower().endswith(".csv") and "csn_monthly" in a.filename.lower()
+                           for a in message.attachments)
         for att in message.attachments:
             name = att.filename.lower()
             report_channel = (
@@ -249,7 +255,9 @@ class EventsCog(commands.Cog):
                 _all_transport = False        # carries something that isn't CSN transport — keep
                 continue
             try:
-                await _process_csn_attachment(att, report_channel, source_channel_id=message.channel.id)
+                await _process_csn_attachment(
+                    att, report_channel, source_channel_id=message.channel.id,
+                    txn_only=("csn_export" in name and _has_monthly))
                 _processed_any = True
             except Exception as e:
                 log.error("CSN on_message processing failed: %s", e)

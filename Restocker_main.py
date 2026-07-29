@@ -2603,7 +2603,13 @@ _HIVE_DEFAULT_VALUES = {"honey block": 350.0 / 64.0, "honeycomb block": 300.0 / 
 
 def _hive_item_value(item) -> float:
     """Per-piece value of a hive product. Config 'hive_value:<item>' (lowercased) wins;
-    defaults: Honey Block 350, Honeycomb Block 300; anything unknown = 0 (not a hive item)."""
+    anything unknown = 0 (not a hive item, so it's never paid for).
+
+    UNITS — the thing everyone gets wrong: shop prices are quoted PER STACK OF 64
+    (Honeycomb Block 300/stack, Honey Block 350/stack) but this function and the
+    `hive_harvests.unit_value` column are PER PIECE. Hence the defaults are
+    300/64 = 4.6875 and 350/64 = 5.46875. If you ever set `hive_value:` to a
+    stack price by mistake, harvesters get paid 64x too much."""
     key = re.sub(r"\s+", " ", str(item or "").strip().lower())
     if not key:
         return 0.0
@@ -3669,7 +3675,8 @@ _ACQ_VALUE_PER_PIECE = {
 }
 
 
-async def _process_csn_attachment(attachment: discord.Attachment, report_channel, source_channel_id=None):
+async def _process_csn_attachment(attachment: discord.Attachment, report_channel, source_channel_id=None,
+                                  txn_only: bool = False):
     filename = attachment.filename
     try:
         csv_text = (await attachment.read()).decode("utf-8", errors="replace")
@@ -3892,6 +3899,26 @@ async def _process_csn_attachment(attachment: discord.Attachment, report_channel
                 f"Recorded to the `{effective_market_id}` (fallback) market instead of a real one. "
                 f"Create it first with `/market add market_id:{csv_market_id}`, or check for typos."
             )
+
+    # ── Per-transaction ledger ───────────────────────────────────────────────
+    # A `# PERIOD` export carries every individual sale (who bought what, and when).
+    # csn_history only keeps monthly per-item totals, so this is the only place that
+    # detail survives. Stored against the SAME resolved market as the earnings, and
+    # deduped on full sale identity so re-scans are free.
+    if csv_type == "export":
+        try:
+            _txns = _parse_period_transactions(csv_text)
+            if _txns:
+                import Restocker_db as _db_txn
+                _new = _db_txn.add_csn_transactions(effective_market_id, _txns)
+                log.info("[csn txn] %s: %d/%d transaction(s) recorded from %s",
+                         effective_market_id, _new, len(_txns), filename)
+        except Exception as _te:
+            log.warning("[csn txn] ingest failed for %s: %s", filename, _te)
+    # When a monthly report accompanies this file, that one carries the earnings —
+    # recording both would double-count every coin. Transactions are already saved.
+    if txn_only:
+        return
 
     # Combs (and any other item we choose to price) arrive via 0-coin collection shops:
     # workers deposit them free, so CSN records 0 coins, but the STOCK gained is worth its
@@ -4260,6 +4287,20 @@ async def on_ready():
             log.info("[hive feeds] left existing bindings alone: %s", ", ".join(_kept))
     except Exception as _hfe:
         log.warning("[hive feeds] auto-registration failed: %s", _hfe)
+
+    # ── Earnings privacy defaults ────────────────────────────────────────────────
+    # The Ledger is public, so every market's income/spend/margins are readable by
+    # anyone with the URL. These owners asked to be excluded. Only applied when the
+    # key is UNSET, so an owner flipping it back on via the website always wins.
+    try:
+        import Restocker_db as _db_pv
+        for _pmid in ("viridianmarket", "freezone"):
+            if _db_pv.get_config(f"market_earnings_public:{_pmid}") is None:
+                _db_pv.set_config(f"market_earnings_public:{_pmid}", "0")
+                log.info("[earnings privacy] %s defaulted to hidden", _pmid)
+                print(f"🔒 {_pmid}: earnings hidden from the public Ledger.")
+    except Exception as _pve:
+        log.warning("[earnings privacy] defaults failed: %s", _pve)
 
 
     try:
@@ -6220,6 +6261,50 @@ def _detect_csv_type(csv_text: str, filename: str = "") -> str:
     return "unknown"
 
 
+def _parse_period_transactions(csv_text: str) -> list:
+    """Every individual sale in a `# PERIOD` export, preserving WHO and WHEN.
+
+    `_parse_export_csv` reads the same file but aggregates it to per-item totals,
+    throwing away `actor` and `timestamp_iso` — the two columns that make daily and
+    per-customer reporting possible. This keeps them.
+
+    Returns [{actor, seller, verb, item, qty, coins, sale_ts}]; rows without a usable
+    timestamp are dropped (they can't be deduped or placed on a day).
+    """
+    out, header = [], None
+    for row in csv.reader(io.StringIO(csv_text)):
+        if not row:
+            continue
+        first = (row[0] or "").strip()
+        if first.startswith("#"):
+            continue
+        if first == "actor":
+            header = row
+            continue
+        if header is None:
+            continue
+        rec = {header[i]: (row[i] if i < len(row) else "") for i in range(len(header))}
+        ts = (rec.get("timestamp_iso") or "").strip()
+        item = (rec.get("item") or "").strip()
+        if not ts or not item or len(ts) < 10:
+            continue
+        try:
+            qty = int((rec.get("quantity") or "0").strip())
+            coins = float((rec.get("amount_coins") or "0").strip())
+        except Exception:
+            continue
+        out.append({
+            "actor":  (rec.get("actor") or "?").strip(),
+            "seller": (rec.get("seller") or "").strip(),
+            "verb":   (rec.get("verb") or "").strip().lower(),
+            "item":   item,
+            "qty":    qty,
+            "coins":  coins,
+            "sale_ts": ts,
+        })
+    return out
+
+
 def _parse_export_csv(csv_text: str) -> tuple:
     items: dict = {}
     income = 0.0
@@ -6873,6 +6958,26 @@ def _build_csn_compact_embed(title, items, income, spent, market_id, month_key,
                              for n, v in buys),
             inline=False)
 
+    # Day-by-day sales from the per-transaction ledger. The rest of this card is monthly
+    # aggregate, which can't say WHEN anything sold — this is the only part that can, and
+    # it's already up to date because transactions are ingested before the report is built.
+    # Silently skipped for markets with no transaction rows (i.e. anyone still on an older
+    # mod build), so the card looks exactly as it always did for them.
+    try:
+        import Restocker_db as _db_day
+        _days = _db_day.get_csn_daily_sales(market_id, 7) or []
+        if _days:
+            _rows = []
+            for _d in _days[:5]:
+                _rows.append(f"{_d['day'][5:]}  {int(_d.get('income') or 0):>9,}c  "
+                             f"{int(_d.get('units') or 0):>5} pcs  {int(_d.get('customers') or 0)} buyers")
+            # Customer names deliberately stay OFF the card — it posts to a channel others
+            # can read. Per-customer figures live on the owner-gated My Market page.
+            embed.add_field(name="📆 Sales by day (last 5 with activity)",
+                            value="```\n" + "\n".join(_rows) + "\n```", inline=False)
+    except Exception as _de:
+        log.debug("[csn embed] daily block skipped: %s", _de)
+
     # Live low-stock (from the last barrel scan) — actionable, replaces the old
     # sold-derived "Restock Needed" guess with the real shortfall.
     try:
@@ -6998,7 +7103,7 @@ def _build_csn_embed(
 
 def _render_full_report_html(title: str, market_label: str, month_label: str,
                              items: dict, income: float, spent: float,
-                             nav_html: str = "") -> str:
+                             nav_html: str = "", extra_html: str = "") -> str:
     """Render the COMPLETE monthly report as a self-contained, sortable HTML page —
     every item (not just the embed's top-10), split into income vs expense with a live
     search and click-to-sort table. Used both as a downloadable attachment and served
@@ -7089,6 +7194,7 @@ __NAVCSS__
   <div class="card"><div class="k">Spent</div><div class="v neg">__SPENT__ &cent;</div></div>
   <div class="card"><div class="k">Net Profit</div><div class="v __NETCLASS__">__NETSIGN____NET__ &cent;</div></div>
 </div>
+__EXTRA__
 <div class="controls">
   <input id="q" placeholder="Search items…" oninput="render()">
   <select id="f" onchange="render()">
@@ -7138,6 +7244,7 @@ render();
         .replace("__ROWS__", rows_html) \
         .replace("__DATA__", data_json) \
         .replace("__NAVCSS__", nav_css if nav_html else "") \
+        .replace("__EXTRA__", extra_html or "") \
         .replace("__NAV__", nav_html or "")
 
 

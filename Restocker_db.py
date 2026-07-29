@@ -345,6 +345,32 @@ CREATE INDEX IF NOT EXISTS idx_futures_bulk_status ON futures_bulk(status);
 CREATE INDEX IF NOT EXISTS idx_futures_bulk_customer ON futures_bulk(customer_id);
 CREATE INDEX IF NOT EXISTS idx_fbl_bulk ON futures_bulk_lines(bulk_id);
 
+-- ── Per-transaction sales ledger (the CSN mod's "# PERIOD" export) ──────────
+-- csn_history stores MONTHLY aggregates per item; this stores the individual sales those
+-- aggregates are computed from — who bought it and exactly when. Enables daily/hourly
+-- reporting and per-customer analysis, neither of which an aggregate can answer.
+-- `verb` follows CSN's semantics: 'bought' = a customer bought FROM you (income, coins>0),
+-- 'sold' = you bought from them (expense, coins<0).
+CREATE TABLE IF NOT EXISTS csn_transactions (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    market_id   TEXT NOT NULL,
+    actor       TEXT NOT NULL,             -- the other party: your customer (or supplier)
+    seller      TEXT,                      -- shop owner as reported by CSN
+    verb        TEXT NOT NULL,             -- 'bought' | 'sold'
+    item        TEXT NOT NULL,
+    qty         INTEGER NOT NULL,
+    coins       REAL NOT NULL DEFAULT 0,
+    sale_ts     TEXT NOT NULL,             -- absolute ISO instant reconstructed by the mod
+    sale_day    TEXT NOT NULL,             -- YYYY-MM-DD, indexed for day rollups
+    recorded_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_csn_txn_day    ON csn_transactions(market_id, sale_day);
+CREATE INDEX IF NOT EXISTS idx_csn_txn_actor  ON csn_transactions(market_id, actor);
+-- Full sale identity. The mod already dedups per-run via its .seen file, but re-scans after
+-- a .seen wipe (and two operators scanning the same shop) must not create duplicates.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_csn_txn
+    ON csn_transactions(market_id, actor, item, qty, coins, sale_ts);
+
 -- ── Hive engine: per-player harvest feed + monthly value bookings ───────────
 -- hive_harvests: one row per parsed "X sold you Nx Item" feed line. The chest shops buy
 -- honey at 0 coins, so the REAL value is assigned here (unit_value snapshot) and paid out
@@ -621,6 +647,21 @@ CREATE TABLE IF NOT EXISTS market_stock (
     updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (market_id, item)
 );
+
+-- market_stock keeps only the LATEST reading per item (ON CONFLICT DO UPDATE), so every
+-- scan destroyed the previous one and no trend could ever be computed. This keeps one row
+-- per item per scan-day: enough to see depletion and predict a restock, without a row per
+-- scan for people who press K several times an hour.
+CREATE TABLE IF NOT EXISTS market_stock_history (
+    market_id  TEXT NOT NULL,
+    item       TEXT NOT NULL,
+    day        TEXT NOT NULL,              -- YYYY-MM-DD of the reading
+    stock      INTEGER NOT NULL DEFAULT 0, -- last reading that day
+    capacity   INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (market_id, item, day)
+);
+CREATE INDEX IF NOT EXISTS idx_stock_hist ON market_stock_history(market_id, item, day);
 
 CREATE TABLE IF NOT EXISTS stock_alarms (
     market_id   TEXT NOT NULL,
@@ -1932,6 +1973,17 @@ def upsert_market_stock(market_id: str, item: str, owner: str = None, stock: int
              (float(sell_price) if sell_price is not None else None),
              (int(buy_qty) if buy_qty is not None else None),
              (int(sell_qty) if sell_qty is not None else None), now))
+        # Snapshot the reading so history survives the overwrite above. One row per day —
+        # a second scan the same day replaces it, so the day reflects the latest count.
+        try:
+            conn.execute(
+                "INSERT INTO market_stock_history (market_id, item, day, stock, capacity, updated_at) "
+                "VALUES (?,?,?,?,?,?) "
+                "ON CONFLICT(market_id, item, day) DO UPDATE SET stock=excluded.stock, "
+                "capacity=excluded.capacity, updated_at=excluded.updated_at",
+                (mid, item, now[:10], int(stock or 0), cap, now))
+        except Exception:
+            pass          # history is a nice-to-have; never break a live stock write
 
 
 def get_market_stock(market_id: str) -> dict:
@@ -2915,6 +2967,150 @@ def get_hive_harvest_summary(market_id: str) -> dict:
         g["qty"] += q; g["value"] += v
         i = m["by_item"].setdefault(r["item"], {"qty": 0, "value": 0.0})
         i["qty"] += q; i["value"] += v
+    return out
+
+
+def add_csn_transactions(market_id: str, rows: list) -> int:
+    """Bulk-insert per-transaction sales. Returns how many were NEW.
+
+    `rows` are dicts with actor/seller/verb/item/qty/coins/sale_ts. Duplicates are
+    dropped by the uq_csn_txn index, so re-ingesting the same file — or the same
+    shop scanned by two operators — is a no-op.
+    """
+    if not rows:
+        return 0
+    new = 0
+    with db() as conn:
+        for r in rows:
+            ts = str(r.get("sale_ts") or "").strip()
+            if not ts:
+                continue                       # a sale with no time is useless here
+            try:
+                cur = conn.execute("""
+                    INSERT OR IGNORE INTO csn_transactions
+                        (market_id, actor, seller, verb, item, qty, coins, sale_ts, sale_day)
+                    VALUES (?,?,?,?,?,?,?,?,?)
+                """, (str(market_id), str(r.get("actor") or "?"),
+                      str(r.get("seller") or ""), str(r.get("verb") or "").lower(),
+                      str(r.get("item") or ""), int(r.get("qty") or 0),
+                      float(r.get("coins") or 0), ts, ts[:10]))
+                new += cur.rowcount
+            except Exception:
+                continue
+    return new
+
+
+def get_csn_daily_sales(market_id: str, days: int = 30) -> list:
+    """[{day, income, spent, net, units, txns, customers}] newest first."""
+    with db() as conn:
+        rows = conn.execute("""
+            SELECT sale_day AS day,
+                   SUM(CASE WHEN verb='bought' THEN coins ELSE 0 END)      AS income,
+                   SUM(CASE WHEN verb='sold'   THEN ABS(coins) ELSE 0 END) AS spent,
+                   SUM(CASE WHEN verb='bought' THEN qty ELSE 0 END)        AS units,
+                   COUNT(*)                                                AS txns,
+                   COUNT(DISTINCT actor)                                   AS customers
+            FROM csn_transactions
+            WHERE market_id=?
+            GROUP BY sale_day
+            ORDER BY sale_day DESC
+            LIMIT ?
+        """, (str(market_id), int(days))).fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["net"] = float(d["income"] or 0) - float(d["spent"] or 0)
+        out.append(d)
+    return out
+
+
+def get_csn_day_detail(market_id: str, day: str) -> list:
+    """What sold on ONE day: [{item, units, coins, txns}] best-selling first."""
+    with db() as conn:
+        rows = conn.execute("""
+            SELECT item,
+                   SUM(CASE WHEN verb='bought' THEN qty ELSE 0 END)   AS units,
+                   SUM(CASE WHEN verb='bought' THEN coins ELSE 0 END) AS coins,
+                   COUNT(*)                                           AS txns
+            FROM csn_transactions
+            WHERE market_id=? AND sale_day=?
+            GROUP BY item
+            ORDER BY coins DESC
+        """, (str(market_id), str(day))).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_csn_top_customers(market_id: str, days: int = 30, limit: int = 15) -> list:
+    """Who actually spends money here: [{actor, spent, units, txns, last_seen}]."""
+    with db() as conn:
+        rows = conn.execute("""
+            SELECT actor,
+                   SUM(coins) AS spent,
+                   SUM(qty)   AS units,
+                   COUNT(*)   AS txns,
+                   MAX(sale_ts) AS last_seen
+            FROM csn_transactions
+            WHERE market_id=? AND verb='bought'
+              AND sale_day >= date('now', ?)
+            GROUP BY actor
+            ORDER BY spent DESC
+            LIMIT ?
+        """, (str(market_id), f"-{int(days)} days", int(limit))).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_stock_history(market_id: str, item: str = None, days: int = 60) -> list:
+    """Raw stock readings: [{item, day, stock, capacity}] oldest first."""
+    q = ("SELECT item, day, stock, capacity FROM market_stock_history "
+         "WHERE market_id=? AND day >= date('now', ?)")
+    args = [str(market_id), f"-{int(days)} days"]
+    if item:
+        q += " AND item=?"
+        args.append(str(item))
+    q += " ORDER BY day"
+    with db() as conn:
+        return [dict(r) for r in conn.execute(q, args).fetchall()]
+
+
+def get_stock_depletion(market_id: str, days: int = 30) -> list:
+    """Per item: how fast stock is falling and when it runs out.
+
+    [{item, stock, capacity, per_day, days_left, readings, first_day, last_day}]
+    sorted by urgency (soonest to empty first). `per_day` is average units lost per
+    day across the window — negative means it's being restocked faster than it sells,
+    in which case days_left is None. Needs >= 2 readings on different days.
+    """
+    rows = {}
+    with db() as conn:
+        for r in conn.execute(
+                "SELECT item, day, stock, capacity FROM market_stock_history "
+                "WHERE market_id=? AND day >= date('now', ?) ORDER BY item, day",
+                (str(market_id), f"-{int(days)} days")).fetchall():
+            rows.setdefault(r["item"], []).append(dict(r))
+    out = []
+    for item, hist in rows.items():
+        if len(hist) < 2:
+            continue
+        first, last = hist[0], hist[-1]
+        try:
+            from datetime import date as _d
+            d0 = _d.fromisoformat(first["day"]); d1 = _d.fromisoformat(last["day"])
+            span = (d1 - d0).days
+        except Exception:
+            span = 0
+        if span <= 0:
+            continue
+        drop = float(first["stock"] or 0) - float(last["stock"] or 0)
+        per_day = drop / span
+        days_left = (float(last["stock"] or 0) / per_day) if per_day > 0 else None
+        out.append({
+            "item": item, "stock": int(last["stock"] or 0),
+            "capacity": int(last["capacity"] or 0),
+            "per_day": round(per_day, 1),
+            "days_left": (round(days_left, 1) if days_left is not None else None),
+            "readings": len(hist), "first_day": first["day"], "last_day": last["day"],
+        })
+    out.sort(key=lambda x: (x["days_left"] is None, x["days_left"] if x["days_left"] is not None else 1e9))
     return out
 
 

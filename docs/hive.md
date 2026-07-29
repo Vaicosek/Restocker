@@ -24,6 +24,25 @@ hive system records those sales and pays each harvester a % of the harvested val
 - `payout market_id [apply]` — manual sweep. `apply:false` previews, `apply:true` pays.
 - `ingest` — manually paste feed lines (backfill / when the mod isn't posting).
 
+## Item values — PER PIECE, and the shop quotes PER STACK
+This is the single most misread thing in the system, so state it explicitly whenever
+value comes up:
+
+| Item | Shop price | Stack | **Value per piece** |
+|---|---|---|---|
+| Honeycomb Block | 300 per stack | 64 | **4.6875** |
+| Honey Block | 350 per stack | 64 | **5.46875** |
+
+- `hive_value:<item>` and `hive_harvests.unit_value` are **per piece**, always.
+- The built-in defaults are already `300/64` and `350/64` — they are correct, do NOT
+  "fix" them to 300 and 350.
+- A harvest of 3,856 comb blocks is therefore `3,856 x 4.6875 = 18,075` value, and at a
+  15% wage the harvester earns `2,711` coins. That arithmetic is right — if someone
+  thinks the payout looks small, the reason is the **wage %**, not the item value.
+- **"Value" is the goods' market worth, not the wage.** The harvester receives the wage
+  percentage of it; the remainder is the company's. Never present value as money owed.
+- If a value is ever set to a *stack* price by mistake, wages come out **64x too high**.
+
 ## Config / data
 - Value per item: `hive_value:<item lowercased>` (e.g. `honey block`, `honeycomb block`).
 - Wage %: `hive_harvester_pct`. Channel→market feed: `hive_feed:<channel_id>`. Autopay:

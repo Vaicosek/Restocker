@@ -5,7 +5,7 @@ shops (which buy at 0 coins), and the company owes them a wage. This cog closes 
 loop automatically: the CSN Notifier webhook posts per-player lines ("X sold you
 276xHoney Block …") into a bound channel; every line is recorded idempotently, and —
 with autopay on — the harvester is IMMEDIATELY paid their % of the harvested value
-(Honey Block 350 / Honeycomb Block 300 by default) to their coin balance, awarded
+to their coin balance, awarded
 loyalty, and the wage is logged under the perpetual project (team_perf kind="project",
 so the cost of hive harvesting is always visible). A partner owner's cut is paid where
 configured, and V Tech's remainder books to the market's hive ledger — which the stock
