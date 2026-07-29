@@ -332,18 +332,17 @@ class _RedeemModal(discord.ui.Modal, title="Redeem loyalty points"):
 
     async def on_submit(self, i: discord.Interaction):
         loy = _loy()
-        if loy is None or not hasattr(loy, "submit_redemption"):
-            return await i.response.send_message(
-                "Redemptions are handled by `/loyalty redeem` — ask a manager if it's missing.",
-                ephemeral=True)
+        if loy is None:
+            return await i.response.send_message("Loyalty engine isn't loaded.", ephemeral=True)
         try:
             pts = int(float(str(self.points.value).strip()))
         except Exception:
             return await i.response.send_message("❌ Points must be a number.", ephemeral=True)
+        # Same path the /loyalty redeem command used — including the guard that stops
+        # stacking pending requests beyond your balance in a pool.
         msg = await loy.submit_redemption(i, pts, str(self.reward.value).strip(),
                                           str(self.market.value or "").strip() or None)
-        if msg:
-            await i.response.send_message(msg, ephemeral=True)
+        await i.response.send_message(msg, ephemeral=True)
 
 
 class LoyaltyHubView(discord.ui.View):

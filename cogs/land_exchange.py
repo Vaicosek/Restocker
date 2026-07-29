@@ -338,7 +338,7 @@ def _finalize_sale_core(listing_id: int, buyer_id, price: float) -> dict:
         # reads this exact config key at the land haircut (65% rule). No new plumbing.
         _db.set_config(f"valuate:land_claim:{listing['market_id']}", str(float(price)))
     # Award V Tech loyalty points to BOTH sides of a real sale (can't be farmed — coins
-    # actually moved). Feeds the existing loyalty table, so /loyalty stats/redemption see it.
+    # actually moved). Feeds the existing loyalty table, so the loyalty hub sees it.
     pts = _loyalty_award_points(_db, price)
     try:
         _db.add_loyalty_points(str(seller_id), pts)
