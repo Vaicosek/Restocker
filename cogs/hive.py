@@ -11,9 +11,9 @@ so the cost of hive harvesting is always visible). A partner owner's cut is paid
 configured, and V Tech's remainder books to the market's hive ledger — which the stock
 roll-up prices off.
 
-One-time setup: /hive bind (in the webhook channel) → /hive settle (write off the
-pre-engine backlog you already paid by hand) → /hive autopay on. After that it runs
-itself. /hive payout stays as a manual sweep (e.g. after someone registers their IGN).
+Everything is driven from ONE panel: `/hive settings` (HiveSettings). Bind a feed
+channel, set the wage / partner split / item values, toggle autopay, and pay the
+backlog — all from there. Seven subcommands used to do this; the panel replaced them.
 """
 import sys
 import discord
@@ -46,24 +46,6 @@ def _fmt(n) -> str:
     return f"{int(round(float(n))):,}"
 
 
-async def _hive_item_autocomplete(interaction: discord.Interaction, current: str):
-    """Suggest hive-valued items for /hive set_value: the two defaults plus anything
-    already valued in config, filtered by what's typed. Free text still allowed."""
-    names = {"Honey Block", "Honeycomb Block"}
-    try:
-        import Restocker_db as _db
-        with _db.db() as _c:
-            for r in _c.execute("SELECT key FROM bot_config WHERE key LIKE 'hive_value:%'"):
-                nm = str(r[0]).split("hive_value:", 1)[-1].strip()
-                if nm:
-                    names.add(nm.title())
-    except Exception:
-        pass
-    cur = (current or "").strip().lower()
-    out = sorted(n for n in names if cur in n.lower())
-    if current and current.strip() and not any(current.strip().lower() == n.lower() for n in out):
-        out = [current.strip()] + out          # let managers set a custom item name too
-    return [app_commands.Choice(name=n, value=n) for n in out[:25]]
 
 
 def _ingest_lines(market_id: str, msg_id: str, lines: list, start_line: int = 0) -> list:
@@ -164,8 +146,8 @@ class HiveIngestModal(discord.ui.Modal, title="Paste hive feed lines"):
         new_ids = _ingest_lines(self.market_id, f"manual:{interaction.id}", lines)
         await interaction.response.send_message(
             f"🐝 Recorded **{len(new_ids)}** harvest line(s) for `{self.market_id}`. "
-            f"`/hive status` to review — with autopay ON they'd have paid instantly; "
-            f"manual ingests settle via `/hive payout`.", ephemeral=True)
+            f"Open `/hive settings` to review — with autopay ON they'd have paid "
+            f"instantly; otherwise hit **Pay now** there.", ephemeral=True)
 
 
 class HiveCog(commands.Cog):
@@ -180,7 +162,7 @@ class HiveCog(commands.Cog):
     # Autopay fires on ingest, but a harvest can sit unpaid for other reasons: the
     # harvester wasn't registered yet, the item had no value at the time, or a
     # payment failed and released its claim. Those only cleared when someone
-    # remembered to run /hive payout. This sweeps every 6h so balances can't go
+    # remembered to hit Pay now. This sweeps every 6h so balances can't go
     # stale between CSN runs.
     @tasks.loop(hours=6)
     async def autopay_sweep_loop(self):
@@ -218,7 +200,7 @@ class HiveCog(commands.Cog):
         description="(Managers) Hive harvesting — the company's perpetual harvest project",
         default_permissions=discord.Permissions(manage_guild=True))
 
-    # ── the payment core (shared by autopay and /hive payout) ────────────────
+    # ── the payment core (shared by autopay, the sweep and the panel) ────────
     async def _settle_groups(self, market_id: str, groups: dict, batch: str) -> dict:
         """Pay every group: harvester % to coins, loyalty, project team-credit; then the
         owner cut and the hive-ledger booking (which reprices the stock). Returns a
@@ -235,7 +217,7 @@ class HiveCog(commands.Cog):
         for uid, g in sorted(groups.items(), key=lambda kv: -kv[1]["value"]):
             pay = int(round(g["value"] * pct / 100.0))
             # AUDIT FIX (high): CLAIM FIRST, pay after. Two concurrent settle runs
-            # (the autopay listener mid-batch + a manager's /hive payout) used to
+            # (the autopay listener mid-batch + a manager's manual payout) used to
             # snapshot the same unpaid rows and BOTH paid them. The claim is one
             # atomic UPDATE ... WHERE paid=0; whoever claims, pays. A payment that
             # fails releases the claim so the rows stay payable — and value is only
@@ -399,177 +381,30 @@ class HiveCog(commands.Cog):
         await self._handle_feed_message(after, start_line=already)
 
     # ── config commands ───────────────────────────────────────────────────────
-    @hive.command(name="bind", description="Bind a channel as a market's hive harvest feed")
-    @app_commands.describe(market_id="The hive market these harvests belong to (e.g. vtech)",
-                           channel="Which channel to bind (leave empty to bind THIS one)")
+    @hive.command(name="settings",
+                  description="(Managers) HiveSettings — one panel: feeds, wage, split, values, autopay, payout")
+    @app_commands.describe(market_id="Hive site to open on (blank = this channel's site, else the first bound one)")
     @app_commands.autocomplete(market_id=_market_autocomplete)
-    async def hive_bind(self, interaction: discord.Interaction, market_id: str,
-                        channel: discord.TextChannel = None):
+    async def hive_settings(self, interaction: discord.Interaction, market_id: str = None):
+        """One panel replacing bind/unbind/info/payout/set_value/set_wage/set_split."""
         if not is_manager(interaction):
             return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
-        markets = (_load_markets() or {}).get("markets") or {}
-        if market_id not in markets:
-            return await interaction.response.send_message(f"❌ Market `{market_id}` not found.", ephemeral=True)
-        import Restocker_db as _db
-        target = channel or interaction.channel
-        _db.set_config(f"hive_feed:{target.id}", str(market_id))
-        await interaction.response.send_message(
-            f"🐝 {target.mention} now feeds **{markets[market_id].get('name', market_id)}**'s hive project. "
-            f"Every \"X sold you …\" line there is recorded automatically.\n"
-            f"Next: check `/hive info` that the item values aren't 0, then ask the bot to "
-            f"turn autopay on for `{market_id}` — from then on harvesters "
-            f"are paid the moment their sale posts.", ephemeral=True)
-
-    @hive.command(name="unbind", description="Stop treating a channel as a hive feed")
-    @app_commands.describe(channel="Which channel to unbind (leave empty for THIS one)")
-    async def hive_unbind(self, interaction: discord.Interaction, channel: discord.TextChannel = None):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
-        import Restocker_db as _db
-        target = channel or interaction.channel
-        _db.delete_config(f"hive_feed:{target.id}")
-        await interaction.response.send_message(
-            f"✅ {target.mention} unbound — no longer a hive feed.", ephemeral=True)
-
-    @hive.command(name="info",
-                  description="Every hive feed: market, webhook, payout settings and unpaid backlog")
-    async def hive_info(self, interaction: discord.Interaction):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
-        await interaction.response.defer(ephemeral=True, thinking=True)   # shows webhook URLs
-        import Restocker_db as _db
-        markets = (_load_markets() or {}).get("markets") or {}
-        feeds = []
-        for k, v in (_db.get_config_prefix("hive_feed:") or {}).items():
-            try:
-                feeds.append((int(k.split(":", 1)[1]), str(v)))
-            except Exception:
-                continue
-
-        embed = discord.Embed(
-            title="🐝 Hive sites",
-            description=(f"Harvesters get **{core._hive_harvester_pct():g}%** of harvested value "
-                         f"(`/hive set_wage`)."),
-            color=0xE3B341)
-
-        if not feeds:
-            embed.description += "\n\n⚠️ **No channels are bound yet** — run `/hive bind market_id:<id> channel:#…`"
-        for chid, mid in sorted(feeds, key=lambda t: t[1]):
-            ch = self.bot.get_channel(int(chid))
-            name = (markets.get(mid) or {}).get("name", mid)
-            hook = None
-            try:
-                hook = await core._csn_webhook_for(ch, f"{name} hive")
-            except Exception:
-                pass
-            autopay = str(_db.get_config(f"hive_autopay:{mid}") or "").lower() in ("1", "true", "yes")
-            owner_pct = core._hive_owner_pct(mid)
-            try:
-                backlog = len(_db.get_unpaid_hive_harvests(mid) or [])
-            except Exception:
-                backlog = "?"
-            bits = [f"market **{name}** (`{mid}`)",
-                    ("✅ autopay on" if autopay else "⏸️ autopay off"),
-                    f"⏳ {backlog} unpaid line(s)"]
-            if owner_pct:
-                bits.append(f"partner owner **{owner_pct:g}%**")
-            val = " · ".join(bits)
-            if hook:
-                val += f"\nwebhook: ||{hook}||"
-            else:
-                val += "\n⚠️ no webhook — the site can't post"
-            embed.add_field(name=f"#{getattr(ch, 'name', chid)}", value=val, inline=False)
-
-        # Values matter more than anything else here: a 0 value silently pays nothing.
-        vals = []
-        for item in ("honey block", "honeycomb block"):
-            vals.append(f"{item.title()} **{core._hive_item_value(item):,.0f}**🪙")
-        embed.add_field(name="Item values (`/hive set_value`)",
-                        value=" · ".join(vals) + "\n*A value of 0 means harvesters are paid nothing.*",
-                        inline=False)
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        from views.hive_settings import HiveSettingsView, build_embed, _feeds
+        mid = (market_id or "").strip()
+        if not mid:
+            here = [m for c, m in _feeds() if c == interaction.channel_id]
+            bound = sorted({m for _c, m in _feeds()})
+            mid = here[0] if here else (bound[0] if bound else core.DEFAULT_MARKET_ID)
+        view = HiveSettingsView(self, mid, interaction.user.id)
+        await interaction.response.send_message(embed=build_embed(mid), view=view, ephemeral=True)
 
 
-    @hive.command(name="set_value", description="Set the per-piece value of a hive product (default: Honey Block 350, Honeycomb 300)")
-    @app_commands.describe(item="Item name as it appears in the feed (e.g. Honey Block)",
-                           value="Coins per piece (0 removes it from hive valuation)")
-    @app_commands.autocomplete(item=_hive_item_autocomplete)
-    async def hive_set_value(self, interaction: discord.Interaction, item: str,
-                             value: app_commands.Range[float, 0.0, 1_000_000.0]):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
-        import Restocker_db as _db
-        key = " ".join(str(item).strip().lower().split())
-        _db.set_config(f"hive_value:{key}", str(float(value)))
-        await interaction.response.send_message(
-            f"✅ **{item.strip()}** now valued at **{value:g}**/pc for harvests.", ephemeral=True)
 
-    @hive.command(name="set_wage", description="Set the harvesters' wage — their % of harvested value (default 17)")
-    @app_commands.describe(pct="0–100 — e.g. 17 means a harvester gets 17% of the value they bring in")
-    async def hive_set_wage(self, interaction: discord.Interaction,
-                            pct: app_commands.Range[float, 0.0, 100.0]):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
-        import Restocker_db as _db
-        _db.set_config("hive_harvester_pct", str(float(pct)))
-        await interaction.response.send_message(
-            f"✅ Harvester wage set to **{pct:g}%** of harvested value. Applies to every payout "
-            f"from now on (never retroactive).", ephemeral=True)
 
-    @hive.command(name="set_split", description="Set a partner owner's cut of harvested value on a market (V Tech's own hives = 0)")
-    @app_commands.describe(market_id="The hive market",
-                           owner_pct="% of harvested VALUE the market owner gets (e.g. 32 for 60/40 after the harvester cut)")
-    @app_commands.autocomplete(market_id=_market_autocomplete)
-    async def hive_set_split(self, interaction: discord.Interaction, market_id: str,
-                             owner_pct: app_commands.Range[float, 0.0, 80.0]):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
-        import Restocker_db as _db
-        _db.set_config(f"hive_owner_pct:{market_id}", str(float(owner_pct)))
-        hp = core._hive_harvester_pct()
-        await interaction.response.send_message(
-            f"✅ `{market_id}` hive split: harvesters **{hp:g}%** · owner **{owner_pct:g}%** · "
-            f"V Tech **{100.0 - hp - float(owner_pct):g}%** of harvested value.", ephemeral=True)
 
-    @hive.command(name="payout", description="Manual sweep: pay everything unpaid (autopay handles new lines by itself)")
-    @app_commands.describe(market_id="The hive market",
-                           apply="False (default) = preview only. True = pay + book.")
-    @app_commands.autocomplete(market_id=_market_autocomplete)
-    async def hive_payout(self, interaction: discord.Interaction, market_id: str,
-                          apply: bool = False):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        import Restocker_db as _db
-        groups, unregistered, unvalued = _group_rows(_db.get_unpaid_hive_harvests(market_id))
-        if not groups:
-            extra = " (only unregistered IGNs are waiting — they need `/register_ign`)" if unregistered else ""
-            return await interaction.followup.send(
-                f"🐝 Nothing payable for `{market_id}`{extra}.", ephemeral=True)
-        pct = core._hive_harvester_pct()
-        value_total = sum(g["value"] for g in groups.values())
-        warn = ""
-        if unregistered:
-            warn += "\n⚠ Held back (unregistered): " + ", ".join(
-                f"{i} ({_fmt(v)})" for i, v in unregistered.items())
-        if unvalued:
-            warn += "\n⚠ Skipped (no value set): " + ", ".join(f"{it} ×{q}" for it, q in unvalued.items())
-        if not apply:
-            lines = [f"• <@{uid}> ({g['ign']}) — {_fmt(g['qty'])} pcs → **{_fmt(g['value'] * pct / 100)}**"
-                     for uid, g in sorted(groups.items(), key=lambda kv: -kv[1]["value"])[:20]]
-            return await interaction.followup.send(
-                f"🐝 **Payout preview — `{market_id}`** (value {_fmt(value_total)}):\n"
-                + "\n".join(lines) + warn
-                + "\n\n🔍 Nothing paid. Re-run with `apply:True` to execute.",
-                ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
-        res = await self._settle_groups(market_id, groups, batch=str(interaction.id))
-        await interaction.followup.send(
-            f"🐝 **Hive payout — `{market_id}`** · value {_fmt(res['value_total'])} · wages "
-            f"{_fmt(res['harv_total'])} · V Tech keeps {_fmt(res['net'])}\n"
-            + "\n".join(res["paid_lines"])
-            + (("\n" + res["owner_line"]) if res["owner_line"] else "") + warn
-            + f"\n\n✅ Paid & booked to `{market_id}`'s {res['month']} hive ledger — stock repriced.",
-            ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+
+
+
 
 
 async def setup(bot):

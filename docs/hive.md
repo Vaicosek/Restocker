@@ -14,15 +14,22 @@ hive system records those sales and pays each harvester a % of the harvested val
 4. With **autopay on**, the harvester is paid their % immediately; otherwise the row waits
    for a manual `/hive payout`. The remainder books to `hive_ledger` (feeds stock price).
 
-## Commands (`/hive …`)
-- `bind` — mark THIS channel as a market's hive feed. `unbind` — reverse it.
-- `autopay enabled:True|False` — pay instantly on ingest vs record-only.
-- `set_value item value` — coins per piece for a hive item (autocompletes hive items).
-- `set_wage pct` — harvester's % of value (default 17).
-- `set_split market_id owner_pct` — a partner site owner's cut (V Tech's own hives = 0).
-- `status` — unpaid harvests for a market (who's owed what).
-- `payout market_id [apply]` — manual sweep. `apply:false` previews, `apply:true` pays.
-- `ingest` — manually paste feed lines (backfill / when the mod isn't posting).
+## HiveSettings — one panel (`/hive settings`)
+Everything hive-related is on a single ephemeral panel. Seven subcommands used to do
+this; they were replaced by it.
+
+- **Site selector** — switch between bound hive feeds.
+- **Autopay** — toggle instant payment on ingest. Turning it ON warns if lines are
+  already unpaid: autopay only touches NEW lines.
+- **Pay now** — settle the whole backlog (this is the old `payout`).
+- **Bind this channel / Unbind** — make the current channel a feed for the selected site.
+- **Item value / Wage % / Owner split** — modals for the per-piece value, the harvester
+  percentage, and a partner owner's cut.
+- The panel also shows unpaid value, who's held for lacking `/register_ign`, and which
+  items are skipped for having no value set.
+
+Also available as AI tools: `set_hive_autopay`, `run_hive_payout`,
+`get_hive_harvester_detail`, `get_hive_status`.
 
 ## Item values — PER PIECE, and the shop quotes PER STACK
 This is the single most misread thing in the system, so state it explicitly whenever
