@@ -540,7 +540,7 @@ class ValuationCog(commands.Cog):
         if crit:
             embed.add_field(name="⚠️ Must fix (or the quote drifts)",
                             value="\n".join(f"• {a[len('CRITICAL: '):]}" for a in crit)[:1000], inline=False)
-        embed.set_footer(text=f"/stock buy market_id:{market_id} · /market go_private to delist")
+        embed.set_footer(text=f"Trade {market_id} on the dashboard exchange · /market go_private to delist")
         await interaction.followup.send(embed=embed)
 
     # ── server-outage windows (global; a DDoS/downtime must not hurt companies) ──

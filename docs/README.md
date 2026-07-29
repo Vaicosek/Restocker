@@ -45,7 +45,8 @@ replacement, or just answer from your own tools:
 | `/market list`, `/market report`, `/market earnings` | `/market info` + your `get_market_earnings` tool |
 | `/market suggest_price`, `platform_balance`, `hide_earnings` | answer from tools / the website |
 | `/csn_audit`, `/import_earnings` | `get_market_earnings`; imports come from the mod |
-| `/stock list/price/portfolio/index_fund/dashboard` | the website Exchange page |
+| `/stock buy/sell/panel/invest_index/sell_index/list/price/portfolio/index_fund/dashboard` | the website Exchange page (real trades) |
+| `/stock drip`, `/stock buyback`, `/stock dividends` | AI tools |
 | `/brew set|remove|list`, `/tool set|remove|list` | the mod auto-names items from lore; you still have `set_alias` / `remove_alias` / `list_aliases` |
 | `/enchant_area …`, `/escrow …`, `/suggest …`, `/network …` | retired entirely (unused) |
 | `/fees …`, `/investor sync|payout|set_pool|apply_roles|liquidate` | rare admin — say a manager must do it manually |

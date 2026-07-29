@@ -182,69 +182,10 @@ class TeamCog(commands.Cog):
             f"Your manager is <@{mgr}>. Registered IGN: " + (f"**{ign}**" if ign else "none - set it with `/team join`."),
             ephemeral=True)
 
-    @team.command(name="csn", description="(Manager) See your team's chest-shop sales (latest CSN month)")
-    async def csn(self, interaction: discord.Interaction):
-        members = db.get_team(str(interaction.user.id))
-        if not members:
-            return await interaction.response.send_message("Your team is empty.", ephemeral=True)
-        lines = []
-        grand = 0.0
-        for w in members:
-            ign = db.get_ign(w) or "no IGN"
-            try:
-                mids = _owner_markets_for_user(w)
-            except Exception:
-                mids = []
-            wnet = 0.0
-            latest = None
-            for mid in mids:
-                months = (db.csn_get_market(mid) or {}).get("months", {}) or {}
-                if not months:
-                    continue
-                mk = max(months.keys())
-                wnet += float(months[mk].get("net", 0) or 0)
-                latest = mk if (latest is None or mk > latest) else latest
-            grand += wnet
-            tag = f" [{latest}]" if latest else ""
-            body = f"net {wnet:,.0f}{tag}" if mids else "no shop linked"
-            lines.append(f"- <@{w}> (`{ign}`) - {body}")
-        _tn = _team_name(interaction.user.id)
-        _title = f"{_tn} — CSN sales ({len(members)})" if _tn else f"Team CSN sales ({len(members)})"
-        embed = discord.Embed(title=_title,
-                              description="\n".join(lines), color=0x22FF7A)
-        embed.set_footer(text=f"Latest-month net per worker; team total {grand:,.0f}")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-    @team.command(name="webhook", description="(Manager) Bind a Discord webhook for your team's performance feed")
-    @app_commands.describe(url="A Discord webhook URL (Channel Settings -> Integrations -> Webhooks)")
-    async def webhook(self, interaction: discord.Interaction, url: str):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("Managers only.", ephemeral=True)
-        url = url.strip()
-        if "/api/webhooks/" not in url or not url.lower().startswith("https://"):
-            return await interaction.response.send_message(
-                "That doesn't look like a Discord webhook URL (Channel Settings -> Integrations -> Webhooks).",
-                ephemeral=True)
-        db.set_team_settings(str(interaction.user.id), webhook_url=url)
-        await interaction.response.send_message(
-            "Webhook bound. Live events + the weekly digest for your team will post there.", ephemeral=True)
 
-    @team.command(name="channel", description="(Manager) Bind a channel for your team's performance feed")
-    @app_commands.describe(channel="Channel to post your team's performance into")
-    async def channel(self, interaction: discord.Interaction, channel: discord.TextChannel):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("Managers only.", ephemeral=True)
-        db.set_team_settings(str(interaction.user.id), channel_id=str(channel.id))
-        await interaction.response.send_message(
-            f"Bound to {channel.mention}. Live events + the weekly digest will post there.", ephemeral=True)
 
-    @team.command(name="unbind", description="(Manager) Stop posting your team's performance anywhere")
-    async def unbind(self, interaction: discord.Interaction):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("Managers only.", ephemeral=True)
-        db.set_team_settings(str(interaction.user.id), webhook_url="", channel_id="")
-        await interaction.response.send_message("Unbound. No more team performance posts.", ephemeral=True)
 
     @team.command(name="leaderboard", description="See which teams are performing best (compete!)")
     @app_commands.describe(days="Days to look back (default 7)")

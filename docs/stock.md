@@ -4,15 +4,16 @@
 Public markets can list shares that players trade with server currency. A share price is
 derived from the market's **CSN earnings** (a trailing-average net), not set by hand.
 
-## Commands (`/stock …`)
-- `list` — every listed market. `price market` — current share price + recent history.
-- `buy` / `sell` — trade shares for server currency. `panel` — interactive live trade panel.
-- `portfolio` — your holdings + unrealized P/L. `dividends` — show/set shareholder payout.
-- `dashboard` — (manager) post a live auto-updating market dashboard in a channel.
-- `set_params` — (manager) tune shares outstanding / P-E / treasury.
-- `backing market` — backing score: treasury cash + inventory assets + insurance-fund share
-  vs market cap (targets ~10/10/5%). `delist market confirm:` — bankrupt + pay shareholders
-  pro-rata from real backing, then remove.
+## Where trading happens
+**On the website**, not in Discord. The dashboard's Exchange page places real orders via
+`POST /api/trade` (buy · sell · invest_index · sell_index), session + CSRF authed. The
+`/stock buy|sell|panel|invest_index|sell_index` commands were retired.
+
+- Listings, prices, portfolio and the index fund are all on that page.
+- `set_drip`, `stock_buyback` and `stock_dividends` are AI tools — ask the bot.
+- `/stock set_params` (tune shares outstanding / P-E / treasury) and `/stock delist`
+  (bankrupt a market and pay shareholders out) are still commands: one is heavyweight
+  tuning, the other is irreversible.
 
 ## Pricing (how price moves)
 - `_recompute_share_price` blends a trailing-average CSN net (`STOCK_CSN_WEIGHT`), clamps
@@ -21,7 +22,8 @@ derived from the market's **CSN earnings** (a trailing-average net), not set by 
 - Each buy skims 0.5% into a central exchange insurance fund (backing).
 
 ## Gotchas the AI must know
-- The website can't trade (no per-user trade auth) — the site's ticket is an **estimator**
-  that produces the exact `/stock buy|sell` command to run in Discord.
+- Trades from the website are marshalled onto the BOT's event loop (`run_on_bot_loop`).
+  The trade engine's supply check and its writes aren't atomic, so a web trade running on
+  the web thread could otherwise interleave with a Discord one. Never bypass that.
 - Price is earnings-driven: a market with no recent CSN reports won't reprice.
 - A market must be public/listed before its shares can trade; `set_ticker` gives it a symbol.

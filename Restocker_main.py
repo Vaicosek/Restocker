@@ -10159,6 +10159,66 @@ def exec_stock_trade(side, user_id, market_id, shares, name=None):
     return _do_stock_trade(side, user_id, market_id, shares, name)
 
 
+def _do_bond_buy(user_id, bond_id, units, name=None) -> dict:
+    """Buy bond units. Extracted from /bond buy so the website can run the SAME path.
+
+    Returns {ok, msg, cost, units, coupon_monthly, coverage_pct}.
+
+    Like _do_stock_trade this is NOT atomic — it debits coins, credits the issuer's
+    treasury, writes the holding and may close the series. Callers off the bot's event
+    loop (i.e. the web thread) MUST go through run_on_bot_loop().
+    """
+    import Restocker_db as _db
+    res = {"ok": False, "msg": "", "cost": 0, "units": 0,
+           "coupon_monthly": 0, "coverage_pct": 0.0}
+    try:
+        b = _db.get_bond(int(bond_id))
+    except (TypeError, ValueError):
+        b = None
+    if not b or b.get("status") != "open":
+        res["msg"] = "That bond isn't open for sale."
+        return res
+    try:
+        units = int(units)
+    except Exception:
+        res["msg"] = "units must be a whole number."
+        return res
+    if units < 1:
+        res["msg"] = "units must be at least 1."
+        return res
+    left = int(float(b["units_total"]) - float(b["units_sold"] or 0))
+    if units > left:
+        res["msg"] = f"Only {left:,} unit(s) left in this series."
+        return res
+    cost = int(units * float(b["unit_price"]))
+    uid = str(user_id)
+    bal = int(_db.get_balance(uid).get("coins") or 0)
+    if bal < cost:
+        res["msg"] = f"Costs {cost:,} coins — you have {bal:,}."
+        return res
+    # coverage check includes THIS purchase so late buyers are protected too
+    pct, col, face = _bond_coverage(b["market_id"], extra_face=units * float(b["unit_price"]))
+    if pct < BOND_MIN_ITEM_COVER:
+        res["msg"] = (f"Sale paused: item coverage would drop to {pct:.1f}% "
+                      f"(rule: >= {BOND_MIN_ITEM_COVER:g}%). The issuer must add collateral.")
+        res["coverage_pct"] = pct
+        return res
+    deduct_coins(uid, cost, reduce_principal=True)
+    _db.adjust_treasury(b["market_id"], cost)
+    _db.adjust_bond_holding(b["id"], uid, float(units), float(cost), name=name)
+    if units >= left:
+        _db.update_bond(b["id"], status="active")
+    monthly = units * float(b["unit_price"]) * float(b["coupon_pct"]) / 100.0
+    res.update({
+        "ok": True, "cost": cost, "units": units,
+        "coupon_monthly": int(monthly), "coverage_pct": pct,
+        "msg": (f"Bought {units:,} unit(s) of {b['name']} for {cost:,} coins. "
+                f"Coupon ~{int(monthly):,}/month · principal back "
+                f"{str(b.get('matures_at') or '')[:10]} · item coverage {pct:.0f}%."),
+    })
+    return res
+
+
 def _exec_stock_buy(user_id, market_id, shares, buyer_name=None):
     r = _do_stock_trade("buy", user_id, market_id, shares, buyer_name)
     return r["ok"], r["msg"]
@@ -10435,7 +10495,7 @@ def _etf_info_embed():
         lines.append(f"`{w:5.1f}%` {m.get('name', c['mid'])} — fund holds {fund_sh:,.0f} sh")
     if lines:
         embed.add_field(name="Target weights (quality-weighted cap)", value="\n".join(lines), inline=False)
-    embed.set_footer(text="Invest: /stock invest_index  ·  Redeem: /stock sell_index")
+    embed.set_footer(text="Invest and redeem on the dashboard exchange")
     return embed
 
 
@@ -10666,7 +10726,7 @@ def _build_market_dashboard_embed() -> discord.Embed:
             f"(`{pct:+.2f}%`)  ·  cap `{mcap:,.0f}` 🪙"
         )
     embed.description = "\n".join(lines)
-    embed.set_footer(text="Auto-updates every 5 min  ·  /stock panel to trade  ·  /stock buy /sell")
+    embed.set_footer(text="Auto-updates every 5 min  ·  trade on the dashboard exchange")
     embed.timestamp = discord.utils.utcnow()
     return embed
 
@@ -10808,15 +10868,11 @@ individual markets that opt in via /market go_public, priced off their own real 
 using the same server coin balance as everything else:
 - /stock list — See every market currently listed on the stock exchange
 - /stock price — a market's share price, recent pricing history, and how well it's backed
-- /stock buy — Buy shares of a public market with your coins
-- /stock sell — Sell shares of a public market back for coins
 - /stock portfolio — See your holdings and unrealized profit/loss (Managers can view others')
 - /stock set_params — (Managers) Tune a market's shares outstanding / P-E multiplier
-- /stock dividends — view a market's shareholder dividend rate (Managers/Owners can set it)
-- /stock panel — open an interactive live buy/sell trading panel for a market
 - /stock dashboard — (Managers) post a live, auto-updating market dashboard in this channel
 - /stock delist — (Manager/Owner) bankrupt + delist a market, paying shareholders from its backing
-- /stock invest_index / /stock sell_index / /stock index_fund — invest coins into the ABX Index fund (the whole market basket by weight), redeem units, or view the fund
+- Share trading and the ABX Index fund moved to the dashboard exchange page.
 - /market treasury / /market treasury_withdraw — (Manager/Owner) view a market's treasury / withdraw its excess
 
 Teams & Manager Overrides (/team subcommands) — how a manager gets workers and earns a cut:
@@ -11279,6 +11335,63 @@ _AI_TOOLS = [
             "properties": {
                 "confirm": {"type": "boolean", "description": "false (default) = count only. true = delete."},
                 "limit": {"type": "integer", "description": "How many messages to scan (default 200)."}
+            },
+            "required": []
+        }
+    },
+    {
+        "name": "set_drip",
+        "description": "Turn DRIP (dividend reinvestment) on or off for the person asking — when on, their dividends and GEX.PR payouts auto-buy whole shares at market instead of arriving as coins. Anyone can set their own.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"enabled": {"type": "boolean", "description": "true = reinvest, false = take coins."}},
+            "required": ["enabled"]
+        }
+    },
+    {
+        "name": "stock_buyback",
+        "description": "Retire unissued (free-float) shares of a listed market — same market cap over fewer shares, so every holder's slice grows. Managers only. Cannot touch shares people actually hold.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "market": {"type": "string", "description": "Listed market id."},
+                "shares": {"type": "integer", "description": "How many unissued shares to retire."}
+            },
+            "required": ["market", "shares"]
+        }
+    },
+    {
+        "name": "stock_dividends",
+        "description": "Show a listed market's shareholder dividend rate and last distribution, or set the rate (percent of monthly net) when set_pct is given. Reading is open; setting needs a manager or that market's owner.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "market": {"type": "string", "description": "Listed market id."},
+                "set_pct": {"type": "number", "description": "New rate 0-100 as a % of monthly net. Omit to just read."}
+            },
+            "required": ["market"]
+        }
+    },
+    {
+        "name": "get_team_csn",
+        "description": "A manager's team chest-shop sales: latest-month net per worker plus the team total. Managers only — defaults to the asking manager's own team.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "manager_id": {"type": "string", "description": "Discord id of the manager whose team to show. Blank = the person asking."}
+            },
+            "required": []
+        }
+    },
+    {
+        "name": "set_team_feed",
+        "description": "Where a manager's team performance events and weekly digest post. Give a channel_id, or a webhook_url, or neither to switch the feed off. Managers only.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "channel_id": {"type": "string", "description": "Channel id to post into."},
+                "webhook_url": {"type": "string", "description": "A Discord webhook URL instead of a channel."},
+                "off": {"type": "boolean", "description": "true = stop posting anywhere."}
             },
             "required": []
         }
@@ -12632,6 +12745,134 @@ async def _ai_tool_csn_cleanup(guild, channel, user, args):
     return f"Deleted {deleted} noise message(s) in #{getattr(channel,'name','?')}."
 
 
+async def _ai_tool_set_drip(guild, channel, user, args):
+    import Restocker_db as _db
+    uid = str(getattr(user, "id", ""))
+    if not uid:
+        return "❌ I can't tell who you are."
+    if bool(args.get("enabled")):
+        _db.set_config(f"drip:{uid}", "1")
+        return ("DRIP on — your dividends and GEX.PR payouts now auto-buy whole shares at "
+                "market; any remainder stays as coins.")
+    _db.delete_config(f"drip:{uid}")
+    return "DRIP off — payouts arrive as coins again."
+
+
+async def _ai_tool_stock_buyback(guild, channel, user, args):
+    if not _ai_is_manager(user):
+        return "❌ Managers only."
+    import Restocker_db as _db
+    mid = str(args.get("market") or "").strip()
+    try:
+        shares = int(args.get("shares") or 0)
+    except Exception:
+        return "❌ shares must be a whole number."
+    if shares < 1:
+        return "❌ shares must be at least 1."
+    listing = _db.get_market_shares(mid)
+    if not listing or not listing.get("active"):
+        return f"❌ {mid} isn't a listed market."
+    so = float(listing.get("shares_outstanding") or 0)
+    held = sum(float(h.get("shares") or 0) for h in (_db.get_holders(mid) or []))
+    free_float = max(0.0, so - held)
+    if shares > free_float:
+        return (f"❌ Only {free_float:,.0f} unissued share(s) in the float — shares people "
+                f"actually hold can't be retired; they'd have to sell first.")
+    old_price = float(listing.get("share_price") or 0)
+    _db.upsert_market_shares(mid, shares_outstanding=so - shares)
+    new_price = _recompute_share_price(mid, reason="buyback", full_move=True)
+    return (f"Retired {shares:,} share(s) of {mid}: {so:,.0f} → {so - shares:,.0f} outstanding. "
+            f"Price per share {old_price:,.2f} → {new_price:,.2f} — same cap, fewer shares, so "
+            f"every holder's slice got bigger.")
+
+
+async def _ai_tool_stock_dividends(guild, channel, user, args):
+    import Restocker_db as _db
+    mid = str(args.get("market") or "").strip()
+    listing = _db.get_market_shares(mid)
+    if not listing:
+        return f"❌ {mid} isn't listed."
+    pct = args.get("set_pct")
+    if pct is not None:
+        owner = _market_owner_id(mid)
+        if not (_ai_is_manager(user)
+                or (owner and int(owner) == int(getattr(user, "id", 0) or 0))):
+            return f"❌ Only Managers or {mid}'s owner can change the dividend rate."
+        try:
+            pct = max(0.0, min(100.0, float(pct)))
+        except Exception:
+            return "❌ set_pct must be a number 0-100."
+        _db.upsert_market_shares(mid, dividend_pct=pct)
+        return (f"{mid} dividend rate set to {pct:.1f}% of monthly net"
+                + (" — paid to shareholders on each CSN report." if pct > 0 else " (dividends off)."))
+    ov = listing.get("dividend_pct")
+    eff = float(ov) if ov is not None else STOCK_DIVIDEND_PCT
+    last = _db.get_last_dividend(mid)
+    out = [f"{mid} dividends: {eff:.1f}% of monthly net"
+           + (f" ({'market override' if ov is not None else 'server default'})" if eff > 0 else " (off)"),
+           f"Last paid month: {listing.get('last_dividend_month') or '—'}"]
+    if last:
+        out.append(f"Last distribution: {int(last['total_paid']):,} coins to {last['holders']} "
+                   f"holder(s) ({float(last['per_share']):,.2f}/share) in {last['month']}")
+    return "\n".join(out)
+
+
+async def _ai_tool_get_team_csn(guild, channel, user, args):
+    if not _ai_is_manager(user):
+        return "❌ Managers only."
+    import Restocker_db as _db
+    mgr = str(args.get("manager_id") or getattr(user, "id", "") or "").strip()
+    members = _db.get_team(mgr) or []
+    if not members:
+        return "That team is empty."
+    lines, grand = [], 0.0
+    for w in members:
+        ign = _db.get_ign(w) or "no IGN"
+        try:
+            mids = _owner_markets_for_user(w)
+        except Exception:
+            mids = []
+        wnet, latest = 0.0, None
+        for mid in mids:
+            months = (_db.csn_get_market(mid) or {}).get("months", {}) or {}
+            if not months:
+                continue
+            mk = max(months.keys())
+            wnet += float(months[mk].get("net", 0) or 0)
+            latest = mk if (latest is None or mk > latest) else latest
+        grand += wnet
+        lines.append(f"{ign}: " + (f"net {wnet:,.0f}" + (f" [{latest}]" if latest else "")
+                                   if mids else "no shop linked"))
+    return (f"Team CSN sales ({len(members)} member(s)), latest-month net per worker:\n"
+            + "\n".join(lines[:25]) + f"\nTeam total: {grand:,.0f}")
+
+
+async def _ai_tool_set_team_feed(guild, channel, user, args):
+    """Where a team's live events + weekly digest post. This binding is READ by
+    _team_live() on every fulfilment, so it must stay settable somewhere — the
+    /team webhook|channel|unbind commands were retired in favour of this."""
+    if not _ai_is_manager(user):
+        return "❌ Managers only."
+    import Restocker_db as _db
+    uid = str(getattr(user, "id", ""))
+    if bool(args.get("off")):
+        _db.set_team_settings(uid, webhook_url="", channel_id="")
+        return "Team feed off — no more performance posts."
+    url = str(args.get("webhook_url") or "").strip()
+    chan = str(args.get("channel_id") or "").strip().strip("<#>")
+    if url:
+        if "/api/webhooks/" not in url or not url.lower().startswith("https://"):
+            return "❌ That isn't a Discord webhook URL."
+        _db.set_team_settings(uid, webhook_url=url)
+        return "Team feed bound to that webhook — live events and the weekly digest post there."
+    if chan:
+        if not chan.isdigit():
+            return "❌ channel_id must be numeric."
+        _db.set_team_settings(uid, channel_id=chan)
+        return f"Team feed bound to <#{chan}> — live events and the weekly digest post there."
+    return "❌ Give a channel_id or a webhook_url, or off=true to switch the feed off."
+
+
 async def _ai_tool_set_hive_autopay(guild, channel, user, args):
     if not _ai_is_manager(user):
         return "❌ Managers only."
@@ -13165,6 +13406,11 @@ _AI_TOOL_MAP = {
     "csn_cleanup":          _ai_tool_csn_cleanup,
     "get_ai_audit":         _ai_tool_get_ai_audit,
     "fix_month_close":      _ai_tool_fix_month_close,
+    "set_drip":             _ai_tool_set_drip,
+    "stock_buyback":        _ai_tool_stock_buyback,
+    "stock_dividends":      _ai_tool_stock_dividends,
+    "get_team_csn":         _ai_tool_get_team_csn,
+    "set_team_feed":        _ai_tool_set_team_feed,
     "set_hive_autopay":     _ai_tool_set_hive_autopay,
     "create_restock_orders": _ai_tool_create_restock_orders,
     "get_land_status":      _ai_tool_get_land_status,
@@ -13181,7 +13427,7 @@ _AI_SENSITIVE_TOOLS = {
     "delete_messages", "create_role", "setup_market_owner", "send_dm", "dm_role",
     "send_channel_message", "ping_user", "propose_code_change", "set_item_price",
     "run_hive_payout", "rebuild_market_channel", "rebuild_hive_channel",
-    "purge_channel", "csn_cleanup", "fix_month_close", "set_channel_config", "set_hive_autopay",
+    "purge_channel", "csn_cleanup", "fix_month_close", "set_channel_config", "set_hive_autopay", "set_team_feed", "stock_buyback", "stock_dividends",
     "create_restock_orders", "log_manual_restock",
     "add_item", "get_market_code", "create_futures_order", "dm_market_setup",
 }

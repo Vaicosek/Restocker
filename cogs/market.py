@@ -802,7 +802,7 @@ class MarketCog(commands.Cog):
                 value=f"Price set to the floor (`{MIN_SHARE_PRICE:,.2f}` 🪙) until a monthly report is recorded.",
                 inline=False,
             )
-        embed.set_footer(text=f"Buy in with /stock buy market_id:{market_id} shares:<amount>")
+        embed.set_footer(text=f"Buy in on the dashboard exchange · market {market_id}")
         await interaction.response.send_message(embed=embed)
 
     @market.command(

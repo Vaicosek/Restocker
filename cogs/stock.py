@@ -38,7 +38,7 @@ save_yaml = core.save_yaml
 
 
 async def _shares_amount_autocomplete(interaction: discord.Interaction, current: str):
-    """Suggest share amounts for /stock buy & sell: your MAX (affordable coins capped by
+    """Suggest share amounts for share trades: your MAX (affordable coins capped by
     free float on buy; your whole holding on sell) plus round sizes with their cost."""
     import Restocker_db as _db
     out = []
@@ -93,84 +93,10 @@ class StockCog(commands.Cog):
 
     stock = app_commands.Group(name="stock", description="Buy and sell shares of markets that have gone public, priced off their real CSN profit")
 
-    @stock.command(name="drip",
-                   description="Dividend reinvestment: auto-buy shares with your dividends instead of taking coins")
-    @app_commands.describe(enabled="On = dividends & GEX.PR payouts buy more shares automatically")
-    async def stock_drip(self, interaction: discord.Interaction, enabled: bool):
-        import Restocker_db as _db
-        uid = str(interaction.user.id)
-        if enabled:
-            _db.set_config(f"drip:{uid}", "1")
-            msg = ("🌱 **DRIP on** — from now on your dividends and GEX.PR payouts "
-                   "auto-buy shares at market (whole shares; remainder stays as coins). "
-                   "Compounding, the eighth wonder of Abexilas.")
-        else:
-            _db.delete_config(f"drip:{uid}")
-            msg = "💰 **DRIP off** — payouts arrive as coins again."
-        await interaction.response.send_message(msg, ephemeral=True)
 
-    @stock.command(name="buyback",
-                   description="(Manager) Retire free-float shares — fewer shares against the same cap raises the floor")
-    @app_commands.describe(market_id="Which listing", shares="How many unissued (free-float) shares to retire")
-    @app_commands.autocomplete(market_id=_public_market_autocomplete)
-    async def stock_buyback(self, interaction: discord.Interaction, market_id: str,
-                            shares: app_commands.Range[int, 1, 10_000_000]):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
-        import Restocker_db as _db
-        listing = _db.get_market_shares(market_id)
-        if not listing or not listing.get("active"):
-            return await interaction.response.send_message("❌ Not a listed market.", ephemeral=True)
-        so = float(listing.get("shares_outstanding") or 0)
-        held = sum(float(h.get("shares") or 0) for h in _db.get_holders(market_id))
-        free_float = max(0.0, so - held)
-        if shares > free_float:
-            return await interaction.response.send_message(
-                f"❌ Only `{free_float:,.0f}` unissued share(s) in the float — holders' shares "
-                f"can't be retired (they'd have to sell first).", ephemeral=True)
-        old_price = float(listing.get("share_price") or 0)
-        _db.upsert_market_shares(market_id, shares_outstanding=so - shares)
-        new_price = _recompute_share_price(market_id, reason="buyback", full_move=True)
-        await interaction.response.send_message(
-            f"🔥 Retired `{shares:,}` share(s) of `{market_id}`: "
-            f"`{so:,.0f}` → `{so - shares:,.0f}` outstanding.\n"
-            f"Price floor per share: `{old_price:,.2f}` → `{new_price:,.2f}` 🪙 "
-            f"(same cap, fewer shares — every holder's slice got bigger).", ephemeral=False)
 
-    @stock.command(name="buy", description="Buy shares of a public market using your server currency")
-    @app_commands.describe(market_id="The public market to invest in",
-                           shares="How many shares to buy (suggestions show your max and the cost)")
-    @app_commands.autocomplete(market_id=_public_market_autocomplete, shares=_shares_amount_autocomplete)
-    async def stock_buy(self,
-        interaction: discord.Interaction,
-        market_id: str,
-        shares: app_commands.Range[int, 1, 1_000_000],
-    ):
-        ok, msg = _exec_stock_buy(interaction.user.id, market_id, shares, interaction.user.display_name)
-        await interaction.response.send_message(msg, ephemeral=not ok)
 
-    @stock.command(name="sell", description="Sell shares of a public market back for server currency")
-    @app_commands.describe(market_id="The market you hold shares in",
-                           shares="How many shares to sell (suggestions show your holding)")
-    @app_commands.autocomplete(market_id=_public_market_autocomplete, shares=_shares_amount_autocomplete)
-    async def stock_sell(self,
-        interaction: discord.Interaction,
-        market_id: str,
-        shares: app_commands.Range[int, 1, 1_000_000],
-    ):
-        ok, msg = _exec_stock_sell(interaction.user.id, market_id, shares, interaction.user.display_name)
-        await interaction.response.send_message(msg, ephemeral=not ok)
 
-    @stock.command(name="panel", description="Open an interactive live trading panel for a market")
-    @app_commands.describe(market_id="The public market to trade")
-    @app_commands.autocomplete(market_id=_public_market_autocomplete)
-    async def stock_panel(self, interaction: discord.Interaction, market_id: str):
-        import Restocker_db as _db
-        listing = _db.get_market_shares(market_id)
-        if not listing or not listing.get("active"):
-            return await interaction.response.send_message(f"❌ `{market_id}` isn't public.", ephemeral=True)
-        embed = _build_stock_panel_embed(market_id)
-        await interaction.response.send_message(embed=embed, view=StockPanelView(market_id))
 
     @stock.command(
         name="set_params",
@@ -254,58 +180,10 @@ class StockCog(commands.Cog):
     # get_user_limit_orders / cancel_limit_order, _check_limit_orders), so restoring the four
     # commands later is just a git revert of this block.
 
-    @stock.command(name="dividends", description="Show (or set) a market's shareholder dividend payout")
-    @app_commands.describe(market_id="Public market",
-                           set_pct="(Manager/Owner) Set this market's dividend % of monthly net (0 disables)")
-    @app_commands.autocomplete(market_id=_public_market_autocomplete)
-    async def stock_dividends(self, interaction: discord.Interaction, market_id: str, set_pct: Optional[float] = None):
-        import Restocker_db as _db
-        listing = _db.get_market_shares(market_id)
-        if not listing:
-            return await interaction.response.send_message(f"❌ `{market_id}` isn't listed.", ephemeral=True)
-        if set_pct is not None:
-            if not _is_market_manager(interaction, market_id):
-                return await interaction.response.send_message("⛔ Managers or this market's owner only.", ephemeral=True)
-            set_pct = max(0.0, min(100.0, float(set_pct)))
-            _db.upsert_market_shares(market_id, dividend_pct=set_pct)
-            return await interaction.response.send_message(
-                f"✅ `{market_id}` dividend rate set to `{set_pct:.1f}%` of monthly net "
-                f"({'paid to shareholders on each CSN report' if set_pct > 0 else 'dividends off for this market'}).",
-                ephemeral=True)
-        market = _get_market(market_id) or {}
-        ov = listing.get("dividend_pct")
-        eff = float(ov) if ov is not None else STOCK_DIVIDEND_PCT
-        last = _db.get_last_dividend(market_id)
-        embed = discord.Embed(title=f"💸 {market.get('name', market_id)} — Dividends", color=0x9B59B6)
-        embed.add_field(name="Payout rate", value=(f"`{eff:.1f}%` of monthly net" if eff > 0 else "Off"), inline=True)
-        embed.add_field(name="Source", value=("market override" if ov is not None else "server default"), inline=True)
-        embed.add_field(name="Last paid month", value=str(listing.get("last_dividend_month") or "—"), inline=True)
-        if last:
-            embed.add_field(name="Last distribution",
-                            value=f"`{int(last['total_paid']):,}` 🪙 to `{last['holders']}` holders "
-                                  f"(`{float(last['per_share']):,.2f}`/share) — {last['month']}", inline=False)
-        embed.set_footer(text="Dividends pay to shareholders pro-rata automatically on each CSN report.")
-        await interaction.response.send_message(embed=embed)
 
 
     # ── ABX Index Fund (investable ETF) ──────────────────────────────────────
-    @stock.command(name="invest_index",
-                   description="Invest coins into the ABX Index — buys the whole market basket by cap weight")
-    @app_commands.describe(coins="How many coins to invest into the index")
-    async def invest_index(self, interaction: discord.Interaction,
-                           coins: app_commands.Range[int, 1, 1_000_000_000]):
-        await interaction.response.defer(ephemeral=True)
-        r = _etf_invest(interaction.user.id, coins, interaction.user.display_name)
-        await interaction.followup.send(r["msg"], ephemeral=True)
 
-    @stock.command(name="sell_index",
-                   description="Redeem ABX Index units back for coins (sells the basket at market)")
-    @app_commands.describe(units="How many units to redeem, or leave blank to redeem ALL")
-    async def sell_index(self, interaction: discord.Interaction, units: Optional[float] = None):
-        await interaction.response.defer(ephemeral=True)
-        r = _etf_redeem(interaction.user.id, units if units is not None else "all",
-                        interaction.user.display_name)
-        await interaction.followup.send(r["msg"], ephemeral=True)
 
     @stock.command(name="delist",
                    description="(Manager/Owner) Bankrupt + delist a market, paying shareholders from its backing")

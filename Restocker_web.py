@@ -2302,8 +2302,8 @@ async def _handle_mymarket_page(request):
 
 # ── /exchange — pro-terminal exchange view (XTB/IBKR-style, read-only) ────────
 # Purely additive page: consumes the existing /api/stocks and /api/me endpoints.
-# The site can't trade (no per-user trade auth), so the order ticket is an
-# ESTIMATOR that produces the exact /stock buy|sell command to run in Discord.
+# The order ticket places REAL trades via POST /api/trade (session + CSRF authed);
+# it used to only estimate and hand you a /stock command to paste into Discord.
 _EXCHANGE_HTML = r"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
@@ -2450,13 +2450,17 @@ background:var(--panel2);color:var(--muted);font-family:var(--sans)}
         <div class="kv">Price / share<b id="sPx">—</b></div>
         <div class="kv" style="border-bottom:0">Est. price impact<b id="sSlip">—</b></div>
       </div>
-      <div class="cmd" id="cmd" title="Click to copy">/stock buy</div>
-      <div class="hint">Trading runs through Discord — click the command to copy it.</div>
+      <div class="cmd" id="cmd" title="Place this order">Buy</div>
+      <div class="hint" id="tkHint">Log in (top right) to trade here.</div>
     </div>
     <div class="panel"><div class="ph"><span class="t">Your position</span></div><div class="pb" id="pos">
       <span class="faint">Link your Discord on the dashboard to see holdings.</span></div></div>
     <div class="panel"><div class="ph"><span class="t">Portfolio</span></div><div class="pb" id="pf">
       <span class="faint">—</span></div></div>
+    <div class="panel" id="bondPanel" style="display:none">
+      <div class="ph"><span class="t">Bonds</span><span class="faint" id="bondNote"></span></div>
+      <div class="pb" id="bondList"></div>
+    </div>
   </aside>
 </div>
 <script>
@@ -2558,28 +2562,94 @@ function calc(){const m=MK.find(x=>x.mid===cur);if(!m)return;
  document.getElementById('sShares').textContent=fmt(sh);
  document.getElementById('sPx').textContent=fmt(m.price)+' ¢';
  document.getElementById('sSlip').textContent=(side=='buy'?'+':'−')+(m.mcap?(amt/m.mcap*100).toFixed(2):'0.00')+'%';
- document.getElementById('cmd').textContent='/stock '+side+' market_id:'+m.mid+' shares:'+Math.max(1,sh);}
+ const btn=document.getElementById('cmd');
+ btn.textContent=(side=='buy'?'Buy ':'Sell ')+fmt(Math.max(1,sh))+' '+(m.ticker||m.mid);
+ btn.dataset.shares=Math.max(1,sh); btn.dataset.mid=m.mid;}
 document.getElementById('btnBuy').onclick=()=>{side='buy';
  document.getElementById('btnBuy').classList.add('on');document.getElementById('btnSell').classList.remove('on');calc();};
 document.getElementById('btnSell').onclick=()=>{side='sell';
  document.getElementById('btnSell').classList.add('on');document.getElementById('btnBuy').classList.remove('on');calc();};
 document.getElementById('amt').oninput=calc;
 document.querySelectorAll('.chips button').forEach(b=>b.onclick=()=>{document.getElementById('amt').value=b.dataset.a;calc();});
-document.getElementById('cmd').onclick=()=>{navigator.clipboard&&navigator.clipboard.writeText(document.getElementById('cmd').textContent);
- const el=document.getElementById('cmd');const t=el.textContent;el.textContent='copied ✓';setTimeout(()=>{el.textContent=t;},700);};
+// Real order. The site used to only COPY a /stock command; sessions give us per-user
+// auth, so the trade executes here. Server-side it is marshalled onto the bot's event
+// loop so a web trade can't interleave with a Discord one.
+document.getElementById('cmd').onclick=async()=>{
+ const el=document.getElementById('cmd'), hint=document.getElementById('tkHint');
+ const me=window.OWNERINFO;
+ if(!me||!me.logged_in){hint.textContent='Log in (top right) to trade here.';return;}
+ const sh=+el.dataset.shares||0, mid=el.dataset.mid;
+ if(!mid||sh<1){hint.textContent='Pick a market and an amount first.';return;}
+ if(!confirm((side=='buy'?'Buy ':'Sell ')+sh+' share(s) of '+mid+'?'))return;
+ el.textContent='working…'; el.style.pointerEvents='none';
+ try{
+  const r=await fetch('/api/trade',{method:'POST',
+    headers:{'Content-Type':'application/json','X-CSRF-Token':me.csrf||''},
+    body:JSON.stringify({action:side,market_id:mid,shares:sh})});
+  const j=await r.json();
+  hint.textContent=(j&&j.message)?j.message:((j&&j.error)||'Trade failed.');
+  el.textContent=(j&&j.ok)?'done ✓':'failed';
+ }catch(e){hint.textContent='Network error.';el.textContent='failed';}
+ setTimeout(()=>{el.style.pointerEvents='';calc();},1400);};
 document.querySelectorAll('#ranges button').forEach(b=>b.onclick=()=>{
  document.querySelectorAll('#ranges button').forEach(x=>x.classList.remove('on'));b.classList.add('on');
  rangeSec=+b.dataset.r;const m=MK.find(x=>x.mid===cur);if(m)drawMain(m);});
 addEventListener('resize',()=>{const m=MK.find(x=>x.mid===cur);if(m)drawMain(m);});
+// Bond board. This lived on the retired /classic page, so deleting that page took away
+// the only place bonds were visible. Rebuilt here — and unlike the old one it can BUY,
+// through the same authed /api/trade path the share ticket uses.
+function renderBonds(bonds){
+ const panel=document.getElementById('bondPanel'), list=document.getElementById('bondList');
+ if(!panel||!list)return;
+ if(!bonds||!bonds.length){panel.style.display='none';return;}
+ panel.style.display='';
+ document.getElementById('bondNote').textContent=bonds.length+' series';
+ list.innerHTML='';
+ bonds.forEach(b=>{
+  const covOk=(b.coverage||0)>=80, open=(b.status==='open');
+  const row=document.createElement('div');
+  row.style.cssText='padding:8px 0;border-bottom:1px solid var(--line)';
+  row.innerHTML='<div style="display:flex;justify-content:space-between;gap:8px">'
+   +'<b>'+esc(b.name)+' <span class="faint">#'+b.id+'</span></b>'
+   +'<span class="'+(covOk?'up':'down')+'">'+(b.coverage!=null?b.coverage.toFixed(0)+'%':'-')+'</span></div>'
+   +'<div class="faint" style="font-size:11px">'+esc(b.market_id)+' &middot; '+b.coupon_pct.toFixed(2)+'%/mo &middot; '
+   +'matures '+esc(b.matures_at||'-')+' &middot; '+fmt(b.units_left)+' left @ '+fmt(Math.round(b.unit_price))+'c</div>';
+  if(open){
+   const wrap=document.createElement('div');
+   wrap.style.cssText='display:flex;gap:6px;margin-top:6px';
+   const inp=document.createElement('input');
+   inp.type='number'; inp.min='1'; inp.value='1'; inp.className='mono';
+   inp.style.cssText='width:70px;background:var(--panel2);border:1px solid var(--line2);color:var(--ink);padding:2px 6px';
+   const btn=document.createElement('button');
+   btn.textContent='Buy';
+   btn.style.cssText='flex:1;background:var(--panel2);border:1px solid var(--line2);color:var(--ink);cursor:pointer;padding:2px 6px';
+   btn.onclick=async()=>{
+    if(!ME||!ME.logged_in){alert('Log in (top right) to buy bonds.');return;}
+    const u=+inp.value||0; if(u<1)return;
+    if(!confirm('Buy '+u+' unit(s) of '+b.name+'?'))return;
+    btn.disabled=true; btn.textContent='...';
+    try{
+     const r=await fetch('/api/trade',{method:'POST',
+       headers:{'Content-Type':'application/json','X-CSRF-Token':(ME&&ME.csrf)||''},
+       body:JSON.stringify({action:'bond_buy',bond_id:b.id,units:u})});
+     const j=await r.json();
+     alert((j&&j.message)||(j&&j.error)||'Failed.');
+     if(j&&j.ok){const s2=await (await fetch('/api/stocks')).json();renderBonds(s2.bonds||[]);}
+    }catch(e){alert('Network error.');}
+    btn.disabled=false; btn.textContent='Buy';};
+   wrap.appendChild(inp); wrap.appendChild(btn); row.appendChild(wrap);
+  }
+  list.appendChild(row);});
+}
 async function boot(){
- try{const r=await fetch('/api/stocks');const d=await r.json();MK=d.markets||[];}catch(e){MK=[];}
+ try{const r=await fetch('/api/stocks');const d=await r.json();MK=d.markets||[];renderBonds(d.bonds||[]);}catch(e){MK=[];}
  try{const r=await fetch('/api/me');ME=await r.json();
   if(ME.logged_in){document.getElementById('hWho').textContent=ME.name||'linked';
    document.getElementById('hWhoSub').textContent='Discord linked';}}catch(e){}
  if(MK.length){cur=MK[0].mid;renderList();render();}
  else{document.getElementById('list').innerHTML='<tr><td colspan="4" class="faint" style="height:40px;padding:0 10px">No public markets yet</td></tr>';}
  setInterval(async()=>{try{const r=await fetch('/api/stocks');const d=await r.json();
-  MK=d.markets||MK;renderList();render();}catch(e){}},30000);}
+  MK=d.markets||MK;renderList();render();renderBonds(d.bonds||[]);}catch(e){}},30000);}
 boot();
 </script></body></html>"""
 
@@ -2696,6 +2766,109 @@ async def _handle_owner_set_item(request):
     r = await m.run_on_bot_loop(m._set_market_item, mid, item, coin=coin, stock=stock)
     _CACHE.clear()
     return web.json_response({"ok": True, **r})
+
+
+async def _handle_api_trade(request):
+    """Buy/sell shares, or invest/redeem ABX Index units, as the logged-in user.
+
+    The site was read-only ("no per-user trade auth") — sessions now give us that, so
+    this is the website's half of retiring the /stock commands.
+
+    THREADING: the web server runs on its own OS thread and event loop. The trade engine
+    is only safe because every caller shares the bot's loop — its supply check and its
+    writes are not atomic. So every mutation goes through run_on_bot_loop(), which is what
+    keeps a web trade from interleaving with a Discord one.
+    """
+    import Restocker_main as m
+    sess = _session_user(request)
+    if not sess:
+        return web.json_response({"ok": False, "error": "Log in first."}, status=401)
+    if not _csrf_ok(request):
+        return web.json_response({"ok": False, "error": "Bad or missing CSRF token."}, status=403)
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"ok": False, "error": "bad json"}, status=400)
+
+    action = str(body.get("action") or "").strip().lower()
+    uid = str(sess["user_id"])
+    name = sess.get("name") or ""
+
+    if action in ("buy", "sell"):
+        mid = str(body.get("market_id") or "").strip()
+        if not mid:
+            return web.json_response({"ok": False, "error": "Which market?"}, status=400)
+        try:
+            shares = int(body.get("shares") or 0)
+        except Exception:
+            return web.json_response({"ok": False, "error": "shares must be a whole number."}, status=400)
+        if not (1 <= shares <= 1_000_000):
+            return web.json_response({"ok": False, "error": "shares must be 1..1,000,000."}, status=400)
+        try:
+            r = await m.run_on_bot_loop(m._do_stock_trade, action, uid, mid, shares, name)
+        except Exception as e:
+            return web.json_response({"ok": False, "error": f"trade failed: {e}"}, status=500)
+        return web.json_response({
+            "ok": bool(r.get("ok")), "error": None if r.get("ok") else r.get("msg"),
+            "message": r.get("msg"), "shares": r.get("shares"), "fill": r.get("fill"),
+            "total": r.get("total"), "new_price": r.get("new_price"),
+        })
+
+    if action == "bond_buy":
+        bid = str(body.get("bond_id") or "").strip()
+        if not bid.isdigit():
+            return web.json_response({"ok": False, "error": "bond_id must be numeric."}, status=400)
+        try:
+            units = int(body.get("units") or 0)
+        except Exception:
+            return web.json_response({"ok": False, "error": "units must be a whole number."}, status=400)
+        if not (1 <= units <= 10_000_000):
+            return web.json_response({"ok": False, "error": "units must be 1..10,000,000."}, status=400)
+        try:
+            r = await m.run_on_bot_loop(m._do_bond_buy, uid, int(bid), units, name)
+        except Exception as e:
+            return web.json_response({"ok": False, "error": f"bond purchase failed: {e}"}, status=500)
+        return web.json_response({
+            "ok": bool(r.get("ok")), "message": r.get("msg"),
+            "error": None if r.get("ok") else r.get("msg"),
+            "cost": r.get("cost"), "units": r.get("units"),
+            "coupon_monthly": r.get("coupon_monthly"), "coverage_pct": r.get("coverage_pct"),
+        })
+
+    if action == "invest_index":
+        try:
+            coins = int(body.get("coins") or 0)
+        except Exception:
+            return web.json_response({"ok": False, "error": "coins must be a whole number."}, status=400)
+        if not (1 <= coins <= 1_000_000_000):
+            return web.json_response({"ok": False, "error": "coins out of range."}, status=400)
+        try:
+            r = await m.run_on_bot_loop(m._etf_invest, uid, coins, name)
+        except Exception as e:
+            return web.json_response({"ok": False, "error": f"invest failed: {e}"}, status=500)
+        return web.json_response({"ok": bool(r.get("ok")), "message": r.get("msg"),
+                                  "error": None if r.get("ok") else r.get("msg")})
+
+    if action == "sell_index":
+        units = body.get("units")
+        if units in (None, "", "all"):
+            units = "all"
+        else:
+            try:
+                units = float(units)
+            except Exception:
+                return web.json_response({"ok": False, "error": "units must be a number or 'all'."}, status=400)
+            if units <= 0:
+                return web.json_response({"ok": False, "error": "units must be positive."}, status=400)
+        try:
+            r = await m.run_on_bot_loop(m._etf_redeem, uid, units, name)
+        except Exception as e:
+            return web.json_response({"ok": False, "error": f"redeem failed: {e}"}, status=500)
+        return web.json_response({"ok": bool(r.get("ok")), "message": r.get("msg"),
+                                  "error": None if r.get("ok") else r.get("msg")})
+
+    return web.json_response({"ok": False, "error": "action must be buy, sell, invest_index or sell_index."},
+                             status=400)
 
 
 async def _handle_owner_privacy(request):
@@ -3528,6 +3701,7 @@ async def start_webserver(port: int = 8080):
     app.router.add_post("/api/owner/remove_item", _handle_owner_remove_item)
     app.router.add_post("/api/owner/log_restock", _handle_owner_log_restock)
     app.router.add_post("/api/owner/set_item",    _handle_owner_set_item)
+    app.router.add_post("/api/trade",             _handle_api_trade)
     app.router.add_get("/api/owner/sales",         _handle_owner_sales)
     app.router.add_get("/api/owner/privacy",       _handle_owner_privacy)
     app.router.add_post("/api/owner/privacy",      _handle_owner_privacy)

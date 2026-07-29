@@ -141,7 +141,7 @@ class VotingCog(commands.Cog):
         if w <= 0:
             return await interaction.response.send_message(
                 f"❌ No voting power — you hold no `{p['market_id']}` shares and aren't on "
-                f"the GEX.PR register. Buy in with `/stock buy`.", ephemeral=True)
+                f"the GEX.PR register. Buy in on the dashboard exchange.", ephemeral=True)
         _db.cast_vote(p["id"], str(interaction.user.id), idx, w,
                       name=getattr(interaction.user, "display_name", None))
         detail = f"`{common:,.0f}` shares" + (f" + `{pref:,.0f}` GEX.PR equivalent" if pref else "")
