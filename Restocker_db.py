@@ -2918,6 +2918,54 @@ def get_hive_harvest_summary(market_id: str) -> dict:
     return out
 
 
+def get_hive_harvester_detail(market_id: str, ign: str) -> dict:
+    """Item-level breakdown for ONE harvester on one hive site.
+
+    Answers "how many comb blocks / honey blocks did this person actually deliver",
+    which the aggregate unpaid-value figure can't. Returns:
+
+    {"ign", "qty", "value", "paid_value", "unpaid_value", "first_sale", "last_sale",
+     "items": {item: {"qty","unit_value","value","paid_qty","unpaid_qty",
+                      "paid_value","unpaid_value"}}}
+    """
+    out = {"ign": str(ign), "qty": 0, "value": 0.0, "paid_value": 0.0,
+           "unpaid_value": 0.0, "first_sale": None, "last_sale": None, "items": {}}
+    with db() as conn:
+        rows = conn.execute("""
+            SELECT item,
+                   SUM(qty)                                             AS qty,
+                   MAX(unit_value)                                      AS unit_value,
+                   SUM(qty * unit_value)                                AS value,
+                   SUM(CASE WHEN paid=1 THEN qty ELSE 0 END)            AS paid_qty,
+                   SUM(CASE WHEN paid=1 THEN qty*unit_value ELSE 0 END) AS paid_value,
+                   MIN(COALESCE(sale_ts, recorded_at))                  AS first_sale,
+                   MAX(COALESCE(sale_ts, recorded_at))                  AS last_sale
+            FROM hive_harvests
+            WHERE market_id=? AND ign=? COLLATE NOCASE
+            GROUP BY item
+            ORDER BY value DESC
+        """, (str(market_id), str(ign))).fetchall()
+    for r in rows:
+        q = int(r["qty"] or 0)
+        v = float(r["value"] or 0)
+        pq = int(r["paid_qty"] or 0)
+        pv = float(r["paid_value"] or 0)
+        out["items"][r["item"]] = {
+            "qty": q, "unit_value": float(r["unit_value"] or 0), "value": v,
+            "paid_qty": pq, "unpaid_qty": q - pq,
+            "paid_value": pv, "unpaid_value": v - pv,
+        }
+        out["qty"] += q
+        out["value"] += v
+        out["paid_value"] += pv
+        out["unpaid_value"] += (v - pv)
+        for key, val in (("first_sale", r["first_sale"]), ("last_sale", r["last_sale"])):
+            cur = out[key]
+            if val and (cur is None or (val < cur if key == "first_sale" else val > cur)):
+                out[key] = val
+    return out
+
+
 def add_land_entry(land: str, entry_no: int, ts: str, kind: str,
                    amount: float, new_balance, body: str) -> bool:
     """Store one land-inbox entry. Returns True if it was NEW (dedup by PK)."""

@@ -11133,6 +11133,18 @@ _AI_TOOLS = [
         }
     },
     {
+        "name": "get_hive_harvester_detail",
+        "description": "ONE harvester's item-level hive breakdown: exactly how many Honeycomb Blocks / Honey Blocks they delivered, the per-piece value used, what's paid vs still held, and the first/last sale date. Use whenever someone asks what a specific person actually harvested, or to check whether a payout figure is right.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "ign": {"type": "string", "description": "The harvester's in-game name, e.g. 'Unclepabloo'."},
+                "market": {"type": "string", "description": "Market id, e.g. 'vtech'. Default 'vtech'."}
+            },
+            "required": ["ign"]
+        }
+    },
+    {
         "name": "get_market_earnings",
         "description": "A market's recorded CSN earnings: recent months with income/spent/net, plus lifetime totals. Use for 'how much did X make', month comparisons, or checking whether a report was recorded.",
         "input_schema": {
@@ -12222,6 +12234,31 @@ async def _ai_tool_get_hive_status(guild, channel, user, args):
     return "\n".join(lines[:25])
 
 
+async def _ai_tool_get_hive_harvester_detail(guild, channel, user, args):
+    import Restocker_db as _db
+    ign = str(args.get("ign") or "").strip()
+    if not ign:
+        return "❌ I need an in-game name."
+    mid = str(args.get("market") or "vtech").strip().lower()
+    d = _db.get_hive_harvester_detail(mid, ign)
+    if not d.get("items"):
+        return f"No hive harvests recorded for {ign} on {mid}."
+    pct = _hive_harvester_pct()
+    lines = [f"{d['ign']} — hive harvests on {mid} "
+             f"({str(d.get('first_sale') or '')[:10]} → {str(d.get('last_sale') or '')[:10]}):"]
+    for item, v in d["items"].items():
+        lines.append(
+            f"• {item}: {v['qty']:,} pcs @ {v['unit_value']:g}/pc = {v['value']:,.0f} value"
+            + (f" — {v['unpaid_qty']:,} pcs ({v['unpaid_value']:,.0f}) still unpaid"
+               if v["unpaid_qty"] else " — all paid"))
+    lines.append(f"TOTAL: {d['qty']:,} pcs, {d['value']:,.0f} value.")
+    lines.append(f"At the {pct:g}% harvester wage that's {d['value']*pct/100:,.0f} coins earned; "
+                 f"{d['paid_value']*pct/100:,.0f} paid, {d['unpaid_value']*pct/100:,.0f} outstanding.")
+    lines.append("NOTE: 'value' is the market worth of the goods, NOT the wage. The harvester "
+                 f"receives {pct:g}% of it; the rest stays with the company.")
+    return "\n".join(lines[:30])
+
+
 async def _ai_tool_get_market_earnings(guild, channel, user, args):
     mid = str(args.get("market") or "").strip().lower()
     if not mid:
@@ -12485,6 +12522,7 @@ _AI_TOOL_MAP = {
     "remove_alias":         _ai_tool_remove_alias,
     "list_aliases":         _ai_tool_list_aliases,
     "get_market_code":      _ai_tool_get_market_code,
+    "get_hive_harvester_detail": _ai_tool_get_hive_harvester_detail,
     "propose_code_change":  _ai_tool_propose_code_change,
     "create_futures_order": _ai_tool_create_futures_order,
 }

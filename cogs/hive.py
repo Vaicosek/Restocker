@@ -18,7 +18,7 @@ itself. /hive payout stays as a manual sweep (e.g. after someone registers their
 import sys
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 from typing import Optional
 
@@ -171,6 +171,47 @@ class HiveIngestModal(discord.ui.Modal, title="Paste hive feed lines"):
 class HiveCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        self.autopay_sweep_loop.start()
+
+    async def cog_unload(self):
+        self.autopay_sweep_loop.cancel()
+
+    # ── periodic autopay sweep ───────────────────────────────────────────────
+    # Autopay fires on ingest, but a harvest can sit unpaid for other reasons: the
+    # harvester wasn't registered yet, the item had no value at the time, or a
+    # payment failed and released its claim. Those only cleared when someone
+    # remembered to run /hive payout. This sweeps every 6h so balances can't go
+    # stale between CSN runs.
+    @tasks.loop(hours=6)
+    async def autopay_sweep_loop(self):
+        import Restocker_db as _db
+        try:
+            feeds = _db.get_config_prefix("hive_feed:") or {}
+        except Exception as e:
+            log.warning("[hive sweep] can't read feeds: %s", e)
+            return
+        for mid in sorted({str(v) for v in feeds.values()}):
+            try:
+                if str(_db.get_config(f"hive_autopay:{mid}") or "") != "1":
+                    continue                      # respect autopay being off
+                rows = _db.get_unpaid_hive_harvests(mid)
+                if not rows:
+                    continue
+                groups, unregistered, unvalued = _group_rows(rows)
+                if not groups:
+                    log.info("[hive sweep] %s: %d unpaid row(s) but none payable "
+                             "(unregistered=%s, unvalued=%s)",
+                             mid, len(rows), list(unregistered)[:5], list(unvalued)[:5])
+                    continue
+                res = await self._settle_groups(mid, groups, batch=f"sweep-{mid}")
+                log.info("[hive sweep] %s: paid %s in wages on %s value to %d harvester(s)",
+                         mid, f"{res['harv_total']:,.0f}", f"{res['value_total']:,.0f}", len(groups))
+            except Exception as e:
+                log.warning("[hive sweep] %s failed: %s", mid, e)
+
+    @autopay_sweep_loop.before_loop
+    async def _before_autopay_sweep(self):
+        await self.bot.wait_until_ready()
 
     hive = app_commands.Group(
         name="hive",
