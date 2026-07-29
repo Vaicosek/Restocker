@@ -2929,7 +2929,8 @@ def get_hive_harvester_detail(market_id: str, ign: str) -> dict:
                       "paid_value","unpaid_value"}}}
     """
     out = {"ign": str(ign), "qty": 0, "value": 0.0, "paid_value": 0.0,
-           "unpaid_value": 0.0, "first_sale": None, "last_sale": None, "items": {}}
+           "unpaid_value": 0.0, "first_sale": None, "last_sale": None,
+           "last_paid_at": None, "items": {}}
     with db() as conn:
         rows = conn.execute("""
             SELECT item,
@@ -2939,7 +2940,8 @@ def get_hive_harvester_detail(market_id: str, ign: str) -> dict:
                    SUM(CASE WHEN paid=1 THEN qty ELSE 0 END)            AS paid_qty,
                    SUM(CASE WHEN paid=1 THEN qty*unit_value ELSE 0 END) AS paid_value,
                    MIN(COALESCE(sale_ts, recorded_at))                  AS first_sale,
-                   MAX(COALESCE(sale_ts, recorded_at))                  AS last_sale
+                   MAX(COALESCE(sale_ts, recorded_at))                  AS last_sale,
+                   MAX(paid_at)                                         AS last_paid_at
             FROM hive_harvests
             WHERE market_id=? AND ign=? COLLATE NOCASE
             GROUP BY item
@@ -2959,7 +2961,8 @@ def get_hive_harvester_detail(market_id: str, ign: str) -> dict:
         out["value"] += v
         out["paid_value"] += pv
         out["unpaid_value"] += (v - pv)
-        for key, val in (("first_sale", r["first_sale"]), ("last_sale", r["last_sale"])):
+        for key, val in (("first_sale", r["first_sale"]), ("last_sale", r["last_sale"]),
+                         ("last_paid_at", r["last_paid_at"])):
             cur = out[key]
             if val and (cur is None or (val < cur if key == "first_sale" else val > cur)):
                 out[key] = val
