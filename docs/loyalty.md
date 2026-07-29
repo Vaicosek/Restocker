@@ -15,7 +15,7 @@ redeemed for rewards.
 | Elite | 40,000 | 0.5% | +12% |
 
 ## Commands
-- `/loyalty stats` — your points, tier, next tier. `/loyalty leaderboard` — top holders.
+- `/loyalty hub` — ONE panel: your points/tier, leaderboard, redeem. Managers also gep holders.
 - `/loyalty redeem` — spend points on a reward (a manager/owner pays it out).
   `/loyalty redemptions` / `approve` / `deny` — the approval queue.
 - `/loyalty settings` — (manager) ONE panel: add/set points, link/unlink IGNs, see who's

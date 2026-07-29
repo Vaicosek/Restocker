@@ -239,7 +239,7 @@ class ReportsCog(commands.Cog):
         charts="Post bar charts (requires matplotlib). Default: True",
         restock="Show restock preview (managers only). Default: False",
         confirm_restock="Set True to actually create restock orders (only with restock=True). Default: False",
-        market_id="Which market to record this data for (default: main). Use /market list to see IDs.",
+        market_id="Which market to record this data for (default: main). Use /market info to see IDs.",
     )
     @app_commands.autocomplete(market_id=_market_autocomplete)
     async def csn(self, 

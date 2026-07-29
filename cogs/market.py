@@ -137,7 +137,7 @@ class MarketCog(commands.Cog):
         m = _get_market(market_id)
         if m is None:
             return await interaction.response.send_message(
-                f"❌ Market `{market_id}` not found. Use `/market list` to see registered markets.",
+                f"❌ Market `{market_id}` not found. Use `/market info` or `/market settings`.",
                 ephemeral=True,
             )
         if not (is_manager(interaction) or _is_market_owner(interaction, market_id)

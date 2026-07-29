@@ -41,8 +41,8 @@ replacement, or just answer from your own tools:
 |---|---|
 | `/hive status` | your `get_hive_status` tool |
 | `/hive ingest`, `/hive settle` | the mod posts harvest lines itself; `/hive payout` settles |
-| `/inventory stock`, `/inventory clear_stock` | your `get_stock_fullness` tool, or the website |
-| `/market list`, `/market report`, `/market earnings` | `/market info` + your `get_market_earnings` tool |
+| `/inventory *` | your `get_stock_fullness` tool, or the website |
+| `/market list/report/earnings` + 14 more | `/market settings` panel, `/market info` + your `get_market_earnings` tool |
 | `/market suggest_price`, `platform_balance`, `hide_earnings` | answer from tools / the website |
 | `/csn_audit`, `/import_earnings` | `get_market_earnings`; imports come from the mod |
 | `/stock buy/sell/panel/invest_index/sell_index/list/price/portfolio/index_fund/dashboard` | the website Exchange page (real trades) |

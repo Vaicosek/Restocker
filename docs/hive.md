@@ -12,7 +12,7 @@ hive system records those sales and pays each harvester a % of the harvested val
 3. The bot parses it (`_parse_hive_feed`), records a `hive_harvests` row valued at the
    item's hive value, resolves the IGN to a Discord user via the IGN registry.
 4. With **autopay on**, the harvester is paid their % immediately; otherwise the row waits
-   for a manual `/hive payout`. The remainder books to `hive_ledger` (feeds stock price).
+   for a manual payout (`/hive settings` → Pay now). The remainder books to `hive_ledger` (feeds stock price).
 
 ## HiveSettings — one panel (`/hive settings`)
 Everything hive-related is on a single ephemeral panel. Seven subcommands used to do

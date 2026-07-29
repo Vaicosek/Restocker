@@ -513,7 +513,7 @@ class OrdersCog(commands.Cog):
             if arch_ch is not None:
                 bits.append(f"archived {archived} shot(s) in {arch_ch.mention}")
             else:
-                bits.append("no archive channel set (`/config set_channel` → *Payment-proof archive channel*)")
+                bits.append("no archive channel set (ask the bot to set the payment-proof archive channel*)")
             await message.reply("📸 Payment screenshot: " + "; ".join(bits) + ". "
                                 "Click **🗑 Close ticket** when done.",
                                 allowed_mentions=discord.AllowedMentions.none())

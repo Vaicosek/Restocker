@@ -3419,7 +3419,7 @@ async def _pay_honey_harvesters(rows: list, market_id: str, report_channel):
             uid = _db.get_user_id_by_ign(owner)
             if not uid:
                 paid_lines.append(f"⚠️ `{owner}` harvested {delta:,} × {item} but has no linked "
-                                  f"Discord account — `/team add` them with ign `{owner}` to pay them.")
+                                  f"Discord account — add them in `/team settings` with ign `{owner}` to pay them.")
                 continue
             coins = delta * rate
             points = delta                     # 1 loyalty point per unit harvested (tunable)
@@ -12663,7 +12663,7 @@ async def _ai_tool_rebuild_hive_channel(guild, channel, user, args):
     import Restocker_db as _db
     feeds = await cog._hive_feeds()
     if not feeds:
-        return "❌ No hive feeds are bound. Use /hive bind first."
+        return "❌ No hive feeds are bound. Bind one in `/hive settings` first."
     want = str(args.get("site") or "").strip().lower()
     confirm = bool(args.get("confirm"))
     if want == "all":

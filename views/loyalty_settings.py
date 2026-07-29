@@ -83,7 +83,7 @@ def build_embed(guild) -> discord.Embed:
                         inline=False)
     except Exception as ex:
         log.debug("[loyalty panel] redemption count failed: %s", ex)
-    e.set_footer(text="Members keep /loyalty stats · leaderboard · redeem.")
+    e.set_footer(text="Members use /loyalty hub for stats, leaderboard and redeem.")
     return e
 
 
