@@ -8787,7 +8787,7 @@ def _fundamental_for_market(market_id):
         pass
     fundamental = max(MIN_SHARE_PRICE, (avg_net / shares_out) * pe)
     # Book-value floor: a company is worth at least its productive assets plus cash on
-    # hand (config asset_value:<mid>, set via /stock set_params assets:). V Tech's hive
+    # hand (config asset_value:<mid>, set in /market settings -> Tune params). V Tech's hive
     # fleet is real infrastructure with a build cost — earnings can price the stock
     # ABOVE book value, but a slow earnings month can't price the company below the
     # replacement value of what it owns.
@@ -8832,7 +8832,7 @@ def _recompute_share_price(market_id, reason="csn_report", full_move=False):
     net profit, blended with the current trade-driven price and clamped so a
     single re-anchor can't whipsaw the quote. try/except-wrapped so a pricing
     hiccup can never break CSN recording.
-    full_move=True (deliberate management actions like /stock set_params) skips the
+    full_move=True (deliberate management actions like Tune params) skips the
     blend + per-event clamp and re-anchors straight onto the fundamental — without
     it, a big book-value change would take a dozen report events to phase in."""
     try:
@@ -9599,7 +9599,7 @@ def _market_backing(market_id) -> dict:
     cash = float(_db.get_treasury(market_id) or 0)
     assets = _market_asset_value(market_id)
     # Off-market assets currently FOR SALE (hive batches, land claims) — liquid backing,
-    # set via /stock set_params sellable:. Deliberately separate from asset_value:<mid>
+    # set in /market settings -> Tune params. Deliberately separate from asset_value:<mid>
     # (the book-value price floor): the fleet's book value is a VALUATION, not backing —
     # only things that can actually be turned into coins back the shares.
     try:
@@ -10875,12 +10875,12 @@ Teams & Manager Overrides (/team subcommands) — how a manager gets workers and
 - /team perf — your team's performance leaderboard (optional days)
 - /team leaderboard — cross-team leaderboard so teams compete on efficiency
 - /team webhook / /team channel / /team unbind — (Manager) bind/unbind a live team feed + weekly digest
-- /project create / /project pay — (Manager) fund a manager a budget to build something; they pay their team and keep the rest
+- Manager Panel → Fund project / Pay from project — hand a manager a budget; they pay their team and keep the rest
 HOW THE MANAGER CUT WORKS (explain this when asked): a worker registers their EXACT in-game name (IGN) so the CSN mod's "who sold what" links to their Discord account. The manager then earns override commissions on that worker's activity, paid as MINTED bonuses ON TOP — they are NEVER taken from the worker, who always keeps their full earnings:
   - Order payouts: the manager earns ~5% (default) of each worker's fulfilled-order payout.
   - Loyalty points: the manager gets a matching ~5% of the worker's loyalty points.
   - Chest-shop sales: an optional % of the worker's monthly CSN sales net (OFF by default).
-  - Team projects: a funder hands a manager a budget (/project create); the manager pays their team with /project pay and keeps whatever's left (15% is the default manager cut).
+  - Team projects: a funder hands a manager a budget from the Manager Panel; the manager pays their team from the same panel and keeps whatever's left (15% is the default manager cut).
 So the flow is: worker joins a manager (/team join) and registers their IGN → does orders and/or runs their shop → the server pays the worker their FULL amount (coins via /balance, plus interest and loyalty perks) and separately mints the manager an override commission on top. The cross-team leaderboard drives competition for efficiency.
 
 Brew & Tool Codes (/brew and /tool subcommands — shared name store):
@@ -10891,7 +10891,7 @@ Loyalty (/loyalty subcommands):
 - /loyalty stats — your loyalty points, tier, interest rate, and payout bonus
 - /loyalty leaderboard — top loyalty point holders
 - /register_ign — register your exact Minecraft username (run again to add alt accounts — all your IGNs pool into one account)
-- /loyalty set_points / /loyalty add_points — (Managers) set or add a user's loyalty points
+- /loyalty settings — (Managers) one panel: points, IGN links, unlinked employees
 
 Inventory & Stock Alarms (/inventory subcommands — live barrel fullness from CSN stock scans):
 - /inventory stock — live shop stock / barrel fullness for a market (lowest first)
@@ -13974,7 +13974,7 @@ async def _main():
     # AI still has set_alias / remove_alias / list_aliases for the rare manual fix.
     for _ext in ("cogs.loyalty", "cogs.admin", "cogs.market", "cogs.stock",
                  "cogs.shop", "cogs.orders", "cogs.money", "cogs.reports", "cogs.misc",
-                 "cogs.loops", "cogs.events", "cogs.config", "cogs.team",  "cogs.projects",
+                 "cogs.loops", "cogs.events", "cogs.config", "cogs.team",  
                  "cogs.devassist", "cogs.hive", "cogs.lands", "cogs.bonds", "cogs.voting",
                  "cogs.land_exchange"):
         try:

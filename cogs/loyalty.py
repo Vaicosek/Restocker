@@ -61,10 +61,6 @@ TIER_EMOJIS = {1: "🪨", 2: "🔨", 3: "⚔️", 4: "💎", 5: "👑"}
 _IGN_RE = r"^[A-Za-z0-9_]{3,16}$"
 
 
-def _mention_list(members: list, cap: int = 30) -> str:
-    shown = ", ".join(m.mention for m in members[:cap])
-    extra = len(members) - cap
-    return shown + (f" … +{extra} more" if extra > 0 else "")
 
 
 class LoyaltyCog(commands.Cog):
@@ -177,7 +173,7 @@ class LoyaltyCog(commands.Cog):
         if _db_ri.count_igns(uid) >= MAX_IGNS_PER_USER:
             return await interaction.response.send_message(
                 f"❌ You've hit the max of **{MAX_IGNS_PER_USER}** in-game names. "
-                f"Ask a manager to `/loyalty unlink` one you no longer use first.", ephemeral=True)
+                f"Ask a manager to unlink one you no longer use (`/loyalty settings`).", ephemeral=True)
         # AUDIT FIX (high): money-bearing IGNs can't be self-claimed (anti-squatting) —
         # unpaid harvest coins would flow to whoever registered the name first.
         try:
@@ -199,259 +195,24 @@ class LoyaltyCog(commands.Cog):
                    f"pooling into this one account:\n" + ", ".join(f"`{g}`" for g in igns))
         await interaction.response.send_message(msg, ephemeral=True)
 
-    @loyalty.command(name="whois", description="(Manager) Who holds an IGN — the Discord account it's registered to")
-    @app_commands.describe(ign="The in-game name to look up (case-insensitive)")
-    async def loyalty_whois(self, interaction: discord.Interaction, ign: str):
+    @loyalty.command(name="settings",
+                     description="(Manager) LoyaltySettings — points, IGN links, unlinked employees")
+    async def loyalty_settings(self, interaction: discord.Interaction):
+        """One panel replacing add_points/set_points/link/unlink/unlinked/remind_unlinked/whois.
+        Members keep stats, leaderboard, redeem and redemptions as commands."""
         if not is_manager(interaction):
             return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
-        import Restocker_db as _db_wi
-        ign = ign.strip()
-        uid = _db_wi.get_user_id_by_ign(ign)
-        if not uid:
-            try:
-                pend = _db_wi.ign_unpaid_value(ign)
-            except Exception:
-                pend = 0
-            extra = (f" It has **{int(pend):,}** coins of unpaid harvests waiting, so only a "
-                     f"manager can link it." if pend > 0 else "")
-            return await interaction.response.send_message(
-                f"🔎 `{ign}` is **not registered** to anyone.{extra}", ephemeral=True)
-        member = interaction.guild.get_member(int(uid)) if interaction.guild else None
-        who = (f"{member.mention} ({member.display_name})" if member
-               else f"<@{uid}> (ID `{uid}` — not in this server)")
-        others = [g for g in _db_wi.get_igns(uid) if g.lower() != ign.lower()]
-        alts = ("\nTheir other IGNs: " + ", ".join(f"`{g}`" for g in others)) if others else ""
-        return await interaction.response.send_message(
-            f"🔎 `{ign}` is registered to {who}.{alts}\n"
-            f"To move it: `/loyalty unlink user:<holder> ign:{ign}` then "
-            f"`/loyalty link user:<rightful owner> ign:{ign}`.",
-            ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
-
-    @loyalty.command(name="unlinked", description="(Manager) List employees who haven't linked their Minecraft IGN")
-    async def loyalty_unlinked(self, interaction: discord.Interaction):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
-        guild = interaction.guild
-        if guild is None:
-            return await interaction.response.send_message("Run this in a server.", ephemeral=True)
-        await interaction.response.defer(ephemeral=True)
-
-        # Make sure the full member list is cached (members intent is on).
-        members = guild.members
-        if not guild.chunked:
-            try:
-                members = await guild.chunk()
-            except Exception:
-                members = guild.members
-
-        import Restocker_db as _db_ul
-        employees = [m for m in members if not m.bot
-                     and any(r.name in LOYALTY_EMPLOYEE_ROLES for r in m.roles)]
-        linked, pending, unlinked = [], [], []
-        for m in employees:
-            if _db_ul.get_ign(str(m.id)):
-                linked.append(m)
-            elif _db_ul.get_ign_pending(str(m.id)):
-                pending.append(m)
-            else:
-                unlinked.append(m)
-
-        embed = discord.Embed(
-            title="🔗 IGN Link Status — all employees",
-            description=(f"Scanned **{len(employees)}** members holding an employee role "
-                         f"({', '.join(sorted(LOYALTY_EMPLOYEE_ROLES))})."),
-            color=0xE74C3C if unlinked else 0x2ECC71,
-        )
-        embed.add_field(name=f"✅ Linked ({len(linked)})",
-                        value=_mention_list(linked) if linked else "*none*", inline=False)
-        if pending:
-            embed.add_field(name=f"⏳ Prompted, awaiting reply ({len(pending)})",
-                            value=_mention_list(pending), inline=False)
-        embed.add_field(name=f"❌ Not linked ({len(unlinked)})",
-                        value=_mention_list(unlinked) if unlinked else "*none — everyone is linked!* 🎉",
-                        inline=False)
-        if unlinked:
-            embed.set_footer(text="Unlinked employees' CSN sales credit NO ONE. "
-                                  "Link them with /loyalty link <user> <ign>.")
-        await interaction.followup.send(embed=embed, ephemeral=True)
-
-    @loyalty.command(
-        name="remind_unlinked",
-        description="(Manager) DM every employee who hasn't linked their IGN, asking them to")
-    @app_commands.describe(
-        apply="false = dry-run preview (default); true = actually send the DMs",
-        set_deadline="⚠️ true = also start the 3-day countdown; their role is REMOVED if they "
-                     "don't reply. Default false = reminder only, nobody loses anything.")
-    async def loyalty_remind_unlinked(self, interaction: discord.Interaction,
-                                      apply: bool = False, set_deadline: bool = False):
-        """Nudges existing unlinked employees. The on-role-gain prompt in events.py only fires
-        when someone RECEIVES an employee role, so anyone who already had it never got asked —
-        this catches them up.
-
-        set_deadline is off by default on purpose: turning it on writes an ign_pending row, and
-        the deadline loop STRIPS THE ROLE of anyone who doesn't reply in time. Fine for a couple
-        of new hires; a bad idea to fire at 60+ existing staff at once."""
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
-        guild = interaction.guild
-        if guild is None:
-            return await interaction.response.send_message("Run this in a server.", ephemeral=True)
-        await interaction.response.defer(ephemeral=True, thinking=True)
-
-        members = guild.members
-        if not guild.chunked:
-            try:
-                members = await guild.chunk()
-            except Exception:
-                members = guild.members
-
-        import Restocker_db as _db_r
-        employees = [m for m in members if not m.bot
-                     and any(r.name in LOYALTY_EMPLOYEE_ROLES for r in m.roles)]
-        targets = [m for m in employees
-                   if not _db_r.get_ign(str(m.id)) and not _db_r.get_ign_pending(str(m.id))]
-
-        if not targets:
-            return await interaction.followup.send(
-                "✅ Everyone with an employee role is either linked or already prompted.",
-                ephemeral=True)
-
-        if not apply:
-            warn = ("\n\n⚠️ `set_deadline:true` would ALSO start the "
-                    f"{LOYALTY_IGN_DEADLINE_DAYS}-day countdown — anyone who doesn't reply gets "
-                    f"their **role removed**. With {len(targets)} people, think hard before doing that."
-                    if set_deadline else
-                    "\n\nThis sends a reminder only — no deadline, nobody loses their role.")
-            return await interaction.followup.send(
-                f"**Dry run** — would DM **{len(targets)}** unlinked employee(s):\n"
-                + ", ".join(m.mention for m in targets[:30])
-                + (f" … +{len(targets)-30} more" if len(targets) > 30 else "")
-                + warn + "\n\nRe-run with `apply:true` to send.", ephemeral=True)
-
-        sent, blocked = 0, []
-        deadline = (datetime.now(timezone.utc)
-                    + timedelta(days=LOYALTY_IGN_DEADLINE_DAYS)).isoformat()
-        for m in targets:
-            try:
-                dm = await m.create_dm()
-                body = (
-                    f"👋 Hi! You have an employee role in **{guild.name}**, but you haven't linked "
-                    f"your **Minecraft in-game username (IGN)** yet.\n\n"
-                    f"Right now your in-game sales and hive harvests **credit nobody** — your wages "
-                    f"and loyalty points are being held instead of paid.\n\n"
-                    f"**➡️ Go to the {guild.name} Discord and run `/register_ign ign:<your exact "
-                    f"in-game name>`** — that's it, you're linked and everything owed starts flowing.\n"
-                    f"(Run it again later to add alt accounts — they all pool into one account.)"
-                )
-                if set_deadline:
-                    body += (f"\n\n⏰ Please do it within **{LOYALTY_IGN_DEADLINE_DAYS} days** — "
-                             f"after that your role is removed automatically.")
-                await dm.send(body)
-                sent += 1
-                if set_deadline:
-                    role = next((r for r in m.roles if r.name in LOYALTY_EMPLOYEE_ROLES), None)
-                    _db_r.set_ign_pending(str(m.id), str(dm.id),
-                                          str(role.id) if role else "0",
-                                          str(guild.id), deadline)
-            except discord.Forbidden:
-                blocked.append(m)
-            except Exception as e:
-                log.warning("[ign] reminder to %s failed: %s", m.id, e)
-                blocked.append(m)
-            # Throttle — 60+ DMs in a burst is exactly what gets a bot rate-limited or flagged.
-            await asyncio.sleep(1.2)
-
-        msg = f"✅ DM'd **{sent}**/{len(targets)} unlinked employee(s)."
-        if set_deadline:
-            msg += (f"\n⏰ Deadline set — they lose their role in {LOYALTY_IGN_DEADLINE_DAYS} days "
-                    f"if they don't reply.")
-        else:
-            msg += "\n(Reminder only — no deadline set, nobody loses their role.)"
-        if blocked:
-            msg += (f"\n\n🚫 Couldn't DM **{len(blocked)}** (DMs closed): "
-                    + ", ".join(m.mention for m in blocked[:15])
-                    + (f" … +{len(blocked)-15} more" if len(blocked) > 15 else "")
-                    + "\nThose need `/loyalty link <user> <ign>` manually.")
-        await interaction.followup.send(msg[:1900], ephemeral=True)
-
-    @loyalty.command(name="link", description="(Manager) Link a member to a Minecraft IGN — run again to add their alts")
-    @app_commands.describe(user="The Discord member", ign="An EXACT Minecraft username of theirs (main or alt)")
-    async def loyalty_link(self, interaction: discord.Interaction, user: discord.Member, ign: str):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
-        import re as _re3, Restocker_db as _db_lk
-        ign = ign.strip()
-        if not _re3.match(_IGN_RE, ign):
-            return await interaction.response.send_message(
-                "❌ Invalid IGN. Must be 3-16 characters: letters, numbers, underscores.", ephemeral=True)
-        owner = _db_lk.get_user_id_by_ign(ign)
-        if owner and owner != str(user.id):
-            return await interaction.response.send_message(
-                f"❌ `{ign}` is already linked to <@{owner}>. Unlink it from them first if this is a mistake.",
-                ephemeral=True)
-        if owner == str(user.id):
-            return await interaction.response.send_message(
-                f"ℹ️ {user.mention} already has `{ign}` linked.", ephemeral=True)
-        if _db_lk.count_igns(str(user.id)) >= MAX_IGNS_PER_USER:
-            return await interaction.response.send_message(
-                f"❌ {user.mention} already has the max of **{MAX_IGNS_PER_USER}** IGNs. "
-                f"Unlink one first.", ephemeral=True)
-        _db_lk.add_ign(str(user.id), ign)
-        _db_lk.delete_ign_pending(str(user.id))
-        igns = _db_lk.get_igns(str(user.id))
-        extra = (f" They now have **{len(igns)}**: " + ", ".join(f"`{g}`" for g in igns)) if len(igns) > 1 else ""
+        from views.loyalty_settings import LoyaltySettingsView, build_embed
         await interaction.response.send_message(
-            f"🔗 Linked {user.mention} → **{ign}**. Their CSN sales now credit them.{extra}")
+            embed=build_embed(interaction.guild),
+            view=LoyaltySettingsView(interaction.user.id), ephemeral=True)
 
-    @loyalty.command(name="unlink", description="(Manager) Remove a member's IGN — one specific alt, or all of them")
-    @app_commands.describe(user="The Discord member to unlink",
-                           ign="(Optional) remove just this one IGN. Leave blank to remove ALL of theirs.")
-    async def loyalty_unlink(self, interaction: discord.Interaction, user: discord.Member,
-                             ign: Optional[str] = None):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
-        import Restocker_db as _db_ulk
-        current = _db_ulk.get_igns(str(user.id))
-        if not current:
-            return await interaction.response.send_message(
-                f"{user.mention} has no IGN linked.", ephemeral=True)
-        if ign:
-            ign = ign.strip()
-            if _db_ulk.remove_ign(str(user.id), ign):
-                left = _db_ulk.get_igns(str(user.id))
-                left_txt = ", ".join(f"`{g}`" for g in left) if left else "*none left*"
-                return await interaction.response.send_message(
-                    f"🔓 Removed `{ign}` from {user.mention}. Remaining: {left_txt}.")
-            return await interaction.response.send_message(
-                f"❌ {user.mention} has no IGN `{ign}`. They have: "
-                + ", ".join(f"`{g}`" for g in current), ephemeral=True)
-        _db_ulk.delete_ign(str(user.id))
-        await interaction.response.send_message(
-            f"🔓 Unlinked {user.mention} — removed all **{len(current)}** IGN(s) "
-            f"(was: {', '.join(f'`{g}`' for g in current)}).")
 
-    @loyalty.command(name="set_points", description="(Manager) Manually set a user's loyalty points")
-    @app_commands.describe(user="The user", points="New point total")
-    async def loyalty_set_points(self, interaction: discord.Interaction, user: discord.Member, points: float):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
-        import Restocker_db as _db_sp
-        new = _db_sp.set_loyalty_points(str(user.id), points)
-        tier = _loyalty_tier(new)
-        await interaction.response.send_message(
-            f"✅ Set **{user.display_name}**'s loyalty to `{new:,.0f}` pts — {TIER_EMOJIS.get(tier['tier'],'')} **{tier['name']}**"
-        )
 
-    @loyalty.command(name="add_points", description="(Manager) Add loyalty points to a user")
-    @app_commands.describe(user="The user", points="Points to add", reason="Reason")
-    async def loyalty_add_points(self, interaction: discord.Interaction, user: discord.Member, points: float, reason: str = "manual"):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
-        new_total, old_tier, new_tier = _award_loyalty_points(user.id, int(points), reason=reason)
-        tier_up = f" 🏆 Tier up to **{new_tier['name']}**!" if new_tier["tier"] > old_tier["tier"] else ""
-        await interaction.response.send_message(
-            f"✅ Added **{points:,.0f}** pts to {user.mention} → `{new_total:,.0f}` total{tier_up}"
-        )
+
+
+
+
 
 
     @loyalty.command(name="redeem", description="Redeem your loyalty points for a reward (a manager or market owner pays it out)")

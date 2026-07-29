@@ -40,6 +40,7 @@ _save_items = core._save_items
 _send_funds_report = core._send_funds_report
 _total_funds_coins = core._total_funds_coins
 add_coins = core.add_coins
+deduct_coins = core.deduct_coins   # project funding/pay moved here from /project
 _pay_manager_override = core._pay_manager_override
 _pay_manager_points_override = core._pay_manager_points_override
 _log_team_event = core._log_team_event
@@ -898,6 +899,127 @@ async def cancel_order_by_id(client, order_id: int) -> str:
     except Exception as e:
         log.warning("[cancel] card refresh failed for #%s: %s", order_id, e)
     return f"❌ Order #{order_id} has been cancelled."
+
+
+class _ProjectFundModal(discord.ui.Modal, title="Fund a project"):
+    """Was /project create. Guards kept: no self-funding (a free round-trip that would
+    mint budget//1000 loyalty points per run), and a real balance check."""
+
+    def __init__(self):
+        super().__init__(timeout=300)
+        self.uid = discord.ui.TextInput(label="Manager's Discord user id", required=True)
+        self.budget = discord.ui.TextInput(label="Budget (coins)", required=True)
+        self.title_in = discord.ui.TextInput(label="What to build", required=True, max_length=100)
+        self.add_item(self.uid); self.add_item(self.budget); self.add_item(self.title_in)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        import Restocker_db as _db
+        raw = str(self.uid.value).strip().strip("<@!>")
+        if not raw.isdigit():
+            return await interaction.response.send_message("❌ That isn't a user id.", ephemeral=True)
+        mgr_id = int(raw)
+        funder = interaction.user
+        if mgr_id == funder.id:
+            return await interaction.response.send_message(
+                "❌ You can't fund yourself — that's a free round-trip that mints points.",
+                ephemeral=True)
+        try:
+            budget = int(float(str(self.budget.value).strip()))
+        except Exception:
+            return await interaction.response.send_message("❌ Budget must be a number.", ephemeral=True)
+        if not (1 <= budget <= 1_000_000_000):
+            return await interaction.response.send_message("❌ Budget out of range.", ephemeral=True)
+        bal = int(_db.get_balance(str(funder.id)).get("coins") or 0)
+        if bal < budget:
+            return await interaction.response.send_message(
+                f"❌ You need {budget:,} coins but have {bal:,}.", ephemeral=True)
+        title = str(self.title_in.value).strip()[:100]
+        deduct_coins(funder.id, budget, reason=f"project fund: {title}")
+        add_coins(mgr_id, budget, counts_as_principal=True, reason=f"project budget: {title}")
+        pid = _db.create_project(title, str(funder.id), str(mgr_id), budget)
+        _db.set_project_status(pid, "funded")
+        pts = max(1, budget // 1000)
+        try:
+            _award_loyalty_points(mgr_id, pts, reason=f"project#{pid}")
+        except Exception:
+            pass
+        await interaction.response.send_message(
+            f"✅ Funded <@{mgr_id}> **{budget:,}** coins for **#{pid} · {title}**. "
+            f"They pay their team from the Manager Panel and keep the rest.", ephemeral=True)
+        try:
+            u = interaction.client.get_user(mgr_id) or await interaction.client.fetch_user(mgr_id)
+            await u.send(f"📋 {funder.mention} tasked you with **#{pid} {title}** — budget "
+                         f"**{budget:,}** coins, now in your balance. (+{pts} pts)")
+        except Exception:
+            pass
+
+
+class _ProjectPayModal(discord.ui.Modal, title="Pay from project budget"):
+    """Was /project pay. Guards kept verbatim: the payee must be on YOUR team, circular
+    manager pairs earn no points (coin ping-pong minted unlimited points), and points are
+    capped per payer->worker per day."""
+
+    def __init__(self):
+        super().__init__(timeout=300)
+        self.uid = discord.ui.TextInput(label="Worker's Discord user id", required=True)
+        self.amount = discord.ui.TextInput(label="Coins to pay", required=True)
+        self.note = discord.ui.TextInput(label="Note (optional)", required=False)
+        self.add_item(self.uid); self.add_item(self.amount); self.add_item(self.note)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        import Restocker_db as _db
+        from datetime import datetime as _dt, timezone as _tz
+        raw = str(self.uid.value).strip().strip("<@!>")
+        if not raw.isdigit():
+            return await interaction.response.send_message("❌ That isn't a user id.", ephemeral=True)
+        wid = int(raw)
+        payer = interaction.user
+        if wid == payer.id:
+            return await interaction.response.send_message(
+                "❌ Pick a real team member, not yourself.", ephemeral=True)
+        if str(_db.get_manager_of(str(wid)) or "") != str(payer.id):
+            return await interaction.response.send_message(
+                f"❌ <@{wid}> isn't on your team. Add them in `/team settings` first.", ephemeral=True)
+        try:
+            amount = int(float(str(self.amount.value).strip()))
+        except Exception:
+            return await interaction.response.send_message("❌ Amount must be a number.", ephemeral=True)
+        if not (1 <= amount <= 1_000_000_000):
+            return await interaction.response.send_message("❌ Amount out of range.", ephemeral=True)
+        bal = int(_db.get_balance(str(payer.id)).get("coins") or 0)
+        if bal < amount:
+            return await interaction.response.send_message(
+                f"❌ You only have {bal:,} coins.", ephemeral=True)
+        note = str(self.note.value or "").strip()
+        deduct_coins(payer.id, amount, reason=f"project pay -> {wid}")
+        add_coins(wid, amount, counts_as_principal=True,
+                  reason=f"project pay from {payer.id}" + (f": {note}" if note else ""))
+        # Coins are conserved; it was the REWARDS that were mintable. Two accounts
+        # managing each other bounced coins back and forth for unlimited points.
+        _circular = str(_db.get_manager_of(str(payer.id)) or "") == str(wid)
+        _cap = int(getattr(core, "PROJECT_PAY_POINTS_DAILY_CAP", 500) or 500)
+        _key = f"projpts:{payer.id}:{wid}:{_dt.now(_tz.utc).strftime('%Y-%m-%d')}"
+        try:
+            _used = int(float(_db.get_config(_key) or 0))
+        except Exception:
+            _used = 0
+        pts = 0 if _circular else max(0, min(max(1, amount // 100), _cap - _used))
+        if pts > 0:
+            try:
+                _db.set_config(_key, str(_used + pts))
+                _award_loyalty_points(wid, pts, reason="project pay")
+                _db.record_team_perf(str(payer.id), str(wid), "project", coins=amount, points=pts)
+            except Exception:
+                pass
+        await interaction.response.send_message(
+            f"💸 Paid <@{wid}> **{amount:,}** coins (+{pts} pts)." + (f" — {note}" if note else ""),
+            ephemeral=True)
+        try:
+            u = interaction.client.get_user(wid) or await interaction.client.fetch_user(wid)
+            await u.send(f"💸 {payer.mention} paid you **{amount:,}** coins from a team project "
+                         f"(+{pts} loyalty pts)." + (f"\nNote: {note}" if note else ""))
+        except Exception:
+            pass
 
 
 class CancelPickView(discord.ui.View):
@@ -2057,6 +2179,14 @@ class ManagerPanelView(discord.ui.View):
             color=discord.Color.orange())
         return await interaction.response.send_message(embed=embed, view=CancelPickView(),
                                                        ephemeral=True)
+
+    @discord.ui.button(label="📋 Fund project", style=discord.ButtonStyle.secondary)
+    async def fund_project_btn(self, interaction: discord.Interaction, button: Button):
+        return await interaction.response.send_modal(_ProjectFundModal())
+
+    @discord.ui.button(label="💸 Pay from project", style=discord.ButtonStyle.secondary)
+    async def pay_project_btn(self, interaction: discord.Interaction, button: Button):
+        return await interaction.response.send_modal(_ProjectPayModal())
 
     @discord.ui.button(label="🧹 Prune Cancelled", style=discord.ButtonStyle.danger)
     async def prune_closed(self, interaction: discord.Interaction, button: Button):

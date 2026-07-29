@@ -18,12 +18,14 @@ redeemed for rewards.
 - `/loyalty stats` — your points, tier, next tier. `/loyalty leaderboard` — top holders.
 - `/loyalty redeem` — spend points on a reward (a manager/owner pays it out).
   `/loyalty redemptions` / `approve` / `deny` — the approval queue.
-- `/loyalty set_points` / `add_points` — (manager) adjust points.
+- `/loyalty settings` — (manager) ONE panel: add/set points, link/unlink IGNs, see who's
+  unlinked, look up who holds an IGN, preview the unlinked reminder.
 
 ## IGN registry (critical for pay)
 - `/register_ign` — a worker links their Minecraft name. **Run again to add alts.**
-- `/loyalty link` / `/loyalty unlink` — (manager) link or remove a member's IGN(s).
-- `/loyalty unlinked` — (manager) employees with no IGN. `/loyalty remind_unlinked` — DM them all.
+- Members keep `/loyalty stats`, `leaderboard`, `redeem` and `redemptions`.
+- The panel PREVIEWS the unlinked reminder only. Actually DMing — and especially the
+  deadline that strips roles — goes through the bot so it can confirm first.
 
 ## Gotchas the AI must know
 - **Pay routes through the IGN registry.** Hive wages and order payouts resolve the

@@ -998,6 +998,7 @@ class OrdersCog(commands.Cog):
                 "• **View Orders** → full order list (same as `/orders`)\n"
                 "• **Escalate order…** → repost/bump an order to workers\n"
                 "• **Cancel order…** → pick an open order and cancel it\n"
+                "• **Fund project / Pay from project** → hand a manager a budget, pay their team\n"
                 "• **Prune Cancelled** → deletes cancelled orders (fulfilled kept as history)"
             ),
             color=discord.Color.gold()

@@ -381,6 +381,77 @@ class _WithdrawModal(discord.ui.Modal, title="Withdraw excess treasury"):
         await self.p.refresh(i, f"✅ Withdrew {moved:,} coins to your wallet.")
 
 
+class _ParamsModal(discord.ui.Modal, title="Tune listing parameters"):
+    """Was /stock set_params. Two behaviours kept:
+      * shares outstanding can NEVER drop below what holders already own;
+      * a treasury/asset change re-anchors the price with full_move=True, because it's a
+        deliberate management action rather than a market tick.
+    """
+
+    def __init__(self, p):
+        super().__init__(timeout=300)
+        self.p = p
+        d = _db()
+        L = d.get_market_shares(p.mid) or {}
+        self.shares = discord.ui.TextInput(label="Shares outstanding", required=False,
+                                           default=str(L.get("shares_outstanding") or ""))
+        self.pe = discord.ui.TextInput(label="P/E multiplier", required=False,
+                                       default=str(L.get("pe_multiplier") or ""))
+        self.treasury = discord.ui.TextInput(label="Treasury (cash on hand)", required=False,
+                                             default=str(L.get("treasury_coins") or ""))
+        self.assets = discord.ui.TextInput(label="Asset book value (0 clears)", required=False)
+        self.sellable = discord.ui.TextInput(label="Sellable assets (0 clears)", required=False)
+        for f in (self.shares, self.pe, self.treasury, self.assets, self.sellable):
+            self.add_item(f)
+
+    async def on_submit(self, i: discord.Interaction):
+        if not _is_full_manager(i.user):
+            return await i.response.send_message("⛔ Server managers only.", ephemeral=True)
+        d = _db()
+        mid = self.p.mid
+        if not d.get_market_shares(mid):
+            return await i.response.send_message(f"❌ `{mid}` has never been public.", ephemeral=True)
+
+        def num(f):
+            t = str(f.value or "").strip()
+            if not t:
+                return None
+            try:
+                return float(t)
+            except Exception:
+                return "bad"
+        so, pe, tre, ast_, sell = (num(self.shares), num(self.pe), num(self.treasury),
+                                   num(self.assets), num(self.sellable))
+        if "bad" in (so, pe, tre, ast_, sell):
+            return await i.response.send_message("❌ Those must all be numbers.", ephemeral=True)
+        if all(v is None for v in (so, pe, tre, ast_, sell)):
+            return await i.response.send_message("❌ Change at least one field.", ephemeral=True)
+
+        if so is not None:
+            held = sum(float(h.get("shares") or 0) for h in (d.get_holders(mid) or []))
+            if so < held:
+                return await i.response.send_message(
+                    f"❌ Holders already own {held:,.0f} shares — outstanding can't go below that. "
+                    f"Buy shares back first, or pick a number >= {held:,.0f}.", ephemeral=True)
+        if tre is not None:
+            d.upsert_market_shares(mid, treasury_coins=tre)
+        for val, key in ((ast_, "asset_value"), (sell, "sellable_assets")):
+            if val is None:
+                continue
+            if val > 0:
+                d.set_config(f"{key}:{mid}", str(val))
+            else:
+                d.delete_config(f"{key}:{mid}")
+        if so is not None or pe is not None:
+            d.upsert_market_shares(mid, shares_outstanding=so, pe_multiplier=pe)
+            price = core._recompute_share_price(mid, reason="params_changed")
+        else:
+            # treasury/assets moved — deliberate, so re-anchor fully (no per-event clamp)
+            price = core._recompute_share_price(mid, reason="params_changed", full_move=True)
+        await self.p.refresh(
+            i, f"✅ Parameters updated." + (f" Share price now {price:,.2f}." if price is not None else ""))
+
+
 class MarketSettingsView(discord.ui.View):
     def __init__(self, mid: str, user_id: int):
         super().__init__(timeout=300)
@@ -430,6 +501,7 @@ class MarketSettingsView(discord.ui.View):
              discord.ButtonStyle.danger if listed else discord.ButtonStyle.success,
              self._delist if listed else self._go_public, 3),
             ("Withdraw treasury", discord.ButtonStyle.secondary, self._withdraw, 3),
+            ("Tune params", discord.ButtonStyle.secondary, self._params, 3),
             ("Delete market", discord.ButtonStyle.danger, self._delete, 3),
         ]
         for label, style, cb, row in spec:
@@ -462,6 +534,7 @@ class MarketSettingsView(discord.ui.View):
     async def _add_mgr(self, i): await i.response.send_modal(_PeopleModal(self, "Add site manager", "add_mgr"))
     async def _rm_mgr(self, i):  await i.response.send_modal(_PeopleModal(self, "Remove site manager", "rm_mgr"))
     async def _go_public(self, i): await i.response.send_modal(_GoPublicModal(self))
+    async def _params(self, i):    await i.response.send_modal(_ParamsModal(self))
 
     async def _vtech(self, i: discord.Interaction):
         if not _is_full_manager(i.user):

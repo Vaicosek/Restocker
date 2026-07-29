@@ -11,7 +11,8 @@ derived from the market's **CSN earnings** (a trailing-average net), not set by 
 
 - Listings, prices, portfolio and the index fund are all on that page.
 - `set_drip`, `stock_buyback` and `stock_dividends` are AI tools — ask the bot.
-- `/stock set_params` (tune shares outstanding / P-E / treasury) and `/stock delist`
+- Tuning shares outstanding / P-E / treasury / assets is in `/market settings` → **Tune params**.
+- `/stock delist`
   (bankrupt a market and pay shareholders out) are still commands: one is heavyweight
   tuning, the other is irreversible.
 
