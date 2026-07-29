@@ -11421,6 +11421,15 @@ _AI_TOOLS = [
         }
     },
     {
+        "name": "set_lands_feed_channel",
+        "description": "Lock LANDS FEED ingest to ONE channel — webhook posts anywhere else are rejected and logged. Managers only. This is spoof protection: land balances drive market treasuries, so an unlocked feed lets anyone forge one.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"channel_id": {"type": "string", "description": "Channel id to accept the feed from."}},
+            "required": ["channel_id"]
+        }
+    },
+    {
         "name": "get_land_status",
         "description": "Land claims: treasury balances, which market each land is bound to, and recent inferred teleport-fee income per month. Managers only.",
         "input_schema": {"type": "object", "properties": {}, "required": []}
@@ -11467,6 +11476,20 @@ _AI_TOOLS = [
                 "repost": {"type": "boolean", "description": "true = post a new message instead of editing the old one."}
             },
             "required": []
+        }
+    },
+    {
+        "name": "admin_wipe",
+        "description": "DESTRUCTIVE maintenance wipe. Targets: 'stock' (all exchange data), 'market' (delete a market entirely), 'market_csn' (its CSN months, keeping manual earnings), 'market_sales' (per-item rows, keeping monthly totals), 'employee_dms' (bot DMs to Employees). Managers only. REQUIRES an exact confirm phrase — the market id for the market targets, or CONFIRM for stock/employee_dms. Without it you get a dry run. NEVER supply the confirm phrase yourself: ask the person to state it, quote back exactly what will be destroyed, and only then pass it through.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "stock | market | market_csn | market_sales | employee_dms"},
+                "confirm": {"type": "string", "description": "The phrase the USER supplied. Omit for a dry run."},
+                "market_id": {"type": "string", "description": "Required for market, market_csn and market_sales."},
+                "limit_per_user": {"type": "integer", "description": "employee_dms only — messages scanned per user (0 = all)."}
+            },
+            "required": ["target"]
         }
     },
     {
@@ -12922,6 +12945,18 @@ async def _ai_tool_create_restock_orders(guild, channel, user, args):
             + f" Biggest shortfalls: {top}")
 
 
+async def _ai_tool_set_lands_feed_channel(guild, channel, user, args):
+    if not _ai_is_manager(user):
+        return "❌ Managers only."
+    import Restocker_db as _db
+    cid = str(args.get("channel_id") or "").strip().strip("<#>")
+    if not cid.isdigit():
+        return "❌ channel_id must be numeric."
+    _db.set_config("lands_feed_channel", cid)
+    return (f"LANDS FEED locked to <#{cid}> — webhook posts from anywhere else are now "
+            f"rejected and logged.")
+
+
 async def _ai_tool_get_land_status(guild, channel, user, args):
     if not _ai_is_manager(user):
         return "❌ Managers only."
@@ -13043,6 +13078,32 @@ async def _ai_tool_fix_month_close(guild, channel, user, args):
             repost=bool(args.get("repost")))
     except Exception as ex:
         return f"❌ fix_month_close failed: {type(ex).__name__}: {ex}"
+
+
+async def _ai_tool_admin_wipe(guild, channel, user, args):
+    """The old /admin wipe. The confirm PHRASE is the safety, not the command surface:
+    without the exact market id (or CONFIRM) every branch returns a dry run."""
+    if not _ai_is_manager(user):
+        return "❌ Only Managers can run a wipe."
+    cog = _admin_cog()
+    if cog is None:
+        return "❌ The admin engine isn't loaded."
+    target = str(args.get("target") or "").strip().lower()
+    if target not in ("stock", "market", "market_csn", "market_sales", "employee_dms"):
+        return ("❌ target must be one of: stock, market, market_csn, market_sales, "
+                "employee_dms.")
+    try:
+        lim = int(args.get("limit_per_user") or 0)
+    except Exception:
+        lim = 0
+    try:
+        return await cog.wipe_target(
+            user, target,
+            confirm=str(args.get("confirm") or ""),
+            market_id=(str(args.get("market_id") or "").strip() or None),
+            limit_per_user=max(0, min(lim, 5000)))
+    except Exception as ex:
+        return f"❌ Wipe failed: {type(ex).__name__}: {ex}"
 
 
 async def _ai_tool_get_ai_audit(guild, channel, user, args):
@@ -13404,6 +13465,7 @@ _AI_TOOL_MAP = {
     "rebuild_hive_channel": _ai_tool_rebuild_hive_channel,
     "purge_channel":        _ai_tool_purge_channel,
     "csn_cleanup":          _ai_tool_csn_cleanup,
+    "admin_wipe":           _ai_tool_admin_wipe,
     "get_ai_audit":         _ai_tool_get_ai_audit,
     "fix_month_close":      _ai_tool_fix_month_close,
     "set_drip":             _ai_tool_set_drip,
@@ -13414,6 +13476,7 @@ _AI_TOOL_MAP = {
     "set_hive_autopay":     _ai_tool_set_hive_autopay,
     "create_restock_orders": _ai_tool_create_restock_orders,
     "get_land_status":      _ai_tool_get_land_status,
+    "set_lands_feed_channel": _ai_tool_set_lands_feed_channel,
     "log_manual_restock":   _ai_tool_log_manual_restock,
     "get_channel_config":   _ai_tool_get_channel_config,
     "set_channel_config":   _ai_tool_set_channel_config,
@@ -13427,7 +13490,7 @@ _AI_SENSITIVE_TOOLS = {
     "delete_messages", "create_role", "setup_market_owner", "send_dm", "dm_role",
     "send_channel_message", "ping_user", "propose_code_change", "set_item_price",
     "run_hive_payout", "rebuild_market_channel", "rebuild_hive_channel",
-    "purge_channel", "csn_cleanup", "fix_month_close", "set_channel_config", "set_hive_autopay", "set_team_feed", "stock_buyback", "stock_dividends",
+    "purge_channel", "csn_cleanup", "fix_month_close", "admin_wipe", "set_channel_config", "set_hive_autopay", "set_team_feed", "set_lands_feed_channel", "stock_buyback", "stock_dividends",
     "create_restock_orders", "log_manual_restock",
     "add_item", "get_market_code", "create_futures_order", "dm_market_setup",
 }

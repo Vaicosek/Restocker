@@ -1023,7 +1023,7 @@ class LandExchangeCog(commands.Cog):
         reserve="(Auction) Starting/reserve price — omit to auto-value from chunks x quality",
         buy_now="Fixed-price sale price, or an optional instant-buy price on an auction",
         comps="(Optional) comma-separated recent comparable sale prices to fold into the AI reserve",
-        land="(Optional) tracked land name — ties this listing to /land bind data",
+        land="(Optional) tracked land name — ties this listing to the land bound via /market edit",
         market_id="(Optional) a company this plot will back (65% rule) once sold",
         coords="(Optional) plot coordinates — your choice whether to disclose",
         description="Short description of the plot / build",

@@ -53,7 +53,7 @@ class TeamCog(commands.Cog):
         existing = db.get_manager_of(str(interaction.user.id))
         if existing and str(existing) != str(manager.id):
             return await interaction.response.send_message(
-                f"You're already on <@{existing}>'s team - ask them to `/team remove` you first.", ephemeral=True)
+                f"You're already on <@{existing}>'s team - ask them to remove you in `/team settings` first.", ephemeral=True)
         # AUDIT FIX (high): money-bearing IGNs can't be self-claimed (anti-squatting).
         try:
             _pend_val = db.ign_unpaid_value(ign)
@@ -87,124 +87,28 @@ class TeamCog(commands.Cog):
         except Exception:
             pass
 
-    @team.command(name="add", description="(Manager) Add a worker to your team and link their in-game name")
-    @app_commands.describe(
-        worker="The worker to put under you",
-        ign="Their EXACT Minecraft username — links their CSN sales/harvests to this Discord account (optional)")
-    async def add(self, interaction: discord.Interaction, worker: discord.Member, ign: str = None):
+    @team.command(name="settings",
+                  description="(Manager) TeamSettings — roster, add/remove, rename, leaderboard")
+    async def team_settings(self, interaction: discord.Interaction):
+        """One panel replacing add / remove / name / list / mine / leaderboard.
+        `/team join` stays separate — that's the one workers run."""
         if not is_manager(interaction):
             return await interaction.response.send_message("Managers only.", ephemeral=True)
-        if worker.bot or worker.id == interaction.user.id:
-            return await interaction.response.send_message("Pick a real worker (not yourself or a bot).", ephemeral=True)
-        existing = db.get_manager_of(str(worker.id))
-        if existing and str(existing) != str(interaction.user.id):
-            return await interaction.response.send_message(
-                f"{worker.mention} is already on <@{existing}>'s team.", ephemeral=True)
-
-        # Optionally register the worker's IGN now — that's what links incoming CSN
-        # "who sold what" rows (keyed by in-game name) back to this Discord account.
-        ign_note = ""
-        if ign is not None:
-            ign = ign.strip()
-            if not _IGN_RE.match(ign):
-                return await interaction.response.send_message(
-                    "Invalid IGN - must be 3-16 characters: letters, numbers, underscores.", ephemeral=True)
-            owner = db.get_user_id_by_ign(ign)
-            if owner and str(owner) != str(worker.id):
-                return await interaction.response.send_message(
-                    f"IGN `{ign}` is already linked to <@{owner}>. Use that worker's own exact name.",
-                    ephemeral=True)
-            db.set_ign(str(worker.id), ign)
-            db.delete_ign_pending(str(worker.id))   # registered now → cancel any pending deadline
-            ign_note = f"\nLinked in-game name **{ign}** → their CSN sales/harvests now credit {worker.mention}."
-
-        db.set_team_member(str(worker.id), str(interaction.user.id))
-
-        if not ign_note and not db.get_ign(str(worker.id)):
-            ign_note = (f"\n⚠️ No in-game name linked yet — re-run `/team add` with the **ign** field "
-                        f"(or have {worker.mention} run `/team join`), or their CSN sales can't be attributed.")
-
+        from views.team_settings import TeamSettingsView, build_embed
+        view = TeamSettingsView(interaction.user.id)
         await interaction.response.send_message(
-            f"{worker.mention} is now on your team - you earn **{MANAGER_OVERRIDE_ORDER_PCT:g}%** "
-            f"on their order payouts." + ign_note, ephemeral=True)
-
-    @team.command(name="name", description="(Manager) Set a display name for your team")
-    @app_commands.describe(name="Your team's name, e.g. 'The Miners' — leave blank to clear it")
-    async def team_name_cmd(self, interaction: discord.Interaction, name: str = None):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("Managers only.", ephemeral=True)
-        val = (name or "").strip()[:40]
-        db.set_config(f"team_name:{interaction.user.id}", val)
-        if val:
-            await interaction.response.send_message(
-                f"Your team is now called **{val}** — it'll show that on `/team list` and the leaderboard.",
-                ephemeral=True)
-        else:
-            await interaction.response.send_message(
-                "Cleared your team name — it'll show as your @mention again.", ephemeral=True)
-
-    @team.command(name="remove", description="(Manager) Remove a worker from your team")
-    @app_commands.describe(worker="The worker to remove")
-    async def remove(self, interaction: discord.Interaction, worker: discord.Member):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("Managers only.", ephemeral=True)
-        mgr = db.get_manager_of(str(worker.id))
-        if str(mgr) != str(interaction.user.id):
-            return await interaction.response.send_message(f"{worker.mention} isn't on your team.", ephemeral=True)
-        db.remove_team_member(str(worker.id))
-        await interaction.response.send_message(f"Removed {worker.mention} from your team.", ephemeral=True)
-
-    @team.command(name="list", description="(Manager) Show your team and their in-game names")
-    async def list(self, interaction: discord.Interaction):
-        members = db.get_team(str(interaction.user.id))
-        if not members:
-            return await interaction.response.send_message(
-                "Your team is empty. Have workers run `/team join manager:@you ign:<name>`.", ephemeral=True)
-        lines = []
-        for w in members:
-            ign = db.get_ign(w)
-            lines.append(f"- <@{w}> - " + (f"`{ign}`" if ign else "no IGN set"))
-        _tn = _team_name(interaction.user.id)
-        _title = f"{_tn} ({len(members)})" if _tn else f"Your team ({len(members)})"
-        embed = discord.Embed(title=_title,
-                              description="\n".join(lines), color=0x22FF7A)
-        embed.set_footer(text=f"You earn {MANAGER_OVERRIDE_ORDER_PCT:g}% on their order payouts; IGNs link to CSN sales")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    @team.command(name="mine", description="See who your manager is and your registered IGN")
-    async def mine(self, interaction: discord.Interaction):
-        mgr = db.get_manager_of(str(interaction.user.id))
-        ign = db.get_ign(str(interaction.user.id))
-        if not mgr:
-            return await interaction.response.send_message(
-                "You're not on anyone's team. Join with `/team join manager:@them ign:<name>`.", ephemeral=True)
-        await interaction.response.send_message(
-            f"Your manager is <@{mgr}>. Registered IGN: " + (f"**{ign}**" if ign else "none - set it with `/team join`."),
-            ephemeral=True)
+            embed=build_embed(interaction.user.id), view=view, ephemeral=True)
 
 
 
 
 
 
-    @team.command(name="leaderboard", description="See which teams are performing best (compete!)")
-    @app_commands.describe(days="Days to look back (default 7)")
-    async def leaderboard(self, interaction: discord.Interaction, days: int = 7):
-        days = max(1, min(int(days or 7), 365))
-        board = _all_teams_leaderboard(days)
-        if not board:
-            return await interaction.response.send_message("No team activity yet.", ephemeral=True)
-        lines = []
-        for i, tm in enumerate(board[:10], 1):
-            medal = ["\U0001F947", "\U0001F948", "\U0001F949"][i - 1] if i <= 3 else f"{i}."
-            _tn = _team_name(tm['manager_id'])
-            _label = f"**{_tn}**" if _tn else f"<@{tm['manager_id']}>'s team"
-            lines.append(
-                f"{medal} {_label} - **{int(tm['total']):,}c** "
-                f"({tm['orders']} orders, sales {int(tm['sales_coins']):,}c)")
-        embed = discord.Embed(title=f"\U0001F3C6 Team leaderboard - last {days}d",
-                              description="\n".join(lines), color=0x22FF7A)
-        await interaction.response.send_message(embed=embed)
+
+
+
+
+
 
 
 

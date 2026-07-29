@@ -108,7 +108,7 @@ class LandsCog(commands.Cog):
     # market's treasury (and thus dividends) to whatever an attacker types, so
     # feed posts are only accepted from a WEBHOOK (regular members can't post as
     # one without Manage Webhooks) and, when config `lands_feed_channel` is set,
-    # only in that channel. Lock it down with /land feed_channel.
+    # only in that channel. Lock it down by asking the bot (set_lands_feed_channel).
     @commands.Cog.listener()
     async def on_message(self, message):
         try:
@@ -187,13 +187,13 @@ class LandsCog(commands.Cog):
                     core._recompute_share_price(mid, reason="land_treasury")
                     line += f" → treasury of `{mid}` updated"
             else:
-                line += " · *(unbound — `/land bind` to link a market)*"
+                line += " · *(unbound — `/market edit land:<name>` links it)*"
             report.append(line)
         if new_entries or balances:
             try:
                 warn = ("⚠️ **No lands-feed channel is locked** — this was accepted from "
                          "**any** webhook, including ones belonging to other markets. Run "
-                         "`/land feed_channel` to restrict ingestion to your official feed "
+                         "Ask the bot to lock the feed channel to restrict ingestion to your official feed "
                          "channel and close this gap.\n\n") if unlocked else ""
                 await message.channel.send(
                     warn + f"✅ Lands feed ingested — {new_entries} new entrie(s), "
@@ -202,48 +202,8 @@ class LandsCog(commands.Cog):
                 pass
 
     # ── commands ─────────────────────────────────────────────────────────────
-    land = app_commands.Group(
-        name="land",
-        description="(Managers) Lands/claims tracking — treasuries and teleport-fee income",
-        default_permissions=discord.Permissions(manage_guild=True))
 
-    @land.command(name="bind", description="Link a land (claim) to a market — its balance becomes that market's treasury")
-    @app_commands.describe(land_name="Land name exactly as in-game (e.g. MardURAK)",
-                           market_id="Market it belongs to (blank to unbind)")
-    @app_commands.autocomplete(market_id=_market_autocomplete)
-    async def land_bind(self, interaction: discord.Interaction,
-                        land_name: str, market_id: Optional[str] = None):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
-        import Restocker_db as _db
-        key = f"land_map:{land_name.strip().lower()}"
-        if not (market_id or "").strip():
-            _db.delete_config(key)
-            return await interaction.response.send_message(
-                f"✅ `{land_name}` unbound — its feed is stored but no longer syncs a treasury.",
-                ephemeral=True)
-        _db.set_config(key, market_id.strip())
-        msg = f"✅ Land **{land_name}** → market `{market_id}`."
-        snap = _db.get_land_balance(land_name.strip())
-        if snap:
-            _db.upsert_market_shares(market_id.strip(), treasury_coins=float(snap["balance"]))
-            core._recompute_share_price(market_id.strip(), reason="land_treasury")
-            msg += f"\nTreasury synced now: `{float(snap['balance']):,.0f}` 🪙."
-        msg += "\nEvery future LANDS FEED post keeps the treasury live and re-infers teleport fees."
-        await interaction.response.send_message(msg, ephemeral=True)
 
-    @land.command(name="feed_channel",
-                  description="(Manager) Lock LANDS FEED ingest to one channel — spoof protection")
-    @app_commands.describe(channel="The only channel the mod's webhook posts land data in")
-    async def land_feed_channel(self, interaction: discord.Interaction,
-                                channel: discord.TextChannel):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
-        import Restocker_db as _db
-        _db.set_config("lands_feed_channel", str(channel.id))
-        await interaction.response.send_message(
-            f"🔒 LANDS FEED now only accepted from **webhook posts in {channel.mention}**. "
-            f"Everything else is rejected and logged.", ephemeral=True)
 
 
 

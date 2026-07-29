@@ -10,6 +10,28 @@ import asyncio
 import Restocker_db as _db
 
 core = sys.modules.get("Restocker_main") or sys.modules["__main__"]
+
+def _s(*a, **k) -> str:
+    """Return the first positional arg. The wipe body ended every branch with
+    interaction.response.send_message(...); turning it into a plain function makes those
+    return values, and this keeps that rewrite mechanical rather than hand-edited."""
+    return a[0] if a else ""
+
+
+def _wipe_may_touch(user, market_id) -> bool:
+    """Manager, or the owner of THIS market. Replaces the interaction-based
+    _is_market_manager check now that the wipe runs without an interaction."""
+    try:
+        if core._ai_is_manager(user):
+            return True
+    except Exception:
+        pass
+    try:
+        owner = core._market_owner_id(market_id)
+        return bool(owner) and int(owner) == int(getattr(user, "id", 0) or 0)
+    except Exception:
+        return False
+
 DEFAULT_MARKET_ID = core.DEFAULT_MARKET_ID
 EMPLOYEE_ROLE_NAME = core.EMPLOYEE_ROLE_NAME
 WORKER_CHANNEL_ID = core.WORKER_CHANNEL_ID
@@ -131,41 +153,25 @@ class AdminCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    admin = app_commands.Group(name="admin", description="(Managers) Destructive maintenance — guarded by confirm", default_permissions=discord.Permissions(manage_guild=True))
+    # /admin was retired — every subcommand is an AI tool now. The cog stays as the
+    # home for the implementations (wipe_target, _rebuild_one, _nuke_by_clone, …).
 
-    @admin.command(name="wipe", description="(Managers) Destructive wipe — requires confirm")
-    @app_commands.describe(
-        target="What to wipe",
-        confirm="Safety phrase: the market ID for market/market_csn, or 'CONFIRM' for stock/employee_dms",
-        market_id="Required for the 'market' and 'market_csn' targets",
-        limit_per_user="employee_dms only — messages to scan per user (0 = all)",
-    )
-    @app_commands.choices(target=[
-        app_commands.Choice(name="All stock-exchange data", value="stock"),
-        app_commands.Choice(name="A market — full wipe (registration, items, CSN)", value="market"),
-        app_commands.Choice(name="A market's CSN-sourced months (keep manual earnings)", value="market_csn"),
-        app_commands.Choice(name="A market's per-item sales (keep monthly earnings totals)", value="market_sales"),
-        app_commands.Choice(name="Employee bot DMs", value="employee_dms"),
-    ])
-    @app_commands.autocomplete(market_id=_market_autocomplete)
-    async def admin_wipe(self, 
-        interaction: discord.Interaction,
-        target: app_commands.Choice[str],
-        confirm: str = "",
-        market_id: Optional[str] = None,
-        limit_per_user: app_commands.Range[int, 0, 5000] = 0,
-    ):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
-        t = target.value
+    async def wipe_target(self, user, target: str, confirm: str = "",
+                          market_id=None, limit_per_user: int = 0) -> str:
+        """Destructive wipe. Was /admin wipe; the slash surface was retired, so this
+        returns a STRING instead of replying to an interaction.
+
+        The safety was never the command surface — it is the confirm PHRASE: the market
+        id for market/market_csn/market_sales, or CONFIRM for stock/employee_dms. That is
+        preserved exactly, so nothing can be wiped by asking loosely."""
+        t = str(target or "").strip().lower()
         import Restocker_db as _db
 
         if t == "stock":
             if confirm.strip().upper() != "CONFIRM":
-                return await interaction.response.send_message(
-                    "⚠️ This **permanently deletes ALL stock data** — every listing, holding, trade "
+                return _s("⚠️ This **permanently deletes ALL stock data** — every listing, holding, trade "
                     "and price-history row (markets become unlisted). Coins are **not** refunded.\n"
-                    "Run again with **confirm: CONFIRM** to proceed.", ephemeral=True)
+                    "Run again with **confirm: CONFIRM** to proceed.")
             counts = {}
             try:
                 with _db.db() as conn:
@@ -180,27 +186,24 @@ class AdminCog(commands.Cog):
                         except Exception as e:
                             counts[tbl] = f"err: {e}"
             except Exception as e:
-                return await interaction.response.send_message(f"❌ Reset failed: {e}", ephemeral=True)
+                return _s(f"❌ Reset failed: {e}")
             for f in ("stock_names.yml", "stock_dashboard.yml"):
                 try:
                     save_yaml(f, {})
                 except Exception:
                     pass
             summary = ", ".join(f"`{k}`={v}" for k, v in counts.items())
-            return await interaction.response.send_message(
-                f"🧹 **Stock data wiped.** Rows deleted: {summary}. Markets are now unlisted.", ephemeral=True)
+            return _s(f"🧹 **Stock data wiped.** Rows deleted: {summary}. Markets are now unlisted.")
 
         if t == "market":
             if not market_id:
-                return await interaction.response.send_message(
-                    "❌ `market_id` is required for this target.", ephemeral=True)
+                return _s("❌ `market_id` is required for this target.")
             if confirm.strip().lower() != market_id.strip().lower():
-                return await interaction.response.send_message(
-                    f"❌ Confirmation didn't match. Put `{market_id}` in the `confirm` field to delete.", ephemeral=True)
+                return _s(f"❌ Confirmation didn't match. Put `{market_id}` in the `confirm` field to delete.")
             data = _load_markets()
             markets = data.get("markets") or {}
             if market_id not in markets:
-                return await interaction.response.send_message(f"❌ Market `{market_id}` not found.", ephemeral=True)
+                return _s(f"❌ Market `{market_id}` not found.")
             mkt_name = markets[market_id].get("name", market_id)
             csn_file = markets[market_id].get("csn_history_file") or f"csn_history_{market_id}.yml"
             del markets[market_id]
@@ -229,33 +232,27 @@ class AdminCog(commands.Cog):
                     csn_deleted = True
             except Exception as e:
                 log.warning("[admin_wipe market] csn file delete failed: %s", e)
-            embed = discord.Embed(title=f"🗑️ Market Deleted — {mkt_name}", color=0xE74C3C)
-            embed.add_field(name="Market ID", value=f"`{market_id}`", inline=True)
-            embed.add_field(name="Items removed", value=str(items_deleted), inline=True)
-            embed.add_field(name="CSN history", value="✅ cleared" if csn_deleted else "⚠️ file not found", inline=True)
-            return await interaction.response.send_message(embed=embed)
+            return _s(f"🗑️ Market deleted — {mkt_name} (`{market_id}`). "
+                      f"Items removed: {items_deleted}. CSN history: "
+                      + ("cleared." if csn_deleted else "file not found."))
 
         if t == "market_csn":
             if not market_id:
-                return await interaction.response.send_message(
-                    "❌ `market_id` is required for this target.", ephemeral=True)
-            if not _is_market_manager(interaction, market_id):
-                return await interaction.response.send_message(
-                    "⛔ Managers or this market's owner only.", ephemeral=True)
+                return _s("❌ `market_id` is required for this target.")
+            if not _wipe_may_touch(user, market_id):
+                return _s("⛔ Managers or this market's owner only.")
             history = _load_csn_for_market(market_id)
             months = history.get("months", {}) or {}
             targets = [mk for mk, md in months.items() if isinstance(md, dict) and md.get("items")]
             if not targets:
-                return await interaction.response.send_message(
-                    f"✅ No CSN-sourced months in `{market_id}` — nothing to delete.", ephemeral=True)
+                return _s(f"✅ No CSN-sourced months in `{market_id}` — nothing to delete.")
             if confirm.strip().lower() != market_id.strip().lower():
                 preview = "\n".join(
                     f"• `{mk}` — {months[mk].get('label', mk)} "
                     f"(`{len(months[mk].get('items', {}))}` items · net `{int(months[mk].get('net', 0)):,}`)"
                     for mk in sorted(targets))
-                return await interaction.response.send_message(
-                    f"🔍 **Dry run** — `{len(targets)}` CSN month(s) in `{market_id}` would be deleted "
-                    f"(manual earnings kept):\n{preview}\n\nPut `{market_id}` in `confirm` to delete.", ephemeral=True)
+                return _s(f"🔍 **Dry run** — `{len(targets)}` CSN month(s) in `{market_id}` would be deleted "
+                    f"(manual earnings kept):\n{preview}\n\nPut `{market_id}` in `confirm` to delete.")
             for mk in targets:
                 months.pop(mk, None)
             _save_csn_for_market(market_id, history)
@@ -270,32 +267,27 @@ class AdminCog(commands.Cog):
                 _recompute_share_price(market_id, reason="admin_wipe_csn")
             except Exception:
                 pass
-            return await interaction.response.send_message(
-                f"🗑️ Deleted `{len(targets)}` CSN month(s) from `{market_id}`. Manual earnings kept.", ephemeral=True)
+            return _s(f"🗑️ Deleted `{len(targets)}` CSN month(s) from `{market_id}`. Manual earnings kept.")
 
         if t == "market_sales":
             # Clear the per-item sales breakdown (the SOLD/CSN column + CSN-derived items)
             # but KEEP each month's income/spent/net totals. Use when a market shows bogus
             # "sold" data but the earnings figures should stay.
             if not market_id:
-                return await interaction.response.send_message(
-                    "❌ `market_id` is required for this target.", ephemeral=True)
-            if not _is_market_manager(interaction, market_id):
-                return await interaction.response.send_message(
-                    "⛔ Managers or this market's owner only.", ephemeral=True)
+                return _s("❌ `market_id` is required for this target.")
+            if not _wipe_may_touch(user, market_id):
+                return _s("⛔ Managers or this market's owner only.")
             history = _load_csn_for_market(market_id)
             months = history.get("months", {}) or {}
             affected = [mk for mk, md in months.items()
                         if isinstance(md, dict) and (md.get("items") or {})]
             if not affected:
-                return await interaction.response.send_message(
-                    f"✅ No per-item sales data in `{market_id}` — nothing to clear.", ephemeral=True)
+                return _s(f"✅ No per-item sales data in `{market_id}` — nothing to clear.")
             item_rows = sum(len(months[mk].get("items", {})) for mk in affected)
             if confirm.strip().lower() != market_id.strip().lower():
-                return await interaction.response.send_message(
-                    f"🔍 **Dry run** — would clear `{item_rows}` per-item sales row(s) across "
+                return _s(f"🔍 **Dry run** — would clear `{item_rows}` per-item sales row(s) across "
                     f"`{len(affected)}` month(s) in `{market_id}`, **keeping** each month's "
-                    f"income/spent/net totals.\nPut `{market_id}` in `confirm` to proceed.", ephemeral=True)
+                    f"income/spent/net totals.\nPut `{market_id}` in `confirm` to proceed.")
             for mk in affected:
                 months[mk]["items"] = {}
             _save_csn_for_market(market_id, history)
@@ -303,25 +295,21 @@ class AdminCog(commands.Cog):
                 _recompute_share_price(market_id, reason="admin_wipe_sales")
             except Exception:
                 pass
-            return await interaction.response.send_message(
-                f"🗑️ Cleared `{item_rows}` per-item sales row(s) from `{len(affected)}` month(s) in "
-                f"`{market_id}`. Monthly earnings totals kept; the dashboard's SOLD column refreshes shortly.",
-                ephemeral=True)
+            return _s(f"🗑️ Cleared `{item_rows}` per-item sales row(s) from `{len(affected)}` month(s) in "
+                f"`{market_id}`. Monthly earnings totals kept; the dashboard's SOLD column refreshes shortly.")
 
         if t == "employee_dms":
             if confirm.strip().upper() != "CONFIRM":
-                return await interaction.response.send_message(
-                    "⚠️ This deletes **all DMs this bot sent to Employees**. Run again with "
-                    "**confirm: CONFIRM** to proceed.", ephemeral=True)
-            await interaction.response.defer(ephemeral=True, thinking=True)
-            base = interaction.client.get_channel(WORKER_CHANNEL_ID)
+                return _s("⚠️ This deletes **all DMs this bot sent to Employees**. Run again with "
+                    "**confirm: CONFIRM** to proceed.")
+            base = self.bot.get_channel(WORKER_CHANNEL_ID)
             if not base or not base.guild:
-                return await interaction.followup.send("❌ Can't find the guild via WORKER_CHANNEL_ID.", ephemeral=True)
+                return _s("❌ Can't find the guild via WORKER_CHANNEL_ID.")
             guild = base.guild
             role = discord.utils.get(guild.roles, name=EMPLOYEE_ROLE_NAME)
             if not role:
-                return await interaction.followup.send(f"❌ Role not found: {EMPLOYEE_ROLE_NAME}", ephemeral=True)
-            bot_user = interaction.client.user
+                return _s(f"❌ Role not found: {EMPLOYEE_ROLE_NAME}")
+            bot_user = self.bot.user
             total_deleted = users_ok = users_failed = 0
             for member in list(role.members):
                 if member.bot:
@@ -346,11 +334,10 @@ class AdminCog(commands.Cog):
                     users_failed += 1
                     await asyncio.sleep(0.6)
                     continue
-            return await interaction.followup.send(
-                f"✅ Done. Deleted **{total_deleted}** bot DM(s). "
-                f"Employees: **{users_ok}** ok, **{users_failed}** failed.", ephemeral=True)
+            return _s(f"✅ Done. Deleted **{total_deleted}** bot DM(s). "
+                f"Employees: **{users_ok}** ok, **{users_failed}** failed.")
 
-        return await interaction.response.send_message("❌ Unknown target.", ephemeral=True)
+        return _s("❌ Unknown target.")
 
 
 

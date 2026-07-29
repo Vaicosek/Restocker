@@ -407,6 +407,7 @@ class MarketCog(commands.Cog):
         name="New display name",
         fee_pct="New platform fee % (0–50)",
         active="Whether this market is active",
+        land="Land claim to bind to this market — its balance becomes the treasury (blank name unbinds)",
     )
     @app_commands.autocomplete(market_id=_market_autocomplete)
     async def market_edit(self, 
@@ -415,6 +416,7 @@ class MarketCog(commands.Cog):
         name: Optional[str] = None,
         fee_pct: Optional[app_commands.Range[float, 0.0, 50.0]] = None,
         active: Optional[bool] = None,
+        land: Optional[str] = None,
     ):
         if not is_manager(interaction):
             return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
@@ -422,10 +424,10 @@ class MarketCog(commands.Cog):
         markets = data.get("markets") or {}
         if market_id not in markets:
             return await interaction.response.send_message(f"❌ Market `{market_id}` not found.", ephemeral=True)
-        if name is None and fee_pct is None and active is None:
+        if name is None and fee_pct is None and active is None and land is None:
             return await interaction.response.send_message(
-                "❌ Provide at least one field to update: `name`, `fee_pct`, or `active`.", ephemeral=True
-            )
+                "❌ Provide at least one field to update: `name`, `fee_pct`, `active` or `land`.",
+                ephemeral=True)
 
         mkt = markets[market_id]
         changes = []
@@ -438,6 +440,23 @@ class MarketCog(commands.Cog):
         if active is not None:
             mkt["active"] = active
             changes.append(f"Active → `{active}`")
+        # Land binding folded in from the retired /land bind: a land's balance IS this
+        # market's treasury, so it belongs with the market's other settings.
+        if land is not None:
+            import Restocker_db as _db
+            lname = land.strip()
+            if not lname:
+                changes.append("Land → *unchanged (blank name)*")
+            else:
+                _db.set_config(f"land_map:{lname.lower()}", market_id)
+                snap = _db.get_land_balance(lname)
+                if snap:
+                    _db.upsert_market_shares(market_id, treasury_coins=float(snap["balance"]))
+                    core._recompute_share_price(market_id, reason="land_treasury")
+                    changes.append(f"Land → `{lname}` (treasury synced "
+                                   f"`{float(snap['balance']):,.0f}` 🪙)")
+                else:
+                    changes.append(f"Land → `{lname}` (no balance seen yet)")
 
         _save_markets(data)
 

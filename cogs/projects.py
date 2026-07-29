@@ -69,7 +69,7 @@ class ProjectsCog(commands.Cog):
             return await interaction.response.send_message("Pick a real team member (not yourself).", ephemeral=True)
         if str(db.get_manager_of(str(worker.id)) or "") != str(payer.id):
             return await interaction.response.send_message(
-                f"{worker.mention} isn't on your team. Add them with `/team add` first.", ephemeral=True)
+                f"{worker.mention} isn't on your team. Add them in `/team settings` first.", ephemeral=True)
         bal = int(db.get_balance(str(payer.id)).get("coins") or 0)
         if bal < amount:
             return await interaction.response.send_message(
