@@ -19,7 +19,7 @@ In the Discord server (with the bot present) run:
 ```
 
 It replies with a short code. Copy it. (If you don't have a market yet, a manager
-runs `/market add market_id:<name>` first.)
+registers it via `/market settings` → **Register new market** first.)
 
 ## 3. Put it back into the mod
 1. In Minecraft: **Mods** (Mod Menu) → **CSN Export** → the **config** button

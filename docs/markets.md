@@ -16,7 +16,10 @@ this; the panel replaced them.
 - The card shows owner, status, fee, code, bound channel, site managers, listing state
   (price, shares, treasury, **withdrawable excess**) and the CSN webhook (spoilered).
 
-Still separate commands: `/market add` (registering a new market) and `/market info`.
+Registering a new market and inspecting one are BOTH on the panel now (Register new market
+button, server managers only). The only other market command is `/market_code`, which is
+gated by Discord ROLE rather than manager_ids so a market leader who isn't a registered
+manager can still fetch their CSN code.
 
 ### Guards the panel keeps
 - **Launch price** may not exceed **2x the computed fundamental** unless a server manager

@@ -261,7 +261,7 @@ class MiscCog(commands.Cog):
         markets_data = _load_markets()
         if market_id in markets_data.get("markets", {}):
             return await interaction.followup.send(
-                f"❌ Market `{market_id}` already exists. Use `/market info` to inspect one.",
+                f"❌ Market `{market_id}` already exists.",
                 ephemeral=True,
             )
 

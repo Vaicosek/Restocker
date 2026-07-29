@@ -117,6 +117,137 @@ async def build_embed(mid: str, user=None) -> discord.Embed:
     return e
 
 
+class _LocationModal(discord.ui.Modal, title="Delivery location"):
+    """Was /market_set_location. Blank clears the override back to /la spawn <mid>."""
+    def __init__(self, panel):
+        super().__init__(timeout=300)
+        self.panel = panel
+        self.loc = discord.ui.TextInput(
+            label="Where workers deliver", required=False, max_length=100,
+            placeholder=f"/la spawn {panel.mid}  (blank = reset to default)",
+            default=(_db().get_config(f"sell_loc:{panel.mid}") or ""))
+        self.add_item(self.loc)
+
+    async def on_submit(self, i: discord.Interaction):
+        d = _db()
+        loc = str(self.loc.value or "").strip()[:100]
+        if not loc:
+            d.delete_config(f"sell_loc:{self.panel.mid}")
+            return await self.panel.refresh(
+                i, f"✅ Delivery location reset to the default `/la spawn {self.panel.mid}`.")
+        d.set_config(f"sell_loc:{self.panel.mid}", loc)
+        await self.panel.refresh(
+            i, f"✅ Workers are now told to deliver to `{loc}` — shows on order cards, "
+               f"`/orders`, and the website.")
+
+
+class _RollupModal(discord.ui.Modal, title="Profit roll-up"):
+    """Was /market_rollup. The PARENT-authority guard is reproduced verbatim: rolling a
+    market into (or out of) a public stock moves THAT stock's fundamental, so a child-side
+    owner must not be able to re-point a loss-maker into `main`, buy the dip, and detach."""
+    def __init__(self, panel):
+        super().__init__(timeout=300)
+        self.panel = panel
+        try:
+            cur = core._market_rollup_parent(panel.mid) or ""
+            pct = core._market_rollup_share(panel.mid)
+        except Exception:
+            cur, pct = "", 100.0
+        self.parent = discord.ui.TextInput(
+            label="Parent stock id (blank = detach)", required=False, default=str(cur))
+        self.pct = discord.ui.TextInput(
+            label="% of profit that rolls up", required=False,
+            default=f"{float(pct or 100.0):g}")
+        self.add_item(self.parent); self.add_item(self.pct)
+
+    async def on_submit(self, i: discord.Interaction):
+        mid = self.panel.mid
+        markets = (core._load_markets() or {}).get("markets") or {}
+        parent = str(self.parent.value or "").strip()
+
+        def _parent_ok(pmid):
+            return _is_full_manager(i.user) or _may_manage(i.user, pmid)
+
+        if not parent:
+            try:
+                cur = core._market_rollup_parent(mid)
+            except Exception:
+                cur = None
+            if cur and not _parent_ok(cur):
+                return await i.response.send_message(
+                    f"⛔ Detaching from **{cur}** changes that stock's valuation — only its "
+                    f"owner/managers (or a server manager) can do that.", ephemeral=True)
+            core._set_market_rollup(mid, None)
+            return await self.panel.refresh(
+                i, "✅ Detached — it prices its own stock off its own profit again.")
+        if parent not in markets:
+            return await i.response.send_message(
+                f"❌ Parent market `{parent}` not found.", ephemeral=True)
+        if parent == mid:
+            return await i.response.send_message(
+                "❌ A market can't roll into itself.", ephemeral=True)
+        if not _parent_ok(parent):
+            return await i.response.send_message(
+                f"⛔ Rolling into **{parent}** changes that stock's valuation — only its "
+                f"owner/managers (or a server manager) can accept the rollup.", ephemeral=True)
+        try:
+            pct = float(str(self.pct.value or "100").strip() or 100)
+        except Exception:
+            return await i.response.send_message("❌ % must be a number.", ephemeral=True)
+        pct = max(0.0, min(100.0, pct))
+        core._set_market_rollup(mid, parent, pct)
+        await self.panel.refresh(
+            i, f"✅ Profit now rolls into **{markets[parent].get('name', parent)}** at "
+               f"**{pct:g}%**. That stock's price is driven by its own net plus this.")
+
+
+class _RegisterModal(discord.ui.Modal, title="Register a new market"):
+    """Was /market add — full server managers only, same as the command."""
+    def __init__(self, panel):
+        super().__init__(timeout=300)
+        self.panel = panel
+        self.mid = discord.ui.TextInput(label="Market id (a-z 0-9 _ -)", required=True, max_length=32)
+        self.name = discord.ui.TextInput(label="Display name", required=True, max_length=64)
+        self.owner = discord.ui.TextInput(label="Owner Discord user id (optional)", required=False)
+        self.fee = discord.ui.TextInput(label="Platform fee % (default 3)", required=False, default="3")
+        self.add_item(self.mid); self.add_item(self.name)
+        self.add_item(self.owner); self.add_item(self.fee)
+
+    async def on_submit(self, i: discord.Interaction):
+        import re as _re
+        mid = str(self.mid.value or "").strip().lower()
+        if not _re.match(r"^[a-z0-9_-]{1,32}$", mid):
+            return await i.response.send_message(
+                "❌ Market id must be lowercase letters, digits, hyphens or underscores (max 32).",
+                ephemeral=True)
+        data = core._load_markets()
+        markets = data.setdefault("markets", {})
+        if mid in markets:
+            return await i.response.send_message(
+                f"❌ Market `{mid}` already exists — pick it in the selector above.", ephemeral=True)
+        raw = str(self.owner.value or "").strip().strip("<@!>")
+        try:
+            fee = round(max(0.0, min(50.0, float(str(self.fee.value or "3").strip() or 3))), 4)
+        except Exception:
+            return await i.response.send_message("❌ Fee must be a number.", ephemeral=True)
+        markets[mid] = {
+            "name": str(self.name.value).strip(),
+            "owner_id": int(raw) if raw.isdigit() else None,
+            "manager_ids": [],
+            "platform_fee_pct": fee,
+            "csn_history_file": (core.CSN_HISTORY_FILE if mid == core.DEFAULT_MARKET_ID
+                                 else f"csn_history_{mid}.yml"),
+            "active": True,
+            "created_at": core.utcnow_iso(),
+            "created_by": i.user.id,
+        }
+        core._save_markets(data)
+        self.panel.mid = mid
+        await self.panel.refresh(
+            i, f"✅ Registered **{markets[mid]['name']}** (`{mid}`) at {fee:g}% fee. "
+               f"Give the owner `/market_code` so their mod can verify.")
+
+
 # ── modals ───────────────────────────────────────────────────────────────────
 class _EditModal(discord.ui.Modal, title="Edit market"):
     def __init__(self, p):
@@ -453,10 +584,13 @@ class _ParamsModal(discord.ui.Modal, title="Tune listing parameters"):
 
 
 class MarketSettingsView(discord.ui.View):
-    def __init__(self, mid: str, user_id: int):
+    def __init__(self, mid: str, user_id: int, user=None):
         super().__init__(timeout=300)
         self.mid = str(mid)
         self.user_id = int(user_id)
+        # Kept so _build() can role-check for manager-only buttons on the FIRST render,
+        # before any interaction has arrived. Falls back to id-only if not supplied.
+        self.user_obj = user
         self._build()
 
     async def interaction_check(self, i: discord.Interaction) -> bool:
@@ -503,13 +637,18 @@ class MarketSettingsView(discord.ui.View):
             ("Withdraw treasury", discord.ButtonStyle.secondary, self._withdraw, 3),
             ("Tune params", discord.ButtonStyle.secondary, self._params, 3),
             ("Delete market", discord.ButtonStyle.danger, self._delete, 3),
+            ("Delivery location", discord.ButtonStyle.secondary, self._location, 4),
+            ("Profit roll-up", discord.ButtonStyle.secondary, self._rollup, 4),
         ]
+        if self.user_obj is not None and _is_full_manager(self.user_obj):
+            spec.append(("Register new market", discord.ButtonStyle.success, self._register, 4))
         for label, style, cb, row in spec:
             b = discord.ui.Button(label=label, style=style, row=row)
             b.callback = cb
             self.add_item(b)
 
     async def refresh(self, i: discord.Interaction, note: str = ""):
+        self.user_obj = i.user
         self._build()
         e = await build_embed(self.mid, i.user)
         if note:
@@ -535,6 +674,13 @@ class MarketSettingsView(discord.ui.View):
     async def _rm_mgr(self, i):  await i.response.send_modal(_PeopleModal(self, "Remove site manager", "rm_mgr"))
     async def _go_public(self, i): await i.response.send_modal(_GoPublicModal(self))
     async def _params(self, i):    await i.response.send_modal(_ParamsModal(self))
+    async def _location(self, i):  await i.response.send_modal(_LocationModal(self))
+    async def _rollup(self, i):    await i.response.send_modal(_RollupModal(self))
+
+    async def _register(self, i: discord.Interaction):
+        if not _is_full_manager(i.user):
+            return await i.response.send_message("⛔ Server managers only.", ephemeral=True)
+        await i.response.send_modal(_RegisterModal(self))
 
     async def _vtech(self, i: discord.Interaction):
         if not _is_full_manager(i.user):

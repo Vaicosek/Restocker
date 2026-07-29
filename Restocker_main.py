@@ -3750,7 +3750,7 @@ async def _process_csn_attachment(attachment: discord.Attachment, report_channel
                     await report_channel.send(
                         f"⚠️ Stock CSV declared unknown market `{csv_mid}` — recording to the `{mid}` "
                         f"(fallback) market instead of a real one. "
-                        f"Create it first with `/market add market_id:{csv_mid}`, or check for typos."
+                        f"Register it in `/market settings` first, or check for typos."
                     )
                 except Exception:
                     pass
@@ -3897,7 +3897,7 @@ async def _process_csn_attachment(attachment: discord.Attachment, report_channel
             market_warning = (
                 f"⚠️ CSV declared unknown market `{csv_market_id}` — no such market in the database. "
                 f"Recorded to the `{effective_market_id}` (fallback) market instead of a real one. "
-                f"Create it first with `/market add market_id:{csv_market_id}`, or check for typos."
+                f"Register it in `/market settings` first, or check for typos."
             )
 
     # ── Per-transaction ledger ───────────────────────────────────────────────
@@ -10841,11 +10841,8 @@ Reports & CSN:
 - /csn_audit — (Managers) Verify a market's CSN month: dedup stats, net, and pricing
 
 Markets (/market subcommands):
-- /market list — List all registered markets
-- /market info — View details and earnings for a market
 - /market earnings — Earnings report for a market; pick a specific month or a recent-months summary
 - /market report — Your private market report (best sellers, missing stock, earnings)
-- /market add — (Managers) Register a new market
 - /market platform_balance — (Managers) View total platform fee balance collected
 - /bind_market / /unbind_market — (Managers) Bind/unbind a channel so CSN reports posted there route to a market (no code needed)
 - /market suggest_price — (Manager/Owner) Suggested price for an item vs the general market
