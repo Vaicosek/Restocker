@@ -11240,6 +11240,64 @@ _AI_TOOLS = [
         }
     },
     {
+        "name": "rebuild_market_channel",
+        "description": "Wipe a market's bound channel and repost one clean monthly earnings card per recorded month. market='all' does every bound market. Managers only. Previews by default; confirm=true actually does it.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "market": {"type": "string", "description": "Market id, or 'all'. Blank = the market bound to the current channel."},
+                "confirm": {"type": "boolean", "description": "false (default) = preview. true = wipe and repost."}
+            },
+            "required": []
+        }
+    },
+    {
+        "name": "rebuild_hive_channel",
+        "description": "Clean a hive-site feed channel and repost a tidy per-month harvest summary (pieces, value, paid vs owed, harvester leaderboard). site='all' does every bound hive feed. Managers only. Previews by default.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "site": {"type": "string", "description": "Hive market id, or 'all'. Blank = this channel's site."},
+                "confirm": {"type": "boolean", "description": "false (default) = preview. true = wipe and repost."}
+            },
+            "required": []
+        }
+    },
+    {
+        "name": "purge_channel",
+        "description": "Delete every message in the channel this was asked in, by recreating the channel (instant at any size). Managers only. Previews by default. Pins and history are lost; any market bound to it is rebound automatically.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "confirm": {"type": "boolean", "description": "false (default) = describe what would happen. true = do it."}
+            },
+            "required": []
+        }
+    },
+    {
+        "name": "csn_cleanup",
+        "description": "Delete leftover CSN webhook noise in the current channel (empty stock CSVs, {} profile files, raw uploads that were already ingested). Managers only. Previews by default.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "confirm": {"type": "boolean", "description": "false (default) = count only. true = delete."},
+                "limit": {"type": "integer", "description": "How many messages to scan (default 200)."}
+            },
+            "required": []
+        }
+    },
+    {
+        "name": "get_ai_audit",
+        "description": "Recent AI tool actions — who ran what, and whether it was a sensitive tool. Use when asked who changed something, or to check what the AI has been doing.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "description": "How many entries (default 15, max 50)."}
+            },
+            "required": []
+        }
+    },
+    {
         "name": "run_hive_payout",
         "description": "ACTUALLY pay outstanding hive wages for a market (managers only). Preview by default; set apply=true to move real coins. Use this instead of telling someone to run /hive payout — you cannot invoke slash commands yourself.",
         "input_schema": {
@@ -12353,6 +12411,181 @@ async def _ai_tool_get_hive_status(guild, channel, user, args):
     return "\n".join(lines[:25])
 
 
+def _admin_cog():
+    """The AdminCog, kept as the single home for channel-rebuild logic. These used to be
+    /admin subcommands; the slash surface was retired but the implementations stayed."""
+    return bot.get_cog("AdminCog")
+
+
+async def _ai_tool_rebuild_market_channel(guild, channel, user, args):
+    if not _ai_is_manager(user):
+        return "❌ Only Managers can rebuild market channels."
+    cog = _admin_cog()
+    if cog is None:
+        return "❌ The admin engine isn't loaded."
+    want = str(args.get("market") or "").strip().lower()
+    confirm = bool(args.get("confirm"))
+    markets = (_load_markets().get("markets", {}) or {})
+    if want == "all":
+        targets = [k for k, v in markets.items()
+                   if isinstance(v, dict) and v.get("report_channel_id") and v.get("active", True)]
+    elif want:
+        if want not in markets:
+            return f"❌ No market `{want}`."
+        targets = [want]
+    else:
+        targets = [k for k, v in markets.items()
+                   if isinstance(v, dict) and str(v.get("report_channel_id") or "") == str(getattr(channel, "id", ""))]
+        if not targets:
+            return "❌ This channel isn't bound to a market. Give a market id, or 'all'."
+    lines, td, tp = [], 0, 0
+    for mid in sorted(targets):
+        try:
+            d, p, note = await cog._rebuild_one(None, markets[mid], mid, confirm, False, 500)
+            td += d; tp += p
+            lines.append(f"• {mid} — {note}")
+        except Exception as ex:
+            lines.append(f"• {mid} — failed: {type(ex).__name__}: {ex}")
+        await asyncio.sleep(1.0)
+    head = (f"Rebuilt {len(targets)} channel(s): deleted {td}, posted {tp} card(s)." if confirm
+            else f"PREVIEW of {len(targets)} channel(s): would post {tp} card(s). "
+                 f"Nothing changed — say so and ask before re-running with confirm=true.")
+    return head + "\n" + "\n".join(lines[:20])
+
+
+async def _ai_tool_rebuild_hive_channel(guild, channel, user, args):
+    if not _ai_is_manager(user):
+        return "❌ Only Managers can rebuild hive channels."
+    cog = _admin_cog()
+    if cog is None:
+        return "❌ The admin engine isn't loaded."
+    import Restocker_db as _db
+    feeds = await cog._hive_feeds()
+    if not feeds:
+        return "❌ No hive feeds are bound. Use /hive bind first."
+    want = str(args.get("site") or "").strip().lower()
+    confirm = bool(args.get("confirm"))
+    if want == "all":
+        targets = feeds
+    elif want:
+        targets = [(c, m) for c, m in feeds if m.lower() == want]
+        if not targets:
+            return f"❌ No hive feed bound to `{want}`."
+    else:
+        targets = [(c, m) for c, m in feeds if c == getattr(channel, "id", None)]
+        if not targets:
+            return "❌ This channel isn't a hive feed. Give a site id, or 'all'."
+    markets = (_load_markets().get("markets", {}) or {})
+    lines, tp = [], 0
+    for chid, mid in sorted(targets, key=lambda t: t[1]):
+        ch = bot.get_channel(int(chid))
+        if ch is None:
+            lines.append(f"• {mid} — channel not visible"); continue
+        name = (markets.get(mid) or {}).get("name", mid)
+        months = _db.get_hive_harvest_summary(mid) or {}
+        keys = sorted(k for k, v in months.items() if (v.get("qty") or 0))
+        if not confirm:
+            tp += len(keys)
+            lines.append(f"• {mid} — #{getattr(ch,'name',chid)}: would post {len(keys)} month(s)")
+            continue
+        try:
+            ch, _rb = await cog._nuke_by_clone(ch)
+            _db.set_config(f"hive_feed:{ch.id}", str(mid))
+            _db.delete_config(f"hive_feed:{chid}")
+            posted = 0
+            for mk in keys:
+                await ch.send(embed=cog._hive_month_embed(name, mid, mk, months[mk]))
+                posted += 1
+                await asyncio.sleep(1.2)
+            tp += posted
+            lines.append(f"• {mid} — #{getattr(ch,'name','?')}: posted {posted} month(s)")
+        except Exception as ex:
+            lines.append(f"• {mid} — failed: {type(ex).__name__}: {ex}")
+        await asyncio.sleep(1.0)
+    head = (f"Rebuilt {len(targets)} hive feed(s), {tp} card(s)." if confirm
+            else f"PREVIEW: would post {tp} card(s) across {len(targets)} feed(s). Nothing changed.")
+    return head + "\n" + "\n".join(lines[:20])
+
+
+async def _ai_tool_purge_channel(guild, channel, user, args):
+    if not _ai_is_manager(user):
+        return "❌ Only Managers can purge a channel."
+    cog = _admin_cog()
+    if cog is None or channel is None:
+        return "❌ Can't purge from here."
+    if not bool(args.get("confirm")):
+        return (f"PREVIEW: this would delete EVERY message in #{getattr(channel,'name','?')} by "
+                f"recreating the channel. Pins and history are lost; the channel gets a new id "
+                f"and any market bound to it is rebound automatically. Nothing has been deleted — "
+                f"tell the user exactly this and ask them to confirm before re-running with confirm=true.")
+    try:
+        new, rebound = await cog._nuke_by_clone(channel)
+    except discord.Forbidden:
+        return "❌ I need Manage Channels to do that."
+    except Exception as ex:
+        return f"❌ Purge failed: {ex}"
+    return (f"Channel wiped — recreated as #{new.name}."
+            + (f" Rebound market(s): {', '.join(rebound)}." if rebound else ""))
+
+
+async def _ai_tool_csn_cleanup(guild, channel, user, args):
+    if not _ai_is_manager(user):
+        return "❌ Only Managers can clean up CSN noise."
+    cog = _admin_cog()
+    if cog is None or channel is None:
+        return "❌ Can't do that here."
+    confirm = bool(args.get("confirm"))
+    try:
+        limit = max(20, min(int(args.get("limit") or 200), 1000))
+    except Exception:
+        limit = 200
+    victims = []
+    try:
+        async for msg in channel.history(limit=limit):
+            if not (msg.webhook_id or (msg.author and msg.author.bot)):
+                continue
+            if msg.attachments and all(cog._is_noise_attachment(a) for a in msg.attachments):
+                victims.append(msg)
+    except Exception as ex:
+        return f"❌ Couldn't read history: {ex}"
+    if not victims:
+        return f"Nothing to clean in #{getattr(channel,'name','?')} (scanned {limit})."
+    if not confirm:
+        return (f"PREVIEW: {len(victims)} noise message(s) in #{getattr(channel,'name','?')}. "
+                f"Nothing deleted — ask before re-running with confirm=true.")
+    deleted = 0
+    for m in victims:
+        try:
+            await m.delete(); deleted += 1; await asyncio.sleep(0.4)
+        except Exception:
+            pass
+    return f"Deleted {deleted} noise message(s) in #{getattr(channel,'name','?')}."
+
+
+async def _ai_tool_get_ai_audit(guild, channel, user, args):
+    if not _ai_is_manager(user):
+        return "❌ Managers only."
+    import json as _j, Restocker_db as _db
+    try:
+        limit = max(1, min(int(args.get("limit") or 15), 50))
+    except Exception:
+        limit = 15
+    try:
+        arr = _j.loads(_db.get_config("ai_audit_log") or "[]")
+    except Exception:
+        arr = []
+    if not arr:
+        return "No AI actions recorded yet."
+    out = []
+    for e in arr[-limit:][::-1]:
+        import datetime as _dt
+        ts = _dt.datetime.utcfromtimestamp(int(e.get("ts", 0))).strftime("%m-%d %H:%M")
+        out.append(f"{ts} · {e.get('user','?')} · {e.get('tool','?')}"
+                   + (" ⚠️" if e.get("sens") else "")
+                   + f" · {str(e.get('result',''))[:60]}")
+    return "\n".join(out)
+
+
 async def _ai_tool_run_hive_payout(guild, channel, user, args):
     """Really settle hive wages. The AI used to 'trigger' this by typing the slash
     command into chat, which does nothing — a bot can't invoke slash commands."""
@@ -12684,6 +12917,11 @@ _AI_TOOL_MAP = {
     "get_market_code":      _ai_tool_get_market_code,
     "get_hive_harvester_detail": _ai_tool_get_hive_harvester_detail,
     "run_hive_payout":      _ai_tool_run_hive_payout,
+    "rebuild_market_channel": _ai_tool_rebuild_market_channel,
+    "rebuild_hive_channel": _ai_tool_rebuild_hive_channel,
+    "purge_channel":        _ai_tool_purge_channel,
+    "csn_cleanup":          _ai_tool_csn_cleanup,
+    "get_ai_audit":         _ai_tool_get_ai_audit,
     "propose_code_change":  _ai_tool_propose_code_change,
     "create_futures_order": _ai_tool_create_futures_order,
 }
@@ -12693,7 +12931,8 @@ _AI_SENSITIVE_TOOLS = {
     "assign_role", "remove_role", "kick_user", "ban_user", "timeout_user",
     "delete_messages", "create_role", "setup_market_owner", "send_dm", "dm_role",
     "send_channel_message", "ping_user", "propose_code_change", "set_item_price",
-    "run_hive_payout",
+    "run_hive_payout", "rebuild_market_channel", "rebuild_hive_channel",
+    "purge_channel", "csn_cleanup",
     "add_item", "get_market_code", "create_futures_order", "dm_market_setup",
 }
 

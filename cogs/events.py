@@ -220,10 +220,38 @@ class EventsCog(commands.Cog):
                 except Exception:
                     pass
             elif _poster_id not in _allowed:
-                log.warning("[csn] REJECTED CSN report from unknown poster %s — add its id to "
-                            "the csn_allowed_posters config (or CSN_WEBHOOK_IDS env) to allow it.",
-                            _poster_id)
-                return
+                # Trust-on-first-use locked ingest to ONE webhook — but every market has its
+                # own webhook (18 of them), so every market except the first was rejected and
+                # its uploads left rotting in the channel as raw CSV. The real credential is
+                # the market CODE inside the file: a forger can't produce a valid one. So a
+                # new poster is accepted (and remembered) as soon as it delivers a file whose
+                # declared market verifies; anything unsigned is still refused.
+                _vouched = False
+                try:
+                    for _a in message.attachments:
+                        if not _a.filename.lower().endswith(".csv"):
+                            continue
+                        _txt = (await _a.read()).decode("utf-8", errors="replace")
+                        _mid, _code = core._extract_market_info(_txt)
+                        if _mid and _code and core._verify_market_code(_mid, _code):
+                            _vouched = True
+                            break
+                except Exception as _ve:
+                    log.warning("[csn] poster vouch check failed: %s", _ve)
+                if not _vouched:
+                    log.warning("[csn] REJECTED CSN report from unknown poster %s — no valid "
+                                "market code in the file. Add its id to csn_allowed_posters "
+                                "(or CSN_WEBHOOK_IDS) if this is a legitimate relay.",
+                                _poster_id)
+                    return
+                try:
+                    _allowed.add(_poster_id)
+                    _dbw.set_config("csn_allowed_posters",
+                                    ",".join(str(x) for x in sorted(_allowed)))
+                    log.info("[csn] poster %s accepted — carried a valid market code; "
+                             "added to csn_allowed_posters.", _poster_id)
+                except Exception:
+                    pass
         _processed_any = False
         _all_transport = bool(message.attachments)
         # The mod posts the monthly aggregate AND the per-transaction period file in one
@@ -272,8 +300,18 @@ class EventsCog(commands.Cog):
                 import Restocker_db as _db_keep
                 if str(_db_keep.get_config("csn_keep_uploads") or "") != "1":
                     await message.delete()
+            except discord.Forbidden:
+                # Was debug-level, so a missing permission looked identical to "working
+                # fine" — the raw CSV just stayed in the channel with no explanation.
+                log.warning("[csn] can't delete the raw upload in #%s — I need Manage "
+                            "Messages there. The CSV was ingested fine, it just stays visible.",
+                            getattr(message.channel, "name", message.channel.id))
             except Exception as e:
-                log.debug("[csn] upload cleanup skipped: %s", e)
+                log.warning("[csn] upload cleanup skipped: %s", e)
+        elif message.attachments and _has_csn_csv:
+            log.info("[csn] kept the raw upload in #%s (processed=%s, all_transport=%s)",
+                     getattr(message.channel, "name", message.channel.id),
+                     _processed_any, _all_transport)
 
     @commands.Cog.listener()
     async def on_guild_join(self, guild: discord.Guild):
