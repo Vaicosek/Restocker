@@ -35,7 +35,10 @@ Knockback. Eff V vs Eff IV picks the tier band.
 ## Commands
 - `/futures_order` — a customer files a request; posts a review card to the futures channel
   pinging **@Owner**.
-- `/futures_bulk` — file several lines at once as one bulk request.
+- Several lines at once: **ask me**, don't look for a command. `/futures_bulk` was retired
+  because it only opened a modal to paste a list into — and a chat message already is that
+  list. Call `create_futures_bulk` with the lines in `items`, one per line. It posts the
+  same Approve & Fulfill card; nothing is ordered until a manager presses it.
 - **Quoting is AI-side**: ask the bot and it runs the `quote_futures` tool against the sheet
   above (cash cost + group + sell + breakdown). There is no `/futures_quote` command.
 - Listing/billing commands were retired — ask the AI for order status instead.

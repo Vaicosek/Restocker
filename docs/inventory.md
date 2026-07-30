@@ -10,7 +10,8 @@ shortfall-based restock orders.
   are AI-side: ask the bot (`create_restock_orders`). The `/inventory` group was retired.
 - `/item_edit item [coin] [stackable] [stack_size]` — (manager) fix an item's price or
   stackability. `/item_info` shows price, stock, barrel size and stackability.
-  `/item_set_price` sets price alone; `/add_item` adds a catalog item.
+  `/item_edit` sets price (add `per_stack:true` to quote per stack of 64), stackability
+  and `worker_cost` — it absorbed `/item_set_price`. `/add_item` adds a catalog item.
 - Capacities and stock alarms are AI-side now (`/inventory set_capacity` / `set_alarm` were
   retired). Alarms still fire: on import the owner is DM'd what's past the alarm, with a
   one-click "Create restock orders" button.

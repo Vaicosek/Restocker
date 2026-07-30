@@ -21,7 +21,7 @@ retired — ask the AI for fee status or the platform balance.
 
 ## Consignment futures (bulk deals)
 Bulk consignment tracking is AI-side. For custom build requests see [futures.md](futures.md)
-(`/futures_order`, `/futures_bulk`).
+(`/futures_order`, or ask me for a bulk list — `create_futures_bulk`).
 
 ## Gotchas the AI must know
 - Coin movements should always carry a reason; hand-paid credits are the ones that break

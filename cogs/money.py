@@ -155,25 +155,6 @@ class MoneyCog(commands.Cog):
             **ephemeral_kwargs(interaction)
         )
 
-    @app_commands.command(
-        name="futures_bulk",
-        description="(Owner/Manager) One bulk futures order from a pasted item list — then Approve & Fulfill")
-    @app_commands.describe(
-        customer="Who this order is for (the buyer)",
-        market_id="The buyer's market — where resales are tracked for consignment billing (optional)")
-    @app_commands.autocomplete(market_id=core._market_autocomplete)
-    async def futures_bulk(self, interaction: discord.Interaction, customer: discord.Member,
-                           market_id: Optional[str] = None):
-        if not (is_manager(interaction) or _owner_markets_for_user(interaction.user.id)):
-            return await interaction.response.send_message(
-                "📈 Bulk futures orders are for market owners / managers only.",
-                **ephemeral_kwargs(interaction))
-        # A modal is the natural place to paste a multi-line list. It parses on submit and
-        # posts the review card with Approve & Fulfill.
-        from views.web import FuturesBulkModal
-        await interaction.response.send_modal(FuturesBulkModal(
-            customer_id=customer.id, customer_name=customer.display_name,
-            market_id=market_id or "", created_by=interaction.user.id))
 
     # ── Investors (/investor ...) — GEX.PR preferred shareholders, profit-share engine ──
 

@@ -49,7 +49,7 @@ class ShopCog(commands.Cog):
         items = shops.setdefault("items", {})
 
         if item_name in items:
-            return await interaction.response.send_message(f"❌ Item `{item_name}` already exists. Use `/item_set_price` to update it.", **ephemeral_kwargs(interaction))
+            return await interaction.response.send_message(f"❌ Item `{item_name}` already exists. Use `/item_edit` to update it.", **ephemeral_kwargs(interaction))
 
         # Auto-detect the real Minecraft stack size from the name (potions/brews, tools,
         # jetpacks etc. → 1) so barrels aren't sized 64× too big. An explicit `stackable`
@@ -73,76 +73,6 @@ class ShopCog(commands.Cog):
             **ephemeral_kwargs(interaction)
         )
 
-    @app_commands.command(name="item_set_price", description="Set the coin price for an existing item (per piece or per stack of 64)")
-    @app_commands.checks.has_any_role(MANAGER_ROLE_NAME)
-    @app_commands.describe(
-        item="Item name",
-        coin="Price amount",
-        per_stack="Set to True if the price is per stack of 64 (bot divides by 64 automatically)",
-        worker_cost="(Optional) per-piece break-even cost for consignment futures. -1 = leave unchanged.",
-    )
-    @app_commands.autocomplete(item=any_item_autocomplete)
-    @app_commands.default_permissions(manage_guild=True)
-    async def set_price(self, interaction: discord.Interaction, item: str, coin: int,
-                        per_stack: bool = False, worker_cost: int = -1):
-        if coin < 0:
-            return await interaction.response.send_message("❌ Coin must be ≥ 0.", **ephemeral_kwargs(interaction))
-
-        per_val = "stack" if per_stack else "piece"
-        stack_size = 64
-        if per_val == "stack":
-            coin_per_piece = round(coin / stack_size, 4)
-        else:
-            coin_per_piece = coin
-
-        shops = _load_items()
-        items = shops.setdefault("items", {})
-        if item not in items:
-            return await interaction.response.send_message(
-                f"❌ Item `{item}` not found. Use `/add_item` to create it.", **ephemeral_kwargs(interaction))
-
-        old_price = items[item].get("coin", 0)
-        items[item]["coin"] = coin_per_piece
-        if per_val == "stack":
-            items[item]["stackable"] = True
-            items[item]["stack_size"] = stack_size
-        if worker_cost is not None and worker_cost >= 0:
-            items[item]["worker_cost"] = int(worker_cost)
-        _save_items(shops)
-        if worker_cost is not None and worker_cost >= 0:
-            try:
-                import Restocker_db as _db_wc
-                _db_wc.set_item_worker_cost(item, int(worker_cost))
-            except Exception:
-                pass
-
-        try:
-            import Restocker_db as _db_sp2
-            with _db_sp2.db() as _conn:
-                if per_val == "stack":
-                    _conn.execute("UPDATE items SET coin=?, stackable=1, stack_size=64 WHERE name=?",
-                                  (coin_per_piece, item))
-                else:
-                    _conn.execute("UPDATE items SET coin=? WHERE name=?", (coin_per_piece, item))
-        except Exception:
-            pass
-
-        # Keep the normal ↔ Future twin at the same price so paired items don't drift.
-        twin = _sync_twin_price(item, coin_per_piece)
-        twin_note = f"\n↔️ Also synced its twin **{twin}** to the same price." if twin else ""
-
-        if per_val == "stack":
-            await interaction.response.send_message(
-                f"✅ **{item}** price set: `{coin}¢/stack` → `{coin_per_piece}¢/piece` "
-                f"(barrel = `{round(coin_per_piece * BARREL_PIECES * stack_size):,}¢`).{twin_note}",
-                **ephemeral_kwargs(interaction)
-            )
-        else:
-            await interaction.response.send_message(
-                f"✅ **{item}** price updated: `{old_price}¢` → `{coin_per_piece}¢` per piece "
-                f"(barrel = `{round(coin_per_piece * BARREL_PIECES * stack_size):,}¢`).{twin_note}",
-                **ephemeral_kwargs(interaction)
-            )
 
     @app_commands.command(name="item_edit", description="Edit an existing item's price and/or stackability")
     @app_commands.checks.has_any_role(MANAGER_ROLE_NAME)
@@ -151,17 +81,27 @@ class ShopCog(commands.Cog):
         coin="(Optional) new coin price per piece. Leave blank to keep the current price.",
         stackable="(Optional) True = stacks to 64, False = single piece (potions, tools, armor sets). Blank = keep.",
         stack_size="(Optional) exact stack size (advanced, e.g. 16). Leave -1 to derive from stackable.",
+        per_stack="(Optional) True = `coin` is the price per STACK of 64; the bot divides by 64.",
+        worker_cost="(Optional) per-piece break-even cost for consignment futures. -1 = leave unchanged.",
     )
     @app_commands.autocomplete(item=any_item_autocomplete)
     @app_commands.default_permissions(manage_guild=True)
     async def item_edit(self, interaction: discord.Interaction, item: str,
                         coin: int | None = None, stackable: bool | None = None,
-                        stack_size: int = -1):
+                        stack_size: int = -1, per_stack: bool = False,
+                        worker_cost: int = -1):
+        """Absorbed /item_set_price. That command's two extras are `per_stack` (quote the
+        price per stack of 64 and let the bot divide) and `worker_cost`."""
         if coin is not None and coin < 0:
             return await interaction.response.send_message("❌ Coin must be ≥ 0.", **ephemeral_kwargs(interaction))
-        if coin is None and stackable is None and stack_size < 0:
+        if coin is None and stackable is None and stack_size < 0 and worker_cost < 0:
             return await interaction.response.send_message(
-                "❌ Nothing to change — pass `coin:` and/or `stackable:`.", **ephemeral_kwargs(interaction))
+                "❌ Nothing to change — pass `coin:`, `stackable:` and/or `worker_cost:`.",
+                **ephemeral_kwargs(interaction))
+        if per_stack and coin is None:
+            return await interaction.response.send_message(
+                "❌ `per_stack:` only means something alongside `coin:`.",
+                **ephemeral_kwargs(interaction))
 
         shops = _load_items()
         items = shops.setdefault("items", {})
@@ -188,11 +128,33 @@ class ShopCog(commands.Cog):
         new_coin = None
         if coin is not None:
             old_price = entry.get("coin", 0)
-            new_coin = int(coin)
-            entry["coin"] = new_coin
-            changes.append(f"price `{old_price}¢` → `{new_coin}¢`/piece")
+            if per_stack:
+                # Shop quotes are per stack of 64; every stored price is PER PIECE.
+                # Storing a stack price here makes wages and barrel maths 64x too high.
+                new_coin = round(int(coin) / 64, 4)
+                entry["coin"] = new_coin
+                entry["stackable"] = True
+                entry["stack_size"] = 64
+                if new_ss is None:
+                    new_ss = 64
+                changes.append(f"price `{coin}¢/stack` → `{new_coin}¢`/piece")
+            else:
+                new_coin = int(coin)
+                entry["coin"] = new_coin
+                changes.append(f"price `{old_price}¢` → `{new_coin}¢`/piece")
+
+        if worker_cost >= 0:
+            entry["worker_cost"] = int(worker_cost)
+            changes.append(f"worker cost → `{int(worker_cost)}¢`/piece")
 
         _save_items(shops)
+
+        if worker_cost >= 0:
+            try:
+                import Restocker_db as _db_wc
+                _db_wc.set_item_worker_cost(item, int(worker_cost))
+            except Exception as _ex:
+                log.warning("[item_edit] worker_cost db write failed for %s: %s", item, _ex)
 
         # Mirror to the DB items table (the JSON store above is the catalog source of
         # truth; the items table is the twin the orders/stock paths read).

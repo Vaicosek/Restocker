@@ -497,6 +497,9 @@ def _futures_bulk_preview_embed(bulk: dict) -> discord.Embed:
 
 
 class FuturesBulkModal(discord.ui.Modal, title="Bulk futures — paste item list"):
+    """UNUSED since /futures_bulk was retired in favour of the create_futures_bulk AI tool
+    (a chat message already IS the pasted list). Kept because it is the only worked example
+    of building a bulk + its persistent view from free text; delete if it rots.""" 
     """One paragraph field: paste the customer's order, one item per line. On submit we parse
     it, save the bulk order, and post the review card with Approve & Fulfill."""
 

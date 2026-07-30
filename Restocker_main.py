@@ -4128,7 +4128,7 @@ async def _process_csn_attachment(attachment: discord.Attachment, report_channel
         await report_channel.send(
             f"🆕 Added {len(newly_tagged)} new item(s) to the **{market_name or effective_market_id}** "
             f"price catalog from this report: {names}{more}\n"
-            f"Starter prices were estimated from this report's sales — check them with `/item_set_price` if they look off."
+            f"Starter prices were estimated from this report's sales — check them with `/item_edit` if they look off."
         )
 
 
@@ -10817,8 +10817,7 @@ AVAILABLE SLASH COMMANDS (share these when asked):
 
 Orders & Workers:
 - /orders — Show open production requests
-- /order — (Managers) Order an existing catalog item from workers. Leave the worker field blank to ask ALL workers (batched ping); set a worker to assign it directly to ONE person via DM with no mass ping. Item must exist (/add_item) and have a price (/item_set_price).
-- /ping_unclaimed — (Managers) Ping workers about unclaimed orders
+- /order — (Managers) Order an existing catalog item from workers. Leave the worker field blank to ask ALL workers (batched ping); set a worker to assign it directly to ONE person via DM with no mass ping. Item must exist (/add_item) and have a price (/item_edit).
 
 Futures Orders (custom item + enchant requests, separate from the regular catalog /orders board):
 - /futures_order — Request a custom item with specific enchants/quality (e.g. "Fortune III, Unbreaking" picks,
@@ -10893,7 +10892,6 @@ Inventory & Stock Alarms (/inventory subcommands — live barrel fullness from C
 
 Items & Setup:
 - /add_item — Create a new item and set its coin price
-- /item_set_price — (Managers) Set an item's coin price (per piece or per stack of 64)
 - /item_info — Look up an item's price, stock, and market
 - /shop_rename_item — Rename an item (updates all open orders too)
 - /manager_panel — (Managers) Open the Manager control panel
@@ -11233,6 +11231,20 @@ _AI_TOOLS = [
                 "request": {"type": "string", "description": "Plain-English description of the change to make to that file"}
             },
             "required": ["file", "request"]
+        }
+    },
+    {
+        "name": "create_futures_bulk",
+        "description": "File ONE bulk futures order from a multi-line item list for a customer, and post the Approve & Fulfill card. Replaces the retired /futures_bulk command. Use this instead of calling create_futures_order repeatedly when someone pastes a LIST of items for one buyer. Managers and market owners only. Nothing is fulfilled until a manager presses Approve & Fulfill.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "for_user": {"type": "string", "description": "The buyer — @mention, Discord ID, username or display name."},
+                "items": {"type": "string", "description": "The item list, ONE PER LINE, e.g. '2 barrels Warlord Potion\\n3 stacks Iron Ingot'."},
+                "market_id": {"type": "string", "description": "The buyer's market, for consignment resale tracking. Optional."},
+                "notes": {"type": "string", "description": "Extra context for managers. Optional."}
+            },
+            "required": ["for_user", "items"]
         }
     },
     {
@@ -12467,6 +12479,78 @@ async def _ai_tool_propose_code_change(guild, channel, user, args):
         return f"❌ Failed: {type(e).__name__}: {e}"
 
 
+async def _ai_tool_create_futures_bulk(guild, channel, user, args):
+    """Was /futures_bulk. The command only ever opened a modal to paste a list into —
+    which is precisely what someone talking to me hands over as text anyway.
+
+    Posts the review card with the SAME persistent FuturesBulkView the command used, so
+    Approve & Fulfill still works and still survives a restart. Nothing is fulfilled here:
+    this only files the order for a manager to approve.
+    """
+    if not guild:
+        return "❌ This can only be used inside a server."
+    try:
+        allowed = _ai_is_manager(user) or bool(_owner_markets_for_user(getattr(user, "id", 0)))
+    except Exception:
+        allowed = _ai_is_manager(user)
+    if not allowed:
+        return "⛔ Bulk futures orders are for market owners and managers only."
+
+    for_ident = str(args.get("for_user", "")).strip()
+    items_text = str(args.get("items", "") or "").strip()
+    if not for_ident or not items_text:
+        return "❌ I need a customer and a list of items (one per line, e.g. '2 barrels Warlord Potion')."
+
+    member = _resolve_member(guild, for_ident)
+    if member is not None:
+        target_id, target_name = str(member.id), member.display_name
+    else:
+        clean = re.sub(r"[<@!>]", "", for_ident).strip()
+        if not clean.isdigit():
+            return f"❌ Couldn't find a user matching '{for_ident}'. Give me their @mention or Discord ID."
+        target_id, target_name = clean, for_ident
+
+    parsed = _parse_futures_bulk_text(items_text)
+    if not parsed:
+        return ("❌ Couldn't read any items from that list. One item per line, "
+                "e.g. `2 barrels Warlord Potion`.")
+
+    market_id = str(args.get("market_id", "") or "").strip()
+    if market_id:
+        markets = (_load_markets().get("markets", {}) or {})
+        if market_id not in markets:
+            return f"❌ Market `{market_id}` not found."
+
+    import Restocker_db as _db
+    try:
+        bulk_id = _db.create_futures_bulk(
+            target_id, target_name, market_id, getattr(user, "id", 0),
+            str(args.get("notes", "") or "") + f" • placed by {user} via AI")
+        for pr in parsed:
+            _db.add_futures_bulk_line(bulk_id, pr["item"], pr["qty"], pr.get("unit", "pieces"),
+                                      enchants="", raw_line=pr.get("raw", ""))
+    except Exception as e:
+        return f"⚠️ DB error creating the bulk order: {e}"
+
+    try:
+        from views.web import FuturesBulkView, _futures_bulk_preview_embed
+        bulk = _db.get_futures_bulk(bulk_id)
+        msg = await channel.send(embed=_futures_bulk_preview_embed(bulk),
+                                 view=FuturesBulkView(bulk_id))
+        # The persistent view recovers the bulk id from this message id after a restart.
+        _db.update_futures_bulk_status(bulk_id, "pending", notify_msg_id=str(msg.id))
+    except Exception as e:
+        return (f"⚠️ Bulk order #{bulk_id} was saved with {len(parsed)} line(s), but I couldn't "
+                f"post the approval card: {e}")
+
+    lines = "\n".join(f"• {p['qty']} {p.get('unit', 'pieces')} {p['item']}" for p in parsed[:15])
+    more = f"\n…and {len(parsed) - 15} more" if len(parsed) > 15 else ""
+    return (f"✅ Filed bulk futures order **#{bulk_id}** for {target_name} — "
+            f"{len(parsed)} line(s):\n{lines}{more}\n\n"
+            f"Approval card posted above. A manager must press **Approve & Fulfill**; "
+            f"nothing is ordered until they do.")
+
+
 async def _ai_tool_create_futures_order(guild, channel, user, args):
     """File a futures order on behalf of a named customer and post it to #futures for the
     normal manager approve/decline flow. Managers and market owners only."""
@@ -13572,11 +13656,13 @@ _AI_TOOL_MAP = {
     "get_channel_config":   _ai_tool_get_channel_config,
     "set_channel_config":   _ai_tool_set_channel_config,
     "propose_code_change":  _ai_tool_propose_code_change,
+    "create_futures_bulk":   _ai_tool_create_futures_bulk,
     "create_futures_order": _ai_tool_create_futures_order,
 }
 
 # Tools whose effects are destructive/moderation-level — flagged in the audit log.
 _AI_SENSITIVE_TOOLS = {
+    "create_futures_bulk",  # files a real order for approval
     "manage_ai_access",   # grants the power to talk to me — always audit it
     "assign_role", "remove_role", "kick_user", "ban_user", "timeout_user",
     "delete_messages", "create_role", "setup_market_owner", "send_dm", "dm_role",

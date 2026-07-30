@@ -321,7 +321,7 @@ def _earnings_rundown(user_id, max_lines: int = 12) -> str:
 
 
 def _order_search_matches(query: str, orders: list[dict]) -> list[dict]:
-    """Item name / IGN / Discord name-or-ID / order # search — shared by /search_orders and
+    """Item name / IGN / Discord name-or-ID / order # search — shared by the orders browser and
     its autocomplete (and mirrors the 🔎 Search button's modal in views/orders.py). A bare
     '#<digits>' or plain-digits query does an EXACT id match instead of substring, so '#1'
     doesn't also pull in #10-#19, #100+, etc."""
@@ -527,47 +527,6 @@ class OrdersCog(commands.Cog):
     async def orders(self, interaction: discord.Interaction):
         return await orders_cmd(interaction)
 
-    @app_commands.command(
-        name="search_orders",
-        description="Search orders by item, IGN, Discord name/ID, or order # — shows live matches as you type",
-    )
-    @app_commands.describe(query="Item name, IGN, Discord name/ID, or order # (e.g. shovel · jzlr · #17)")
-    @app_commands.autocomplete(query=_order_search_autocomplete)
-    async def search_orders(self, interaction: discord.Interaction, query: str):
-        await interaction.response.defer(**ephemeral_kwargs(interaction))
-        try:
-            data = load_orders()
-            matches = _order_search_matches(query, data.get("orders", []) or [])
-        except Exception as e:
-            return await interaction.followup.send(
-                f"❌ Search failed: `{type(e).__name__}: {e}`", **ephemeral_kwargs(interaction)
-            )
-        if not matches:
-            return await interaction.followup.send(f"🔎 No orders match **{query}**.", **ephemeral_kwargs(interaction))
-        matches.sort(key=lambda o: int(o.get("id", 0) or 0), reverse=True)
-        import Restocker_db as _db
-        _ic = {}
-        def _ign(uid):
-            uid = str(uid or "")
-            if uid and uid not in _ic:
-                try:
-                    _ic[uid] = _db.get_ign(uid) or ""
-                except Exception:
-                    _ic[uid] = ""
-            return _ic.get(uid, "")
-        lines = []
-        for o in matches[:25]:
-            st = str(o.get("status", "open")).lower()
-            cl = o.get("claims") or []
-            who = ""
-            if cl:
-                who = " · " + ", ".join(
-                    f"{(_ign(c.get('user_id', '')) or c.get('user_tag', '') or '?')} ({int(c.get('qty', 0) or 0)})"
-                    for c in cl[:3]
-                )
-            lines.append(f"• **#{o.get('id')}** {o.get('item', '')} · {_ORDER_STATUS_BADGE.get(st, st.capitalize())}{who}")
-        head = f"🔎 **{len(matches)} order(s) matching \"{query}\"**" + (" — showing 25" if len(matches) > 25 else "")
-        await interaction.followup.send((head + "\n" + "\n".join(lines))[:1990], **ephemeral_kwargs(interaction))
 
 
     @app_commands.command(
@@ -874,116 +833,7 @@ class OrdersCog(commands.Cog):
     # builder (Stage 2) and /inventory restock_deficit. _build_stock_refill_plan /
     # _StockRefillConfirmView remain defined but unused; restore from git history if wanted.
 
-    @app_commands.command(name="ping_unclaimed", description="(Managers) Ping the Workers about unclaimed orders.")
 
-
-    @app_commands.describe(limit="Ping only the N oldest unclaimed orders (0 = all)")
-    @app_commands.default_permissions(manage_guild=True)
-    async def ping_unclaimed(self, interaction: discord.Interaction, limit: int = 0):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", **ephemeral_kwargs(interaction))
-
-        data = load_orders()
-        unclaimed = [
-            o for o in data.get("orders", [])
-
-            if not _order_is_claimed_closed(o)
-            and not o.get("claims")
-        ]
-
-
-        unclaimed = [o for o in unclaimed if not _priority_active(o)]
-
-        if not unclaimed:
-            return await interaction.response.send_message("✅ Nothing to ping: no unclaimed orders.", **ephemeral_kwargs(interaction))
-
-        unclaimed.sort(key=lambda o: parse_iso(o.get("created_at", utcnow_iso())))
-        if limit and limit > 0:
-            unclaimed = unclaimed[:limit]
-
-        channel = interaction.client.get_channel(WORKER_CHANNEL_ID)
-        if not channel:
-            return await interaction.response.send_message("⚠️ WORKER_CHANNEL_ID is not set to a valid channel.", **ephemeral_kwargs(interaction))
-
-        role = discord.utils.get(channel.guild.roles, name=EMPLOYEE_ROLE_NAME)
-
-        lines = []
-        for o in unclaimed:
-            rem = remaining_to_assign(o)
-            lines.append(f"• **#{o['id']}** {o.get('item','')} · rem {fmt_qty(o, rem)}")
-
-        mention = (role.mention + " ") if role else ""
-        await channel.send(
-            f"{mention}⏰ **Unclaimed orders need attention:**\n" + "\n".join(lines),
-            allowed_mentions=discord.AllowedMentions(roles=True)
-        )
-        return await interaction.response.send_message(f"🔔 Pinged {len(unclaimed)} unclaimed order(s).", **ephemeral_kwargs(interaction))
-
-    @app_commands.command(
-        name="orders_resend",
-        description="(Managers) Post all open order cards straight to the worker channel — no mass ping."
-    )
-    @app_commands.default_permissions(manage_guild=True)
-    async def orders_resend(self, interaction: discord.Interaction):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", **ephemeral_kwargs(interaction))
-        await interaction.response.defer(**ephemeral_kwargs(interaction), thinking=True)
-
-        # Post the cards DIRECTLY, bypassing the background announce loop (which is
-        # silently swallowing its post errors). Also surfaces the real error if any.
-        channel = interaction.client.get_channel(WORKER_CHANNEL_ID)
-        if channel is None:
-            return await interaction.followup.send(
-                f"❌ `get_channel({WORKER_CHANNEL_ID})` returned **nothing** — the bot can't see the worker "
-                f"channel even though the ID is right and it has Administrator. That's the actual bug "
-                f"(missing Guilds intent, or the channel isn't cached).",
-                **ephemeral_kwargs(interaction)
-            )
-
-        data = load_orders()
-        # Resend re-posts every order that is NOT closed (open OR claimed-but-unfulfilled),
-        # so a manager can always force the cards back into the channel — the old
-        # "and not o.get('claims')" wrongly skipped anything already claimed.
-        open_orders = [
-            o for o in data.get("orders", [])
-            if isinstance(o, dict) and not _order_is_claimed_closed(o)
-        ]
-        open_orders.sort(key=lambda o: int(o.get("id", 0) or 0))
-
-        posted, errors = 0, []
-        for o in open_orders:
-            # Post the CARD directly now (worker side done -> loop won't double-post it),
-            # but leave the employee-DM side OPEN and due now, so the (now-fixed) employee
-            # batch-DM loop sends the DM digest to every @Employee.
-            o["worker_announced"] = True
-            o["employee_announced"] = False
-            o["employee_announce_at"] = utcnow_iso()
-            try:
-                await update_order_messages(interaction.client, o, allow_post=True)
-                posted += 1
-            except Exception as e:
-                errors.append(f"#{o.get('id')}: {type(e).__name__}: {e}")
-        # Do NOT save the whole pre-loop snapshot: the posting loop awaits Discord per order,
-        # and a claim made meanwhile would be clobbered back to unclaimed (save_orders upserts
-        # every row). Re-load fresh state and merge ONLY the fields this command changed.
-        fresh = load_orders()
-        by_id = {int(x.get("id", 0) or 0): x for x in (fresh.get("orders") or []) if isinstance(x, dict)}
-        for o in open_orders:
-            f = by_id.get(int(o.get("id", 0) or 0))
-            if f is not None:
-                f["worker_announced"] = o.get("worker_announced", True)
-                f["employee_announced"] = o.get("employee_announced", False)
-                f["employee_announce_at"] = o.get("employee_announce_at")
-                f["messages"] = o.get("messages") or f.get("messages")
-        save_orders(fresh)
-
-        msg = (f"📮 Posted **{posted}/{len(open_orders)}** order card(s) to <#{WORKER_CHANNEL_ID}>, "
-               f"and queued the **@Employee DM digest** — it goes out within ~1 min.")
-        if errors:
-            msg += "\n\n⚠️ Real errors (this is what the loop was hiding):\n" + "\n".join(f"`{e}`" for e in errors[:8])
-        elif posted == 0:
-            msg += "\n\n(No open orders to post.)"
-        await interaction.followup.send(msg[:1900], **ephemeral_kwargs(interaction))
 
     @app_commands.command(name="manager_panel", description="Open the Manager control panel")
     @app_commands.default_permissions(manage_guild=True)
@@ -1006,156 +856,117 @@ class OrdersCog(commands.Cog):
         await interaction.response.send_message(embed=embed, view=ManagerPanelView(), ephemeral=True)
 
 
-    @app_commands.command(
-        name="orders_purge",
-        description="(Managers) Delete only a scoped batch of orders — by age / ID range / market. Keeps the rest."
-    )
-    @app_commands.describe(
-        confirm="Type YES to actually delete. Anything else = preview only (shows counts, deletes nothing).",
-        since_minutes="Only orders created within the last N minutes (e.g. 60 = the last hour).",
-        market_id="Only orders tagged this market (optional).",
-        min_id="Only orders with ID ≥ this (optional).",
-        max_id="Only orders with ID ≤ this (optional).",
-        clear_dms="Also sweep leftover 'New restock requests' digests + pings from the worker channel and DMs.",
-    )
-    @app_commands.autocomplete(market_id=_market_autocomplete)
-    async def orders_purge(self, interaction: discord.Interaction, confirm: str = "no",
-                           since_minutes: Optional[int] = None,
-                           market_id: Optional[str] = None,
-                           min_id: Optional[int] = None,
-                           max_id: Optional[int] = None,
-                           clear_dms: bool = False):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", **ephemeral_kwargs(interaction))
-        has_filter = not (since_minutes is None and market_id is None and min_id is None and max_id is None)
-        if not has_filter and not clear_dms:
-            return await interaction.response.send_message(
-                "❌ Give at least one filter (`since_minutes` / `market_id` / `min_id` / `max_id`), "
-                "or set `clear_dms:True` to just sweep leftover announcement DMs. "
-                "To wipe the whole board, ask the bot.", **ephemeral_kwargs(interaction))
-        await interaction.response.defer(**ephemeral_kwargs(interaction), thinking=True)
-        client = interaction.client
-        data = load_orders()
-        orders = list(data.get("orders", []) or [])
-        cutoff = (datetime.now(timezone.utc) - timedelta(minutes=int(since_minutes))) if since_minutes else None
-        mid_f = str(market_id).strip() if market_id else None
-
-        def _match(o):
-            try:
-                oid = int(o.get("id", 0) or 0)
-            except Exception:
-                oid = 0
-            if min_id is not None and oid < int(min_id):
-                return False
-            if max_id is not None and oid > int(max_id):
-                return False
-            if mid_f is not None and str(o.get("market_id") or "") != mid_f:
-                return False
-            if cutoff is not None:
-                try:
-                    ts = parse_iso(o.get("created_at"))
-                except Exception:
-                    ts = None
-                if ts is None:
-                    return False
-                if ts.tzinfo is None:
-                    ts = ts.replace(tzinfo=timezone.utc)
-                if ts < cutoff:
-                    return False
-            return True
-
-        matched = [o for o in orders if _match(o)] if has_filter else []
-        ids = sorted(int(o.get("id", 0) or 0) for o in matched)
-        id_span = (f"#{ids[0]}–#{ids[-1]}" if len(ids) > 1 else (f"#{ids[0]}" if ids else "—"))
-
-        if not matched and not clear_dms:
-            return await interaction.followup.send("No orders match that filter.", **ephemeral_kwargs(interaction))
-
-        # Anything destructive is gated behind confirm:YES — preview otherwise.
-        if confirm.strip().upper() != "YES":
-            bits = []
-            if matched:
-                sample = ", ".join(f"#{i}" for i in ids[:25]) + (" …" if len(ids) > 25 else "")
-                bits.append(f"**{len(matched)}** order(s) ({id_span}) — DMs, posts, tickets, records:\n{sample}")
-            if clear_dms:
-                bits.append("sweep leftover **restock-request digests + pings** from the worker channel and every employee DM")
-            return await interaction.followup.send(
-                "🔍 **Preview** — would " + "; and ".join(bits)
-                + f"\n\nRe-run with **`confirm:YES`** to do it. Your other **{len(orders) - len(matched)}** order(s) stay.",
-                **ephemeral_kwargs(interaction))
-
-        import asyncio as _aio
-        deleted_dms = deleted_msgs = deleted_channels = 0
-        for o in matched:
-            try:
-                dms = ((o.get("messages") or {}).get("dms") or {})
-                for uid_str, m_id in list(dms.items()):
-                    try:
-                        user = client.get_user(int(uid_str)) or await client.fetch_user(int(uid_str))
-                        if not user:
-                            continue
-                        dm = user.dm_channel or await user.create_dm()
-                        msg = await dm.fetch_message(int(m_id))
-                        await msg.delete()
-                        deleted_dms += 1
-                        await _aio.sleep(0.35)
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-            try:
-                mm = o.get("messages") or {}
-                ch_id, msg_id = mm.get("channel_id"), mm.get("message_id")
-                if ch_id and msg_id:
-                    ch = client.get_channel(int(ch_id))
-                    if ch:
-                        msg = await ch.fetch_message(int(msg_id))
-                        await msg.delete()
-                        deleted_msgs += 1
-            except Exception:
-                pass
-            try:
-                vid = o.get("verification_ticket_id")
-                if vid:
-                    ch = client.get_channel(int(vid))
-                    if ch:
-                        await ch.delete(reason="Order purge (scoped)")
-                        deleted_channels += 1
-            except Exception:
-                pass
-
-        kept = len(orders)
-        if matched:
-            match_ids = {int(o.get("id", 0) or 0) for o in matched}
-            data["orders"] = [o for o in orders if int(o.get("id", 0) or 0) not in match_ids]
-            save_orders(data, prune=True)
-            kept = len(data["orders"])
-
-        # Sweep the batch digests + plain-text pings. When clear_dms is set we sweep ALL restock
-        # pings (no id filter) — needed to catch a stale ping whose order is already gone;
-        # otherwise only pings referencing the purged ids.
-        try:
-            await cleanup_batch_dms_for_closed_order(client, 0)
-        except Exception:
-            pass
-        try:
-            ping_ids = None if clear_dms else {int(o.get("id", 0) or 0) for o in matched}
-            _pc, _pd = await _purge_worker_ping_messages(client, ping_ids)
-            deleted_msgs += _pc
-            deleted_dms += _pd
-        except Exception:
-            pass
-
-        head = (f"🧹 **Purged {len(matched)} order(s)** ({id_span})."
-                if matched else "🧹 **Swept leftover announcement DMs/pings.**")
-        await interaction.followup.send(
-            head + "\n"
-            f"• Posts/pings deleted: **{deleted_msgs}**\n"
-            f"• Employee DMs deleted: **{deleted_dms}**\n"
-            f"• Verification channels deleted: **{deleted_channels}**\n"
-            f"• Kept: **{kept}** other order(s).",
-            **ephemeral_kwargs(interaction))
 
 
 async def setup(bot):
     await bot.add_cog(OrdersCog(bot))
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Order-maintenance actions, extracted from the retired /orders_resend and
+#  /ping_unclaimed commands so the Manager Panel can call them.
+#  Bodies are unchanged — only `self` is dropped from the signature.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def run_orders_resend(interaction: discord.Interaction):
+    if not is_manager(interaction):
+        return await interaction.response.send_message("⛔ Managers only.", **ephemeral_kwargs(interaction))
+    await interaction.response.defer(**ephemeral_kwargs(interaction), thinking=True)
+
+    # Post the cards DIRECTLY, bypassing the background announce loop (which is
+    # silently swallowing its post errors). Also surfaces the real error if any.
+    channel = interaction.client.get_channel(WORKER_CHANNEL_ID)
+    if channel is None:
+        return await interaction.followup.send(
+            f"❌ `get_channel({WORKER_CHANNEL_ID})` returned **nothing** — the bot can't see the worker "
+            f"channel even though the ID is right and it has Administrator. That's the actual bug "
+            f"(missing Guilds intent, or the channel isn't cached).",
+            **ephemeral_kwargs(interaction)
+        )
+
+    data = load_orders()
+    # Resend re-posts every order that is NOT closed (open OR claimed-but-unfulfilled),
+    # so a manager can always force the cards back into the channel — the old
+    # "and not o.get('claims')" wrongly skipped anything already claimed.
+    open_orders = [
+        o for o in data.get("orders", [])
+        if isinstance(o, dict) and not _order_is_claimed_closed(o)
+    ]
+    open_orders.sort(key=lambda o: int(o.get("id", 0) or 0))
+
+    posted, errors = 0, []
+    for o in open_orders:
+        # Post the CARD directly now (worker side done -> loop won't double-post it),
+        # but leave the employee-DM side OPEN and due now, so the (now-fixed) employee
+        # batch-DM loop sends the DM digest to every @Employee.
+        o["worker_announced"] = True
+        o["employee_announced"] = False
+        o["employee_announce_at"] = utcnow_iso()
+        try:
+            await update_order_messages(interaction.client, o, allow_post=True)
+            posted += 1
+        except Exception as e:
+            errors.append(f"#{o.get('id')}: {type(e).__name__}: {e}")
+    # Do NOT save the whole pre-loop snapshot: the posting loop awaits Discord per order,
+    # and a claim made meanwhile would be clobbered back to unclaimed (save_orders upserts
+    # every row). Re-load fresh state and merge ONLY the fields this command changed.
+    fresh = load_orders()
+    by_id = {int(x.get("id", 0) or 0): x for x in (fresh.get("orders") or []) if isinstance(x, dict)}
+    for o in open_orders:
+        f = by_id.get(int(o.get("id", 0) or 0))
+        if f is not None:
+            f["worker_announced"] = o.get("worker_announced", True)
+            f["employee_announced"] = o.get("employee_announced", False)
+            f["employee_announce_at"] = o.get("employee_announce_at")
+            f["messages"] = o.get("messages") or f.get("messages")
+    save_orders(fresh)
+
+    msg = (f"📮 Posted **{posted}/{len(open_orders)}** order card(s) to <#{WORKER_CHANNEL_ID}>, "
+           f"and queued the **@Employee DM digest** — it goes out within ~1 min.")
+    if errors:
+        msg += "\n\n⚠️ Real errors (this is what the loop was hiding):\n" + "\n".join(f"`{e}`" for e in errors[:8])
+    elif posted == 0:
+        msg += "\n\n(No open orders to post.)"
+    await interaction.followup.send(msg[:1900], **ephemeral_kwargs(interaction))
+
+async def run_ping_unclaimed(interaction: discord.Interaction, limit: int = 0):
+    if not is_manager(interaction):
+        return await interaction.response.send_message("⛔ Managers only.", **ephemeral_kwargs(interaction))
+
+    data = load_orders()
+    unclaimed = [
+        o for o in data.get("orders", [])
+
+        if not _order_is_claimed_closed(o)
+        and not o.get("claims")
+    ]
+
+
+    unclaimed = [o for o in unclaimed if not _priority_active(o)]
+
+    if not unclaimed:
+        return await interaction.response.send_message("✅ Nothing to ping: no unclaimed orders.", **ephemeral_kwargs(interaction))
+
+    unclaimed.sort(key=lambda o: parse_iso(o.get("created_at", utcnow_iso())))
+    if limit and limit > 0:
+        unclaimed = unclaimed[:limit]
+
+    channel = interaction.client.get_channel(WORKER_CHANNEL_ID)
+    if not channel:
+        return await interaction.response.send_message("⚠️ WORKER_CHANNEL_ID is not set to a valid channel.", **ephemeral_kwargs(interaction))
+
+    role = discord.utils.get(channel.guild.roles, name=EMPLOYEE_ROLE_NAME)
+
+    lines = []
+    for o in unclaimed:
+        rem = remaining_to_assign(o)
+        lines.append(f"• **#{o['id']}** {o.get('item','')} · rem {fmt_qty(o, rem)}")
+
+    mention = (role.mention + " ") if role else ""
+    await channel.send(
+        f"{mention}⏰ **Unclaimed orders need attention:**\n" + "\n".join(lines),
+        allowed_mentions=discord.AllowedMentions(roles=True)
+    )
+    return await interaction.response.send_message(f"🔔 Pinged {len(unclaimed)} unclaimed order(s).", **ephemeral_kwargs(interaction))

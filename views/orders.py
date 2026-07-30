@@ -630,7 +630,7 @@ class ManagerReviewView(View):
             # Loud, actionable — this is the failure mode that quietly cost Dr 6 orders.
             msg += ("\n\n🚨 **Some workers were NOT paid** — the item has no catalog price, so the "
                     "payout computed to 0:\n" + "\n".join(unpaid_lines[:10]) +
-                    f"\n\nFix the price with `/item_set_price item:{order.get('item','?')} coin:<amount>` "
+                    f"\n\nFix the price with `/item_edit item:{order.get('item','?')} coin:<amount>` "
                     f"then run `/admin repair_payouts` to pay them retroactively.")
         try:
             await interaction.followup.send(msg, ephemeral=True)
@@ -2188,6 +2188,28 @@ class ManagerPanelView(discord.ui.View):
     async def pay_project_btn(self, interaction: discord.Interaction, button: Button):
         return await interaction.response.send_modal(_ProjectPayModal())
 
+    @discord.ui.button(label="📮 Resend order cards", style=discord.ButtonStyle.secondary)
+    async def resend_cards_btn(self, interaction: discord.Interaction, button: Button):
+        """Was /orders_resend. Posts every not-closed order card to the worker channel and
+        re-queues the @Employee DM digest. No mass ping."""
+        if not is_manager(interaction):
+            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
+        import sys as _sys
+        _oc = _sys.modules.get("cogs.orders")
+        if _oc is None or not hasattr(_oc, "run_orders_resend"):
+            return await interaction.response.send_message(
+                "⚠️ The orders cog isn't loaded — can't resend.", ephemeral=True)
+        await _oc.run_orders_resend(interaction)
+
+    @discord.ui.button(label="⏰ Ping unclaimed", style=discord.ButtonStyle.secondary)
+    async def ping_unclaimed_btn(self, interaction: discord.Interaction, button: Button):
+        """Was /ping_unclaimed. Pings @Employee in the worker channel about orders nobody
+        has claimed. Skips anything already on a priority ping."""
+        if not is_manager(interaction):
+            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
+        await interaction.response.send_modal(_PingUnclaimedModal())
+
+
     @discord.ui.button(label="🧹 Prune Cancelled", style=discord.ButtonStyle.danger)
     async def prune_closed(self, interaction: discord.Interaction, button: Button):
         if not is_manager(interaction):
@@ -2220,8 +2242,33 @@ class ManagerPanelView(discord.ui.View):
 
     # Removed from the panel (2026-07-15): Hive pickup status, Clear hive pickups, Set coin
     # price, Funds report now, Apply interest now. Interest & funds still run automatically on
-    # their weekly loops (cogs/loops.py); pricing is handled on the website + /item_set_price. The
+    # their weekly loops (cogs/loops.py); pricing is handled on the website + /item_edit. The
     # panel is now just the three order-management actions above.
+
+
+class _PingUnclaimedModal(discord.ui.Modal, title="Ping unclaimed orders"):
+    def __init__(self):
+        super().__init__(timeout=300)
+        self.limit = discord.ui.TextInput(
+            label="Ping only the N oldest (blank = all)", required=False,
+            placeholder="e.g. 5")
+        self.add_item(self.limit)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        raw = str(self.limit.value or "").strip()
+        try:
+            n = int(raw) if raw else 0
+        except Exception:
+            return await interaction.response.send_message(
+                "❌ That isn't a number.", ephemeral=True)
+        import sys as _sys
+        _oc = _sys.modules.get("cogs.orders")
+        if _oc is None or not hasattr(_oc, "run_ping_unclaimed"):
+            return await interaction.response.send_message(
+                "⚠️ The orders cog isn't loaded.", ephemeral=True)
+        await _oc.run_ping_unclaimed(interaction, limit=max(0, n))
+
+
 
 
 class FillMissingPricesModal(discord.ui.Modal):
