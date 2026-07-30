@@ -11303,6 +11303,20 @@ _AI_TOOLS = [
         }
     },
     {
+        "name": "set_market_finances",
+        "description": "Set a listed company's TREASURY (its own cash, which backs the share price), or correct its VAULT balance / pledged-item value. Managers only. Values are ABSOLUTE, not deltas. Important: a vault deposit does NOT raise the treasury — they are separate numbers, and vault figures are bookkeeping only (no coins move). Use this when someone says 'set X's treasury to N' or 'I put money in the vault by mistake'.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "market_id": {"type": "string", "description": "Which market."},
+                "treasury": {"type": "number", "description": "Set treasury_coins to this exact figure. Listed stocks only."},
+                "vault_balance": {"type": "number", "description": "Set the recorded vault deposit balance to this exact figure (use to undo a mistaken deposit)."},
+                "vault_pledged": {"type": "number", "description": "Set pledged item value (full market value; the haircut is applied on read)."}
+            },
+            "required": ["market_id"]
+        }
+    },
+    {
         "name": "credit_team_work",
         "description": "Re-attribute an order's team credit to the workers who actually did it. Managers claim and fulfil on their team's behalf, so the ledger records the manager as the worker and the team looks idle — this fixes that. Managers only, own team only. Ask who did what and in what quantity before calling.",
         "input_schema": {
@@ -12664,6 +12678,82 @@ async def _ai_tool_propose_code_change(guild, channel, user, args):
                 f"(nothing goes live until you merge it and restart).")
     except Exception as e:  # noqa: BLE001
         return f"❌ Failed: {type(e).__name__}: {e}"
+
+
+async def _ai_tool_set_market_finances(guild, channel, user, args):
+    """Set a listed company's treasury, and correct vault balance/pledges.
+
+    Exists because "Tune params" was removed from MarketSettings and nothing replaced it,
+    leaving no way at all to set a treasury. Manager-only and audited.
+
+    TREASURY vs VAULT — these are different things and mixing them up is easy:
+      * treasury_coins  = the company's own cash. Backs the share price and pays coupons.
+      * vault_bal       = coins recorded as deposited at the V Tech vault against its dues.
+    Depositing at the vault does NOT raise the treasury, and vault figures are pure
+    bookkeeping — no coins move either way.
+
+    Values are ABSOLUTE (set to X), not deltas, so a repeated call is idempotent.
+    """
+    if not _ai_is_manager(user):
+        return "❌ Managers only — this sets money that backs share prices."
+    import Restocker_db as _db
+    mid = str(args.get("market_id") or "").strip()
+    if not mid:
+        return "❌ Which market?"
+    markets = (_load_markets().get("markets", {}) or {})
+    if mid not in markets:
+        return (f"❌ Market `{mid}` not found. Known: "
+                + ", ".join(f"`{k}`" for k in list(markets)[:15]))
+
+    def _num(key):
+        v = args.get(key)
+        if v is None or str(v).strip() == "":
+            return None
+        try:
+            return float(str(v).replace(",", ""))
+        except Exception:
+            return "bad"
+
+    tre, vbal, vpl = _num("treasury"), _num("vault_balance"), _num("vault_pledged")
+    if "bad" in (tre, vbal, vpl):
+        return "❌ Amounts must be numbers."
+    if tre is None and vbal is None and vpl is None:
+        return "❌ Nothing to set. Give treasury, vault_balance and/or vault_pledged."
+
+    out = []
+    if tre is not None:
+        listing = _db.get_market_shares(mid)
+        if not listing or not listing.get("active"):
+            return f"❌ `{mid}` isn't a listed stock — it has no treasury to set."
+        old = float(listing.get("treasury_coins") or 0)
+
+        def _do():
+            _db.upsert_market_shares(mid, treasury_coins=float(tre))
+        await run_on_bot_loop(_do)
+        out.append(f"treasury `{old:,.0f}` → **`{tre:,.0f}`**")
+        # The share price is floored by asset_value/shares; say so rather than let the
+        # next repricing surprise them.
+        try:
+            sh = float(listing.get("shares_outstanding") or 0)
+            av = float(_db.get_config(f"asset_value:{mid}") or 0)
+            if sh and av:
+                out.append(f"(price floor is `{av/sh:,.2f}`/share from asset_value — "
+                           f"treasury alone won't move the quote above it)")
+        except Exception:
+            pass
+    if vbal is not None:
+        old = float(_db.get_config(f"vault_bal:{mid}") or 0)
+        _db.set_config(f"vault_bal:{mid}", str(float(vbal)))
+        due = float(_db.get_config(f"vault_due:{mid}") or 0)
+        out.append(f"vault balance `{old:,.0f}` → **`{vbal:,.0f}`** (due `{due:,.0f}`"
+                   + (" ✅ current)" if vbal >= due - 1 else f", arrears `{due-vbal:,.0f}`)"))
+    if vpl is not None:
+        old = float(_db.get_config(f"vault_pledged:{mid}") or 0)
+        _db.set_config(f"vault_pledged:{mid}", str(float(vpl)))
+        hc = VAULT_PLEDGE_HAIRCUT
+        out.append(f"vault pledges `{old:,.0f}` → **`{vpl:,.0f}`** "
+                   f"(counts `{vpl*hc/100:,.0f}` at {hc:g}%)")
+    return f"✅ **{markets[mid].get('name', mid)}** — " + "; ".join(out) + "."
 
 
 async def _ai_tool_credit_team_work(guild, channel, user, args):
@@ -14047,6 +14137,7 @@ _AI_TOOL_MAP = {
     "get_channel_config":   _ai_tool_get_channel_config,
     "set_channel_config":   _ai_tool_set_channel_config,
     "propose_code_change":  _ai_tool_propose_code_change,
+    "set_market_finances":   _ai_tool_set_market_finances,
     "credit_team_work":      _ai_tool_credit_team_work,
     "manage_outages":        _ai_tool_manage_outages,
     "clean_item_names":      _ai_tool_clean_item_names,
@@ -14057,6 +14148,7 @@ _AI_TOOL_MAP = {
 
 # Tools whose effects are destructive/moderation-level — flagged in the audit log.
 _AI_SENSITIVE_TOOLS = {
+    "set_market_finances",  # sets money backing share prices
     "credit_team_work",     # moves who gets credit for real work
     "clean_item_names",     # renames catalog + stock rows
     "create_bulk_orders",   # writes real worker orders
