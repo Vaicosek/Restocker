@@ -190,13 +190,13 @@ FUTURES_CHANNEL_ID = _env_int("FUTURES_CHANNEL_ID", 1524155131455737967)  # dedi
 # Keys are matched by _futures_tier() from an item name + effects text.
 FUTURES_COST_TIERS = [
     # (tier key, label, diamonds, xp_value, worker_pay, cash_cost, group_price, sell_price)
-    ("tool_eff5_ench",  "Pickaxe/Axe/Shovel — Eff V + Fortune III/Silk Touch",  750, 1170, 1500, 2250, 2550, 2950),
+    ("tool_eff5_ench",  "Pickaxe/Axe/Shovel — Eff V + Fortune III/Silk Touch",  750, 1170, 1200, 1950, 2550, 2950),
     ("tool_eff5_clean", "Pickaxe/Axe/Shovel — Eff V, clean",                    500,  780, 1200, 1700, 2150, 2550),
     ("tool_eff4_ench",  "Pickaxe — Eff IV + Fortune III/Silk Touch",            400,  585, 1000, 1400, 1950, 2350),
     ("tool_eff4_clean", "Pickaxe/Axe/Shovel — Eff IV, clean",                   250,  390,  850, 1100, 1450, 1850),
-    ("sword_sharp5_ench", "Sword — Sharp V + Fire Aspect II/Knockback III",     750, 1170, 3600, 4350, 4900, 5200),
+    ("sword_sharp5_ench", "Sword — Sharp V + Fire Aspect II/Knockback III",     750, 1170, 3000, 3750, 4900, 5200),
     ("sword_sharp5",    "Sword — Sharp V, clean",                               500,  780, 1800, 2300, 3200, 3600),
-    ("armor",           "Armor piece",                                          500,  780,  675, 1175,  950, 1125),
+    ("armor",           "Armor piece",                                          500,  780,  500, 1000,  950, 1125),
 ]
 FUTURES_TIER_BY_KEY = {t[0]: t for t in FUTURES_COST_TIERS}
 
@@ -4419,6 +4419,71 @@ def _get_worker_announce_lock() -> asyncio.Lock:
 
 
 
+# ── item-name canonicalisation ───────────────────────────────────────────────
+# Autocomplete merges three sources that speak DIFFERENT vocabularies for the same item:
+#   catalog  "Diamond Sword - Fire Aspect II, Sharpness V, Unbreaking III"
+#   shop scan "Diamond Sword - Fire Aspect II, Damage All V, Unbreaking III"
+#   legacy    "Sword - Sharp V + Fire Aspect II/Knockback III"
+# "Damage All" IS "Sharpness" (same enchant id) and enchant ORDER is not meaningful, so
+# these are one product shown three ways. Grouping is display-only — nothing is rewritten.
+_ENCH_SYNONYMS = {
+    "damage all": "sharpness", "sharp": "sharpness",
+    "dig speed": "efficiency", "eff": "efficiency",
+    "durability": "unbreaking", "unbreak": "unbreaking",
+    "loot bonus": "looting", "protect": "protection",
+    "fire prot": "fire protection", "blast prot": "blast protection",
+}
+_ROMAN = {"i": 1, "ii": 2, "iii": 3, "iv": 4, "v": 5, "vi": 6, "vii": 7, "viii": 8, "ix": 9, "x": 10}
+_BASE_ALIASES = {"sword": "diamond sword", "pick": "diamond pickaxe", "axe": "diamond axe",
+                 "shovel": "diamond shovel", "spade": "diamond shovel"}
+
+
+def _canon_item_key(name: str) -> tuple:
+    """(base, frozenset(enchant+level)) — equal keys mean the same real item.
+
+    Deliberately conservative: if there is no ' - ' separator we do NOT try to parse
+    enchants out of the base name, because plain product names ("Honeycomb Block") must
+    never collide with each other.
+    """
+    raw = re.sub(r"#\w{1,8}$", "", str(name or "")).strip()
+    base, sep, tail = raw.partition(" - ")
+    b = re.sub(r"\s+", " ", base.strip().lower())
+    b = _BASE_ALIASES.get(b, b)
+    if not sep:
+        return (b, frozenset())
+    parts = set()
+    for chunk in re.split(r"[,+/]", tail):
+        t = re.sub(r"\([^)]*\)", "", chunk).strip().lower()
+        if not t or t in ("clean", "none"):
+            continue
+        m = re.match(r"^(.*?)\s+([ivx]+|\d+)$", t)
+        if m:
+            ench, lv = m.group(1).strip(), m.group(2)
+            lvl = _ROMAN.get(lv, 0) or (int(lv) if lv.isdigit() else 0)
+        else:
+            ench, lvl = t, 0
+        parts.add(f"{_ENCH_SYNONYMS.get(ench, ench)}{lvl}")
+    return (b, frozenset(parts))
+
+
+def _dedupe_item_names(names, catalog: set = None) -> list:
+    """Collapse names that canonicalise to the same item, PREFERRING the catalog spelling
+    so the suggestion the user picks is the one prices and orders are keyed on."""
+    catalog = catalog or set()
+    best: dict = {}
+    for n in names:
+        k = _canon_item_key(n)
+        cur = best.get(k)
+        if cur is None:
+            best[k] = n
+            continue
+        # catalog wins; then the longer name (more enchants spelled out); then A-Z
+        rank = lambda x: (x in catalog, len(x), x)
+        if rank(n) > rank(cur):
+            best[k] = n
+    return sorted(best.values())
+
+
 async def any_item_autocomplete(interaction: discord.Interaction, current: str):
     """Suggest items from EVERY known source so the field always autofills:
     the catalog (items table) + live shop stock + the latest CSN month per market."""
@@ -4474,9 +4539,16 @@ async def any_item_autocomplete(interaction: discord.Interaction, current: str):
         if c:
             cleaned.add(c)
 
+    # Collapse the three vocabularies to one entry per real item.
+    try:
+        _catalog = set((_db.get_items() or {}).keys())
+    except Exception:
+        _catalog = set()
+    cleaned_list = _dedupe_item_names(cleaned, _catalog)
+
     cur = (current or "").strip().lower()
     out: list[app_commands.Choice[str]] = []
-    for name in sorted(cleaned):
+    for name in cleaned_list:
         if cur and cur not in name.lower():
             continue
         out.append(app_commands.Choice(name=name[:100], value=name[:100]))
@@ -10834,7 +10906,6 @@ Balances & Payouts:
 
 Reports & CSN:
 - /csn — Upload a CSN export/monthly CSV, saves history and shows chart
-- /csn_history — View saved monthly sales history and all-time totals
 - /import_earnings — (Managers) Import a CSV/Excel earnings summary (one row per month) into a market
 - /csn_audit — (Managers) Verify a market's CSN month: dedup stats, net, and pricing
 
@@ -11229,6 +11300,18 @@ _AI_TOOLS = [
                 "request": {"type": "string", "description": "Plain-English description of the change to make to that file"}
             },
             "required": ["file", "request"]
+        }
+    },
+    {
+        "name": "create_bulk_orders",
+        "description": "Create MANY restock orders at once from a pasted list (managers and market owners). Replaces the retired /order_bulk. Use when someone gives you a list of items and quantities to order from workers. One per line as 'Item name | quantity'. Unknown items still post at price 0 and are flagged. For made-to-order/futures items use create_futures_bulk instead.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "orders": {"type": "string", "description": "One per line: 'Item name | quantity', e.g. 'Diamond Shovel | 500\\nIron Ingot | 64'."},
+                "unit_type": {"type": "string", "enum": ["pieces", "stacks", "barrels"], "description": "Unit for EVERY line. Default pieces."}
+            },
+            "required": ["orders"]
         }
     },
     {
@@ -12477,6 +12560,28 @@ async def _ai_tool_propose_code_change(guild, channel, user, args):
         return f"❌ Failed: {type(e).__name__}: {e}"
 
 
+async def _ai_tool_create_bulk_orders(guild, channel, user, args):
+    """Was /order_bulk. The parsing, pricing and market-ownership guards all live in
+    cogs.orders.build_bulk_orders — this is only the permission check and the call, so
+    the two paths can never drift."""
+    oc = sys.modules.get("cogs.orders")
+    if oc is None or not hasattr(oc, "build_bulk_orders"):
+        return "⚠️ The orders cog isn't loaded — can't create orders."
+    is_mgr = _ai_is_manager(user)
+    if not is_mgr and not _markets_owned_by(getattr(user, "id", 0)):
+        return "⛔ You need the Managers role, or to be a market owner, to create orders."
+    text = str(args.get("orders", "") or "").strip()
+    if not text:
+        return "❌ Give me the list, one per line: `Item name | quantity`."
+    unit = str(args.get("unit_type", "pieces") or "pieces").strip().lower()
+    if unit not in ("pieces", "stacks", "barrels"):
+        unit = "pieces"
+    try:
+        return oc.build_bulk_orders(getattr(user, "id", 0), is_mgr, text, unit)
+    except Exception as e:
+        return f"⚠️ Bulk order failed: {type(e).__name__}: {e}"
+
+
 async def _ai_tool_create_futures_bulk(guild, channel, user, args):
     """Was /futures_bulk. The command only ever opened a modal to paste a list into —
     which is precisely what someone talking to me hands over as text anyway.
@@ -13654,12 +13759,14 @@ _AI_TOOL_MAP = {
     "get_channel_config":   _ai_tool_get_channel_config,
     "set_channel_config":   _ai_tool_set_channel_config,
     "propose_code_change":  _ai_tool_propose_code_change,
+    "create_bulk_orders":    _ai_tool_create_bulk_orders,
     "create_futures_bulk":   _ai_tool_create_futures_bulk,
     "create_futures_order": _ai_tool_create_futures_order,
 }
 
 # Tools whose effects are destructive/moderation-level — flagged in the audit log.
 _AI_SENSITIVE_TOOLS = {
+    "create_bulk_orders",   # writes real worker orders
     "create_futures_bulk",  # files a real order for approval
     "manage_ai_access",   # grants the power to talk to me — always audit it
     "assign_role", "remove_role", "kick_user", "ban_user", "timeout_user",

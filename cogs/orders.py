@@ -728,106 +728,6 @@ class OrdersCog(commands.Cog):
                 **ephemeral_kwargs(interaction)
             )
 
-    @app_commands.command(name="order_bulk",
-        description="(Managers / market owners) Create many orders at once from a pasted list")
-    @app_commands.describe(
-        orders="One per line: `Item name | quantity`  (e.g. Diamond Shovel - Fortune III, Unbreaking III, Efficiency V | 500)",
-        unit_type="Unit for every line (default pieces)",
-    )
-    @app_commands.choices(unit_type=[
-        app_commands.Choice(name="Pieces", value="pieces"),
-        app_commands.Choice(name="Stacks", value="stacks"),
-        app_commands.Choice(name="Barrels", value="barrels"),
-    ])
-    async def order_bulk(self, interaction: discord.Interaction, orders: str, unit_type: str = "pieces"):
-        _is_mgr = is_manager(interaction)
-        _owned_markets = _markets_owned_by(interaction.user.id)
-        if not _is_mgr and not _owned_markets:
-            return await interaction.response.send_message(
-                "⛔ You need the @Managers role, or to be a market owner, to create orders.",
-                **ephemeral_kwargs(interaction))
-        await interaction.response.defer(**ephemeral_kwargs(interaction), thinking=True)
-        import re as _re
-        unit = str(unit_type).lower().strip()
-        if unit not in ("pieces", "stacks", "barrels"):
-            unit = "pieces"
-        shops = _load_items()
-        items = (shops.get("items") or {})
-        lines = [l.strip() for l in orders.replace("\\n", "\n").split("\n") if l.strip()]
-        data_orders = load_orders()
-        base_id = max([o.get("id", 0) for o in data_orders.get("orders", [])] or [0])
-        now_utc = datetime.now(timezone.utc)
-        announce_at = next_batch_slot(ANNOUNCE_DELAY_MINUTES)
-        created, unpriced, failed, skipped_market = [], [], [], []
-        for line in lines:
-            # Prefer "name | qty" (safe — item names contain commas); fall back to "name x qty" / "name qty".
-            name = qty = None
-            if "|" in line:
-                a, b = line.rsplit("|", 1)
-                name = a.strip()
-                digs = _re.sub(r"[^\d]", "", b)
-                qty = int(digs) if digs else 0
-            else:
-                m = _re.match(r"^(.*?)\s+x?\s*(\d[\d,]*)\s*$", line, _re.I)
-                if m:
-                    name = m.group(1).strip(); qty = int(m.group(2).replace(",", ""))
-            if not name or not qty or qty <= 0:
-                failed.append(line[:60]); continue
-            if _is_future_item(name):
-                failed.append(f"{name[:48]} → use /futures_order")
-                continue
-            info = items.get(name)
-            if not isinstance(info, dict):
-                _rg = _resolve_gear(name)        # plain-text? "eff 5 unbreak 3 axe fort 3" -> canonical
-                if _rg and isinstance(items.get(_rg), dict):
-                    name, info = _rg, items.get(_rg)
-            if isinstance(info, dict):
-                try:
-                    price = int(info.get("coin", 0) or 0)
-                except Exception:
-                    price = 0
-                stackable, stack_size = _item_stackable(name, info)
-                item_mid = str(info.get("market_id", "main") or "main")
-            else:
-                price, stackable, stack_size = 0, False, 1   # lenient: unknown item still posts (price 0)
-                item_mid = "main"
-                unpriced.append(name)
-            # A non-manager market owner can only bulk-order items in a market they own.
-            if not _is_mgr and item_mid not in _owned_markets:
-                skipped_market.append(f"{name} (`{item_mid}`)")
-                continue
-            requested_pieces = unit_to_pieces(int(qty), unit, stackable=stackable, stack_size=stack_size)
-            base_id += 1
-            data_orders.setdefault("orders", []).append({
-                "id": base_id, "shop": "", "item": name,
-                "requested": requested_pieces, "produced": 0,
-                "status": "open", "claimed_by": None, "claims": [],
-                "created_at": utcnow_iso(),
-                "messages": {"channel_id": None, "message_id": None, "dms": {}},
-                "unit_type": unit, "amount": int(qty),
-                "stackable": bool(stackable), "stack_size": stack_size, "barrel_slots": 54,
-                "employee_announce_at": announce_at.isoformat(),
-                "employee_announced": False, "worker_announced": False,
-                "priority_until": (now_utc + timedelta(hours=PRIORITY_HOURS)).isoformat(),
-                "priority_role": EMPLOYEE_ROLE_NAME,
-                "market_id": item_mid,
-            })
-            created.append(f"#{base_id} {name} × {qty} {unit}" + (" ⚠️unpriced" if price <= 0 else ""))
-        if created:
-            save_orders(data_orders)
-        msg = f"✅ Created **{len(created)}** order(s)."
-        if created:
-            msg += "\n" + "\n".join(created[:20]) + (f"\n…and {len(created)-20} more." if len(created) > 20 else "")
-        if unpriced:
-            msg += (f"\n\n⚠️ {len(unpriced)} item(s) not in the catalog — posted at **price 0** "
-                    f"(set a price before approving): " + ", ".join(f"`{u}`" for u in unpriced[:8]))
-        if failed:
-            msg += f"\n\n❌ Couldn't parse {len(failed)} line(s): " + " · ".join(f"`{f}`" for f in failed[:6])
-        if skipped_market:
-            msg += (f"\n\n⛔ Skipped {len(skipped_market)} item(s) not in your market(s): "
-                    + ", ".join(skipped_market[:8]))
-        msg += f"\n\n⏱️ Cards post to the worker channel in ~{ANNOUNCE_DELAY_MINUTES} min."
-        await interaction.followup.send(msg[:1950], **ephemeral_kwargs(interaction))
 
     # /order_from_stock removed 2026-07-15 — superseded by the website "My Market" order
     # builder (Stage 2) and /inventory restock_deficit. _build_stock_refill_plan /
@@ -970,3 +870,98 @@ async def run_ping_unclaimed(interaction: discord.Interaction, limit: int = 0):
         allowed_mentions=discord.AllowedMentions(roles=True)
     )
     return await interaction.response.send_message(f"🔔 Pinged {len(unclaimed)} unclaimed order(s).", **ephemeral_kwargs(interaction))
+
+
+def build_bulk_orders(user_id, is_mgr: bool, orders: str, unit_type: str = "pieces") -> str:
+    """Was /order_bulk. Pure: parses the list, writes the orders, returns a summary.
+
+    The command only opened a text box to paste a list into, and a chat message already IS
+    that list, so the AI tool is the only caller now. Every guard is kept, including the
+    one that matters most: a market owner who is NOT a manager may only bulk-order items
+    belonging to a market they own.
+    """
+    _is_mgr = bool(is_mgr)
+    _owned_markets = _markets_owned_by(user_id)
+    if not _is_mgr and not _owned_markets:
+        return "⛔ You need the @Managers role, or to be a market owner, to create orders."
+    import re as _re
+    unit = str(unit_type).lower().strip()
+    if unit not in ("pieces", "stacks", "barrels"):
+        unit = "pieces"
+    shops = _load_items()
+    items = (shops.get("items") or {})
+    lines = [l.strip() for l in orders.replace("\\n", "\n").split("\n") if l.strip()]
+    data_orders = load_orders()
+    base_id = max([o.get("id", 0) for o in data_orders.get("orders", [])] or [0])
+    now_utc = datetime.now(timezone.utc)
+    announce_at = next_batch_slot(ANNOUNCE_DELAY_MINUTES)
+    created, unpriced, failed, skipped_market = [], [], [], []
+    for line in lines:
+        # Prefer "name | qty" (safe — item names contain commas); fall back to "name x qty" / "name qty".
+        name = qty = None
+        if "|" in line:
+            a, b = line.rsplit("|", 1)
+            name = a.strip()
+            digs = _re.sub(r"[^\d]", "", b)
+            qty = int(digs) if digs else 0
+        else:
+            m = _re.match(r"^(.*?)\s+x?\s*(\d[\d,]*)\s*$", line, _re.I)
+            if m:
+                name = m.group(1).strip(); qty = int(m.group(2).replace(",", ""))
+        if not name or not qty or qty <= 0:
+            failed.append(line[:60]); continue
+        if _is_future_item(name):
+            failed.append(f"{name[:48]} → use /futures_order")
+            continue
+        info = items.get(name)
+        if not isinstance(info, dict):
+            _rg = _resolve_gear(name)        # plain-text? "eff 5 unbreak 3 axe fort 3" -> canonical
+            if _rg and isinstance(items.get(_rg), dict):
+                name, info = _rg, items.get(_rg)
+        if isinstance(info, dict):
+            try:
+                price = int(info.get("coin", 0) or 0)
+            except Exception:
+                price = 0
+            stackable, stack_size = _item_stackable(name, info)
+            item_mid = str(info.get("market_id", "main") or "main")
+        else:
+            price, stackable, stack_size = 0, False, 1   # lenient: unknown item still posts (price 0)
+            item_mid = "main"
+            unpriced.append(name)
+        # A non-manager market owner can only bulk-order items in a market they own.
+        if not _is_mgr and item_mid not in _owned_markets:
+            skipped_market.append(f"{name} (`{item_mid}`)")
+            continue
+        requested_pieces = unit_to_pieces(int(qty), unit, stackable=stackable, stack_size=stack_size)
+        base_id += 1
+        data_orders.setdefault("orders", []).append({
+            "id": base_id, "shop": "", "item": name,
+            "requested": requested_pieces, "produced": 0,
+            "status": "open", "claimed_by": None, "claims": [],
+            "created_at": utcnow_iso(),
+            "messages": {"channel_id": None, "message_id": None, "dms": {}},
+            "unit_type": unit, "amount": int(qty),
+            "stackable": bool(stackable), "stack_size": stack_size, "barrel_slots": 54,
+            "employee_announce_at": announce_at.isoformat(),
+            "employee_announced": False, "worker_announced": False,
+            "priority_until": (now_utc + timedelta(hours=PRIORITY_HOURS)).isoformat(),
+            "priority_role": EMPLOYEE_ROLE_NAME,
+            "market_id": item_mid,
+        })
+        created.append(f"#{base_id} {name} × {qty} {unit}" + (" ⚠️unpriced" if price <= 0 else ""))
+    if created:
+        save_orders(data_orders)
+    msg = f"✅ Created **{len(created)}** order(s)."
+    if created:
+        msg += "\n" + "\n".join(created[:20]) + (f"\n…and {len(created)-20} more." if len(created) > 20 else "")
+    if unpriced:
+        msg += (f"\n\n⚠️ {len(unpriced)} item(s) not in the catalog — posted at **price 0** "
+                f"(set a price before approving): " + ", ".join(f"`{u}`" for u in unpriced[:8]))
+    if failed:
+        msg += f"\n\n❌ Couldn't parse {len(failed)} line(s): " + " · ".join(f"`{f}`" for f in failed[:6])
+    if skipped_market:
+        msg += (f"\n\n⛔ Skipped {len(skipped_market)} item(s) not in your market(s): "
+                + ", ".join(skipped_market[:8]))
+    msg += f"\n\n⏱️ Cards post to the worker channel in ~{ANNOUNCE_DELAY_MINUTES} min."
+    return msg[:1950]
