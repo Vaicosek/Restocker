@@ -15,7 +15,7 @@ showing" is either the webhook is blank or the market code is missing.
 In the Discord server (with the bot present) run:
 
 ```
-/market_code market_id:<your market>
+/market settings   →  press "Get CSN code"
 ```
 
 It replies with a short code. Copy it. (If you don't have a market yet, a manager
@@ -26,7 +26,7 @@ registers it via `/market settings` → **Register new market** first.)
    (gear/arrow). This opens **CSN Export Settings**.
 2. Fill in:
    - **Discord Webhook URL** → paste the URL from step 1.
-   - **Market ID** → your market name (e.g. `main`). Must match what you used in `/market_code`.
+   - **Market ID** → your market name (e.g. `main`). Must match the panel's Market ID.
    - **Market Code** → paste the code from step 2.
 3. Click **Save**.
 

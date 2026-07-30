@@ -60,5 +60,5 @@ replacement, or just answer from your own tools:
 - **Verb semantics (critical):** in ChestShop/CSN, `bought` = a customer bought FROM you =
   **your income/sale**; `sold` = you bought FROM someone = **your expense**. This is the
   opposite of the intuitive reading. All money logic follows it.
-- Access to the AI itself is an allow-list managed with `/ai_allow add|remove|list`,
+- Access to the AI itself is an allow-list managed with your `manage_ai_access` tool,
   separate from Discord roles.

@@ -57,62 +57,9 @@ class ConfigCog(commands.Cog):
 
 
     # ── Who may talk to the bot's AI ─────────────────────────────────────────────
-    ai_allow = app_commands.Group(
-        name="ai_allow",
-        description="(Managers) Manage who may @mention the bot's AI",
-        default_permissions=discord.Permissions(manage_guild=True),
-    )
 
-    @ai_allow.command(name="add", description="Allow a user to use the bot's AI by @mention")
-    @app_commands.describe(user="The user to grant AI chat access")
-    async def ai_allow_add(self, interaction: discord.Interaction, user: discord.User):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
-        r = core._ai_allow_add(user.id)
-        if r == "added":
-            msg = (f"✅ {user.mention} can now @mention the AI — effective immediately, no restart.\n"
-                   f"(This is chat access only; mutating actions still need a manager role.)")
-        elif r == "already":
-            msg = f"ℹ️ {user.mention} is already allowed."
-        else:
-            msg = "❌ Invalid user."
-        await interaction.response.send_message(msg, ephemeral=True)
 
-    @ai_allow.command(name="remove", description="Revoke a user's AI access")
-    @app_commands.describe(user="The user to remove")
-    async def ai_allow_remove(self, interaction: discord.Interaction, user: discord.User):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
-        r = core._ai_allow_remove(user.id)
-        if r == "removed":
-            msg = f"✅ {user.mention} can no longer use the AI."
-        elif r == "env":
-            msg = (f"⚠️ {user.mention} is allow-listed in the server `.env` (AI_ALLOWED_USER_IDS), "
-                   f"so I can't drop them here — remove them from `.env` and restart.")
-        else:
-            msg = f"ℹ️ {user.mention} wasn't on the runtime allow-list."
-        await interaction.response.send_message(msg, ephemeral=True)
 
-    @ai_allow.command(name="list", description="Show who may use the bot's AI")
-    async def ai_allow_list(self, interaction: discord.Interaction):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
-        env_ids = sorted(core._AI_ALLOWED_ENV_IDS)
-        db_ids = sorted(core._ai_allowed_db_ids())
-        blocks = []
-        if env_ids:
-            blocks.append("**From `.env` (permanent):**\n"
-                          + "\n".join(f"• <@{i}> (`{i}`)" for i in env_ids))
-        if db_ids:
-            blocks.append("**Added via /ai_allow (live):**\n"
-                          + "\n".join(f"• <@{i}> (`{i}`)" for i in db_ids))
-        embed = discord.Embed(
-            title="🤖 AI-allowed users",
-            description="\n\n".join(blocks) or "No one is allowed yet.",
-            color=0x22FF7A,
-        )
-        embed.set_footer(text="These IDs may @mention the AI. Actions are still gated by manager roles.")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 async def setup(bot):

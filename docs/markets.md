@@ -17,9 +17,13 @@ this; the panel replaced them.
   (price, shares, treasury, **withdrawable excess**) and the CSN webhook (spoilered).
 
 Registering a new market and inspecting one are BOTH on the panel now (Register new market
-button, server managers only). The only other market command is `/market_code`, which is
-gated by Discord ROLE rather than manager_ids so a market leader who isn't a registered
-manager can still fetch their CSN code.
+button, server managers only). `/market settings` is now the ONLY market command —
+`/market_code`, `/bind_market`, `/unbind_market` and `/create_market` all folded in.
+
+The panel opens for anyone holding a market's **leader role**, not just its managers —
+that is how `/market_code` was gated, and dropping it would have locked shop leaders out
+of their own code. Those users see exactly one button, **Get CSN code**; the management
+buttons render only for owners/managers.
 
 ### Guards the panel keeps
 - **Launch price** may not exceed **2x the computed fundamental** unless a server manager
@@ -38,5 +42,5 @@ manager can still fetch their CSN code.
 ## Gotchas the AI must know
 - Owners/managers can act on their **own** market without the global Manager role.
 - To attribute a channel's CSN reports: either the config carries `market_id`+`market_code`
-  (auto-binds on first valid report) OR a manager runs `/bind_market`.
+  (auto-binds on first valid report) OR a manager uses **Bind/unbind channel** on the panel.
 - Deleting a market also removes its dashboard tab, stock listing, and stock rows.

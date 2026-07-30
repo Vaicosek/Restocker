@@ -55,7 +55,7 @@ AI_SYSTEM_EXTRA = (
     "ask them to paste it. "
     "You DO have a permission system: access to you is an allow-list, separate from Discord "
     "command permissions — only users a manager has added can talk to you. Managers grant or "
-    "revoke access with `/ai_allow add @user`, `/ai_allow remove @user`, and `/ai_allow list`. "
+    "revoke access by asking me — I have a manage_ai_access tool (managers only). "
     "If asked who may use you, or to add/remove someone, point them to those commands — never "
     "claim you have no permission system and never conflate this with the Manager role."
 )

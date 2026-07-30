@@ -3760,8 +3760,8 @@ async def _process_csn_attachment(attachment: discord.Attachment, report_channel
                 try:
                     await report_channel.send(
                         f"⛔ Stock report for `{csv_mid}` rejected: missing/invalid market code.\n"
-                        f"A manager can bind this channel with `/bind_market market_id:{csv_mid}` "
-                        f"(no code needed afterwards), or share a fresh code via `/market_code market_id:{csv_mid}`."
+                        f"A manager can bind this channel on `/market settings` (Bind/unbind channel) "
+                        f"for `{csv_mid}` — no code needed afterwards — or issue a fresh code there."
                     )
                 except Exception:
                     pass
@@ -3853,7 +3853,7 @@ async def _process_csn_attachment(attachment: discord.Attachment, report_channel
                         f"**`{csv_market_id}`**, not `{_bound_id}`.\n\n"
                         f"If this machine really scans **{_bound_id}**, open "
                         f"`.minecraft/sales/csn_config.json` and set:\n"
-                        f"```json\n\"market_id\": \"{_bound_id}\",\n\"market_code\": \"<from /market_code "
+                        f"```json\n\"market_id\": \"{_bound_id}\",\n\"market_code\": \"<from /market settings "
                         f"market_id:{_bound_id}>\"\n```\n"
                         f"then press **K** again to re-scan. Until then every scan from this machine "
                         f"is credited to `{csv_market_id}`."
@@ -3876,8 +3876,8 @@ async def _process_csn_attachment(attachment: discord.Attachment, report_channel
                 try:
                     await report_channel.send(
                         f"⛔ CSN report for `{csv_market_id}` rejected: missing/invalid market code.\n"
-                        f"A manager can bind this channel with `/bind_market market_id:{csv_market_id}` "
-                        f"(no code needed afterwards), or set a fresh code via `/market_code market_id:{csv_market_id}`."
+                        f"A manager can bind this channel on `/market settings` (Bind/unbind channel) "
+                        f"for `{csv_market_id}` — no code needed afterwards — or issue a fresh code there."
                     )
                 except Exception:
                     pass
@@ -10844,10 +10844,7 @@ Markets (/market subcommands):
 - /market earnings — Earnings report for a market; pick a specific month or a recent-months summary
 - /market report — Your private market report (best sellers, missing stock, earnings)
 - /market platform_balance — (Managers) View total platform fee balance collected
-- /bind_market / /unbind_market — (Managers) Bind/unbind a channel so CSN reports posted there route to a market (no code needed)
 - /market suggest_price — (Manager/Owner) Suggested price for an item vs the general market
-- /market_code — Get your CSN mod verification code
-- /create_market — (Managers) Create a new market
 
 
 Stock Exchange (/stock subcommands) — the server's stakeholder system; trades shares of
@@ -11228,7 +11225,7 @@ _AI_TOOLS = [
     },
     {
         "name": "propose_code_change",
-        "description": "Draft a change to the bot's OWN source code and open a GitHub Pull Request for review. OWNER ONLY — only Vaicos (ID 1203738126850461738) may use this; refuse for anyone else. Use when the owner asks to add, change, or fix a command or behavior in the bot's code (e.g. 'let MarketOwners use /market_code', 'add a /ping2 command'). Name the ONE file to edit (commands live in cogs/, e.g. cogs/market.py, cogs/misc.py) and describe the change. This NEVER deploys — it only opens a PR the owner must review, merge, and restart to apply.",
+        "description": "Draft a change to the bot's OWN source code and open a GitHub Pull Request for review. OWNER ONLY — only Vaicos (ID 1203738126850461738) may use this; refuse for anyone else. Use when the owner asks to add, change, or fix a command or behavior in the bot's code (e.g. 'let MarketOwners open /market settings', 'add a /ping2 command'). Name the ONE file to edit (commands live in cogs/, e.g. cogs/market.py, cogs/misc.py) and describe the change. This NEVER deploys — it only opens a PR the owner must review, merge, and restart to apply.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -11482,6 +11479,18 @@ _AI_TOOLS = [
                 "limit_per_user": {"type": "integer", "description": "employee_dms only — messages scanned per user (0 = all)."}
             },
             "required": ["target"]
+        }
+    },
+    {
+        "name": "manage_ai_access",
+        "description": "Add, remove or list the Discord users allowed to @mention the AI (managers only). Replaces the retired /ai_allow command — use this when someone asks to grant or revoke AI chat access, or asks who can talk to you.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["add", "remove", "list"], "description": "What to do. Default list."},
+                "user_id": {"type": "string", "description": "Discord user id (or @mention). Required for add and remove."}
+            },
+            "required": ["action"]
         }
     },
     {
@@ -12031,7 +12040,10 @@ async def _ai_tool_list_notes(guild, channel, user, args):
     limit = int(args.get("limit", 5))
     try:
         import Restocker_db as _db
-        notes = _db.get_notes(str(user.id), limit=limit)
+        # NOT get_notes — the real name is list_notes(author_id, limit). cogs/ai.py
+        # rebinds a corrected copy over this at load; fixing it here too so the tool
+        # doesn't depend on that cog loading.
+        notes = _db.list_notes(str(user.id), limit=limit)
         if not notes:
             return "No notes found."
         lines = []
@@ -12317,7 +12329,7 @@ async def _ai_tool_get_market_code(guild, channel, user, args):
     name = market.get("name", mid)
     code = (market.get("leader_code") or "").strip()
     if not code:
-        # None on record yet — mint one and persist it (same format as /market_code).
+        # None on record yet — mint one and persist it (same format as the panel's code button).
         import secrets as _secrets
         code = _secrets.token_hex(4).upper()
         market["leader_code"] = code
@@ -13128,6 +13140,61 @@ async def _ai_tool_admin_wipe(guild, channel, user, args):
         return f"❌ Wipe failed: {type(ex).__name__}: {ex}"
 
 
+async def _ai_tool_manage_ai_access(guild, channel, user, args):
+    """Was /ai_allow add|remove|list.
+
+    MANAGER-GATED, and that gate is the whole point: everyone who can reach this tool is
+    by definition already on the allow-list, so without the check any allowed user could
+    ask me to add their friends — the list would grant the power to extend itself.
+
+    There is no lockout risk in retiring the command: AI_ALLOWED_USER_IDS in `.env` is
+    read at every call (`_ai_allowed_ids`), so the env-listed operators can always get in
+    even if the DB list is emptied.
+    """
+    if not _ai_is_manager(user):
+        return "❌ Managers only — AI access changes are manager-gated."
+    action = str(args.get("action") or "list").strip().lower()
+
+    if action == "list":
+        env_ids = sorted(_AI_ALLOWED_ENV_IDS)
+        db_ids = sorted(_ai_allowed_db_ids())
+        if not env_ids and not db_ids:
+            return "No one is allow-listed yet."
+        out = []
+        if env_ids:
+            out.append("From .env (permanent, needs a restart to change):\n"
+                       + "\n".join(f"• <@{i}> ({i})" for i in env_ids))
+        if db_ids:
+            out.append("Added live (removable here):\n"
+                       + "\n".join(f"• <@{i}> ({i})" for i in db_ids))
+        return ("\n\n".join(out)
+                + "\n\nThese may @mention me. Actions are still gated by manager roles separately.")
+
+    raw = str(args.get("user_id") or "").strip().strip("<@!>")
+    if not raw.isdigit():
+        return "❌ I need the user's Discord ID (or an @mention) for add/remove."
+
+    if action == "add":
+        r = _ai_allow_add(int(raw))
+        if r == "added":
+            return (f"✅ <@{raw}> can now @mention me — effective immediately, no restart. "
+                    f"This is chat access only; mutating actions still need a manager role.")
+        if r == "already":
+            return f"ℹ️ <@{raw}> is already allowed."
+        return "❌ Invalid user."
+
+    if action == "remove":
+        r = _ai_allow_remove(int(raw))
+        if r == "removed":
+            return f"✅ <@{raw}> can no longer use me."
+        if r == "env":
+            return (f"⚠️ <@{raw}> is allow-listed in the server `.env` (AI_ALLOWED_USER_IDS), so I "
+                    f"can't drop them from here — remove them from `.env` and restart the bot.")
+        return f"ℹ️ <@{raw}> wasn't on the runtime allow-list."
+
+    return "❌ action must be add, remove or list."
+
+
 async def _ai_tool_get_ai_audit(guild, channel, user, args):
     if not _ai_is_manager(user):
         return "❌ Managers only."
@@ -13488,6 +13555,7 @@ _AI_TOOL_MAP = {
     "purge_channel":        _ai_tool_purge_channel,
     "csn_cleanup":          _ai_tool_csn_cleanup,
     "admin_wipe":           _ai_tool_admin_wipe,
+    "manage_ai_access":     _ai_tool_manage_ai_access,
     "get_ai_audit":         _ai_tool_get_ai_audit,
     "fix_month_close":      _ai_tool_fix_month_close,
     "set_drip":             _ai_tool_set_drip,
@@ -13509,6 +13577,7 @@ _AI_TOOL_MAP = {
 
 # Tools whose effects are destructive/moderation-level — flagged in the audit log.
 _AI_SENSITIVE_TOOLS = {
+    "manage_ai_access",   # grants the power to talk to me — always audit it
     "assign_role", "remove_role", "kick_user", "ban_user", "timeout_user",
     "delete_messages", "create_role", "setup_market_owner", "send_dm", "dm_role",
     "send_channel_message", "ping_user", "propose_code_change", "set_item_price",
@@ -13648,7 +13717,7 @@ Current context:
 - Server: {guild.name if guild else 'DM'}
 - Current UTC time: {now_utc.strftime('%Y-%m-%d %H:%M UTC')}
 - AI-allowed users (the ONLY Discord IDs who may @mention you): {', '.join(str(x) for x in sorted(_ai_allowed_ids())) or 'none'}
-  If asked who can use you / who is on your allow-list, answer with EXACTLY these IDs — this is who can chat with you. Do NOT confuse it with manager roles (that is a separate thing about what actions a user can perform). Managers change this list with /ai_allow.
+  If asked who can use you / who is on your allow-list, answer with EXACTLY these IDs — this is who can chat with you. Do NOT confuse it with manager roles (that is a separate thing about what actions a user can perform). Managers change this list by asking you — call manage_ai_access. The /ai_allow command was retired.
 """
 
     history = _AI_CONVERSATION_HISTORY.get(channel.id, [])

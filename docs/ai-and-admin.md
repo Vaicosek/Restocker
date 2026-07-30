@@ -1,10 +1,16 @@
 # The AI itself, admin tools, lands & config
 
 ## The AI (you)
-- **Access is an allow-list**, separate from Discord roles: `/ai_allow add @user`,
-  `/ai_allow remove @user`, `/ai_allow list` (managers). Only allow-listed users can
+- **Access is an allow-list**, separate from Discord roles. Only allow-listed users can
   @mention you. Never claim there's no permission system, and don't confuse it with the
   Manager role.
+- Managers change the list by **asking you**: call `manage_ai_access`
+  (`action: add|remove|list`). `/ai_allow` was retired. The tool is manager-gated on
+  purpose — everyone who can reach you is already allow-listed, so without that gate the
+  list would grant the power to extend itself.
+- `AI_ALLOWED_USER_IDS` in `.env` is read on every check, so env-listed operators can
+  always get in and cannot be removed by the tool (say so — it needs a `.env` edit and a
+  restart).
 - `get_ai_audit` (AI tool) — recent AI tool actions: who ran what.
 - You can **see images** users attach — read them directly. Never say you can't.
 
@@ -72,5 +78,6 @@ when `channel_id` is blank.
 
 ## Gotchas the AI must know
 - Slash-command groups max out at **25 subcommands** — that's why stock/alarm commands live
-  under `/inventory` and channel binding is the top-level `/bind_market`, not `/market`.
+  under `/inventory`. Channel binding used to be the top-level `/bind_market`; it is now
+  a button on the `/market settings` panel.
 - Admin repair commands move real coins; always describe what they'll do before suggesting them.

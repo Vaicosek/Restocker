@@ -355,17 +355,24 @@ def _load_market_prices() -> dict:
 def _load_earnings() -> list:
     try:
         import Restocker_db as db
-        hist = db.get_csn_history()
-        months = sorted(hist.values(), key=lambda x: x.get("month", ""))
-        return [{
-            "month":  m.get("month", ""),
-            "label":  m.get("label", m.get("month", "")),
-            "income": int(m.get("income", 0)),
-            "spent":  int(m.get("spent", 0)),
-            "net":    int(m.get("net", 0)),
-        } for m in months]
-    except Exception:
-        pass
+        # There is no db.get_csn_history() — that call raised AttributeError on every
+        # request and the bare `except` below swallowed it, so this whole DB path was
+        # dead and the page always fell through to the YAML file. Real API is
+        # csn_all_market_ids() + csn_get_market(mid) -> {"months": {month: {...}}}.
+        totals: dict = {}
+        for _mid in (db.csn_all_market_ids() or []):
+            for _mk, _md in ((db.csn_get_market(_mid) or {}).get("months") or {}).items():
+                if not isinstance(_md, dict):
+                    continue
+                t = totals.setdefault(_mk, {"month": _mk, "label": _md.get("label", _mk),
+                                            "income": 0, "spent": 0, "net": 0})
+                t["income"] += int(_md.get("income", 0) or 0)
+                t["spent"]  += int(_md.get("spent", 0) or 0)
+                t["net"]    += int(_md.get("net", 0) or 0)
+        if totals:
+            return [totals[k] for k in sorted(totals)]
+    except Exception as _ex:
+        print(f"[web] _load_earnings DB path failed, falling back to YAML: {_ex}")
     if _YAML_AVAILABLE:
         try:
             with open(_resolve_data_file("csn_history.yml"), encoding="utf-8") as f:

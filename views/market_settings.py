@@ -57,6 +57,25 @@ def _may_manage(user, mid) -> bool:
         return False
 
 
+def _leads_by_role(user, mid) -> bool:
+    """Holds the market's configured leader ROLE. /market_code gated on this rather than
+    on manager_ids, so a shop leader who was never registered as a site manager could
+    still fetch their code. Folding that command in without honouring the role check
+    would have locked exactly those people out."""
+    role_name = (_mk(mid).get("discord_role_name") or "").strip()
+    if not role_name:
+        return False
+    try:
+        return any(r.name == role_name for r in getattr(user, "roles", []) or [])
+    except Exception:
+        return False
+
+
+def _may_view(user, mid) -> bool:
+    """Can OPEN the panel. Leader-role holders get in but see no management buttons."""
+    return _may_manage(user, mid) or _leads_by_role(user, mid)
+
+
 async def build_embed(mid: str, user=None) -> discord.Embed:
     d = _db()
     m = _mk(mid)
@@ -210,8 +229,13 @@ class _RegisterModal(discord.ui.Modal, title="Register a new market"):
         self.name = discord.ui.TextInput(label="Display name", required=True, max_length=64)
         self.owner = discord.ui.TextInput(label="Owner Discord user id (optional)", required=False)
         self.fee = discord.ui.TextInput(label="Platform fee % (default 3)", required=False, default="3")
+        # WITHOUT this, the market has no leader role and nobody can ever fetch its CSN
+        # code — the old /market add omitted it, which is why /create_market existed.
+        self.role = discord.ui.TextInput(
+            label="Leader role name (for CSN code access)", required=False,
+            placeholder="e.g. Goldmart Leader")
         self.add_item(self.mid); self.add_item(self.name)
-        self.add_item(self.owner); self.add_item(self.fee)
+        self.add_item(self.owner); self.add_item(self.fee); self.add_item(self.role)
 
     async def on_submit(self, i: discord.Interaction):
         import re as _re
@@ -234,6 +258,9 @@ class _RegisterModal(discord.ui.Modal, title="Register a new market"):
             "name": str(self.name.value).strip(),
             "owner_id": int(raw) if raw.isdigit() else None,
             "manager_ids": [],
+            "discord_role_name": str(self.role.value or "").strip(),
+            "leader_discord_id": None,
+            "leader_code": None,
             "platform_fee_pct": fee,
             "csn_history_file": (core.CSN_HISTORY_FILE if mid == core.DEFAULT_MARKET_ID
                                  else f"csn_history_{mid}.yml"),
@@ -245,7 +272,74 @@ class _RegisterModal(discord.ui.Modal, title="Register a new market"):
         self.panel.mid = mid
         await self.panel.refresh(
             i, f"✅ Registered **{markets[mid]['name']}** (`{mid}`) at {fee:g}% fee. "
-               f"Give the owner `/market_code` so their mod can verify.")
+               f"Assign the leader role, then they open this panel and hit **Get CSN code**."
+               + ("" if str(self.role.value or "").strip() else
+                  "\n⚠️ No leader role set — only managers will be able to fetch its code."))
+
+
+async def _rotate_code(panel, i: discord.Interaction) -> str:
+    """Was /market_code. Reproduces the ownership guard verbatim: leader_discord_id gates
+    market-OWNERSHIP rights, so once a leader is on record only a full manager may move
+    it. Everyone else just rotates the code without touching ownership."""
+    import secrets, string as _s
+    mid = panel.mid
+    data = core._load_markets()
+    markets = data.get("markets") or {}
+    if mid not in markets:
+        return f"❌ Market `{mid}` not found."
+    code = "".join(secrets.choice(_s.ascii_uppercase + _s.digits) for _ in range(10))
+    existing = str(markets[mid].get("leader_discord_id") or "").strip()
+    if not existing:
+        markets[mid]["leader_discord_id"] = str(i.user.id)
+    markets[mid]["leader_code"] = code
+    core._save_markets(data)
+    csn_file = markets[mid].get("csn_history_file") or f"csn_history_{mid}.yml"
+    return (f"🔑 **{markets[mid].get('name', mid)}**\n"
+            f"**Market ID:** `{mid}`\n**Code:** ||`{code}`||\n\n"
+            f"Enter both in the **CSN Export Settings** screen in-game.\n"
+            f"📁 Sales record to `{csn_file}`\n"
+            f"⚠️ This replaced the previous code — the old one no longer works.")
+
+
+class _BindModal(discord.ui.Modal, title="Bind a channel"):
+    """Was /bind_market + /unbind_market. Keeps the one-channel-one-market check: two
+    markets sharing a report channel makes CSN routing ambiguous."""
+    def __init__(self, panel):
+        super().__init__(timeout=300)
+        self.panel = panel
+        self.ch = discord.ui.TextInput(
+            label="Channel id (blank = UNBIND)", required=False,
+            placeholder="right-click the channel → Copy Channel ID")
+        self.add_item(self.ch)
+
+    async def on_submit(self, i: discord.Interaction):
+        mid = self.panel.mid
+        data = core._load_markets()
+        markets = data.get("markets") or {}
+        raw = str(self.ch.value or "").strip().strip("<#>")
+        if not raw:
+            markets[mid]["report_channel_id"] = None
+            core._save_markets(data)
+            try:
+                import Restocker_db as _d
+                with _d.db() as conn:
+                    conn.execute("UPDATE markets SET report_channel_id=NULL WHERE market_id=?", (mid,))
+            except Exception as ex:
+                log.error("[market panel] unbind db write failed: %s", ex)
+            return await self.panel.refresh(
+                i, "✅ Unbound. This market falls back to the in-game verification code.")
+        if not raw.isdigit():
+            return await i.response.send_message("❌ That isn't a channel id.", ephemeral=True)
+        for other, m in markets.items():
+            if other != mid and str(m.get("report_channel_id") or "") == raw:
+                return await i.response.send_message(
+                    f"❌ <#{raw}> is already bound to `{other}`. Unbind it there first.",
+                    ephemeral=True)
+        markets[mid]["report_channel_id"] = raw
+        core._save_markets(data)
+        await self.panel.refresh(
+            i, f"✅ CSN reports in <#{raw}> now record to **{markets[mid].get('name', mid)}**. "
+               f"No in-game Market Code is needed for this market anymore.")
 
 
 # ── modals ───────────────────────────────────────────────────────────────────
@@ -597,19 +691,22 @@ class MarketSettingsView(discord.ui.View):
         if int(i.user.id) != self.user_id:
             await i.response.send_message("This panel isn't yours.", ephemeral=True)
             return False
-        if not _may_manage(i.user, self.mid):
+        if not _may_view(i.user, self.mid):
             await i.response.send_message(
-                "⛔ You need to be this market's owner, a site manager, or a server manager.",
-                ephemeral=True)
+                "⛔ You need to be this market's owner, a site manager, a server manager, "
+                "or hold its leader role.", ephemeral=True)
             return False
         return True
 
     def _build(self):
         self.clear_items()
         markets = (core._load_markets().get("markets", {}) or {})
+        _u = self.user_obj
+        _visible = [(k, v) for k, v in markets.items()
+                    if isinstance(v, dict) and (_u is None or _may_view(_u, k))]
         opts = [discord.SelectOption(label=str(v.get("name", k))[:80], value=k,
                                      default=(k == self.mid))
-                for k, v in list(markets.items())[:25] if isinstance(v, dict)]
+                for k, v in _visible[:25]]
         if opts:
             sel = discord.ui.Select(placeholder="Market…", options=opts, row=0)
 
@@ -620,11 +717,19 @@ class MarketSettingsView(discord.ui.View):
             self.add_item(sel)
 
         listed = bool((_db().get_market_shares(self.mid) or {}).get("active"))
+        # A leader-role holder who is NOT a manager can open this panel purely to fetch
+        # their CSN code. Giving them the management buttons would be a privilege
+        # escalation the old /market_code never granted.
+        if self.user_obj is not None and not _may_manage(self.user_obj, self.mid):
+            b = discord.ui.Button(label="Get CSN code", style=discord.ButtonStyle.primary, row=1)
+            b.callback = self._code_get
+            self.add_item(b)
+            return
         spec = [
             ("Edit", discord.ButtonStyle.primary, self._edit, 1),
             ("Rewards", discord.ButtonStyle.secondary, self._loyalty, 1),
             ("Ticker", discord.ButtonStyle.secondary, self._ticker, 1),
-            ("CSN code", discord.ButtonStyle.secondary, self._code, 1),
+            ("Set code manually", discord.ButtonStyle.secondary, self._code, 1),
             ("Leader role", discord.ButtonStyle.secondary, self._role, 1),
             ("Set owner", discord.ButtonStyle.secondary, self._owner, 2),
             ("Add manager", discord.ButtonStyle.secondary, self._add_mgr, 2),
@@ -639,6 +744,8 @@ class MarketSettingsView(discord.ui.View):
             ("Delete market", discord.ButtonStyle.danger, self._delete, 3),
             ("Delivery location", discord.ButtonStyle.secondary, self._location, 4),
             ("Profit roll-up", discord.ButtonStyle.secondary, self._rollup, 4),
+            ("Bind/unbind channel", discord.ButtonStyle.secondary, self._bind, 4),
+            ("Get CSN code", discord.ButtonStyle.primary, self._code_get, 3),
         ]
         if self.user_obj is not None and _is_full_manager(self.user_obj):
             spec.append(("Register new market", discord.ButtonStyle.success, self._register, 4))
@@ -676,6 +783,15 @@ class MarketSettingsView(discord.ui.View):
     async def _params(self, i):    await i.response.send_modal(_ParamsModal(self))
     async def _location(self, i):  await i.response.send_modal(_LocationModal(self))
     async def _rollup(self, i):    await i.response.send_modal(_RollupModal(self))
+    async def _bind(self, i):      await i.response.send_modal(_BindModal(self))
+
+    async def _code_get(self, i: discord.Interaction):
+        if not _may_view(i.user, self.mid):
+            return await i.response.send_message(
+                "⛔ You don't lead this market.", ephemeral=True)
+        # Ephemeral and NOT folded into the panel embed: rotating invalidates the old
+        # code, so it must be a deliberate press with the result shown once.
+        await i.response.send_message(await _rotate_code(self, i), ephemeral=True)
 
     async def _register(self, i: discord.Interaction):
         if not _is_full_manager(i.user):
