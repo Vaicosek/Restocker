@@ -3625,6 +3625,22 @@ def dividend_paid(market_id: str, month: str) -> bool:
         return row is not None
 
 
+def get_dividend_history(market_id: str = None, limit: int = 36) -> list:
+    """Dividend rows, newest first. market_id=None returns every market's — the investor
+    page needs the whole series to show what a holding actually paid over time, which
+    get_last_dividend (one row) could never answer."""
+    with db() as conn:
+        if market_id:
+            rows = conn.execute(
+                "SELECT * FROM stock_dividend_log WHERE market_id=? ORDER BY month DESC, id DESC "
+                "LIMIT ?", (str(market_id), int(limit))).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM stock_dividend_log ORDER BY month DESC, id DESC LIMIT ?",
+                (int(limit),)).fetchall()
+        return [dict(r) for r in rows]
+
+
 def get_last_dividend(market_id: str):
     with db() as conn:
         row = conn.execute(

@@ -5,8 +5,9 @@ Voting weight is HARD DATA like everything else on this exchange:
            + GEX.PR register share % × shares outstanding (preferred investors
              vote their slice of the company even without common shares)
 
-/vote create (manager) opens a proposal and posts it to #investor-chat;
-holders vote with /vote cast (re-voting just moves your weight); the vote loop
+A manager opens a proposal from /investor -> New proposal (posts to #investor-chat);
+holders vote from /investor -> Vote or on the dashboard Investor page (re-voting just
+moves your weight); the vote loop
 closes proposals at their deadline and posts weighted results. Weight is
 snapshotted at cast time — buying shares after you voted? Cast again.
 """
@@ -22,6 +23,45 @@ core = sys.modules.get("Restocker_main") or sys.modules["__main__"]
 is_manager = core.is_manager
 _public_market_autocomplete = core._public_market_autocomplete
 log = core.log
+
+
+def _results_embed(p: dict, final: bool = False) -> discord.Embed:
+    """Standings for a proposal.
+
+    PRE-EXISTING BUG: this was called by vote_close_loop and by /vote results but was
+    never defined anywhere. The loop's `except Exception` swallowed the NameError, so
+    proposals closed correctly and their FINAL RESULTS were never posted to
+    #investor-chat — silently, for as long as voting has existed.
+    """
+    import Restocker_db as _db
+    opts = p.get("options") or []
+    votes = _db.get_votes(p["id"]) or []
+    tally = [0.0] * len(opts)
+    for v in votes:
+        try:
+            idx = int(v.get("choice_idx", 0))
+        except Exception:
+            continue
+        if 0 <= idx < len(tally):
+            tally[idx] += float(v.get("weight") or 0)
+    total = sum(tally) or 1.0
+    lines = []
+    top = max(range(len(tally)), key=lambda i: tally[i]) if tally else None
+    for i, o in enumerate(opts):
+        pct = tally[i] / total * 100.0
+        bar = "█" * int(round(pct / 5)) or "·"
+        mark = " 🏆" if (final and i == top and tally[i] > 0) else ""
+        lines.append(f"**{o}**{mark}\n`{bar:<20}` {pct:5.1f}%  ({tally[i]:,.0f})")
+    e = discord.Embed(
+        title=("🏁 Final — " if final else "🗳️ Standings — ") + f"#{p['id']} {p.get('question','')}",
+        description="\n".join(lines) or "*no options*",
+        color=discord.Color.green() if final else discord.Color.blurple())
+    e.add_field(name="Turnout",
+                value=f"**{len(votes)}** voter(s) · total weight `{sum(tally):,.0f}`", inline=True)
+    e.set_footer(text=f"{p.get('market_id','?')} holders · "
+                      + ("closed" if final or p.get("status") != "open"
+                         else f"closes {p.get('closes_at','?')} UTC"))
+    return e
 
 
 def _voting_weight(user_id: str, market_id: str) -> tuple:
@@ -79,88 +119,22 @@ class VotingCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    vote = app_commands.Group(name="vote", description="Shareholder voting — weight = your stake")
 
-    @vote.command(name="create", description="(Manager) Open a shareholder proposal — posts to #investor-chat")
-    @app_commands.describe(
-        question="What's being decided",
-        options="Choices separated by | (e.g. 'Yes | No' or 'Build hives | Buy claims | Hold cash')",
-        days="Voting window in days (default 3)",
-        market_id="Which company's holders vote (default main)")
-    @app_commands.autocomplete(market_id=_public_market_autocomplete)
-    async def vote_create(self, interaction: discord.Interaction, question: str,
-                          options: Optional[str] = None,
-                          days: app_commands.Range[int, 1, 30] = 3,
-                          market_id: str = "main"):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
-        import Restocker_db as _db
-        opts = [o.strip() for o in (options or "Yes | No").split("|") if o.strip()]
-        if len(opts) < 2:
-            return await interaction.response.send_message(
-                "❌ Give at least two options separated by `|`.", ephemeral=True)
-        closes = (datetime.now(timezone.utc) + timedelta(days=int(days))).strftime("%Y-%m-%d %H:%M")
-        pid = _db.create_proposal(market_id, question.strip(), opts,
-                                  str(interaction.user.id), closes)
-        emb = discord.Embed(
-            title=f"🗳️ Proposal #{pid} — {question.strip()}",
-            description="\n".join(f"**{i+1}.** {o}" for i, o in enumerate(opts)),
-            color=discord.Color.blurple())
-        emb.add_field(name="How to vote",
-                      value=f"`/vote cast` → pick proposal #{pid} · your weight = your shares "
-                            f"+ GEX.PR stake · re-voting moves your weight", inline=False)
-        emb.set_footer(text=f"{market_id} holders · closes {closes} UTC")
-        ch = self.bot.get_channel(int(getattr(core, "INVESTOR_CHAT_CHANNEL_ID", 0) or 0))
-        if ch:
-            try:
-                await ch.send(embed=emb)
-            except Exception as e:
-                log.warning("[vote] couldn't post proposal to investor-chat: %s", e)
+
+
+
+    @app_commands.command(
+        name="investor",
+        description="Investor hub — holdings, shareholder votes, and the dashboard link")
+    async def investor_hub(self, interaction: discord.Interaction):
+        """Replaces /vote create|cast|results. Portfolio detail, dividend history and
+        company backing live on the dashboard — embeds render tables badly — so this
+        panel keeps voting and links out for the rest."""
+        from views.investor_hub import InvestorHubView, build_embed
         await interaction.response.send_message(
-            f"✅ Proposal **#{pid}** open until {closes} UTC"
-            + ("" if ch else " (couldn't post to #investor-chat — check channel access)"),
+            embed=build_embed(interaction.user),
+            view=InvestorHubView(interaction.user.id, is_manager(interaction)),
             ephemeral=True)
-
-    @vote.command(name="cast", description="Vote on an open proposal — your weight is your stake")
-    @app_commands.describe(proposal="Which proposal", choice="Your pick")
-    @app_commands.autocomplete(proposal=_proposal_autocomplete, choice=_choice_autocomplete)
-    async def vote_cast(self, interaction: discord.Interaction, proposal: str, choice: str):
-        import Restocker_db as _db
-        try:
-            p = _db.get_proposal(int(proposal))
-        except (TypeError, ValueError):
-            p = None
-        if not p or p.get("status") != "open":
-            return await interaction.response.send_message("❌ That proposal isn't open.", ephemeral=True)
-        try:
-            idx = int(choice)
-            label = (p["options"])[idx]
-        except (TypeError, ValueError, IndexError):
-            return await interaction.response.send_message("❌ Pick a choice from the list.", ephemeral=True)
-        w, common, pref = _voting_weight(interaction.user.id, p["market_id"])
-        if w <= 0:
-            return await interaction.response.send_message(
-                f"❌ No voting power — you hold no `{p['market_id']}` shares and aren't on "
-                f"the GEX.PR register. Buy in on the dashboard exchange.", ephemeral=True)
-        _db.cast_vote(p["id"], str(interaction.user.id), idx, w,
-                      name=getattr(interaction.user, "display_name", None))
-        detail = f"`{common:,.0f}` shares" + (f" + `{pref:,.0f}` GEX.PR equivalent" if pref else "")
-        await interaction.response.send_message(
-            f"🗳️ Vote recorded: **{label}** with weight `{w:,.0f}` ({detail}). "
-            f"Re-vote any time before it closes.", ephemeral=True)
-
-    @vote.command(name="results", description="Standings of a proposal (live or final)")
-    @app_commands.describe(proposal="Which proposal")
-    @app_commands.autocomplete(proposal=_proposal_autocomplete)
-    async def vote_results(self, interaction: discord.Interaction, proposal: str):
-        import Restocker_db as _db
-        try:
-            p = _db.get_proposal(int(proposal))
-        except (TypeError, ValueError):
-            p = None
-        if not p:
-            return await interaction.response.send_message("❌ Unknown proposal.", ephemeral=True)
-        await interaction.response.send_message(embed=_results_embed(p), ephemeral=True)
 
     @tasks.loop(minutes=10)
     async def vote_close_loop(self):

@@ -5,7 +5,8 @@ market inventory valued at shop prices plus assets listed for sale. Coins don't
 count as bond collateral (coins walk away; chests full of stock don't). Coverage is
 enforced at issuance AND at every purchase, and shows live on the website bond board.
 
-Life cycle: /bond issue (manager) → bought on the dashboard exchange (proceeds go to the market
+Life cycle: issued on the dashboard (Issue a bond panel, owners of listed companies)
+→ bought on the dashboard exchange (proceeds go to the market
 treasury) → monthly coupon auto-paid from the treasury (bond loop) → at maturity
 principal repaid, or the bond DEFAULTS and #dividend-reports announces the
 bondholders' first claim on the item collateral.
@@ -44,66 +45,10 @@ class BondsCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    bond = app_commands.Group(name="bond", description="Item-collateralized corporate bonds")
+    # The /bond group is gone: issuance moved to the dashboard (/api/bond/issue) and
+    # buying already lived on the exchange bond board. An EMPTY app_commands.Group
+    # is rejected by Discord at sync, so it must not be left behind.
 
-    @bond.command(name="issue",
-                  description="(Manager) Issue a COMPANY bond — ≥80% backed by the company's items across all its markets")
-    @app_commands.describe(
-        market_id="The company's listed stock (its treasury pays coupons; collateral = all its markets' items)",
-        amount="Total face value to raise, in coins",
-        coupon_pct="Monthly coupon, % of face (e.g. 1.5)",
-        term_months="Months until principal is repaid",
-        name="Optional series name, e.g. 'GEX 26-B'",
-        unit_price="Coins per bond unit (default 100)")
-    @app_commands.autocomplete(market_id=_public_market_autocomplete)
-    async def bond_issue(self, interaction: discord.Interaction, market_id: str,
-                         amount: app_commands.Range[int, 1000, 1_000_000_000],
-                         coupon_pct: app_commands.Range[float, 0.0, 25.0],
-                         term_months: app_commands.Range[int, 1, 60],
-                         name: Optional[str] = None,
-                         unit_price: app_commands.Range[int, 1, 1_000_000] = 100):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
-        import Restocker_db as _db
-        listing = _db.get_market_shares(market_id)
-        if not listing or not listing.get("active"):
-            return await interaction.response.send_message(
-                f"❌ `{market_id}` isn't a listed company stock.", ephemeral=True)
-        # Bonds are issued by COMPANIES — a market that rolls up into a parent
-        # listing can't issue its own debt; the parent (the company) does.
-        try:
-            _parent = core._market_rollup_parent(market_id)
-        except Exception:
-            _parent = None
-        if _parent:
-            return await interaction.response.send_message(
-                f"❌ `{market_id}` rolls up into **{_parent}** — bonds are issued by the "
-                f"company. Issue from `{_parent}` instead.", ephemeral=True)
-        pct, col, face = core._bond_coverage(market_id, extra_face=float(amount))
-        need = core.BOND_MIN_ITEM_COVER
-        if pct < need:
-            return await interaction.response.send_message(
-                f"❌ Under-collateralized: items on record `{int(col):,}` 🪙 cover only "
-                f"**{pct:.1f}%** of `{int(face):,}` 🪙 total bond face (rule: ≥{need:g}%).\n"
-                f"Add inventory / for-sale assets (or issue less — max issuable now: "
-                f"`{max(0, int(col / (need / 100.0) - (face - amount))):,}` 🪙).",
-                ephemeral=True)
-        matures = (datetime.now(timezone.utc) + timedelta(days=30 * int(term_months))).strftime("%Y-%m-%d")
-        bid = _db.create_bond(market_id, name or f"{market_id.upper()} {datetime.now(timezone.utc):%y-%m}",
-                              float(amount), float(unit_price), float(coupon_pct),
-                              int(term_months), matures)
-        b = _db.get_bond(bid)
-        core._queue_dividend_post({
-            "type": "bond_event", "market_id": market_id,
-            "title": f"🪙 New bond issue — {b['name']} (#{bid})",
-            "lines": [f"Raising `{int(amount):,}` 🪙 · **{coupon_pct:g}%/mo** coupon · "
-                      f"matures {matures}",
-                      f"Item coverage **{pct:.0f}%** (`{int(col):,}` 🪙 of items on record)",
-                      f"Buy on the dashboard exchange — units of `{int(unit_price):,}` 🪙"]})
-        await interaction.response.send_message(
-            f"✅ Bond **{b['name']}** (#{bid}) issued: `{int(amount):,}` 🪙 face · "
-            f"{b['units_total']:,} units @ `{int(unit_price):,}` 🪙 · {coupon_pct:g}%/mo · "
-            f"matures {matures}. Item coverage **{pct:.0f}%** ✅", ephemeral=True)
 
 
 
@@ -112,63 +57,18 @@ class BondsCog(commands.Cog):
 
 
 class VaultCog(commands.Cog):
-    """V Tech vault — mandatory 10% retained-earnings deposits + item pledges at a
+    """Vault state now lives on the /market settings panel (Vault button + embed line);
+    this cog is kept only as the home for the vault constants and future loops.
+
+    V Tech vault — mandatory 10% retained-earnings deposits + item pledges at a
     70% liquidation haircut. Both count as backing; arrears cap the grade at BBB."""
 
     def __init__(self, bot):
         self.bot = bot
 
-    vault = app_commands.Group(name="vault", description="V Tech vault — mandatory backing deposits and item pledges")
 
-    @vault.command(name="deposit", description="(Manager) Record coins a company deposited at the vault")
-    @app_commands.describe(market_id="Which listing", amount="Coins received into the vault")
-    @app_commands.autocomplete(market_id=_public_market_autocomplete)
-    async def vault_deposit(self, interaction: discord.Interaction, market_id: str,
-                            amount: app_commands.Range[int, 1, 1_000_000_000]):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
-        import Restocker_db as _db
-        bal = float(_db.get_config(f"vault_bal:{market_id}") or 0) + amount
-        _db.set_config(f"vault_bal:{market_id}", str(bal))
-        due = float(_db.get_config(f"vault_due:{market_id}") or 0)
-        await interaction.response.send_message(
-            f"🏦 Vault: `{market_id}` balance `{int(bal):,}` 🪙 vs due `{int(due):,}` 🪙"
-            + (" ✅ current" if bal >= due - 1 else f" — ⚠ arrears `{int(due-bal):,}` (grade capped BBB)"),
-            ephemeral=True)
 
-    @vault.command(name="pledge", description="(Manager) Record items handed to the vault — counted at 70% of market value")
-    @app_commands.describe(market_id="Which listing", value="Full market value of the items",
-                           remove="True = remove this value instead (items returned/liquidated)")
-    @app_commands.autocomplete(market_id=_public_market_autocomplete)
-    async def vault_pledge(self, interaction: discord.Interaction, market_id: str,
-                           value: app_commands.Range[int, 1, 1_000_000_000], remove: bool = False):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
-        import Restocker_db as _db
-        raw = float(_db.get_config(f"vault_pledged:{market_id}") or 0)
-        raw = max(0.0, raw - value) if remove else raw + value
-        _db.set_config(f"vault_pledged:{market_id}", str(raw))
-        hc = core.VAULT_PLEDGE_HAIRCUT
-        await interaction.response.send_message(
-            f"🏦 Pledged items for `{market_id}`: market value `{int(raw):,}` 🪙 → counts as "
-            f"`{int(raw*hc/100):,}` 🪙 backing ({hc:g}% liquidation value).", ephemeral=True)
 
-    @vault.command(name="status", description="Vault dues, deposits and pledges per listing")
-    async def vault_status(self, interaction: discord.Interaction):
-        import Restocker_db as _db
-        lines = []
-        for mid in (_db.get_public_markets() or {}):
-            due = float(_db.get_config(f"vault_due:{mid}") or 0)
-            bal = float(_db.get_config(f"vault_bal:{mid}") or 0)
-            raw = float(_db.get_config(f"vault_pledged:{mid}") or 0)
-            if due or bal or raw:
-                st = "✅" if bal >= due - 1 else f"⚠ arrears {int(due-bal):,}"
-                lines.append(f"**{mid}** — due `{int(due):,}` · deposited `{int(bal):,}` · "
-                             f"pledged `{int(raw):,}` (counts `{int(raw*core.VAULT_PLEDGE_HAIRCUT/100):,}`) · {st}")
-        await interaction.response.send_message(
-            embed=discord.Embed(title="🏦 V Tech Vault", color=discord.Color.dark_gold(),
-                                description="\n".join(lines) or "No vault activity yet."),
-            ephemeral=True)
 
 
 async def setup(bot):

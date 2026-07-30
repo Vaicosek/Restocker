@@ -124,6 +124,22 @@ async def build_embed(mid: str, user=None) -> discord.Embed:
     except Exception:
         pass
 
+    # Vault line — this is all /vault status showed for one listing, so folding it here
+    # retired that subcommand outright rather than giving it a button.
+    try:
+        due = float(d.get_config(f"vault_due:{mid}") or 0)
+        bal = float(d.get_config(f"vault_bal:{mid}") or 0)
+        raw = float(d.get_config(f"vault_pledged:{mid}") or 0)
+        if due or bal or raw:
+            hc = getattr(core, "VAULT_PLEDGE_HAIRCUT", 70.0)
+            st = "✅ current" if bal >= due - 1 else f"⚠ arrears `{int(due-bal):,}` (grade capped BBB)"
+            e.add_field(name="🏦 Vault",
+                        value=(f"due `{int(due):,}` · deposited `{int(bal):,}` · pledged "
+                               f"`{int(raw):,}` (counts `{int(raw*hc/100):,}` at {hc:g}%)\n{st}"),
+                        inline=False)
+    except Exception as ex:
+        log.debug("[market panel] vault line failed: %s", ex)
+
     if user is not None and _may_manage(user, mid):
         try:
             ch = core.bot.get_channel(int(rc)) if rc else None
@@ -160,64 +176,6 @@ class _LocationModal(discord.ui.Modal, title="Delivery location"):
                f"`/orders`, and the website.")
 
 
-class _RollupModal(discord.ui.Modal, title="Profit roll-up"):
-    """Was /market_rollup. The PARENT-authority guard is reproduced verbatim: rolling a
-    market into (or out of) a public stock moves THAT stock's fundamental, so a child-side
-    owner must not be able to re-point a loss-maker into `main`, buy the dip, and detach."""
-    def __init__(self, panel):
-        super().__init__(timeout=300)
-        self.panel = panel
-        try:
-            cur = core._market_rollup_parent(panel.mid) or ""
-            pct = core._market_rollup_share(panel.mid)
-        except Exception:
-            cur, pct = "", 100.0
-        self.parent = discord.ui.TextInput(
-            label="Parent stock id (blank = detach)", required=False, default=str(cur))
-        self.pct = discord.ui.TextInput(
-            label="% of profit that rolls up", required=False,
-            default=f"{float(pct or 100.0):g}")
-        self.add_item(self.parent); self.add_item(self.pct)
-
-    async def on_submit(self, i: discord.Interaction):
-        mid = self.panel.mid
-        markets = (core._load_markets() or {}).get("markets") or {}
-        parent = str(self.parent.value or "").strip()
-
-        def _parent_ok(pmid):
-            return _is_full_manager(i.user) or _may_manage(i.user, pmid)
-
-        if not parent:
-            try:
-                cur = core._market_rollup_parent(mid)
-            except Exception:
-                cur = None
-            if cur and not _parent_ok(cur):
-                return await i.response.send_message(
-                    f"⛔ Detaching from **{cur}** changes that stock's valuation — only its "
-                    f"owner/managers (or a server manager) can do that.", ephemeral=True)
-            core._set_market_rollup(mid, None)
-            return await self.panel.refresh(
-                i, "✅ Detached — it prices its own stock off its own profit again.")
-        if parent not in markets:
-            return await i.response.send_message(
-                f"❌ Parent market `{parent}` not found.", ephemeral=True)
-        if parent == mid:
-            return await i.response.send_message(
-                "❌ A market can't roll into itself.", ephemeral=True)
-        if not _parent_ok(parent):
-            return await i.response.send_message(
-                f"⛔ Rolling into **{parent}** changes that stock's valuation — only its "
-                f"owner/managers (or a server manager) can accept the rollup.", ephemeral=True)
-        try:
-            pct = float(str(self.pct.value or "100").strip() or 100)
-        except Exception:
-            return await i.response.send_message("❌ % must be a number.", ephemeral=True)
-        pct = max(0.0, min(100.0, pct))
-        core._set_market_rollup(mid, parent, pct)
-        await self.panel.refresh(
-            i, f"✅ Profit now rolls into **{markets[parent].get('name', parent)}** at "
-               f"**{pct:g}%**. That stock's price is driven by its own net plus this.")
 
 
 class _RegisterModal(discord.ui.Modal, title="Register a new market"):
@@ -422,7 +380,7 @@ class _LoyaltyModal(discord.ui.Modal, title="Restock rewards"):
 
 
 class _TextModal(discord.ui.Modal):
-    """One-field modal used for ticker / code / item removal / role name."""
+    """One-field modal: ticker, CSN code, delist confirmation, delete confirmation."""
 
     def __init__(self, p, title, label, kind, placeholder=""):
         super().__init__(title=title, timeout=300)
@@ -452,16 +410,6 @@ class _TextModal(discord.ui.Modal):
             data["markets"][self.p.mid]["leader_code"] = code
             core._save_markets(data)
             return await self.p.refresh(i, f"✅ Code → `{code}`. Set the mod's Market Code to match.")
-        if self.kind == "role":
-            if not _is_full_manager(i.user):
-                return await i.response.send_message("⛔ Server managers only.", ephemeral=True)
-            data = core._load_markets()
-            data["markets"][self.p.mid]["discord_role_name"] = v
-            core._save_markets(data)
-            return await self.p.refresh(i, f"✅ Leader role → {v}.")
-        if self.kind == "item":
-            r = core._remove_market_item(self.p.mid, v, adjust_totals=True)
-            return await self.p.refresh(i, f"✅ Removed **{v}** ({r})." if r else f"❌ `{v}` not found.")
         if self.kind == "delist_confirm":
             if v.strip().lower() != self.p.mid.lower():
                 return await i.response.send_message(
@@ -484,6 +432,8 @@ class _TextModal(discord.ui.Modal):
 
 
 class _PeopleModal(discord.ui.Modal):
+    """add_mgr adds; anything else removes (rm_mgr falls through)."""
+
     def __init__(self, p, title, kind):
         super().__init__(title=title, timeout=300)
         self.p, self.kind = p, kind
@@ -500,12 +450,6 @@ class _PeopleModal(discord.ui.Modal):
         if self.p.mid not in markets:
             return await i.response.send_message("❌ Market vanished.", ephemeral=True)
         mkt = markets[self.p.mid]
-        if self.kind == "owner":
-            if not _is_full_manager(i.user):
-                return await i.response.send_message("⛔ Server managers only.", ephemeral=True)
-            mkt["owner_id"] = int(raw)
-            core._save_markets(data)
-            return await self.p.refresh(i, f"✅ Owner → <@{raw}>.")
         mgrs = mkt.setdefault("manager_ids", [])
         if self.kind == "add_mgr":
             if int(raw) not in mgrs:
@@ -517,6 +461,92 @@ class _PeopleModal(discord.ui.Modal):
             core._save_markets(data)
             return await self.p.refresh(i, f"✅ <@{raw}> removed as site manager.")
         return await self.p.refresh(i, f"❌ <@{raw}> isn't a site manager here.")
+
+
+class _BankruptModal(discord.ui.Modal, title="Bankrupt & pay out holders"):
+    """Was /stock delist. NOT the same as the Delist button: that one just freezes the
+    listing and keeps everyone's shares. This one PAYS SHAREHOLDERS OUT of the market's
+    cash backing and removes the stock — irreversible and it moves real coins, so it
+    needs the market id typed back."""
+    def __init__(self, panel):
+        super().__init__(timeout=300)
+        self.panel = panel
+        self.confirm = discord.ui.TextInput(
+            label=f"Type {panel.mid} to confirm"[:45], required=True)
+        self.add_item(self.confirm)
+
+    async def on_submit(self, i: discord.Interaction):
+        if str(self.confirm.value or "").strip().lower() != self.panel.mid.lower():
+            return await i.response.send_message(
+                f"❌ Type `{self.panel.mid}` exactly to confirm.", ephemeral=True)
+        import sys as _sys
+        sc = _sys.modules.get("cogs.stock")
+        if sc is None or not hasattr(sc, "run_stock_delist"):
+            return await i.response.send_message(
+                "⚠️ The stock cog isn't loaded — can't run a bankruptcy delist.", ephemeral=True)
+        await sc.run_stock_delist(i, self.panel.mid, confirm=True)
+
+
+class _VaultModal(discord.ui.Modal, title="Vault — deposits & pledges"):
+    """Was /vault deposit + /vault pledge. Status is folded into the panel embed, so the
+    third subcommand needed no button at all.
+
+    Both fields are optional and both are DELTAS, not absolutes — that matches the
+    commands, where each call added to a running total. Pledges are recorded at FULL
+    market value; the haircut is applied when the backing is read, never on write.
+    """
+    def __init__(self, panel):
+        super().__init__(timeout=300)
+        self.panel = panel
+        self.deposit = discord.ui.TextInput(
+            label="Coins deposited (adds to balance)", required=False)
+        self.pledge = discord.ui.TextInput(
+            label="Item value pledged (full market value)", required=False)
+        self.unpledge = discord.ui.TextInput(
+            label="Item value RETURNED (removes pledge)", required=False)
+        self.add_item(self.deposit); self.add_item(self.pledge); self.add_item(self.unpledge)
+
+    async def on_submit(self, i: discord.Interaction):
+        if not _is_full_manager(i.user):
+            return await i.response.send_message("⛔ Server managers only.", ephemeral=True)
+        d = _db()
+        mid = self.panel.mid
+
+        def _amt(field):
+            raw = str(field.value or "").strip().replace(",", "")
+            if not raw:
+                return None
+            try:
+                v = int(float(raw))
+            except Exception:
+                return "bad"
+            return v if 0 < v <= 1_000_000_000 else "bad"
+
+        dep, pl, un = _amt(self.deposit), _amt(self.pledge), _amt(self.unpledge)
+        if "bad" in (dep, pl, un):
+            return await i.response.send_message(
+                "❌ Amounts must be whole numbers between 1 and 1,000,000,000.", ephemeral=True)
+        if dep is None and pl is None and un is None:
+            return await i.response.send_message("❌ Nothing to record.", ephemeral=True)
+
+        notes = []
+        if dep is not None:
+            bal = float(d.get_config(f"vault_bal:{mid}") or 0) + dep
+            d.set_config(f"vault_bal:{mid}", str(bal))
+            due = float(d.get_config(f"vault_due:{mid}") or 0)
+            notes.append(f"deposited `{dep:,}` → balance `{int(bal):,}` vs due `{int(due):,}`"
+                         + (" ✅" if bal >= due - 1 else f" ⚠ arrears `{int(due-bal):,}` (grade capped BBB)"))
+        if pl is not None or un is not None:
+            raw = float(d.get_config(f"vault_pledged:{mid}") or 0)
+            if pl is not None:
+                raw += pl
+            if un is not None:
+                raw = max(0.0, raw - un)
+            d.set_config(f"vault_pledged:{mid}", str(raw))
+            hc = core.VAULT_PLEDGE_HAIRCUT
+            notes.append(f"pledged `{int(raw):,}` market value → counts `{int(raw*hc/100):,}` "
+                         f"backing ({hc:g}% liquidation)")
+        await self.panel.refresh(i, "🏦 " + " · ".join(notes))
 
 
 class _GoPublicModal(discord.ui.Modal, title="List on the exchange"):
@@ -606,75 +636,6 @@ class _WithdrawModal(discord.ui.Modal, title="Withdraw excess treasury"):
         await self.p.refresh(i, f"✅ Withdrew {moved:,} coins to your wallet.")
 
 
-class _ParamsModal(discord.ui.Modal, title="Tune listing parameters"):
-    """Was /stock set_params. Two behaviours kept:
-      * shares outstanding can NEVER drop below what holders already own;
-      * a treasury/asset change re-anchors the price with full_move=True, because it's a
-        deliberate management action rather than a market tick.
-    """
-
-    def __init__(self, p):
-        super().__init__(timeout=300)
-        self.p = p
-        d = _db()
-        L = d.get_market_shares(p.mid) or {}
-        self.shares = discord.ui.TextInput(label="Shares outstanding", required=False,
-                                           default=str(L.get("shares_outstanding") or ""))
-        self.pe = discord.ui.TextInput(label="P/E multiplier", required=False,
-                                       default=str(L.get("pe_multiplier") or ""))
-        self.treasury = discord.ui.TextInput(label="Treasury (cash on hand)", required=False,
-                                             default=str(L.get("treasury_coins") or ""))
-        self.assets = discord.ui.TextInput(label="Asset book value (0 clears)", required=False)
-        self.sellable = discord.ui.TextInput(label="Sellable assets (0 clears)", required=False)
-        for f in (self.shares, self.pe, self.treasury, self.assets, self.sellable):
-            self.add_item(f)
-
-    async def on_submit(self, i: discord.Interaction):
-        if not _is_full_manager(i.user):
-            return await i.response.send_message("⛔ Server managers only.", ephemeral=True)
-        d = _db()
-        mid = self.p.mid
-        if not d.get_market_shares(mid):
-            return await i.response.send_message(f"❌ `{mid}` has never been public.", ephemeral=True)
-
-        def num(f):
-            t = str(f.value or "").strip()
-            if not t:
-                return None
-            try:
-                return float(t)
-            except Exception:
-                return "bad"
-        so, pe, tre, ast_, sell = (num(self.shares), num(self.pe), num(self.treasury),
-                                   num(self.assets), num(self.sellable))
-        if "bad" in (so, pe, tre, ast_, sell):
-            return await i.response.send_message("❌ Those must all be numbers.", ephemeral=True)
-        if all(v is None for v in (so, pe, tre, ast_, sell)):
-            return await i.response.send_message("❌ Change at least one field.", ephemeral=True)
-
-        if so is not None:
-            held = sum(float(h.get("shares") or 0) for h in (d.get_holders(mid) or []))
-            if so < held:
-                return await i.response.send_message(
-                    f"❌ Holders already own {held:,.0f} shares — outstanding can't go below that. "
-                    f"Buy shares back first, or pick a number >= {held:,.0f}.", ephemeral=True)
-        if tre is not None:
-            d.upsert_market_shares(mid, treasury_coins=tre)
-        for val, key in ((ast_, "asset_value"), (sell, "sellable_assets")):
-            if val is None:
-                continue
-            if val > 0:
-                d.set_config(f"{key}:{mid}", str(val))
-            else:
-                d.delete_config(f"{key}:{mid}")
-        if so is not None or pe is not None:
-            d.upsert_market_shares(mid, shares_outstanding=so, pe_multiplier=pe)
-            price = core._recompute_share_price(mid, reason="params_changed")
-        else:
-            # treasury/assets moved — deliberate, so re-anchor fully (no per-event clamp)
-            price = core._recompute_share_price(mid, reason="params_changed", full_move=True)
-        await self.p.refresh(
-            i, f"✅ Parameters updated." + (f" Share price now {price:,.2f}." if price is not None else ""))
 
 
 class MarketSettingsView(discord.ui.View):
@@ -730,20 +691,16 @@ class MarketSettingsView(discord.ui.View):
             ("Rewards", discord.ButtonStyle.secondary, self._loyalty, 1),
             ("Ticker", discord.ButtonStyle.secondary, self._ticker, 1),
             ("Set code manually", discord.ButtonStyle.secondary, self._code, 1),
-            ("Leader role", discord.ButtonStyle.secondary, self._role, 1),
-            ("Set owner", discord.ButtonStyle.secondary, self._owner, 2),
             ("Add manager", discord.ButtonStyle.secondary, self._add_mgr, 2),
             ("Remove manager", discord.ButtonStyle.secondary, self._rm_mgr, 2),
-            ("Remove item", discord.ButtonStyle.secondary, self._rm_item, 2),
-            ("V Tech group", discord.ButtonStyle.secondary, self._vtech, 2),
             ("Delist" if listed else "Go public",
              discord.ButtonStyle.danger if listed else discord.ButtonStyle.success,
              self._delist if listed else self._go_public, 3),
             ("Withdraw treasury", discord.ButtonStyle.secondary, self._withdraw, 3),
-            ("Tune params", discord.ButtonStyle.secondary, self._params, 3),
             ("Delete market", discord.ButtonStyle.danger, self._delete, 3),
+            ("Bankrupt & pay out", discord.ButtonStyle.danger, self._bankrupt, 3),
+            ("Vault", discord.ButtonStyle.secondary, self._vault, 4),
             ("Delivery location", discord.ButtonStyle.secondary, self._location, 4),
-            ("Profit roll-up", discord.ButtonStyle.secondary, self._rollup, 4),
             ("Bind/unbind channel", discord.ButtonStyle.secondary, self._bind, 4),
             ("Get CSN code", discord.ButtonStyle.primary, self._code_get, 3),
         ]
@@ -773,17 +730,23 @@ class MarketSettingsView(discord.ui.View):
     async def _loyalty(self, i): await i.response.send_modal(_LoyaltyModal(self))
     async def _ticker(self, i):  await i.response.send_modal(_TextModal(self, "Set ticker", "Symbol (1-6)", "ticker", "GEX"))
     async def _code(self, i):    await i.response.send_modal(_TextModal(self, "Set CSN code", "Exact code", "code"))
-    async def _role(self, i):    await i.response.send_modal(_TextModal(self, "Leader role", "Role name", "role"))
-    async def _rm_item(self, i): await i.response.send_modal(_TextModal(self, "Remove item", "Item name", "item"))
     async def _delete(self, i):  await i.response.send_modal(_TextModal(self, "DELETE market", f"Type {self.mid} to confirm", "delete"))
-    async def _owner(self, i):   await i.response.send_modal(_PeopleModal(self, "Set owner", "owner"))
     async def _add_mgr(self, i): await i.response.send_modal(_PeopleModal(self, "Add site manager", "add_mgr"))
     async def _rm_mgr(self, i):  await i.response.send_modal(_PeopleModal(self, "Remove site manager", "rm_mgr"))
     async def _go_public(self, i): await i.response.send_modal(_GoPublicModal(self))
-    async def _params(self, i):    await i.response.send_modal(_ParamsModal(self))
     async def _location(self, i):  await i.response.send_modal(_LocationModal(self))
-    async def _rollup(self, i):    await i.response.send_modal(_RollupModal(self))
     async def _bind(self, i):      await i.response.send_modal(_BindModal(self))
+    async def _vault(self, i):     await i.response.send_modal(_VaultModal(self))
+
+    async def _bankrupt(self, i: discord.Interaction):
+        if not _is_full_manager(i.user) and not _is_owner(i.user, self.mid):
+            return await i.response.send_message(
+                "⛔ Only a server manager or this market's owner can bankrupt it.", ephemeral=True)
+        listing = _db().get_market_shares(self.mid)
+        if not listing or not listing.get("active"):
+            return await i.response.send_message(
+                f"❌ `{self.mid}` isn't a listed stock.", ephemeral=True)
+        await i.response.send_modal(_BankruptModal(self))
 
     async def _code_get(self, i: discord.Interaction):
         if not _may_view(i.user, self.mid):
@@ -798,17 +761,6 @@ class MarketSettingsView(discord.ui.View):
             return await i.response.send_message("⛔ Server managers only.", ephemeral=True)
         await i.response.send_modal(_RegisterModal(self))
 
-    async def _vtech(self, i: discord.Interaction):
-        if not _is_full_manager(i.user):
-            return await i.response.send_message("⛔ Server managers only — V Tech-wide setting.",
-                                                 ephemeral=True)
-        cur = set(core._vtech_group_markets() or [])
-        if self.mid in cur:
-            cur.discard(self.mid); note = f"➖ `{self.mid}` removed from the V Tech group."
-        else:
-            cur.add(self.mid); note = f"➕ `{self.mid}` added to the V Tech group."
-        core._set_vtech_group_markets(sorted(cur))
-        await self.refresh(i, note)
 
     async def _delist(self, i: discord.Interaction):
         d = _db()

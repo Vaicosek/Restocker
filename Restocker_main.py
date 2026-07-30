@@ -10833,7 +10833,6 @@ Balances & Payouts:
 - /balance_history — Your recent coin movements (Managers can view another user's)
 
 Reports & CSN:
-- /monthly_report — Monthly coins payout report from fulfilled orders
 - /csn — Upload a CSN export/monthly CSV, saves history and shows chart
 - /csn_history — View saved monthly sales history and all-time totals
 - /import_earnings — (Managers) Import a CSV/Excel earnings summary (one row per month) into a market
@@ -10854,7 +10853,6 @@ using the same server coin balance as everything else:
 - /stock portfolio — See your holdings and unrealized profit/loss (Managers can view others')
 - /stock set_params — (Managers) Tune a market's shares outstanding / P-E multiplier
 - /stock dashboard — (Managers) post a live, auto-updating market dashboard in this channel
-- /stock delist — (Manager/Owner) bankrupt + delist a market, paying shareholders from its backing
 - Share trading and the ABX Index fund moved to the dashboard exchange page.
 - /market treasury / /market treasury_withdraw — (Manager/Owner) view a market's treasury / withdraw its excess
 

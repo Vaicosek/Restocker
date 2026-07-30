@@ -1345,6 +1345,7 @@ _TERMINAL_NAV = r"""
     <a href="/exchange" data-nav="exchange">Exchange</a>
     <a href="/orders" data-nav="orders">Orders</a>
     <a href="/teams" data-nav="teams">Teams</a>
+    <a href="/investor" data-nav="investor">Investor</a>
     <a href="/mymarket" data-nav="mymarket">My Market</a>
   </nav>
   <div class="rt"><div class="bp"><b class="mono" id="hWho">—</b><br><span id="hWhoSub">not linked</span></div>
@@ -1576,6 +1577,161 @@ document.getElementById('gen').onclick=async()=>{
 window.addEventListener('load',()=>{setTimeout(()=>{chips();catchips();render();},60);});
 setTimeout(()=>{chips();catchips();render();},400);
 </script></body></html>"""
+
+
+# ── /investor — portfolio, dividends, company detail, shareholder voting ─────
+_INVESTOR_HTML = r"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Investor - Abexilas</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>__TERMINAL_CSS__
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:10px}
+@media(max-width:900px){.grid{grid-template-columns:1fr}}
+.kv{display:flex;justify-content:space-between;padding:3px 0;font-size:12px}
+.kv b{font-family:var(--mono)}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th{text-align:left;color:var(--muted);font-weight:600;font-size:10px;text-transform:uppercase;padding:4px 6px;border-bottom:1px solid var(--line)}
+td{padding:4px 6px;border-bottom:1px solid var(--line)}
+.co{cursor:pointer} .co:hover{background:var(--panel2)}
+.vopt{display:flex;gap:6px;align-items:center;margin-top:4px}
+.vopt button{flex:1;background:var(--panel2);border:1px solid var(--line2);color:var(--ink);cursor:pointer;padding:3px 6px;font:inherit;font-size:11px;text-align:left}
+.vopt button.mine{border-color:var(--accent);color:var(--ink2)}
+.bar2{height:6px;background:var(--panel2);margin-top:2px}
+.bar2 i{display:block;height:100%;background:var(--accent)}
+</style></head><body>
+__NAV__
+<div class="grid">
+  <div class="panel">
+    <div class="ph"><span class="t">Portfolio</span><span class="faint" id="pfNote"></span></div>
+    <div class="pb" id="pfBody"><div class="faint">loading...</div></div>
+  </div>
+  <div class="panel">
+    <div class="ph"><span class="t">Dividends</span><span class="faint" id="dvNote"></span></div>
+    <div class="pb" id="dvBody"><div class="faint">loading...</div></div>
+  </div>
+  <div class="panel">
+    <div class="ph"><span class="t">Companies</span><span class="faint" id="coNote"></span></div>
+    <div class="pb" id="coBody"><div class="faint">loading...</div></div>
+  </div>
+  <div class="panel">
+    <div class="ph"><span class="t">Shareholder votes</span><span class="faint" id="vtNote"></span></div>
+    <div class="pb" id="vtBody"><div class="faint">loading...</div></div>
+  </div>
+</div>
+<script>
+var D=null, ME=null;
+function esc(x){return String(x==null?'':x).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
+function fmt(n){return (Math.round(+n||0)).toLocaleString();}
+function sgn(n){return (+n>=0?'up':'down');}
+
+function renderPortfolio(){
+ var b=document.getElementById('pfBody');
+ if(!D.logged_in){b.innerHTML='<div class="faint">Link your Discord account (top right) to see your holdings, '
+   +'dividends earned and voting weight.</div>';document.getElementById('pfNote').textContent='not linked';return;}
+ if(!D.holdings.length){b.innerHTML='<div class="faint">You hold no shares yet. Buy on the '
+   +'<a href="/exchange" style="color:var(--accent)">Exchange</a>.</div>';return;}
+ var t=D.totals;
+ document.getElementById('pfNote').textContent=D.holdings.length+' position'+(D.holdings.length>1?'s':'');
+ var h='<div class="kv"><span>Market value</span><b>'+fmt(t.value)+'c</b></div>'
+      +'<div class="kv"><span>Cost basis</span><b>'+fmt(t.cost)+'c</b></div>'
+      +'<div class="kv"><span>Unrealised P/L</span><b class="'+sgn(t.pnl)+'">'+(t.pnl>=0?'+':'')+fmt(t.pnl)+'c</b></div>'
+      +'<table style="margin-top:8px"><tr><th>Company</th><th>Shares</th><th>Value</th><th>P/L</th><th>Div est.</th></tr>';
+ D.holdings.forEach(function(x){
+  h+='<tr><td><b>'+esc(x.mid)+'</b></td><td class="mono">'+fmt(x.shares)+'</td><td class="mono">'+fmt(x.value)
+    +'c</td><td class="mono '+sgn(x.pnl)+'">'+(x.pnl>=0?'+':'')+fmt(x.pnl)+'c</td><td class="mono">'+fmt(x.dividends_est)+'c</td></tr>';});
+ b.innerHTML=h+'</table><div class="faint" style="font-size:10px;margin-top:6px">Div est. applies each '
+  +'month’s per-share payout to your CURRENT share count — historical position sizes aren’t stored, '
+  +'so treat it as an estimate.</div>';}
+
+function renderDividends(){
+ var b=document.getElementById('dvBody'), rows=[];
+ Object.keys(D.dividends||{}).forEach(function(mid){
+  (D.dividends[mid]||[]).forEach(function(d){rows.push({mid:mid,month:d.month,per_share:d.per_share,total:d.total_paid,holders:d.holders});});});
+ rows.sort(function(a,b2){return a.month<b2.month?1:-1;});
+ if(!rows.length){b.innerHTML='<div class="faint">No dividends paid yet.</div>';return;}
+ document.getElementById('dvNote').textContent=rows.length+' payments';
+ var h='<table><tr><th>Month</th><th>Company</th><th>Per share</th><th>Total</th><th>Holders</th></tr>';
+ rows.slice(0,40).forEach(function(r){
+  h+='<tr><td class="mono">'+esc(r.month)+'</td><td>'+esc(r.mid)+'</td><td class="mono up">'
+    +(+r.per_share).toFixed(2)+'c</td><td class="mono">'+fmt(r.total)+'c</td><td class="mono">'+fmt(r.holders)+'</td></tr>';});
+ b.innerHTML=h+'</table>';}
+
+function renderCompanies(){
+ var b=document.getElementById('coBody');
+ if(!D.companies.length){b.innerHTML='<div class="faint">No listed companies.</div>';return;}
+ document.getElementById('coNote').textContent=D.companies.length+' listed';
+ var h='';
+ D.companies.forEach(function(c){
+  h+='<div class="co" onclick="this.querySelector(\'.det\').style.display=this.querySelector(\'.det\').style.display?\'\':\'none\'" style="padding:6px 0;border-bottom:1px solid var(--line)">'
+   +'<div style="display:flex;justify-content:space-between"><b>'+esc(c.name)+' <span class="faint">'+esc(c.ticker)+'</span></b>'
+   +'<span class="mono">'+fmt(c.price)+'c</span></div>'
+   +'<div class="faint" style="font-size:11px">cap '+fmt(c.market_cap)+'c &middot; rating '+esc(c.rating)
+   +' &middot; 12m div/share '+(+c.dividend_12m).toFixed(2)+'c</div>'
+   +'<div class="det" style="display:none;margin-top:6px;padding-left:8px;border-left:2px solid var(--line2)">'
+   +'<div class="kv"><span>Shares outstanding</span><b>'+fmt(c.shares_outstanding)+'</b></div>'
+   +'<div class="kv"><span>Treasury</span><b>'+fmt(c.treasury)+'c</b></div>'
+   +'<div class="kv"><span>Backing (cash / assets)</span><b>'+fmt(c.backing_cash)+'c / '+fmt(c.backing_assets)+'c</b></div>'
+   +'<div class="kv"><span>Payable on wind-up</span><b>'+fmt(c.backing_cashable)+'c</b></div>'
+   +'<div class="kv"><span>Bond face outstanding</span><b>'+fmt(c.bond_face)+'c</b></div>'
+   +'<div class="kv"><span>Item coverage of bonds</span><b class="'+(c.bond_coverage_pct>=80?'up':'down')+'">'+c.bond_coverage_pct+'%</b></div>'
+   +(c.last_dividend?('<div class="kv"><span>Last dividend</span><b>'+esc(c.last_dividend.month)+' &middot; '
+      +(+c.last_dividend.per_share).toFixed(2)+'c/share</b></div>'):'<div class="kv"><span>Last dividend</span><b class="faint">none</b></div>')
+   +'</div></div>';});
+ b.innerHTML=h;}
+
+async function castVote(pid,idx,btn){
+ if(!D.logged_in){alert('Link your Discord account (top right) to vote.');return;}
+ btn.disabled=true;
+ try{
+  var r=await fetch('/api/vote',{method:'POST',
+    headers:{'Content-Type':'application/json','X-CSRF-Token':(ME&&ME.csrf)||''},
+    body:JSON.stringify({proposal_id:pid,choice_idx:idx})});
+  var j=await r.json();
+  alert((j&&j.message)||(j&&j.error)||'Failed.');
+  if(j&&j.ok){await boot();}
+ }catch(e){alert('Network error.');}
+ btn.disabled=false;}
+
+function renderVotes(){
+ var b=document.getElementById('vtBody');
+ var open=(D.proposals||[]).filter(function(p){return p.status==='open';});
+ var closed=(D.proposals||[]).filter(function(p){return p.status!=='open';});
+ if(!D.proposals.length){b.innerHTML='<div class="faint">No proposals yet.</div>';return;}
+ document.getElementById('vtNote').textContent=open.length+' open';
+ var h='';
+ open.concat(closed.slice(0,6)).forEach(function(p){
+  var tot=(p.tally||[]).reduce(function(a,c){return a+c;},0)||1;
+  h+='<div style="padding:8px 0;border-bottom:1px solid var(--line)">'
+   +'<div style="display:flex;justify-content:space-between;gap:8px"><b>#'+p.id+' '+esc(p.question)+'</b>'
+   +'<span class="faint" style="font-size:11px">'+(p.status==='open'?('closes '+esc(p.closes_at||'-')):'closed')+'</span></div>'
+   +'<div class="faint" style="font-size:11px">'+esc(p.market_id)
+   +(p.status==='open'&&D.logged_in?(' &middot; your weight <b>'+fmt(p.my_weight)+'</b>'):'')+'</div>';
+  (p.options||[]).forEach(function(o,i){
+   var w=(p.tally||[])[i]||0, pctv=Math.round(w/tot*100);
+   h+='<div class="vopt"><button class="'+(p.my_choice===i?'mine':'')+'"'
+    +(p.status==='open'?(' onclick="castVote('+p.id+','+i+',this)"'):' disabled')+'>'
+    +(p.my_choice===i?'✓ ':'')+esc(o)+'</button>'
+    +'<span class="mono faint" style="width:74px;text-align:right;font-size:11px">'+fmt(w)+' ('+pctv+'%)</span></div>'
+    +'<div class="bar2"><i style="width:'+pctv+'%"></i></div>';});
+  h+='</div>';});
+ b.innerHTML=h;}
+
+async function boot(){
+ try{var r=await fetch('/api/investor');D=await r.json();}catch(e){D={ok:false};}
+ if(!D||!D.ok){document.getElementById('pfBody').innerHTML='<div class="down">Could not load investor data.</div>';return;}
+ try{var r2=await fetch('/api/me');ME=await r2.json();}catch(e){}
+ renderPortfolio();renderDividends();renderCompanies();renderVotes();}
+boot();
+setInterval(boot,60000);
+</script></body></html>"""
+
+
+async def _handle_investor_page(request):
+    html = (_INVESTOR_HTML
+            .replace("__TERMINAL_CSS__", _TERMINAL_CSS)
+            .replace("__NAV__", _TERMINAL_NAV))
+    return web.Response(text=html, content_type="text/html")
 
 
 async def _handle_inventory_page(request):
@@ -2464,6 +2620,22 @@ background:var(--panel2);color:var(--muted);font-family:var(--sans)}
       <span class="faint">Link your Discord on the dashboard to see holdings.</span></div></div>
     <div class="panel"><div class="ph"><span class="t">Portfolio</span></div><div class="pb" id="pf">
       <span class="faint">—</span></div></div>
+    <div class="panel" id="issuePanel" style="display:none">
+      <div class="ph"><span class="t">Issue a bond</span><span class="faint" id="issueNote"></span></div>
+      <div class="pb">
+        <select id="isMk" class="mono" style="width:100%;background:var(--panel2);border:1px solid var(--line2);color:var(--ink);padding:4px 6px;margin-bottom:6px"></select>
+        <div id="isCap" class="faint" style="font-size:11px;margin-bottom:6px"></div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px">
+          <input id="isAmt"  type="number" placeholder="Face total (coins)" class="mono">
+          <input id="isCpn"  type="number" step="0.05" placeholder="Coupon %/month" class="mono">
+          <input id="isTerm" type="number" placeholder="Term (months)" class="mono">
+          <input id="isUnit" type="number" placeholder="Unit price (100)" class="mono">
+        </div>
+        <input id="isName" type="text" placeholder="Series name (optional)" class="mono" style="width:100%;margin-top:6px">
+        <button id="isGo" style="width:100%;margin-top:8px;background:var(--panel2);border:1px solid var(--line2);color:var(--ink);cursor:pointer;padding:5px">Issue bond</button>
+        <div id="isMsg" class="faint" style="font-size:11px;margin-top:6px"></div>
+      </div>
+    </div>
     <div class="panel" id="bondPanel" style="display:none">
       <div class="ph"><span class="t">Bonds</span><span class="faint" id="bondNote"></span></div>
       <div class="pb" id="bondList"></div>
@@ -2648,11 +2820,64 @@ function renderBonds(bonds){
   }
   list.appendChild(row);});
 }
+// Bond ISSUANCE. Was `/bond issue` — a 6-argument slash command with no way to see
+// your collateral headroom before committing. Here the form fetches capacity first.
+async function bondCapacity(mid){
+ try{const r=await fetch('/api/bond/capacity?market_id='+encodeURIComponent(mid));
+  const j=await r.json(); if(!j.ok)return null; return j;}catch(e){return null;}}
+async function refreshCapacity(){
+ const sel=document.getElementById('isMk'), cap=document.getElementById('isCap');
+ if(!sel||!sel.value){cap.textContent='';return;}
+ cap.textContent='checking collateral…';
+ const j=await bondCapacity(sel.value);
+ if(!j){cap.textContent='Could not read collateral.';return;}
+ if(j.rollup_parent){cap.innerHTML='<span class="down">Rolls up into '+esc(j.rollup_parent)
+   +' — the company issues its debt, not this market.</span>';return;}
+ if(!j.listed){cap.innerHTML='<span class="down">Not a listed stock — take it public first.</span>';return;}
+ cap.innerHTML='Items on record <b>'+fmt(j.collateral)+'c</b> &middot; outstanding face <b>'
+  +fmt(j.face_outstanding)+'c</b> &middot; coverage <b>'+j.coverage_pct+'%</b><br>'
+  +'Max issuable at the '+j.min_cover+'% rule: <b class="up">'+fmt(j.headroom)+'c</b>';}
+async function setupIssue(){
+ if(!ME||!ME.logged_in||!ME.owned||!ME.owned.length)return;
+ // /api/me returns owned as [{mid,name}] — map to ids before filtering.
+ const listed=(MK||[]).map(m=>m.mid);
+ const mine=ME.owned.map(o=>o.mid).filter(m=>listed.indexOf(m)>=0);
+ if(!mine.length)return;
+ const panel=document.getElementById('issuePanel'), sel=document.getElementById('isMk');
+ sel.innerHTML=mine.map(m=>'<option value="'+esc(m)+'">'+esc(m)+'</option>').join('');
+ panel.style.display='';
+ document.getElementById('issueNote').textContent=mine.length+' company'+(mine.length>1?'s':'');
+ sel.onchange=refreshCapacity; await refreshCapacity();
+ document.getElementById('isGo').onclick=async()=>{
+  const btn=document.getElementById('isGo'), msg=document.getElementById('isMsg');
+  const amount=+document.getElementById('isAmt').value||0;
+  const coupon=+document.getElementById('isCpn').value||0;
+  const term=+document.getElementById('isTerm').value||0;
+  const unit=+document.getElementById('isUnit').value||100;
+  const name=document.getElementById('isName').value||'';
+  if(amount<1000){msg.textContent='Face total must be at least 1,000c.';return;}
+  if(term<1){msg.textContent='Term must be at least 1 month.';return;}
+  if(!confirm('Issue '+fmt(amount)+'c of bonds at '+coupon+'%/mo for '+term+' months?'))return;
+  btn.disabled=true; msg.textContent='issuing…';
+  try{
+   const r=await fetch('/api/bond/issue',{method:'POST',
+     headers:{'Content-Type':'application/json','X-CSRF-Token':(ME&&ME.csrf)||''},
+     body:JSON.stringify({market_id:document.getElementById('isMk').value,
+       amount:amount,coupon_pct:coupon,term_months:term,unit_price:unit,name:name})});
+   const j=await r.json();
+   msg.innerHTML=(j&&j.ok)?'<span class="up">'+esc(j.message)+'</span>'
+                          :'<span class="down">'+esc((j&&j.error)||'Failed.')+'</span>';
+   if(j&&j.ok){const s2=await (await fetch('/api/stocks')).json();renderBonds(s2.bonds||[]);
+     await refreshCapacity();}
+  }catch(e){msg.textContent='Network error.';}
+  btn.disabled=false;};}
+
 async function boot(){
  try{const r=await fetch('/api/stocks');const d=await r.json();MK=d.markets||[];renderBonds(d.bonds||[]);}catch(e){MK=[];}
  try{const r=await fetch('/api/me');ME=await r.json();
   if(ME.logged_in){document.getElementById('hWho').textContent=ME.name||'linked';
    document.getElementById('hWhoSub').textContent='Discord linked';}}catch(e){}
+ try{await setupIssue();}catch(e){}
  if(MK.length){cur=MK[0].mid;renderList();render();}
  else{document.getElementById('list').innerHTML='<tr><td colspan="4" class="faint" style="height:40px;padding:0 10px">No public markets yet</td></tr>';}
  setInterval(async()=>{try{const r=await fetch('/api/stocks');const d=await r.json();
@@ -2773,6 +2998,300 @@ async def _handle_owner_set_item(request):
     r = await m.run_on_bot_loop(m._set_market_item, mid, item, coin=coin, stock=stock)
     _CACHE.clear()
     return web.json_response({"ok": True, **r})
+
+
+async def _handle_bond_issue(request):
+    """Issue a company bond from the dashboard. Was `/bond issue`.
+
+    Discord's modals cap at 5 short text fields with no live validation, which is a poor
+    fit for an instrument with a collateral test, a term and a unit price — so issuance
+    lives here, where the form can show the coverage headroom before you commit.
+
+    Every guard from the command is reproduced, and they all matter:
+      * the market must be a LISTED stock (its treasury pays the coupons);
+      * a market that rolls up into a parent cannot issue its own debt — the company does,
+        otherwise a subsidiary could lever up against assets it doesn't own;
+      * item coverage must be >= BOND_MIN_ITEM_COVER *including the new issue*.
+
+    THREADING: this runs on the web server's own event loop. create_bond writes and
+    _queue_dividend_post touches bot state, so both go through run_on_bot_loop().
+    """
+    import Restocker_main as m
+    sess = _session_user(request)
+    if not sess:
+        return web.json_response({"ok": False, "error": "Log in first."}, status=401)
+    if not _csrf_ok(request):
+        return web.json_response({"ok": False, "error": "Bad or missing CSRF token."}, status=403)
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"ok": False, "error": "bad json"}, status=400)
+
+    mid = str(body.get("market_id") or "").strip()
+    if not mid or not _require_owner(request, mid):
+        return web.json_response({"ok": False, "error": "Not authorized for this market."}, status=403)
+
+    def _num(key, lo, hi, cast=float):
+        try:
+            v = cast(body.get(key))
+        except Exception:
+            return None
+        return v if lo <= v <= hi else None
+
+    amount = _num("amount", 1000, 1_000_000_000, int)
+    coupon = _num("coupon_pct", 0.0, 25.0, float)
+    term   = _num("term_months", 1, 60, int)
+    unit   = _num("unit_price", 1, 1_000_000, int)
+    if amount is None:
+        return web.json_response({"ok": False, "error": "Amount must be 1,000-1,000,000,000 coins."}, status=400)
+    if coupon is None:
+        return web.json_response({"ok": False, "error": "Coupon must be 0-25 %/month."}, status=400)
+    if term is None:
+        return web.json_response({"ok": False, "error": "Term must be 1-60 months."}, status=400)
+    if unit is None:
+        unit = 100
+
+    import Restocker_db as db
+    listing = db.get_market_shares(mid)
+    if not listing or not listing.get("active"):
+        return web.json_response({"ok": False, "error": f"{mid} isn't a listed company stock."}, status=400)
+    try:
+        parent = m._market_rollup_parent(mid)
+    except Exception:
+        parent = None
+    if parent:
+        return web.json_response({"ok": False, "error":
+            f"{mid} rolls up into {parent} — bonds are issued by the company. Issue from {parent}."},
+            status=400)
+
+    pct, col, face = m._bond_coverage(mid, extra_face=float(amount))
+    need = m.BOND_MIN_ITEM_COVER
+    if pct < need:
+        max_issuable = max(0, int(col / (need / 100.0) - (face - amount)))
+        return web.json_response({"ok": False, "error":
+            f"Under-collateralized: {int(col):,}c of items cover only {pct:.1f}% of "
+            f"{int(face):,}c total face (need >={need:g}%). Max issuable now: {max_issuable:,}c."},
+            status=400)
+
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    matures = (_dt.now(_tz.utc) + _td(days=30 * int(term))).strftime("%Y-%m-%d")
+    name = (str(body.get("name") or "").strip()
+            or f"{mid.upper()} {_dt.now(_tz.utc):%y-%m}")[:60]
+
+    def _do():
+        bid = db.create_bond(mid, name, float(amount), float(unit),
+                             float(coupon), int(term), matures)
+        b = db.get_bond(bid)
+        m._queue_dividend_post({
+            "type": "bond_event", "market_id": mid,
+            "title": f"\U0001FA99 New bond issue — {b['name']} (#{bid})",
+            "lines": [f"Raising `{int(amount):,}` \U0001FA99 · **{coupon:g}%/mo** coupon · matures {matures}",
+                      f"Item coverage **{pct:.0f}%** (`{int(col):,}` \U0001FA99 of items on record)",
+                      f"Buy on the dashboard exchange — units of `{int(unit):,}` \U0001FA99"]})
+        return b
+    try:
+        b = await m.run_on_bot_loop(_do)
+    except Exception as e:
+        return web.json_response({"ok": False, "error": f"Issue failed: {e}"}, status=500)
+
+    return web.json_response({"ok": True, "message":
+        f"Bond {b['name']} (#{b['id']}) issued: {int(amount):,}c face, "
+        f"{b['units_total']:,} units @ {int(unit):,}c, {coupon:g}%/mo, matures {matures}. "
+        f"Coverage {pct:.0f}%."})
+
+
+async def _handle_bond_capacity(request):
+    """How much a company could issue right now, so the form can show headroom before
+    the user commits to a number."""
+    mid = (request.query.get("market_id") or "").strip()
+    if not mid or not _require_owner(request, mid):
+        return web.json_response({"ok": False, "error": "Not authorized for this market."}, status=403)
+    import Restocker_main as m, Restocker_db as db
+    listing = db.get_market_shares(mid)
+    try:
+        parent = m._market_rollup_parent(mid)
+    except Exception:
+        parent = None
+    try:
+        pct, col, face = m._bond_coverage(mid, extra_face=0.0)
+        need = m.BOND_MIN_ITEM_COVER
+        headroom = max(0, int(col / (need / 100.0) - face))
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=500)
+    return web.json_response({
+        "ok": True, "market_id": mid,
+        "listed": bool(listing and listing.get("active")),
+        "rollup_parent": parent,
+        "coverage_pct": round(pct, 1), "collateral": int(col),
+        "face_outstanding": int(face), "min_cover": need, "headroom": headroom,
+    })
+
+
+async def _handle_api_investor(request):
+    """Everything an investor needs in one call: holdings marked to market, the dividend
+    history those holdings actually earned, per-company detail, and open proposals with
+    this user's current vote.
+
+    Public data (companies, proposals) is returned to anyone; holdings and votes only to
+    a logged-in session. That split is deliberate — the page is useful before you link.
+    """
+    import Restocker_db as db
+    import Restocker_main as m
+    sess = _session_user(request)
+    uid = str(sess["user_id"]) if sess else None
+
+    companies, dividends = [], {}
+    try:
+        for mid in (db.get_public_markets() or {}):
+            listing = db.get_market_shares(mid) or {}
+            if not listing.get("active"):
+                continue
+            raw = (_load_markets() or {}).get(mid) or {}
+            price = float(listing.get("share_price") or 0)
+            out = float(listing.get("shares_outstanding") or 0)
+            try:
+                back = m._market_backing(mid)
+            except Exception:
+                back = {}
+            try:
+                cov_pct, cov_col, cov_face = m._bond_coverage(mid)
+            except Exception:
+                cov_pct = cov_col = cov_face = 0
+            hist = db.get_dividend_history(mid, 24)
+            dividends[mid] = hist
+            companies.append({
+                "mid": mid,
+                "name": (raw.get("name") if isinstance(raw, dict) else None) or mid,
+                "ticker": (core_tickers().get(mid) or "-"),
+                "price": price,
+                "shares_outstanding": out,
+                "market_cap": price * out,
+                "treasury": float(listing.get("treasury_coins") or 0),
+                "rating": listing.get("rating") or raw.get("rating") or "-",
+                "backing_cash": int(back.get("cash", 0) or 0),
+                "backing_assets": int(back.get("assets", 0) or 0),
+                "backing_cashable": int(back.get("cashable", 0) or 0),
+                "bond_coverage_pct": round(float(cov_pct or 0), 1),
+                "bond_face": int(cov_face or 0),
+                "last_dividend": (hist[0] if hist else None),
+                "dividend_12m": sum(float(h.get("per_share") or 0) for h in hist[:12]),
+            })
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    holdings, total_value, total_cost = [], 0.0, 0.0
+    if uid:
+        try:
+            for h in (db.get_portfolio(uid) or []):
+                mid = h.get("market_id")
+                listing = db.get_market_shares(mid) or {}
+                price = float(listing.get("share_price") or 0)
+                sh = float(h.get("shares") or 0)
+                cost = float(h.get("cost_basis") or 0)
+                # What this holding actually paid out: per_share x shares held now. An
+                # approximation (we do not store historical position sizes), so label it.
+                earned = sum(float(d.get("per_share") or 0) for d in (dividends.get(mid) or [])) * sh
+                holdings.append({
+                    "mid": mid, "shares": sh, "price": price,
+                    "value": sh * price, "cost": cost, "pnl": sh * price - cost,
+                    "dividends_est": earned,
+                })
+                total_value += sh * price
+                total_cost += cost
+        except Exception:
+            pass
+
+    proposals = []
+    try:
+        for p in (db.list_proposals() or [])[:40]:
+            votes = db.get_votes(p["id"]) or []
+            tally = {}
+            for v in votes:
+                tally[int(v.get("choice_idx", 0))] = tally.get(int(v.get("choice_idx", 0)), 0) + float(v.get("weight") or 0)
+            mine = None
+            if uid:
+                for v in votes:
+                    if str(v.get("user_id")) == uid:
+                        mine = int(v.get("choice_idx", 0))
+            weight = 0.0
+            if uid:
+                try:
+                    vc = __import__("sys").modules.get("cogs.voting")
+                    if vc:
+                        weight = float(vc._voting_weight(uid, p["market_id"])[0])
+                except Exception:
+                    weight = 0.0
+            proposals.append({
+                "id": p["id"], "market_id": p.get("market_id"),
+                "question": p.get("question"), "options": p.get("options") or [],
+                "status": p.get("status"), "closes_at": p.get("closes_at"),
+                "tally": [tally.get(i, 0.0) for i in range(len(p.get("options") or []))],
+                "my_choice": mine, "my_weight": weight,
+            })
+    except Exception:
+        pass
+
+    return web.json_response({
+        "ok": True, "logged_in": bool(uid),
+        "companies": companies, "holdings": holdings,
+        "totals": {"value": total_value, "cost": total_cost, "pnl": total_value - total_cost},
+        "dividends": dividends, "proposals": proposals,
+    })
+
+
+def core_tickers() -> dict:
+    try:
+        import Restocker_main as m
+        return m.load_yaml("market_tickers.yml", {}) or {}
+    except Exception:
+        return {}
+
+
+async def _handle_api_vote(request):
+    """Cast a shareholder vote. Was `/vote cast`.
+
+    Weight is recomputed SERVER-SIDE from the register on every call — never trusted from
+    the client — because weight is the whole security model of the ballot.
+    """
+    sess = _session_user(request)
+    if not sess:
+        return web.json_response({"ok": False, "error": "Log in first."}, status=401)
+    if not _csrf_ok(request):
+        return web.json_response({"ok": False, "error": "Bad or missing CSRF token."}, status=403)
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"ok": False, "error": "bad json"}, status=400)
+    import Restocker_db as db
+    uid = str(sess["user_id"])
+    try:
+        pid = int(body.get("proposal_id"))
+        idx = int(body.get("choice_idx"))
+    except Exception:
+        return web.json_response({"ok": False, "error": "bad proposal or choice"}, status=400)
+    p = db.get_proposal(pid)
+    if not p or p.get("status") != "open":
+        return web.json_response({"ok": False, "error": "That proposal isn't open."}, status=400)
+    opts = p.get("options") or []
+    if not (0 <= idx < len(opts)):
+        return web.json_response({"ok": False, "error": "Pick a choice from the list."}, status=400)
+    try:
+        vc = __import__("sys").modules.get("cogs.voting")
+        w, common, pref = vc._voting_weight(uid, p["market_id"]) if vc else (0, 0, 0)
+    except Exception:
+        return web.json_response({"ok": False, "error": "Voting is unavailable right now."}, status=500)
+    if w <= 0:
+        return web.json_response({"ok": False, "error":
+            f"No voting power — you hold no {p['market_id']} shares and aren't on the "
+            f"GEX.PR register."}, status=403)
+    try:
+        db.cast_vote(pid, uid, idx, float(w), name=sess.get("name"))
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=500)
+    return web.json_response({"ok": True, "message":
+        f"Vote recorded: {opts[idx]} with weight {w:,.0f}"
+        + (f" ({common:,.0f} shares + {pref:,.0f} GEX.PR equiv)" if pref else "")
+        + ". Re-vote any time before it closes."})
 
 
 async def _handle_api_trade(request):
@@ -3706,6 +4225,11 @@ async def start_webserver(port: int = 8080):
     app.router.add_post("/api/logout",   _handle_api_logout)
     app.router.add_get("/api/owner/inventory",   _handle_owner_inventory)
     app.router.add_post("/api/owner/remove_item", _handle_owner_remove_item)
+    app.router.add_get("/investor",          _handle_investor_page)
+    app.router.add_get("/api/investor",      _handle_api_investor)
+    app.router.add_post("/api/vote",         _handle_api_vote)
+    app.router.add_post("/api/bond/issue",   _handle_bond_issue)
+    app.router.add_get("/api/bond/capacity", _handle_bond_capacity)
     app.router.add_post("/api/owner/log_restock", _handle_owner_log_restock)
     app.router.add_post("/api/owner/set_item",    _handle_owner_set_item)
     app.router.add_post("/api/trade",             _handle_api_trade)

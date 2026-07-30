@@ -91,7 +91,6 @@ class StockCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    stock = app_commands.Group(name="stock", description="Buy and sell shares of markets that have gone public, priced off their real CSN profit")
 
 
 
@@ -110,111 +109,118 @@ class StockCog(commands.Cog):
     # ── ABX Index Fund (investable ETF) ──────────────────────────────────────
 
 
-    @stock.command(name="delist",
-                   description="(Manager/Owner) Bankrupt + delist a market, paying shareholders from its backing")
-    @app_commands.describe(market_id="Market to delist", confirm="Set true to actually pay out + remove the stock")
-    @app_commands.autocomplete(market_id=_public_market_autocomplete)
-    async def delist(self, interaction: discord.Interaction, market_id: str, confirm: bool = False):
-        if not (is_manager(interaction) or _is_market_manager(interaction, market_id)):
-            return await interaction.response.send_message("Managers / market owner only.", ephemeral=True)
-        import Restocker_db as _db
-        listing = _db.get_market_shares(market_id)
-        if not listing or not listing.get("active"):
-            return await interaction.response.send_message(f"`{market_id}` isn't a listed stock.", ephemeral=True)
-        m = _get_market(market_id) or {}
-        name = m.get("name", market_id)
-        holders = _db.get_holders(market_id)
-        total_shares = sum(float(h.get("shares") or 0) for h in holders)
-        b = _market_backing(market_id)
-        pool = int(b["cashable"])  # treasury + this market's fund share = real coins payable
-        if not confirm:
-            return await interaction.response.send_message(
-                f"⚠️ Delisting **{name}** pays ~`{pool:,}` coins (cash `{int(b['cash']):,}` + fund "
-                f"`{int(b['fund_share']):,}`) pro-rata to **{len(holders)}** holder(s), then removes the stock. "
-                f"Asset backing (`{int(b['assets']):,}`) is honored off-exchange by the owner. "
-                f"Re-run with `confirm:true`.", ephemeral=True)
-        # Re-entrancy guard: holders/pool were snapshotted above, and defer() yields the event
-        # loop — a second `/stock delist confirm:true` dispatched in that window would pass the
-        # same active-listing check and pay EVERY holder twice from the same snapshot. Claim the
-        # market synchronously (no await between check and set) before the first await.
-        busy = getattr(type(self), "_delisting_now", None)
-        if busy is None:
-            busy = type(self)._delisting_now = set()
-        if market_id in busy:
-            return await interaction.response.send_message(
-                "⏳ A delist for this market is already in progress.", ephemeral=True)
-        busy.add(market_id)
-        try:
-            await interaction.response.defer()   # payouts can exceed the 3s interaction window
-            return await self._delist_payout(interaction, market_id, name, holders, total_shares, pool, b)
-        finally:
-            busy.discard(market_id)
 
-    async def _delist_payout(self, interaction, market_id, name, holders, total_shares, pool, b):
-        import Restocker_db as _db
-        # AUDIT FIX (critical): (1) re-snapshot AFTER the defer — a sell timed into
-        # the defer window used to collect the sale AND the delist payout on shares
-        # it no longer held; (2) never int()-cast holder ids — the ABX index fund
-        # account ("ABX_INDEX_FUND") crashed the loop AFTER the treasury was drained,
-        # leaving a zombie active listing. The fund is paid like any holder; its
-        # payout becomes fund cash, and NAV carries it to unit holders.
-        holders = _db.get_holders(market_id)
-        total_shares = sum(float(h.get("shares") or 0) for h in holders)
-        b = _market_backing(market_id)
-        pool = int(b["cashable"])
-        if total_shares <= 0 or pool <= 0:
-            _db.upsert_market_shares(market_id, active=0)
-            return await interaction.followup.send(
-                f"🪦 **{name}** delisted. No payout ({'no holders' if total_shares<=0 else 'no cash backing'}).")
-        paid = 0
-        failed = []
-        for h in holders:
-            sh = float(h.get("shares") or 0)
-            cb = float(h.get("cost_basis") or 0)
-            amt = int(pool * (sh / total_shares))
-            uid = str(h.get("user_id"))
-            try:
-                # Claim-first: clear the holding, THEN pay — a concurrent sell can't
-                # double-dip. If the credit fails, the holding is restored.
-                _db.adjust_holding(uid, market_id, delta_shares=-sh, delta_cost_basis=-cb)
-            except Exception:
-                failed.append(uid)
-                continue
-            try:
-                if amt > 0:
-                    add_coins(uid, amt, counts_as_principal=True)
-                    paid += amt
-            except Exception:
-                try:
-                    _db.adjust_holding(uid, market_id, delta_shares=sh, delta_cost_basis=cb)
-                except Exception:
-                    pass
-                failed.append(uid)
-        # remove exactly what we paid from the backing sources (treasury first, then fund)
-        from_treasury = min(int(b["cash"]), paid)
-        from_fund = paid - from_treasury
-        try:
-            if from_treasury > 0:
-                _db.adjust_treasury(market_id, -float(from_treasury), allow_negative=False)
-            if from_fund > 0:
-                _add_insurance_fund(-float(from_fund))
-        except Exception:
-            pass
-        note = ""
-        if failed:
-            # Keep the listing ACTIVE so re-running /stock delist retries the unpaid
-            # holders (paid holders' shares are already cleared, so the retry only
-            # sees the remainder and the remaining backing).
-            note = (f"\n⚠️ {len(failed)} holder(s) could not be paid — their shares were KEPT and the "
-                    f"listing stays active: " + ", ".join(f"<@{u}>" for u in failed[:10])
-                    + ". Re-run `/stock delist confirm:true` to retry them.")
-        else:
-            _db.upsert_market_shares(market_id, active=0)
-        await interaction.followup.send(
-            f"🪦 **{name}** declared bankrupt{' & delisted' if not failed else ''}. Paid `{paid:,}` coins to "
-            f"**{len(holders) - len(failed)}** shareholder(s) pro-rata "
-            f"(cash `{from_treasury:,}` + fund `{from_fund:,}`).{note}")
 
 
 async def setup(bot):
     await bot.add_cog(StockCog(bot))
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Bankruptcy delist, extracted from the retired /stock delist so MarketSettings
+#  can call it. Bodies unchanged except `self` -> module-level state.
+#  The re-entrancy guard MUST stay module-level: it is what stops two confirms
+#  dispatched inside the defer window from paying every holder twice.
+# ─────────────────────────────────────────────────────────────────────────────
+_DELISTING_NOW: set = set()
+
+async def run_stock_delist(interaction: discord.Interaction, market_id: str, confirm: bool = False):
+    if not (is_manager(interaction) or _is_market_manager(interaction, market_id)):
+        return await interaction.response.send_message("Managers / market owner only.", ephemeral=True)
+    import Restocker_db as _db
+    listing = _db.get_market_shares(market_id)
+    if not listing or not listing.get("active"):
+        return await interaction.response.send_message(f"`{market_id}` isn't a listed stock.", ephemeral=True)
+    m = _get_market(market_id) or {}
+    name = m.get("name", market_id)
+    holders = _db.get_holders(market_id)
+    total_shares = sum(float(h.get("shares") or 0) for h in holders)
+    b = _market_backing(market_id)
+    pool = int(b["cashable"])  # treasury + this market's fund share = real coins payable
+    if not confirm:
+        return await interaction.response.send_message(
+            f"⚠️ Delisting **{name}** pays ~`{pool:,}` coins (cash `{int(b['cash']):,}` + fund "
+            f"`{int(b['fund_share']):,}`) pro-rata to **{len(holders)}** holder(s), then removes the stock. "
+            f"Asset backing (`{int(b['assets']):,}`) is honored off-exchange by the owner. "
+            f"Re-run with `confirm:true`.", ephemeral=True)
+    # Re-entrancy guard: holders/pool were snapshotted above, and defer() yields the event
+    # loop — a second `/stock delist confirm:true` dispatched in that window would pass the
+    # same active-listing check and pay EVERY holder twice from the same snapshot. Claim the
+    # market synchronously (no await between check and set) before the first await.
+    # Module-level, not per-cog: the panel and any future caller must share ONE guard.
+    busy = _DELISTING_NOW
+    if market_id in busy:
+        return await interaction.response.send_message(
+            "⏳ A delist for this market is already in progress.", ephemeral=True)
+    busy.add(market_id)
+    try:
+        await interaction.response.defer()   # payouts can exceed the 3s interaction window
+        return await _run_delist_payout(interaction, market_id, name, holders, total_shares, pool, b)
+    finally:
+        busy.discard(market_id)
+
+async def _run_delist_payout(interaction, market_id, name, holders, total_shares, pool, b):
+    import Restocker_db as _db
+    # AUDIT FIX (critical): (1) re-snapshot AFTER the defer — a sell timed into
+    # the defer window used to collect the sale AND the delist payout on shares
+    # it no longer held; (2) never int()-cast holder ids — the ABX index fund
+    # account ("ABX_INDEX_FUND") crashed the loop AFTER the treasury was drained,
+    # leaving a zombie active listing. The fund is paid like any holder; its
+    # payout becomes fund cash, and NAV carries it to unit holders.
+    holders = _db.get_holders(market_id)
+    total_shares = sum(float(h.get("shares") or 0) for h in holders)
+    b = _market_backing(market_id)
+    pool = int(b["cashable"])
+    if total_shares <= 0 or pool <= 0:
+        _db.upsert_market_shares(market_id, active=0)
+        return await interaction.followup.send(
+            f"🪦 **{name}** delisted. No payout ({'no holders' if total_shares<=0 else 'no cash backing'}).")
+    paid = 0
+    failed = []
+    for h in holders:
+        sh = float(h.get("shares") or 0)
+        cb = float(h.get("cost_basis") or 0)
+        amt = int(pool * (sh / total_shares))
+        uid = str(h.get("user_id"))
+        try:
+            # Claim-first: clear the holding, THEN pay — a concurrent sell can't
+            # double-dip. If the credit fails, the holding is restored.
+            _db.adjust_holding(uid, market_id, delta_shares=-sh, delta_cost_basis=-cb)
+        except Exception:
+            failed.append(uid)
+            continue
+        try:
+            if amt > 0:
+                add_coins(uid, amt, counts_as_principal=True)
+                paid += amt
+        except Exception:
+            try:
+                _db.adjust_holding(uid, market_id, delta_shares=sh, delta_cost_basis=cb)
+            except Exception:
+                pass
+            failed.append(uid)
+    # remove exactly what we paid from the backing sources (treasury first, then fund)
+    from_treasury = min(int(b["cash"]), paid)
+    from_fund = paid - from_treasury
+    try:
+        if from_treasury > 0:
+            _db.adjust_treasury(market_id, -float(from_treasury), allow_negative=False)
+        if from_fund > 0:
+            _add_insurance_fund(-float(from_fund))
+    except Exception:
+        pass
+    note = ""
+    if failed:
+        # Keep the listing ACTIVE so re-running /stock delist retries the unpaid
+        # holders (paid holders' shares are already cleared, so the retry only
+        # sees the remainder and the remaining backing).
+        note = (f"\n⚠️ {len(failed)} holder(s) could not be paid — their shares were KEPT and the "
+                f"listing stays active: " + ", ".join(f"<@{u}>" for u in failed[:10])
+                + ". Re-run `/stock delist confirm:true` to retry them.")
+    else:
+        _db.upsert_market_shares(market_id, active=0)
+    await interaction.followup.send(
+        f"🪦 **{name}** declared bankrupt{' & delisted' if not failed else ''}. Paid `{paid:,}` coins to "
+        f"**{len(holders) - len(failed)}** shareholder(s) pro-rata "
+        f"(cash `{from_treasury:,}` + fund `{from_fund:,}`).{note}")

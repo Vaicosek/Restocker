@@ -89,45 +89,6 @@ class DevAssist(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    @app_commands.command(
-        name="propose",
-        description="(Owner) Draft a code change with AI and open a GitHub PR for your review",
-    )
-    @app_commands.describe(
-        file="Path in the repo, e.g. cogs/market.py",
-        request="Describe the change you want made to that file",
-    )
-    async def propose(self, interaction: discord.Interaction, file: str, request: str):
-        uid = interaction.user.id
-        if uid not in _dev_allowed_ids():
-            return await interaction.response.send_message(
-                "⛔ You're not authorized to propose code changes.", ephemeral=True)
-        if not GH_TOKEN:
-            return await interaction.response.send_message(
-                "⚠️ `GITHUB_PR_TOKEN` isn't set in the environment — add it to `.env` first.",
-                ephemeral=True)
-
-        file = file.strip().lstrip("/")
-        if not file or ".." in file or _PROTECTED.search(file):
-            return await interaction.response.send_message(
-                "⛔ That file is protected and can't be edited by the bot.", ephemeral=True)
-
-        await interaction.response.defer(thinking=True)
-        try:
-            pr_url, summary = await self._run(interaction, file, request)
-        except _DevError as e:
-            return await interaction.followup.send(f"❌ {e}")
-        except Exception as e:  # noqa: BLE001
-            log.exception("devassist: /propose failed")
-            return await interaction.followup.send(
-                f"❌ Something went wrong: `{type(e).__name__}: {e}`")
-
-        log.info("devassist: %s (%s) proposed change to %s -> %s", interaction.user, uid, file, pr_url)
-        await interaction.followup.send(
-            f"📝 Drafted a change to `{file}`\n"
-            f"**{summary}**\n"
-            f"Review & merge → {pr_url}\n"
-            f"_Nothing goes live until you merge it and restart the bot._")
 
     # -------------------------------------------------------------- pipeline
     async def _run(self, interaction: discord.Interaction, file: str, request: str):
