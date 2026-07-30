@@ -604,7 +604,9 @@ def _load_stock_data() -> dict:
                 pass
             bonds.append({
                 "id": b["id"], "name": b.get("name") or f"#{b['id']}",
-                "market_id": b["market_id"], "status": b["status"],
+                "market_id": b["market_id"],
+                "market_name": _market_display_name(b["market_id"]),
+                "status": b["status"],
                 "coupon_pct": float(b.get("coupon_pct") or 0),
                 "unit_price": float(b.get("unit_price") or 0),
                 "units_left": max(0, int(float(b.get("units_total") or 0) - float(b.get("units_sold") or 0))),
@@ -1644,7 +1646,7 @@ function renderPortfolio(){
       +'<div class="kv"><span>Unrealised P/L</span><b class="'+sgn(t.pnl)+'">'+(t.pnl>=0?'+':'')+fmt(t.pnl)+'c</b></div>'
       +'<table style="margin-top:8px"><tr><th>Company</th><th>Shares</th><th>Value</th><th>P/L</th><th>Div est.</th></tr>';
  D.holdings.forEach(function(x){
-  h+='<tr><td><b>'+esc(x.mid)+'</b></td><td class="mono">'+fmt(x.shares)+'</td><td class="mono">'+fmt(x.value)
+  h+='<tr><td><b>'+esc(x.name||x.mid)+'</b></td><td class="mono">'+fmt(x.shares)+'</td><td class="mono">'+fmt(x.value)
     +'c</td><td class="mono '+sgn(x.pnl)+'">'+(x.pnl>=0?'+':'')+fmt(x.pnl)+'c</td><td class="mono">'+fmt(x.dividends_est)+'c</td></tr>';});
  b.innerHTML=h+'</table><div class="faint" style="font-size:10px;margin-top:6px">Div est. applies each '
   +'month’s per-share payout to your CURRENT share count — historical position sizes aren’t stored, '
@@ -1659,7 +1661,7 @@ function renderDividends(){
  document.getElementById('dvNote').textContent=rows.length+' payments';
  var h='<table><tr><th>Month</th><th>Company</th><th>Per share</th><th>Total</th><th>Holders</th></tr>';
  rows.slice(0,40).forEach(function(r){
-  h+='<tr><td class="mono">'+esc(r.month)+'</td><td>'+esc(r.mid)+'</td><td class="mono up">'
+  h+='<tr><td class="mono">'+esc(r.month)+'</td><td>'+esc((D.names&&D.names[r.mid])||r.mid)+'</td><td class="mono up">'
     +(+r.per_share).toFixed(2)+'c</td><td class="mono">'+fmt(r.total)+'c</td><td class="mono">'+fmt(r.holders)+'</td></tr>';});
  b.innerHTML=h+'</table>';}
 
@@ -2810,7 +2812,7 @@ function renderBonds(bonds){
   row.innerHTML='<div style="display:flex;justify-content:space-between;gap:8px">'
    +'<b>'+esc(b.name)+' <span class="faint">#'+b.id+'</span></b>'
    +'<span class="'+(covOk?'up':'down')+'">'+(b.coverage!=null?b.coverage.toFixed(0)+'%':'-')+'</span></div>'
-   +'<div class="faint" style="font-size:11px">'+esc(b.market_id)+' &middot; '+b.coupon_pct.toFixed(2)+'%/mo &middot; '
+   +'<div class="faint" style="font-size:11px">'+esc(b.market_name||b.market_id)+' &middot; '+b.coupon_pct.toFixed(2)+'%/mo &middot; '
    +'matures '+esc(b.matures_at||'-')+' &middot; '+fmt(b.units_left)+' left @ '+fmt(Math.round(b.unit_price))+'c</div>';
   if(open){
    const wrap=document.createElement('div');
@@ -3146,6 +3148,24 @@ async def _handle_bond_capacity(request):
     })
 
 
+def _market_display_name(mid: str) -> str:
+    """Display name for a market id, falling back to the stock label, then the id."""
+    try:
+        raw = (_load_markets() or {}).get(mid)
+        if isinstance(raw, dict) and raw.get("name"):
+            return str(raw["name"])
+    except Exception:
+        pass
+    try:
+        import Restocker_db as _d
+        lbl = _d.get_config(f"stock_label:{mid}")
+        if lbl:
+            return str(lbl)
+    except Exception:
+        pass
+    return str(mid)
+
+
 async def _handle_api_investor(request):
     """Everything an investor needs in one call: holdings marked to market, the dividend
     history those holdings actually earned, per-company detail, and open proposals with
@@ -3211,7 +3231,9 @@ async def _handle_api_investor(request):
                 # approximation (we do not store historical position sizes), so label it.
                 earned = sum(float(d.get("per_share") or 0) for d in (dividends.get(mid) or [])) * sh
                 holdings.append({
-                    "mid": mid, "shares": sh, "price": price,
+                    # Ship the display NAME too: the id ("main") is an internal handle and
+                    # showing it is why a market renamed to GreyHames still read as "main".
+                    "mid": mid, "name": _market_display_name(mid), "shares": sh, "price": price,
                     "value": sh * price, "cost": cost, "pnl": sh * price - cost,
                     "dividends_est": earned,
                 })
@@ -3255,6 +3277,7 @@ async def _handle_api_investor(request):
         "companies": companies, "holdings": holdings,
         "totals": {"value": total_value, "cost": total_cost, "pnl": total_value - total_cost},
         "dividends": dividends, "proposals": proposals,
+        "names": {m["mid"]: m["name"] for m in companies},
     })
 
 

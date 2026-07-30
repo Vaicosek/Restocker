@@ -11303,6 +11303,22 @@ _AI_TOOLS = [
         }
     },
     {
+        "name": "set_market_details",
+        "description": "Rename a market (display name), set its OWNER, its leader role, platform fee, or active flag. Managers only. The market_id itself never changes — it keys history files, channel bindings and ledger rows. Use for 'rename main to GreyHames' or 'set X as owner of Y'.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "market_id": {"type": "string", "description": "Which market (the id, e.g. 'main')."},
+                "name": {"type": "string", "description": "New DISPLAY name, e.g. 'GreyHames'."},
+                "owner_id": {"type": "string", "description": "Discord user id (or @mention) of the new owner."},
+                "role_name": {"type": "string", "description": "Discord role name that identifies the market leader (gates CSN code access)."},
+                "fee_pct": {"type": "number", "description": "Platform fee %, 0-50."},
+                "active": {"type": "boolean", "description": "Active flag."}
+            },
+            "required": ["market_id"]
+        }
+    },
+    {
         "name": "set_market_finances",
         "description": "Set a listed company's TREASURY (its own cash, which backs the share price), or correct its VAULT balance / pledged-item value. Managers only. Values are ABSOLUTE, not deltas. Important: a vault deposit does NOT raise the treasury — they are separate numbers, and vault figures are bookkeeping only (no coins move). Use this when someone says 'set X's treasury to N' or 'I put money in the vault by mistake'.",
         "input_schema": {
@@ -12678,6 +12694,63 @@ async def _ai_tool_propose_code_change(guild, channel, user, args):
                 f"(nothing goes live until you merge it and restart).")
     except Exception as e:  # noqa: BLE001
         return f"❌ Failed: {type(e).__name__}: {e}"
+
+
+async def _ai_tool_set_market_details(guild, channel, user, args):
+    """Rename an existing market, set its owner, fee, leader role, or active flag.
+
+    The market_id is NEVER changed. It keys csn_history files, channel bindings, stock
+    listings, hive feeds and every ledger row — renaming it would orphan all of them.
+    Only the DISPLAY NAME changes, which is what people actually see.
+    """
+    if not _ai_is_manager(user):
+        return "❌ Managers only."
+    mid = str(args.get("market_id") or "").strip()
+    data = _load_markets()
+    markets = data.setdefault("markets", {})
+    if mid not in markets:
+        return (f"❌ Market `{mid}` not found. Known: "
+                + ", ".join(f"`{k}`" for k in markets))
+    m = markets[mid]
+    out = []
+
+    name = str(args.get("name") or "").strip()
+    if name:
+        out.append(f"name `{m.get('name', mid)}` → **{name}**")
+        m["name"] = name[:64]
+
+    raw = str(args.get("owner_id") or "").strip().strip("<@!>")
+    if raw:
+        if not raw.isdigit():
+            return "❌ owner_id must be a Discord user id."
+        out.append(f"owner `{m.get('owner_id') or 'unset'}` → <@{raw}>")
+        m["owner_id"] = int(raw)
+
+    role = args.get("role_name")
+    if role is not None and str(role).strip():
+        out.append(f"leader role → **{str(role).strip()}**")
+        m["discord_role_name"] = str(role).strip()
+
+    fee = args.get("fee_pct")
+    if fee is not None and str(fee).strip() != "":
+        try:
+            f = round(max(0.0, min(50.0, float(fee))), 4)
+        except Exception:
+            return "❌ fee_pct must be a number 0-50."
+        out.append(f"fee `{m.get('platform_fee_pct', 0)}%` → **{f}%**")
+        m["platform_fee_pct"] = f
+
+    act = args.get("active")
+    if act is not None:
+        m["active"] = bool(act)
+        out.append("status → **" + ("active" if act else "inactive") + "**")
+
+    if not out:
+        return "❌ Nothing to change. Give name, owner_id, role_name, fee_pct or active."
+    _save_markets(data)
+    return (f"✅ `{mid}` updated — " + "; ".join(out) + "."
+            + "\nThe market id stays `" + mid + "` on purpose: it keys the history files, "
+              "channel binding, stock listing and every ledger row.")
 
 
 async def _ai_tool_set_market_finances(guild, channel, user, args):
@@ -14137,6 +14210,7 @@ _AI_TOOL_MAP = {
     "get_channel_config":   _ai_tool_get_channel_config,
     "set_channel_config":   _ai_tool_set_channel_config,
     "propose_code_change":  _ai_tool_propose_code_change,
+    "set_market_details":    _ai_tool_set_market_details,
     "set_market_finances":   _ai_tool_set_market_finances,
     "credit_team_work":      _ai_tool_credit_team_work,
     "manage_outages":        _ai_tool_manage_outages,
@@ -14148,6 +14222,7 @@ _AI_TOOL_MAP = {
 
 # Tools whose effects are destructive/moderation-level — flagged in the audit log.
 _AI_SENSITIVE_TOOLS = {
+    "set_market_details",   # ownership + naming
     "set_market_finances",  # sets money backing share prices
     "credit_team_work",     # moves who gets credit for real work
     "clean_item_names",     # renames catalog + stock rows
