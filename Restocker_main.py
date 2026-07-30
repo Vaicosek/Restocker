@@ -11105,6 +11105,9 @@ _AI_TOOLS = [
         "input_schema": {
             "type": "object",
             "properties": {
+                "stackable": {"type": "boolean", "description": "true = stacks to 64 (default for blocks/ingots), false = single item (potions, tools, armor)."},
+                "stack_size": {"type": "integer", "description": "Exact stack size, e.g. 16. Wins over 'stackable'."},
+                "per_stack": {"type": "boolean", "description": "true = 'price' is per STACK OF 64; the bot divides by 64."},
                 "market_id": {"type": "string", "description": "Existing market to value from its CSN history (optional)"},
                 "monthly_profit": {"type": "number", "description": "Monthly net profit in coins, for a what-if / not-yet-tracked market"},
                 "growth_pct": {"type": "number", "description": "Recent profit growth percent; scales the P/E (optional)"},
@@ -11237,12 +11240,16 @@ _AI_TOOLS = [
     },
     {
         "name": "set_item_price",
-        "description": "Change the coin price of an EXISTING catalog item (Manager only). Matches by exact, then case-insensitive, then partial name. Stock and other settings are preserved. Use add_item instead if the item doesn't exist yet.",
+        "description": "Edit an EXISTING catalog item (Manager only): coin price, stackability, stack size and worker_cost. Replaces the retired /item edit. Matches by exact, then case-insensitive, then partial name. Stock is preserved, and the normal/Future twin is kept at the same price. Use add_item if the item doesn't exist yet.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "name": {"type": "string", "description": "Item name (partial match ok if unambiguous)"},
-                "price": {"type": "number", "description": "New coin price"}
+                "price": {"type": "number", "description": "New coin price. PER PIECE unless per_stack is true."},
+                "per_stack": {"type": "boolean", "description": "true = 'price' is per STACK OF 64; the bot divides by 64. Shop signs quote per stack."},
+                "stackable": {"type": "boolean", "description": "true = stacks to 64, false = single item (potions, tools, armor). Omit to leave unchanged."},
+                "stack_size": {"type": "integer", "description": "Exact stack size, e.g. 16. Wins over 'stackable'. Omit to leave unchanged."},
+                "worker_cost": {"type": "integer", "description": "Per-piece break-even cost used by consignment futures. Omit to leave unchanged."}
             },
             "required": ["name", "price"]
         }
@@ -12302,20 +12309,46 @@ async def _ai_tool_add_item(guild, channel, user, args):
         return "❌ A numeric coin price is required."
     if price < 0:
         return "❌ Price cannot be negative."
-    coin = int(round(price))
+    # per_stack: shop signs quote per STACK OF 64 but every stored price is PER PIECE.
+    # Storing a stack price is the 64x error that wrecks wages and barrel maths.
+    if bool(args.get("per_stack")):
+        coin = round(price / 64.0, 4)
+    else:
+        coin = int(round(price))
     market_id = (args.get("market_id") or "main").strip() or "main"
     existing = _load_items().get("items", {}).get(name)
+    # Stackability was hardcoded from `existing`, so a NEW item always landed as
+    # stack_size=1 no matter what was asked for — the 64x barrel error in reverse.
+    if args.get("stack_size") is not None:
+        try:
+            ss = max(1, int(args.get("stack_size")))
+        except Exception:
+            return "❌ stack_size must be a whole number."
+    elif args.get("stackable") is not None:
+        ss = 64 if bool(args.get("stackable")) else 1
+    elif bool(args.get("per_stack")):
+        ss = 64
+    else:
+        ss = int((existing or {}).get("stack_size", 1) or 1)
+    stackable = ss > 1
     try:
         import Restocker_db as _db
         _db.upsert_item(
             name=name, coin=coin,
             stock=int((existing or {}).get("stock", 0)),
             unit_type=(existing or {}).get("unit_type", "pieces"),
-            stackable=bool((existing or {}).get("stackable", False)),
-            stack_size=int((existing or {}).get("stack_size", 1)),
+            stackable=stackable, stack_size=ss,
             barrel_slots=int((existing or {}).get("barrel_slots", 54)),
             market_id=(existing or {}).get("market_id", market_id),
         )
+        # Mirror to the YAML catalog: it is what the order/pricing paths read. Writing
+        # only the DB left the two stores disagreeing about brand-new items.
+        shops = _load_items()
+        entry = (shops.setdefault("items", {})).setdefault(name, {})
+        entry.update({"coin": coin, "stackable": stackable, "stack_size": ss,
+                      "market_id": (existing or {}).get("market_id", market_id)})
+        entry.setdefault("stock", 0)
+        _save_items(shops)
     except Exception as e:
         return f"❌ Failed to save item: {e}"
     verb = "Updated" if existing else "Added"
@@ -12346,19 +12379,59 @@ async def _ai_tool_set_item_price(guild, channel, user, args):
         else:
             return f"❌ No item named '{name_q}'. Use add_item to create it first."
     info = items[key]
+    # Stackability: explicit stack_size wins over the yes/no toggle, matching what
+    # /item edit did before it was retired.
+    new_ss = None
+    if args.get("stack_size") is not None:
+        try:
+            new_ss = max(1, int(args.get("stack_size")))
+        except Exception:
+            return "❌ stack_size must be a whole number."
+    elif args.get("stackable") is not None:
+        new_ss = 64 if bool(args.get("stackable")) else 1
+    if bool(args.get("per_stack")) and new_ss is None:
+        new_ss = 64
+    stackable = (new_ss > 1) if new_ss is not None else bool(info.get("stackable", False))
+    stack_size = new_ss if new_ss is not None else int(info.get("stack_size", 1))
+
+    wc = args.get("worker_cost")
     try:
         import Restocker_db as _db
         _db.upsert_item(
             name=key, coin=coin, stock=int(info.get("stock", 0)),
             unit_type=info.get("unit_type", "pieces"),
-            stackable=bool(info.get("stackable", False)),
-            stack_size=int(info.get("stack_size", 1)),
+            stackable=stackable, stack_size=stack_size,
             barrel_slots=int(info.get("barrel_slots", 54)),
             market_id=info.get("market_id", "main"),
         )
+        # Mirror into the YAML catalog too — it is the source of truth the order and
+        # pricing paths read; writing only the DB left the two stores disagreeing.
+        shops = _load_items()
+        entry = (shops.setdefault("items", {})).setdefault(key, {})
+        entry["coin"] = coin
+        entry["stackable"] = stackable
+        entry["stack_size"] = stack_size
+        if wc is not None:
+            entry["worker_cost"] = int(wc)
+            _db.set_item_worker_cost(key, int(wc))
+        _save_items(shops)
     except Exception as e:
-        return f"❌ Failed to update price: {e}"
-    return f"✅ **{key}** price set to {coin} coins."
+        return f"❌ Failed to update item: {e}"
+
+    # Keep the normal <-> Future twin at the same price so paired items don't drift.
+    twin = None
+    try:
+        twin = _sync_twin_price(key, coin)
+    except Exception as ex:
+        log.warning("[set_item_price] twin sync failed for %s: %s", key, ex)
+
+    bits = [f"price `{coin}`/piece" + (f" (from {price:,.0f}/stack)" if args.get("per_stack") else "")]
+    if new_ss is not None:
+        bits.append("stackable **" + (f"yes x{stack_size}" if stackable else "no (single)") + "**")
+    if wc is not None:
+        bits.append(f"worker cost `{int(wc)}`")
+    return (f"✅ **{key}** — " + "; ".join(bits) + "."
+            + (f"\n↔️ Synced its twin **{twin}** to the same price." if twin else ""))
 
 
 async def _ai_tool_set_alias(guild, channel, user, args):
