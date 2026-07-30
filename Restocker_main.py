@@ -11303,6 +11303,19 @@ _AI_TOOLS = [
         }
     },
     {
+        "name": "migrate_market_id",
+        "description": "Rename a market's internal ID everywhere it is keyed — share holdings, ledgers, config, history files. OWNER ONLY and destructive: PREVIEW first (apply defaults to false) and show the user the row counts before applying. Use only when someone explicitly asks to change a market's ID, not its display name (use set_market_details for renaming what people see).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "old_id": {"type": "string", "description": "Current market id, e.g. 'main'."},
+                "new_id": {"type": "string", "description": "New market id, lowercase, e.g. 'greyhames'."},
+                "apply": {"type": "boolean", "description": "false (default) = preview. true = actually migrate."}
+            },
+            "required": ["old_id", "new_id"]
+        }
+    },
+    {
         "name": "set_market_details",
         "description": "Rename a market (display name), set its OWNER, its leader role, platform fee, or active flag. Managers only. The market_id itself never changes — it keys history files, channel bindings and ledger rows. Use for 'rename main to GreyHames' or 'set X as owner of Y'.",
         "input_schema": {
@@ -12694,6 +12707,84 @@ async def _ai_tool_propose_code_change(guild, channel, user, args):
                 f"(nothing goes live until you merge it and restart).")
     except Exception as e:  # noqa: BLE001
         return f"❌ Failed: {type(e).__name__}: {e}"
+
+
+async def _ai_tool_migrate_market_id(guild, channel, user, args):
+    """Rename a market's ID everywhere it is keyed. PREVIEWS unless apply=true.
+
+    OWNER ONLY. This rewrites the join key behind share holdings and every ledger — a
+    half-applied run strands real positions, so it is one transaction that rolls back on
+    any error and refuses outright if the target id already exists anywhere.
+
+    Also moves the YAML side: the markets.yml key, the csn_history_file pointer, and the
+    history file on disk. Those are not in the DB transaction, so they are done LAST —
+    if the DB step fails, nothing on disk has moved.
+    """
+    if int(getattr(user, "id", 0)) not in MANAGER_DM_IDS:
+        return "❌ Owner only — this rewrites the key behind every share holding."
+    import importlib, os
+    import migrate_market_id as _mig
+    importlib.reload(_mig)
+    import Restocker_db as _db
+
+    old = str(args.get("old_id") or "").strip()
+    new = str(args.get("new_id") or "").strip().lower()
+    if not old or not new:
+        return "❌ Need old_id and new_id."
+    if not re.match(r"^[a-z0-9_-]{1,32}$", new):
+        return "❌ New id must be lowercase letters, digits, hyphens or underscores."
+    markets = (_load_markets().get("markets", {}) or {})
+    if old not in markets:
+        return f"❌ `{old}` isn't a known market. Known: " + ", ".join(f"`{k}`" for k in markets)
+    if new in markets:
+        return f"❌ `{new}` already exists as a market."
+
+    with _db.db() as conn:
+        p = _mig.plan(conn, old, new)
+    if p["collisions"]:
+        return ("❌ Refusing — `{}` already has rows in: {}. Migrating would collide."
+                .format(new, ", ".join(p["collisions"])))
+
+    tbl = "\n".join(f"• `{t}.{c}` — {n:,} row(s)" for t, c, n in p["tables"])
+    head = (f"**Migrate `{old}` → `{new}`**\n{tbl}\n"
+            f"• `bot_config` — {len(p['config']):,} key(s)\n"
+            f"• `markets.yml` key + `csn_history_file` + the history file on disk\n"
+            f"**{p['rows']:,} rows total.**")
+    if not bool(args.get("apply")):
+        return (head + "\n\n⚠️ Operators' CSN mods have the OLD id in their settings. After "
+                "this runs, uploads keep working only for markets whose CHANNEL is bound "
+                "(channel binding wins over the code); anyone relying on the market code "
+                "must update their mod.\n\nNothing changed. Ask me to apply it.")
+
+    def _do():
+        import shutil
+        with _db.db() as conn:
+            _mig.apply(conn, old, new)
+        # YAML last: if the DB step raised, nothing on disk has moved.
+        data = _load_markets()
+        mk = data.get("markets") or {}
+        entry = mk.pop(old, {}) or {}
+        old_file = entry.get("csn_history_file") or f"csn_history_{old}.yml"
+        new_file = CSN_HISTORY_FILE if new == DEFAULT_MARKET_ID else f"csn_history_{new}.yml"
+        entry["csn_history_file"] = new_file
+        mk[new] = entry
+        _save_markets(data)
+        try:
+            src = _resolve_data_file(old_file)
+            if os.path.exists(src):
+                shutil.move(src, _resolve_data_file(new_file))
+        except Exception as ex:
+            log.warning("[migrate] history file move failed (%s -> %s): %s",
+                        old_file, new_file, ex)
+        return new_file
+
+    try:
+        nf = await run_on_bot_loop(_do, _timeout=120.0)
+    except Exception as e:
+        return f"⚠️ Migration failed and was rolled back: {type(e).__name__}: {e}"
+    return (f"✅ Migrated **{old} → {new}** — {p['rows']:,} rows, {len(p['config'])} config "
+            f"key(s), history file now `{nf}`.\n"
+            f"Restart the bot so every cached id is reloaded.")
 
 
 async def _ai_tool_set_market_details(guild, channel, user, args):
@@ -14210,6 +14301,7 @@ _AI_TOOL_MAP = {
     "get_channel_config":   _ai_tool_get_channel_config,
     "set_channel_config":   _ai_tool_set_channel_config,
     "propose_code_change":  _ai_tool_propose_code_change,
+    "migrate_market_id":     _ai_tool_migrate_market_id,
     "set_market_details":    _ai_tool_set_market_details,
     "set_market_finances":   _ai_tool_set_market_finances,
     "credit_team_work":      _ai_tool_credit_team_work,
@@ -14222,6 +14314,7 @@ _AI_TOOL_MAP = {
 
 # Tools whose effects are destructive/moderation-level — flagged in the audit log.
 _AI_SENSITIVE_TOOLS = {
+    "migrate_market_id",    # rewrites the key behind every holding
     "set_market_details",   # ownership + naming
     "set_market_finances",  # sets money backing share prices
     "credit_team_work",     # moves who gets credit for real work
