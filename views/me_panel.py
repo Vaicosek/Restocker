@@ -165,30 +165,72 @@ class _TeamIgnModal(discord.ui.Modal, title="Join a team"):
 
 
 class _PickManagerView(discord.ui.View):
-    """Step 1: choose the manager with Discord's OWN user picker — type-to-search, no ids.
+    """Step 1: choose a TEAM, not a person.
 
-    This is why joining a team is a view and not a single modal: modals may only contain
-    text inputs, so folding /team join into one turned `manager: discord.Member` into
-    "paste a Discord user id", which is how onboarding got stuck.
+    A generic user picker asked the wrong question — a new worker is told "join Pollum
+    sector", so they know the TEAM, not which Discord account manages it. This lists the
+    teams that actually exist, named, with their size. The user picker stays as a fallback
+    for a manager who has no roster yet and so does not appear in the list.
     """
 
     def __init__(self, panel, user_id: int):
         super().__init__(timeout=300)
         self.panel = panel
         self.user_id = int(user_id)
-        sel = discord.ui.UserSelect(placeholder="Search for your manager…", max_values=1)
+        d = _db()
+        opts = []
+        try:
+            for mgr in (d.get_all_team_managers() or []):
+                mid = str(mgr)
+                if mid == str(user_id):
+                    continue                      # can't join your own team
+                try:
+                    name = str(d.get_config(f"team_name:{mid}") or "").strip()
+                except Exception:
+                    name = ""
+                size = len(d.get_team(mid) or [])
+                who = None
+                try:
+                    who = core.bot.get_user(int(mid))
+                except Exception:
+                    pass
+                label = name or (getattr(who, "display_name", None) or f"Team {mid[:6]}")
+                desc = (f"led by {who.display_name}" if who and name else "")
+                desc = (desc + (" · " if desc else "") + f"{size} member(s)")[:100]
+                opts.append(discord.SelectOption(label=label[:100], value=mid, description=desc))
+        except Exception as ex:
+            log.debug("[me] team list failed: %s", ex)
 
-        async def pick(i: discord.Interaction):
-            await i.response.send_modal(_TeamIgnModal(self.panel, sel.values[0]))
-        sel.callback = pick
-        self.add_item(sel)
+        if opts:
+            sel = discord.ui.Select(placeholder="Pick your team…", options=opts[:25], row=0)
+
+            async def pick_team(i: discord.Interaction):
+                mgr = core.bot.get_user(int(sel.values[0]))
+                if mgr is None:
+                    try:
+                        mgr = await core.bot.fetch_user(int(sel.values[0]))
+                    except Exception:
+                        return await i.response.send_message(
+                            "❌ Couldn't resolve that team's manager.", ephemeral=True)
+                await i.response.send_modal(_TeamIgnModal(self.panel, mgr))
+            sel.callback = pick_team
+            self.add_item(sel)
+
+        us = discord.ui.UserSelect(
+            placeholder=("Or search for a manager by name…" if opts
+                         else "Search for your manager…"),
+            max_values=1, row=1)
+
+        async def pick_user(i: discord.Interaction):
+            await i.response.send_modal(_TeamIgnModal(self.panel, us.values[0]))
+        us.callback = pick_user
+        self.add_item(us)
 
     async def interaction_check(self, i: discord.Interaction) -> bool:
         if int(i.user.id) != self.user_id:
             await i.response.send_message("This panel isn't yours.", ephemeral=True)
             return False
         return True
-
 
 
 class MePanelView(discord.ui.View):
@@ -225,7 +267,7 @@ class MePanelView(discord.ui.View):
     async def _ign(self, i): await i.response.send_modal(_IgnModal(self))
     async def _team(self, i: discord.Interaction):
         await i.response.send_message(
-            "Pick your manager — start typing their name:",
+            "Pick your team:",
             view=_PickManagerView(self, i.user.id), ephemeral=True)
 
     async def _loyalty(self, i: discord.Interaction):
