@@ -100,28 +100,25 @@ class _IgnModal(discord.ui.Modal, title="Link an in-game name"):
         await cog._register_ign_impl(i, str(self.ign.value or "").strip())
 
 
-class _TeamModal(discord.ui.Modal, title="Join a team"):
-    """Was /team join. Reproduces all three guards: IGN already owned by someone else,
-    already on another manager's team, and money-bearing IGNs can't be self-claimed."""
+class _TeamIgnModal(discord.ui.Modal, title="Join a team"):
+    """Step 2: the IGN. The MANAGER was already chosen with a native user picker, so
+    nobody has to find a Discord ID."""
 
-    def __init__(self, panel):
+    def __init__(self, panel, manager: discord.abc.User):
         super().__init__(timeout=300)
-        self.panel = panel
-        self.mgr = discord.ui.TextInput(label="Manager's Discord user id", required=True,
-                                        placeholder="right-click them → Copy User ID")
-        self.ign = discord.ui.TextInput(label="Your EXACT Minecraft name", required=True,
-                                        max_length=16)
-        self.add_item(self.mgr); self.add_item(self.ign)
+        self.panel, self.manager = panel, manager
+        self.ign = discord.ui.TextInput(
+            label="Your EXACT Minecraft name", required=True, max_length=16,
+            placeholder="case-sensitive, e.g. DivineAxo")
+        self.add_item(self.ign)
 
     async def on_submit(self, i: discord.Interaction):
         d = _db()
         uid = str(i.user.id)
-        raw = str(self.mgr.value or "").strip().strip("<@!>")
+        raw = str(self.manager.id)
         ign = str(self.ign.value or "").strip()
-        if not raw.isdigit():
-            return await i.response.send_message("❌ That isn't a user id.", ephemeral=True)
         if raw == uid:
-            return await i.response.send_message("❌ Pick a real manager, not yourself.", ephemeral=True)
+            return await i.response.send_message("❌ Pick a manager, not yourself.", ephemeral=True)
         if not _IGN_RE.match(ign):
             return await i.response.send_message(
                 "❌ IGN must be 3–16 characters: letters, numbers, underscores.", ephemeral=True)
@@ -153,20 +150,45 @@ class _TeamModal(discord.ui.Modal, title="Join a team"):
         except Exception:
             pass
         d.set_ign(uid, ign)
-        # Registering clears any pending role-strip deadline — every registration path
-        # MUST do this or the deadline loop strips the role of someone who did register.
         try:
             d.delete_ign_pending(uid)
         except Exception as ex:
             log.warning("[me] delete_ign_pending failed for %s: %s", uid, ex)
-        d.set_team_member(uid, raw)          # NOT set_manager_of — that does not exist
+        d.set_team_member(uid, raw)
         try:
-            mgr_user = core.bot.get_user(int(raw))
-            if mgr_user:
-                await mgr_user.send(f"<@{uid}> (IGN `{ign}`) joined your team.")
+            await self.manager.send(f"<@{uid}> (IGN `{ign}`) joined your team.")
         except Exception:
             pass
-        await self.panel.refresh(i, f"✅ Joined <@{raw}>'s team as `{ign}`.")
+        await i.response.send_message(
+            f"✅ Joined {self.manager.mention}'s team as `{ign}`. Your orders and tracked "
+            f"sales now credit them.", ephemeral=True)
+
+
+class _PickManagerView(discord.ui.View):
+    """Step 1: choose the manager with Discord's OWN user picker — type-to-search, no ids.
+
+    This is why joining a team is a view and not a single modal: modals may only contain
+    text inputs, so folding /team join into one turned `manager: discord.Member` into
+    "paste a Discord user id", which is how onboarding got stuck.
+    """
+
+    def __init__(self, panel, user_id: int):
+        super().__init__(timeout=300)
+        self.panel = panel
+        self.user_id = int(user_id)
+        sel = discord.ui.UserSelect(placeholder="Search for your manager…", max_values=1)
+
+        async def pick(i: discord.Interaction):
+            await i.response.send_modal(_TeamIgnModal(self.panel, sel.values[0]))
+        sel.callback = pick
+        self.add_item(sel)
+
+    async def interaction_check(self, i: discord.Interaction) -> bool:
+        if int(i.user.id) != self.user_id:
+            await i.response.send_message("This panel isn't yours.", ephemeral=True)
+            return False
+        return True
+
 
 
 class MePanelView(discord.ui.View):
@@ -201,7 +223,10 @@ class MePanelView(discord.ui.View):
             log.debug("[me] refresh failed: %s", ex)
 
     async def _ign(self, i): await i.response.send_modal(_IgnModal(self))
-    async def _team(self, i): await i.response.send_modal(_TeamModal(self))
+    async def _team(self, i: discord.Interaction):
+        await i.response.send_message(
+            "Pick your manager — start typing their name:",
+            view=_PickManagerView(self, i.user.id), ephemeral=True)
 
     async def _loyalty(self, i: discord.Interaction):
         from views.loyalty_settings import LoyaltyHubView, build_hub_embed

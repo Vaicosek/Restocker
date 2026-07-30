@@ -62,22 +62,45 @@ def build_embed(manager_id: int) -> discord.Embed:
     return e
 
 
-class _AddModal(discord.ui.Modal, title="Add member / link IGN"):
-    def __init__(self, panel):
+class _PickMemberView(discord.ui.View):
+    """Step 1: pick the person with Discord's own user picker — type-to-search.
+
+    Modals may only contain TEXT inputs, so "Add member" as a single modal forced managers
+    to hunt for a raw Discord id (Developer Mode → right-click → Copy User ID). That is a
+    dead end for anyone who doesn't already know the trick, and it stalled real onboarding.
+    A view can hold a UserSelect; a modal cannot. Hence two steps.
+    """
+
+    def __init__(self, panel, user_id: int):
         super().__init__(timeout=300)
         self.panel = panel
-        self.uid = discord.ui.TextInput(label="Discord user id", placeholder="123456789012345678",
-                                        required=True)
-        self.ign = discord.ui.TextInput(label="Exact in-game name (optional)",
-                                        placeholder="Vaicos_Isman", required=False)
-        self.add_item(self.uid)
+        self.user_id = int(user_id)
+        sel = discord.ui.UserSelect(placeholder="Search for the member…", max_values=1)
+
+        async def pick(i: discord.Interaction):
+            await i.response.send_modal(_AddModal(self.panel, sel.values[0]))
+        sel.callback = pick
+        self.add_item(sel)
+
+    async def interaction_check(self, i: discord.Interaction) -> bool:
+        if int(i.user.id) != self.user_id:
+            await i.response.send_message("This panel isn't yours.", ephemeral=True)
+            return False
+        return True
+
+
+class _AddModal(discord.ui.Modal, title="Add member / link IGN"):
+    def __init__(self, panel, member):
+        super().__init__(timeout=300)
+        self.panel, self.member = panel, member
+        self.ign = discord.ui.TextInput(
+            label=f"IGN for {getattr(member, 'display_name', member)}"[:45],
+            placeholder="Exact in-game name (optional)", required=False)
         self.add_item(self.ign)
 
     async def on_submit(self, interaction: discord.Interaction):
         d = _db()
-        raw = str(self.uid.value).strip().strip("<@!>")
-        if not raw.isdigit():
-            return await interaction.response.send_message("❌ That isn't a user id.", ephemeral=True)
+        raw = str(self.member.id)
         if int(raw) == int(self.panel.manager_id):
             return await interaction.response.send_message("❌ You can't add yourself.", ephemeral=True)
         existing = d.get_manager_of(raw)
@@ -171,7 +194,8 @@ class TeamSettingsView(discord.ui.View):
             log.debug("[team panel] refresh failed: %s", ex)
 
     async def _add(self, interaction: discord.Interaction):
-        await interaction.response.send_modal(_AddModal(self))
+        await interaction.response.send_message("Pick the member — start typing their name:",
+            view=_PickMemberView(self, i.user.id), ephemeral=True)
 
     async def _rename(self, interaction: discord.Interaction):
         await interaction.response.send_modal(_NameModal(self))
