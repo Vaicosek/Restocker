@@ -544,64 +544,9 @@ class ValuationCog(commands.Cog):
         await interaction.followup.send(embed=embed)
 
     # ── server-outage windows (global; a DDoS/downtime must not hurt companies) ──
-    outage = app_commands.Group(
-        name="outage", description="(Manager) Server-outage windows excluded from every valuation")
 
-    @outage.command(name="add", description="Record a server-outage window — excluded from all valuations")
-    @app_commands.describe(start="Start date (YYYY-MM-DD)", end="End date (YYYY-MM-DD)", reason="What happened (e.g. DDoS)")
-    async def outage_add(self, interaction: discord.Interaction, start: str, end: str,
-                         reason: Optional[str] = ""):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Server managers only.", ephemeral=True)
-        try:
-            sd = date.fromisoformat(start.strip())
-            ed = date.fromisoformat(end.strip())
-        except Exception:
-            return await interaction.response.send_message("❌ Dates must be `YYYY-MM-DD`.", ephemeral=True)
-        if ed < sd:
-            return await interaction.response.send_message("❌ End date is before the start date.", ephemeral=True)
-        import Restocker_db as _db
-        wins = _load_outages(_db)
-        wins.append({"start": sd.isoformat(), "end": ed.isoformat(), "reason": (reason or "").strip()})
-        wins.sort(key=lambda w: w["start"])
-        _save_outages(_db, wins)
-        days = (ed - sd).days + 1
-        thr = int(_gd(_db, "outage_month_threshold", DEF["outage_month_threshold"]) * 100)
-        await interaction.response.send_message(
-            f"✅ Outage recorded: **{sd} → {ed}** ({days}d)"
-            + (f" · {reason}" if reason else "")
-            + f"\nAny month ≥{thr}% inside an outage now drops out of every company's run-rate.",
-            ephemeral=True)
 
-    @outage.command(name="list", description="Show recorded server-outage windows")
-    async def outage_list(self, interaction: discord.Interaction):
-        import Restocker_db as _db
-        wins = _load_outages(_db)
-        if not wins:
-            return await interaction.response.send_message("No outage windows recorded.", ephemeral=True)
-        lines = []
-        for i, w in enumerate(wins):
-            try:
-                d = f"{(date.fromisoformat(w['end']) - date.fromisoformat(w['start'])).days + 1}d"
-            except Exception:
-                d = "?"
-            lines.append(f"`{i}` **{w['start']} → {w['end']}** ({d})"
-                         + (f" · {w['reason']}" if w.get("reason") else ""))
-        await interaction.response.send_message("🛑 **Server-outage windows**\n" + "\n".join(lines), ephemeral=True)
 
-    @outage.command(name="remove", description="Remove an outage window by index (see /outage list)")
-    @app_commands.describe(index="Index shown by /outage list")
-    async def outage_remove(self, interaction: discord.Interaction, index: int):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Server managers only.", ephemeral=True)
-        import Restocker_db as _db
-        wins = _load_outages(_db)
-        if index < 0 or index >= len(wins):
-            return await interaction.response.send_message(f"❌ No outage window at index {index}.", ephemeral=True)
-        removed = wins.pop(index)
-        _save_outages(_db, wins)
-        await interaction.response.send_message(
-            f"🗑️ Removed outage **{removed['start']} → {removed['end']}**.", ephemeral=True)
 
 
 async def setup(bot):

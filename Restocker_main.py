@@ -11300,6 +11300,21 @@ _AI_TOOLS = [
         }
     },
     {
+        "name": "manage_outages",
+        "description": "Record, list or remove server-outage windows (DDoS/downtime). Months mostly inside an outage are excluded from every company's run-rate valuation, so downtime doesn't crash stock prices. Replaces the retired /outage command. Listing is open; adding and removing are managers only.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["add", "list", "remove"], "description": "Default list."},
+                "start": {"type": "string", "description": "Start date YYYY-MM-DD (add only)."},
+                "end": {"type": "string", "description": "End date YYYY-MM-DD (add only)."},
+                "reason": {"type": "string", "description": "What happened, e.g. 'DDoS'. Optional."},
+                "index": {"type": "integer", "description": "Index from the list (remove only)."}
+            },
+            "required": ["action"]
+        }
+    },
+    {
         "name": "clean_item_names",
         "description": "Find and fix item names that swallowed shop-sign lore (server announcements, crate labels, colour codes) so only the real enchants remain — e.g. 'Diamond Pickaxe - Announcement \u00bb You can do anything... Efficiency VI... Unbreaking III' becomes 'Diamond Pickaxe - Efficiency VI, Unbreaking III'. Managers only. PREVIEWS by default; pass apply=true only after the user has seen the preview and agreed. Brews/potions are skipped unless brews=true, because a potion's lore is its name.",
         "input_schema": {
@@ -12570,6 +12585,70 @@ async def _ai_tool_propose_code_change(guild, channel, user, args):
         return f"❌ Failed: {type(e).__name__}: {e}"
 
 
+async def _ai_tool_manage_outages(guild, channel, user, args):
+    """Was /outage add|list|remove.
+
+    Outage windows are GLOBAL and they suppress months from every company's run-rate, so
+    a bad window silently re-rates every stock on the exchange. Managers only, and the
+    date validation from the command is reproduced exactly — an end-before-start window
+    would quietly exclude nothing.
+    """
+    vc = sys.modules.get("cogs.valuation")
+    if vc is None or not hasattr(vc, "_load_outages"):
+        return "⚠️ The valuation cog isn't loaded."
+    import Restocker_db as _db
+    from datetime import date as _date
+    action = str(args.get("action") or "list").strip().lower()
+    wins = vc._load_outages(_db)
+
+    if action == "list":
+        if not wins:
+            return "No outage windows recorded."
+        out = []
+        for i, w in enumerate(wins):
+            try:
+                d = f"{(_date.fromisoformat(w['end']) - _date.fromisoformat(w['start'])).days + 1}d"
+            except Exception:
+                d = "?"
+            out.append(f"`{i}` **{w['start']} → {w['end']}** ({d})"
+                       + (f" · {w['reason']}" if w.get("reason") else ""))
+        return "🛑 **Server-outage windows**\n" + "\n".join(out)
+
+    if not _ai_is_manager(user):
+        return "❌ Managers only — outage windows re-rate every company on the exchange."
+
+    if action == "add":
+        try:
+            sd = _date.fromisoformat(str(args.get("start", "")).strip())
+            ed = _date.fromisoformat(str(args.get("end", "")).strip())
+        except Exception:
+            return "❌ Dates must be `YYYY-MM-DD`."
+        if ed < sd:
+            return "❌ End date is before the start date."
+        wins.append({"start": sd.isoformat(), "end": ed.isoformat(),
+                     "reason": str(args.get("reason", "") or "").strip()})
+        wins.sort(key=lambda w: w["start"])
+        vc._save_outages(_db, wins)
+        thr = int(vc._gd(_db, "outage_month_threshold",
+                         vc.DEF["outage_month_threshold"]) * 100)
+        return (f"✅ Outage recorded: **{sd} → {ed}** ({(ed-sd).days+1}d)"
+                + (f" · {args.get('reason')}" if args.get("reason") else "")
+                + f"\nAny month ≥{thr}% inside an outage now drops out of every company's run-rate.")
+
+    if action == "remove":
+        try:
+            idx = int(args.get("index"))
+        except Exception:
+            return "❌ Give the index shown in the list."
+        if idx < 0 or idx >= len(wins):
+            return f"❌ No outage window at index {idx}."
+        rm = wins.pop(idx)
+        vc._save_outages(_db, wins)
+        return f"🗑️ Removed outage **{rm['start']} → {rm['end']}**."
+
+    return "❌ action must be add, list or remove."
+
+
 async def _ai_tool_clean_item_names(guild, channel, user, args):
     """Salvage scraped item names that swallowed sign lore (server announcements, crate
     labels) so only the real enchants remain.
@@ -13835,6 +13914,7 @@ _AI_TOOL_MAP = {
     "get_channel_config":   _ai_tool_get_channel_config,
     "set_channel_config":   _ai_tool_set_channel_config,
     "propose_code_change":  _ai_tool_propose_code_change,
+    "manage_outages":        _ai_tool_manage_outages,
     "clean_item_names":      _ai_tool_clean_item_names,
     "create_bulk_orders":    _ai_tool_create_bulk_orders,
     "create_futures_bulk":   _ai_tool_create_futures_bulk,

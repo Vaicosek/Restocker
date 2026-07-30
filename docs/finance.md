@@ -23,7 +23,7 @@ items handed over, counted at **70% of market value**. `status` — dues, deposi
 ## Valuation (`/valuate`, top-level)
 AI valuation that auto-gathers earnings, hives, traffic and backing, then **grades** the
 stock (e.g. BB, BBB). `list_public` — (manager) value a market, set its params from the
-model, and list it on the exchange (`/list_public`). `/outage add|list|remove` — server-outage windows that
+model, and list it on the exchange (`/list_public`). Outage windows are now an AI tool (`manage_outages`) — server-outage windows that
 are **excluded from every valuation** (so a DDOS month doesn't tank a grade).
 
 ## Shareholder voting (`/investor` (Discord) + the dashboard **Investor** page)
