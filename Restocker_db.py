@@ -2648,6 +2648,33 @@ def get_futures_order(order_id: int) -> Optional[dict]:
         return dict(row) if row else None
 
 
+def get_futures_order_by_msg(notify_msg_id) -> Optional[dict]:
+    """Recover a futures order from the message its buttons live on.
+
+    Persistent views are registered as FuturesOrderView(0), so after a restart the view
+    has NO order id — every button reported "Order not found" on any message posted
+    before that restart. This is the same recovery the bulk view already used.
+    """
+    if not notify_msg_id:
+        return None
+    with db() as conn:
+        row = conn.execute(
+            "SELECT * FROM futures_orders WHERE notify_msg_id=? LIMIT 1",
+            (str(notify_msg_id),)).fetchone()
+        return dict(row) if row else None
+
+
+def get_web_order_by_msg(notify_msg_id) -> Optional[dict]:
+    """Same recovery for web orders — WebOrderView(0) has the identical flaw."""
+    if not notify_msg_id:
+        return None
+    with db() as conn:
+        row = conn.execute(
+            "SELECT * FROM web_orders WHERE notify_msg_id=? LIMIT 1",
+            (str(notify_msg_id),)).fetchone()
+        return dict(row) if row else None
+
+
 def update_futures_order_status(order_id: int, status: str, reviewed_by: str = "", notify_msg_id: str = "") -> None:
     with db() as conn:
         conn.execute(

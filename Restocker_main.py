@@ -11346,6 +11346,21 @@ _AI_TOOLS = [
         }
     },
     {
+        "name": "manage_team",
+        "description": "Name a team, add or remove members, or show a roster. Managers act on their own team. Naming matters: an unnamed team appears as the manager's Discord name in the /me join list, so workers told to join by team name can't find it.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["list", "name", "add", "remove"], "description": "Default list."},
+                "name": {"type": "string", "description": "New team name (action=name), e.g. 'Pollum sector'."},
+                "user_id": {"type": "string", "description": "Member's Discord id or @mention (add/remove)."},
+                "ign": {"type": "string", "description": "Optionally link their exact Minecraft name while adding."},
+                "manager_id": {"type": "string", "description": "Server managers only: act on another manager's team."}
+            },
+            "required": ["action"]
+        }
+    },
+    {
         "name": "credit_team_work",
         "description": "Re-attribute an order's team credit to the workers who actually did it. Managers claim and fulfil on their team's behalf, so the ledger records the manager as the worker and the team looks idle — this fixes that. Managers only, own team only. Ask who did what and in what quantity before calling.",
         "input_schema": {
@@ -12920,6 +12935,87 @@ async def _ai_tool_set_market_finances(guild, channel, user, args):
     return f"✅ **{markets[mid].get('name', mid)}** — " + "; ".join(out) + "."
 
 
+async def _ai_tool_manage_team(guild, channel, user, args):
+    """Name a team, add/remove members, or show a roster.
+
+    Team NAMES had no AI path at all — only the TeamSettings panel's Rename button — so an
+    unnamed team shows as its manager's display name in the join list, which is why a new
+    worker told to "join Pollum sector" cannot find it.
+
+    Managers act on THEIR OWN team. A full server manager may pass manager_id to act on
+    someone else's.
+    """
+    if not _ai_is_manager(user):
+        return "❌ Managers only."
+    import Restocker_db as _db
+    me = str(getattr(user, "id", 0))
+    mgr = str(args.get("manager_id") or "").strip().strip("<@!>") or me
+    if mgr != me and int(getattr(user, "id", 0)) not in MANAGER_DM_IDS:
+        return "❌ You can only manage your own team."
+    action = str(args.get("action") or "list").strip().lower()
+
+    if action == "list":
+        members = _db.get_team(mgr) or []
+        name = str(_db.get_config(f"team_name:{mgr}") or "").strip()
+        if not members:
+            return (f"**{name or 'Team ' + mgr}** has no members yet."
+                    + ("" if name else "\n⚠️ No team NAME set — it shows as your Discord name "
+                                       "in the join list. Ask me to name it."))
+        rows = []
+        for w in members:
+            ign = _db.get_ign(str(w)) or "—"
+            rows.append(f"• <@{w}> (`{ign}`)")
+        return (f"**{name or '(unnamed team)'}** — {len(members)} member(s)\n"
+                + "\n".join(rows)
+                + ("" if name else "\n\n⚠️ No team name set — ask me to name it so workers "
+                                   "can find it in `/me` → Join a team."))
+
+    if action == "name":
+        new = str(args.get("name") or "").strip()
+        if not new:
+            return "❌ What should the team be called?"
+        old = str(_db.get_config(f"team_name:{mgr}") or "").strip()
+        _db.set_config(f"team_name:{mgr}", new[:64])
+        return (f"✅ Team renamed {'`' + old + '` → ' if old else ''}**{new[:64]}**. "
+                f"It now shows by that name in `/me` → Join a team.")
+
+    raw = str(args.get("user_id") or "").strip().strip("<@!>")
+    if not raw.isdigit():
+        return "❌ I need the member's Discord id (or an @mention)."
+
+    if action == "add":
+        if raw == mgr:
+            return "❌ A manager can't be their own team member."
+        existing = _db.get_manager_of(raw)
+        if existing and str(existing) != mgr:
+            return f"❌ <@{raw}> is already on <@{existing}>'s team."
+        ign = str(args.get("ign") or "").strip()
+        if ign:
+            if not re.match(r"^[A-Za-z0-9_]{3,16}$", ign):
+                return "❌ IGN must be 3-16 characters: letters, numbers, underscores."
+            owner = _db.get_user_id_by_ign(ign)
+            if owner and str(owner) != raw:
+                return f"❌ `{ign}` is already linked to <@{owner}>."
+            _db.set_ign(raw, ign)
+            _db.delete_ign_pending(raw)
+        _db.set_team_member(raw, mgr)
+        return (f"✅ <@{raw}> added to your team"
+                + (f" and linked to `{ign}`." if ign else ".")
+                + ("" if ign or _db.get_ign(raw) else
+                   " ⚠️ They have NO in-game name linked — their sales and harvests credit "
+                   "nobody until they do."))
+
+    if action == "remove":
+        if str(_db.get_manager_of(raw) or "") != mgr:
+            return f"❌ <@{raw}> isn't on your team."
+        # NOT set_team_member(raw, None) — that INSERTs the string "None" as the
+        # manager id and leaves them on a phantom team.
+        _db.remove_team_member(raw)
+        return f"✅ <@{raw}> removed from your team. Their past credit stays on the ledger."
+
+    return "❌ action must be list, name, add or remove."
+
+
 async def _ai_tool_credit_team_work(guild, channel, user, args):
     """Re-attribute an order to the team members who actually did it.
 
@@ -14304,6 +14400,7 @@ _AI_TOOL_MAP = {
     "migrate_market_id":     _ai_tool_migrate_market_id,
     "set_market_details":    _ai_tool_set_market_details,
     "set_market_finances":   _ai_tool_set_market_finances,
+    "manage_team":           _ai_tool_manage_team,
     "credit_team_work":      _ai_tool_credit_team_work,
     "manage_outages":        _ai_tool_manage_outages,
     "clean_item_names":      _ai_tool_clean_item_names,

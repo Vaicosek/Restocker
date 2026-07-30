@@ -78,6 +78,66 @@ def build_embed(user) -> discord.Embed:
     return e
 
 
+class _SearchModal(discord.ui.Modal, title="Find an item"):
+    """Step 1 of 2. Modals cannot autocomplete — that is a hard Discord limit — so the
+    only way to keep type-ahead inside a panel is: type a fragment here, then pick the
+    real name from a Select. With 554 catalog items, asking anyone to recall an exact
+    name like 'Diamond Sword - Fire Aspect II, Sharpness V, Unbreaking III' is hopeless.
+    """
+
+    def __init__(self, panel, mode: str):
+        super().__init__(timeout=300)
+        self.panel, self.mode = panel, mode
+        self.q = discord.ui.TextInput(
+            label="Search (part of the name is enough)", required=True,
+            placeholder="e.g. sword, fortune, honey")
+        self.add_item(self.q)
+
+    async def on_submit(self, i: discord.Interaction):
+        q = str(self.q.value or "").strip().lower()
+        hits = [k for k in _items() if q in k.lower()]
+        if not hits:
+            return await i.response.send_message(
+                f"❌ Nothing matches `{q}`.", ephemeral=True)
+        if len(hits) == 1:
+            return await _open(i, self.panel, hits[0], self.mode)
+        hits.sort(key=lambda k: (len(k), k))
+        more = ("\n\n…and %d more — narrow the search." % (len(hits) - 25)) if len(hits) > 25 else ""
+        await i.response.send_message(
+            f"**{len(hits)}** match `{q}` — pick one:{more}",
+            view=_PickItemView(self.panel, i.user.id, hits[:25], self.mode), ephemeral=True)
+
+
+class _PickItemView(discord.ui.View):
+    def __init__(self, panel, user_id: int, names: list, mode: str):
+        super().__init__(timeout=300)
+        self.panel, self.user_id, self.mode = panel, int(user_id), mode
+        sel = discord.ui.Select(
+            placeholder="Pick the item…",
+            options=[discord.SelectOption(label=n[:100], value=str(n_i))
+                     for n_i, n in enumerate(names)])
+        self._names = names
+
+        async def pick(i: discord.Interaction):
+            await _open(i, self.panel, self._names[int(sel.values[0])], self.mode)
+        sel.callback = pick
+        self.add_item(sel)
+
+    async def interaction_check(self, i: discord.Interaction) -> bool:
+        if int(i.user.id) != self.user_id:
+            await i.response.send_message("This panel isn't yours.", ephemeral=True)
+            return False
+        return True
+
+
+async def _open(i: discord.Interaction, panel, key: str, mode: str):
+    """Show info, or open the edit modal prefilled for the chosen item."""
+    if mode == "info":
+        return await i.response.send_message(embed=info_embed(key), ephemeral=True)
+    if not _is_mgr(i.user):
+        return await i.response.send_message("⛔ Managers only.", ephemeral=True)
+    await i.response.send_modal(_EditModal(panel, key))
+
 class _LookupModal(discord.ui.Modal, title="Look up an item"):
     def __init__(self, panel):
         super().__init__(timeout=300)
@@ -93,30 +153,31 @@ class _LookupModal(discord.ui.Modal, title="Look up an item"):
 
 
 class _EditModal(discord.ui.Modal, title="Edit an item"):
-    """Was /item edit. Blank fields are left unchanged — every field is optional except
-    the name, so this can change price alone, stackability alone, or both."""
+    """Was /item edit. The item is already CHOSEN by the time this opens — the name field
+    is gone, and current values are prefilled so nothing has to be remembered. Blank means
+    "leave unchanged"."""
 
-    def __init__(self, panel):
+    def __init__(self, panel, key: str):
         super().__init__(timeout=300)
-        self.panel = panel
-        self.name = discord.ui.TextInput(label="Item name", required=True)
-        self.coin = discord.ui.TextInput(label="Price (blank = keep)", required=False)
+        self.panel, self.key = panel, key
+        self.title = f"Edit — {key}"[:45]
+        info = _items().get(key) or {}
+        self.coin = discord.ui.TextInput(
+            label="Price per piece (blank = keep)", required=False,
+            default=str(info.get("coin", "") or ""))
         self.per_stack = discord.ui.TextInput(
             label="Price is per stack of 64? yes/no", required=False, default="no")
         self.stackable = discord.ui.TextInput(
             label="Stackable? yes / no / a number (blank=keep)", required=False)
         self.worker_cost = discord.ui.TextInput(label="Worker cost per piece (blank = keep)",
                                                 required=False)
-        for f in (self.name, self.coin, self.per_stack, self.stackable, self.worker_cost):
+        for f in (self.coin, self.per_stack, self.stackable, self.worker_cost):
             self.add_item(f)
 
     async def on_submit(self, i: discord.Interaction):
         if not _is_mgr(i.user):
             return await i.response.send_message("⛔ Managers only.", ephemeral=True)
-        key, err = _resolve(str(self.name.value or "").strip())
-        if err:
-            return await i.response.send_message(err, ephemeral=True)
-
+        key = self.key
         raw_coin = str(self.coin.value or "").strip().replace(",", "")
         per_stack = str(self.per_stack.value or "").strip().lower() in ("yes", "y", "true", "1")
         raw_stk = str(self.stackable.value or "").strip().lower()
@@ -196,9 +257,12 @@ class _AddModal(discord.ui.Modal, title="Add a catalog item"):
 
 
 class ItemPanelView(discord.ui.View):
-    def __init__(self, user_id: int, is_manager: bool = False):
+    def __init__(self, user_id: int, is_manager: bool = False, key: str = None):
         super().__init__(timeout=300)
         self.user_id = int(user_id)
+        # Set when /item was called WITH an autocompleted name: Edit then skips the
+        # search step entirely and opens straight on that item.
+        self.key = key
         b = discord.ui.Button(label="Look up", style=discord.ButtonStyle.primary, row=0)
         b.callback = self._lookup
         self.add_item(b)
@@ -215,7 +279,7 @@ class ItemPanelView(discord.ui.View):
             return False
         return True
 
-    async def _lookup(self, i): await i.response.send_modal(_LookupModal(self))
+    async def _lookup(self, i): await i.response.send_modal(_SearchModal(self, "info"))
 
     async def _add(self, i):
         if not _is_mgr(i.user):
@@ -225,4 +289,6 @@ class ItemPanelView(discord.ui.View):
     async def _edit(self, i):
         if not _is_mgr(i.user):
             return await i.response.send_message("⛔ Managers only.", ephemeral=True)
-        await i.response.send_modal(_EditModal(self))
+        if self.key:
+            return await i.response.send_modal(_EditModal(self, self.key))
+        await i.response.send_modal(_SearchModal(self, "edit"))

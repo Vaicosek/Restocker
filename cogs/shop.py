@@ -27,10 +27,25 @@ class ShopCog(commands.Cog):
         self.bot = bot
 
     @app_commands.command(name="item", description="Items — look up a price, or add/edit one")
-    async def item_panel(self, interaction: discord.Interaction):
+    @app_commands.describe(item="Start typing to search the catalog (optional)")
+    @app_commands.autocomplete(item=any_item_autocomplete)
+    async def item_panel(self, interaction: discord.Interaction, item: str = None):
         """ONE picker row. An app_commands.Group would not have helped: Discord renders
-        every subcommand as its own row, so /item add|info|edit still showed three."""
-        from views.item_settings import ItemPanelView, build_embed
+        every subcommand as its own row, so /item add|info|edit still showed three.
+
+        The optional `item` argument keeps REAL type-ahead: modals cannot autocomplete,
+        so the fastest path to one item is the command's own autocomplete. Pass nothing
+        and you get the panel, which searches instead."""
+        from views.item_settings import ItemPanelView, build_embed, info_embed, _resolve
+        q = (item or "").strip()
+        if q:
+            key, err = _resolve(q)
+            if err:
+                return await interaction.response.send_message(err, ephemeral=True)
+            return await interaction.response.send_message(
+                embed=info_embed(key),
+                view=ItemPanelView(interaction.user.id, is_manager(interaction), key),
+                ephemeral=True)
         await interaction.response.send_message(
             embed=build_embed(interaction.user),
             view=ItemPanelView(interaction.user.id, is_manager(interaction)),

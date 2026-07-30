@@ -45,6 +45,31 @@ class WebOrderView(discord.ui.View):
         super().__init__(timeout=None)
         self.order_id = int(order_id)
 
+    def _resolve(self, interaction) -> int:
+        """Same recovery as FuturesOrderView: bot.add_view(WebOrderView(0)) means
+        _oid is 0 for every message that predates the current process."""
+        if self.order_id:
+            return self.order_id
+        msg = getattr(interaction, "message", None)
+        if msg is None:
+            return 0
+        try:
+            import Restocker_db as _db
+            rec = _db.get_web_order_by_msg(msg.id)
+            if rec:
+                return int(rec["id"])
+        except Exception:
+            pass
+        try:
+            import re as _re
+            for emb in (msg.embeds or []):
+                m = _re.search(r"#(\d+)", str(emb.title or ""))
+                if m:
+                    return int(m.group(1))
+        except Exception:
+            pass
+        return 0
+
     @discord.ui.button(label="✅ Approve & Ping Workers", style=discord.ButtonStyle.success,
                        custom_id="web_order_approve_ping")
     async def approve_ping(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -67,12 +92,17 @@ class WebOrderView(discord.ui.View):
         if not is_manager(interaction):
             await interaction.response.send_message("❌ Manager access required.", ephemeral=True)
             return
+        _oid = self._resolve(interaction)
+        if not _oid:
+            return await interaction.response.send_message(
+                "⚠️ Couldn't identify this order.", ephemeral=True)
+
 
         try:
             import Restocker_db as _db
-            order = _db.get_web_order(self.order_id)      # needed for the customer's DM
+            order = _db.get_web_order(_oid)      # needed for the customer's DM
             _db.update_web_order_status(
-                self.order_id,
+                _oid,
                 status="declined",
                 reviewed_by=str(interaction.user.id),
                 notify_msg_id=str(interaction.message.id) if interaction.message else None,
@@ -97,7 +127,7 @@ class WebOrderView(discord.ui.View):
             if order and order.get("discord_id"):
                 customer = await bot.fetch_user(int(order["discord_id"]))
                 await customer.send(
-                    f"❌ Your web order **#{self.order_id}** was declined.\n"
+                    f"❌ Your web order **#{_oid}** was declined.\n"
                     f"{_web_items_text(order)}\n\n"
                     f"Ask a manager if you think that's a mistake.")
                 dm_ok = True
@@ -105,7 +135,7 @@ class WebOrderView(discord.ui.View):
             pass
 
         await interaction.response.send_message(
-            f"❌ Order #{self.order_id} declined."
+            f"❌ Order #{_oid} declined."
             + ("" if dm_ok else " ⚠️ Couldn't DM the customer (DMs closed?)."),
             ephemeral=True,
         )
@@ -113,10 +143,15 @@ class WebOrderView(discord.ui.View):
     async def _do_approve(self, interaction: discord.Interaction, *, ping_workers: bool):
         try:
             import Restocker_db as _db
-            order = _db.get_web_order(self.order_id)
+            order = _db.get_web_order(_oid)
         except Exception as e:
             await interaction.response.send_message(f"⚠️ DB error: {e}", ephemeral=True)
             return
+        _oid = self._resolve(interaction)
+        if not _oid:
+            return await interaction.response.send_message(
+                "⚠️ Couldn't identify this order.", ephemeral=True)
+
 
         if not order:
             await interaction.response.send_message("⚠️ Order not found.", ephemeral=True)
@@ -136,7 +171,7 @@ class WebOrderView(discord.ui.View):
         # this path, so re-check the live status before doing anything.
         if str(order.get("status") or "").lower() == "approved":
             await interaction.response.send_message(
-                f"ℹ️ Order #{self.order_id} is already approved — not creating duplicate orders.",
+                f"ℹ️ Order #{_oid} is already approved — not creating duplicate orders.",
                 ephemeral=True)
             return
 
@@ -145,7 +180,7 @@ class WebOrderView(discord.ui.View):
         try:
             import Restocker_db as _db
             _db.update_web_order_status(
-                self.order_id,
+                _oid,
                 status="approved",
                 reviewed_by=str(interaction.user.id),
                 notify_msg_id=str(interaction.message.id) if interaction.message else None,
@@ -185,7 +220,7 @@ class WebOrderView(discord.ui.View):
             if to_order:
                 created = int(_create_restock_orders(to_order) or 0)
         except Exception as e:
-            log.warning("[web-order] couldn't create restock orders for #%s: %s", self.order_id, e)
+            log.warning("[web-order] couldn't create restock orders for #%s: %s", _oid, e)
             skipped.append(f"error: {e}")
 
         try:
@@ -205,7 +240,7 @@ class WebOrderView(discord.ui.View):
                 try:
                     await interaction.channel.send(
                         f"📦 {worker_mention} — new web order approved! "
-                        f"**Order #{self.order_id}** from **{order.get('discord_username', '?')}**. "
+                        f"**Order #{_oid}** from **{order.get('discord_username', '?')}**. "
                         f"Please check and fulfil."
                     )
                 except Exception:
@@ -217,14 +252,14 @@ class WebOrderView(discord.ui.View):
             if order.get("discord_id"):
                 customer = await bot.fetch_user(int(order["discord_id"]))
                 await customer.send(
-                    f"✅ Your web order **#{self.order_id}** was approved!\n"
+                    f"✅ Your web order **#{_oid}** was approved!\n"
                     f"{_web_items_text(order)}\n\n"
                     f"Our workers are on it — you'll be contacted when it's ready.")
                 dm_ok = True
         except Exception:
             pass
 
-        msg = f"✅ Order #{self.order_id} approved."
+        msg = f"✅ Order #{_oid} approved."
         if created:
             msg += f"\n🧰 Created **{created}** restock order(s) — workers can claim them now."
         elif not skipped:
@@ -245,6 +280,38 @@ class FuturesOrderView(discord.ui.View):
     def __init__(self, order_id: int):
         super().__init__(timeout=None)
         self.order_id = int(order_id)
+
+    def _resolve(self, interaction) -> int:
+        """Recover the order id. Persistent views are registered with id 0, so after a
+        restart _oid is meaningless on any pre-existing message.
+
+        Three sources, in order of reliability:
+          1. the id we were constructed with (fresh post, same process)
+          2. the stored notify_msg_id (survives restarts)
+          3. the embed title "New Futures Order #N" — needed because notify_msg_id was
+             only written from a later version, so older messages have none.
+        """
+        if _oid:
+            return _oid
+        msg = getattr(interaction, "message", None)
+        if msg is None:
+            return 0
+        try:
+            import Restocker_db as _db
+            rec = _db.get_futures_order_by_msg(msg.id)
+            if rec:
+                return int(rec["id"])
+        except Exception:
+            pass
+        try:
+            import re as _re
+            for emb in (msg.embeds or []):
+                m = _re.search(r"#(\d+)", str(emb.title or ""))
+                if m:
+                    return int(m.group(1))
+        except Exception:
+            pass
+        return 0
 
     @discord.ui.button(label="✅ Approve & Ping Workers", style=discord.ButtonStyle.success,
                        custom_id="futures_order_approve_ping")
@@ -268,12 +335,18 @@ class FuturesOrderView(discord.ui.View):
         if not is_manager(interaction):
             await interaction.response.send_message("❌ Manager access required.", ephemeral=True)
             return
+        _oid = self._resolve(interaction)
+        if not _oid:
+            return await interaction.response.send_message(
+                "⚠️ Couldn't identify this order — it predates message-id "
+                "tracking and its embed carries no #number.", ephemeral=True)
+
 
         try:
             import Restocker_db as _db
-            order = _db.get_futures_order(self.order_id)
+            order = _db.get_futures_order(_oid)
             _db.update_futures_order_status(
-                self.order_id,
+                _oid,
                 status="declined",
                 reviewed_by=str(interaction.user.id),
                 notify_msg_id=str(interaction.message.id) if interaction.message else None,
@@ -301,7 +374,7 @@ class FuturesOrderView(discord.ui.View):
             pass
 
         await interaction.response.send_message(
-            f"❌ Futures order #{self.order_id} declined.", ephemeral=True
+            f"❌ Futures order #{_oid} declined.", ephemeral=True
         )
 
     async def _do_approve(self, interaction: discord.Interaction, *, ping_workers: bool):
@@ -309,10 +382,16 @@ class FuturesOrderView(discord.ui.View):
         from datetime import datetime, timezone as _tz, timedelta
 
         try:
-            order = _db.get_futures_order(self.order_id)
+            order = _db.get_futures_order(_oid)
         except Exception as e:
             await interaction.response.send_message(f"⚠️ DB error: {e}", ephemeral=True)
             return
+        _oid = self._resolve(interaction)
+        if not _oid:
+            return await interaction.response.send_message(
+                "⚠️ Couldn't identify this order — it predates message-id "
+                "tracking and its embed carries no #number.", ephemeral=True)
+
 
         if not order:
             await interaction.response.send_message("⚠️ Order not found.", ephemeral=True)
@@ -329,7 +408,7 @@ class FuturesOrderView(discord.ui.View):
 
         try:
             _db.update_futures_order_status(
-                self.order_id,
+                _oid,
                 status="approved",
                 reviewed_by=str(interaction.user.id),
                 notify_msg_id=str(interaction.message.id) if interaction.message else None,
@@ -340,8 +419,8 @@ class FuturesOrderView(discord.ui.View):
         try:
             _wid = str(order.get("user_id") or "")
             if _wid:
-                _log_team_event(_wid, "futures", qty=int(order.get("quantity") or 0), detail=f"futures#{self.order_id}")
-                await _team_live(_wid, f"🔮 <@{_wid}> futures order #{self.order_id} approved "
+                _log_team_event(_wid, "futures", qty=int(order.get("quantity") or 0), detail=f"futures#{_oid}")
+                await _team_live(_wid, f"🔮 <@{_wid}> futures order #{_oid} approved "
                                        f"({order.get('quantity')}x {order.get('item')}).")
         except Exception:
             pass
@@ -405,7 +484,7 @@ class FuturesOrderView(discord.ui.View):
                 "priority_until": (_now + timedelta(hours=PRIORITY_HOURS)).isoformat(),
                 "priority_role": EMPLOYEE_ROLE_NAME,
                 # traceability back to the futures request
-                "source": "futures", "futures_id": int(self.order_id),
+                "source": "futures", "futures_id": int(_oid),
                 "customer_id": str(order.get("user_id") or ""),
             }
             data_orders.setdefault("orders", []).append(work_order)
@@ -413,7 +492,7 @@ class FuturesOrderView(discord.ui.View):
             await update_order_messages(bot, work_order, allow_post=True)
             posted_ok = True
         except Exception as e:
-            print(f"⚠️ Could not create claimable work order from futures #{self.order_id}: {e}")
+            print(f"⚠️ Could not create claimable work order from futures #{_oid}: {e}")
 
         # Post a short context line under the card (customer + required enchants/notes,
         # which the standard order card doesn't show) and @Employee ping only on
@@ -450,7 +529,7 @@ class FuturesOrderView(discord.ui.View):
                     timestamp=datetime.now(_tz.utc),
                 )
                 dm_embed.add_field(name="Item", value=f"{qty}x {item}", inline=True)
-                dm_embed.add_field(name="Order #", value=str(self.order_id), inline=True)
+                dm_embed.add_field(name="Order #", value=str(_oid), inline=True)
                 if enchants:
                     dm_embed.add_field(name="Enchants / Quality", value=enchants, inline=False)
                 if notes:
@@ -461,10 +540,10 @@ class FuturesOrderView(discord.ui.View):
             pass
 
         await interaction.response.send_message(
-            (f"✅ Futures #{self.order_id} approved → posted as claimable order **#{_new_order_id}** "
+            (f"✅ Futures #{_oid} approved → posted as claimable order **#{_new_order_id}** "
              f"in the worker channel"
              if posted_ok else
-             f"⚠️ Futures #{self.order_id} marked approved, but I couldn't post the worker order — "
+             f"⚠️ Futures #{_oid} marked approved, but I couldn't post the worker order — "
              f"check WORKER_CHANNEL_ID")
             + (f" · {EMPLOYEE_ROLE_NAME} pinged." if (ping_workers and posted_ok) else "."),
             ephemeral=True,
@@ -567,9 +646,21 @@ class FuturesBulkView(discord.ui.View):
         except Exception:
             return 0
 
-    @discord.ui.button(label="✅ Approve & Fulfill", style=discord.ButtonStyle.success,
+    @discord.ui.button(label="✅ Approve & Ping Workers", style=discord.ButtonStyle.success,
                        custom_id="futures_bulk_fulfill")
-    async def fulfill(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def approve_ping(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._do_approve(interaction, ping_workers=True)
+
+    @discord.ui.button(label="Approve (no ping)", style=discord.ButtonStyle.primary,
+                       custom_id="futures_bulk_approve_quiet")
+    async def approve_quiet(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._do_approve(interaction, ping_workers=False)
+
+    async def _do_approve(self, interaction: discord.Interaction, *, ping_workers: bool):
+        """Was one button labelled "Approve & Fulfill". It never fulfilled anything — it
+        creates claimable work orders, exactly like the single-item card's Approve. The
+        label implied the job was DONE when no worker had touched it, and the status it
+        wrote ("fulfilled") said the same thing to every downstream reader."""
         if not is_manager(interaction):
             return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
         import Restocker_db as _db
@@ -577,7 +668,7 @@ class FuturesBulkView(discord.ui.View):
         bulk = _db.get_futures_bulk(bulk_id) if bulk_id else None
         if not bulk:
             return await interaction.response.send_message("⚠️ Bulk order not found.", ephemeral=True)
-        if str(bulk.get("status")) == "fulfilled":
+        if str(bulk.get("status")) in ("approved", "fulfilled"):   # "fulfilled" = pre-rename rows
             return await interaction.response.send_message("⚠️ Already fulfilled.", ephemeral=True)
         if str(bulk.get("status")) in ("declined", "cancelled"):
             return await interaction.response.send_message(f"⚠️ This order is {bulk.get('status')}.", ephemeral=True)
@@ -586,7 +677,7 @@ class FuturesBulkView(discord.ui.View):
             created = core._create_futures_bulk_work_orders(bulk_id)
         except Exception as e:
             return await interaction.followup.send(f"⚠️ Couldn't create work orders: {e}", ephemeral=True)
-        _db.update_futures_bulk_status(bulk_id, "fulfilled", reviewed_by=str(interaction.user.id))
+        _db.update_futures_bulk_status(bulk_id, "approved", reviewed_by=str(interaction.user.id))
         try:
             await interaction.message.edit(embed=_futures_bulk_preview_embed(_db.get_futures_bulk(bulk_id)),
                                            view=None)
@@ -600,11 +691,22 @@ class FuturesBulkView(discord.ui.View):
                                 f"**{len(created)}** item(s) are now queued for our workers to craft.")
         except Exception:
             pass
+        if ping_workers and interaction.guild:
+            try:
+                ch = interaction.client.get_channel(WORKER_CHANNEL_ID)
+                role = discord.utils.get(interaction.guild.roles, name=EMPLOYEE_ROLE_NAME)
+                if ch and role:
+                    await ch.send(f"{role.mention} \U0001F52E **{len(created)}** new futures work "
+                                  f"order(s) from bulk #{bulk_id} — claim them in the cards below.",
+                                  allowed_mentions=discord.AllowedMentions(roles=True))
+            except Exception as ex:
+                print(f"[futures bulk] ping failed: {ex}")
         await interaction.followup.send(
-            f"✅ Fulfilled bulk futures **#{bulk_id}** — created **{len(created)}** claimable work "
-            f"order(s). They post to the worker channel on the next announce slot.", ephemeral=True)
+            f"✅ Approved bulk futures **#{bulk_id}** — created **{len(created)}** claimable work "
+            f"order(s). They post to the worker channel on the next announce slot."
+            + (f" {EMPLOYEE_ROLE_NAME} pinged." if ping_workers else ""), ephemeral=True)
 
-    @discord.ui.button(label="🗑 Cancel", style=discord.ButtonStyle.danger,
+    @discord.ui.button(label="❌ Decline", style=discord.ButtonStyle.danger,
                        custom_id="futures_bulk_cancel")
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not is_manager(interaction):
@@ -614,7 +716,7 @@ class FuturesBulkView(discord.ui.View):
         bulk = _db.get_futures_bulk(bulk_id) if bulk_id else None
         if not bulk:
             return await interaction.response.send_message("⚠️ Bulk order not found.", ephemeral=True)
-        if str(bulk.get("status")) == "fulfilled":
+        if str(bulk.get("status")) in ("approved", "fulfilled"):   # "fulfilled" = pre-rename rows
             return await interaction.response.send_message(
                 "⚠️ Already fulfilled — the work orders exist. Cancel those individually if needed.",
                 ephemeral=True)
