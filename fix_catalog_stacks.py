@@ -70,7 +70,7 @@ def main():
                      (0 if want == 1 else 1, want, name))
     conn.commit()
     print(f"\nDone — {len(fixes)} item(s) corrected. "
-          f"Start the bot and re-run /csn with your stock CSV to recompute capacities.")
+          f"Start the bot and drop your stock CSV in the market channel to recompute capacities.")
 
 
 if __name__ == "__main__":

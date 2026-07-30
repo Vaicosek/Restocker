@@ -630,7 +630,7 @@ class ManagerReviewView(View):
             # Loud, actionable — this is the failure mode that quietly cost Dr 6 orders.
             msg += ("\n\n🚨 **Some workers were NOT paid** — the item has no catalog price, so the "
                     "payout computed to 0:\n" + "\n".join(unpaid_lines[:10]) +
-                    f"\n\nFix the price with `/item_edit item:{order.get('item','?')} coin:<amount>` "
+                    f"\n\nFix the price with `/item edit item:{order.get('item','?')} coin:<amount>` "
                     f"then run `/admin repair_payouts` to pay them retroactively.")
         try:
             await interaction.followup.send(msg, ephemeral=True)
@@ -2242,7 +2242,7 @@ class ManagerPanelView(discord.ui.View):
 
     # Removed from the panel (2026-07-15): Hive pickup status, Clear hive pickups, Set coin
     # price, Funds report now, Apply interest now. Interest & funds still run automatically on
-    # their weekly loops (cogs/loops.py); pricing is handled on the website + /item_edit. The
+    # their weekly loops (cogs/loops.py); pricing is handled on the website + /item edit. The
     # panel is now just the three order-management actions above.
 
 

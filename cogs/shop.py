@@ -26,11 +26,15 @@ class ShopCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
+    item = app_commands.Group(
+        name="item",
+        description="Catalog items — add, look up, edit price/stackability")
+
     # /shop_rename_item was REMOVED (owner decision after the 2026-07 audit): renaming
     # an item key orphaned its references in consignment deals, stock scans, restock
     # targets and alarms. Delete + re-add under the new name instead.
 
-    @app_commands.command(name="add_item", description="Create a new item and set its coin price")
+    @item.command(name="add", description="Create a new item and set its coin price")
     @app_commands.checks.has_any_role(MANAGER_ROLE_NAME)
     @app_commands.describe(
         item="Item name", coin="Coin price per piece (integer)",
@@ -49,7 +53,7 @@ class ShopCog(commands.Cog):
         items = shops.setdefault("items", {})
 
         if item_name in items:
-            return await interaction.response.send_message(f"❌ Item `{item_name}` already exists. Use `/item_edit` to update it.", **ephemeral_kwargs(interaction))
+            return await interaction.response.send_message(f"❌ Item `{item_name}` already exists. Use `/item edit` to update it.", **ephemeral_kwargs(interaction))
 
         # Auto-detect the real Minecraft stack size from the name (potions/brews, tools,
         # jetpacks etc. → 1) so barrels aren't sized 64× too big. An explicit `stackable`
@@ -74,7 +78,7 @@ class ShopCog(commands.Cog):
         )
 
 
-    @app_commands.command(name="item_edit", description="Edit an existing item's price and/or stackability")
+    @item.command(name="edit", description="Edit an existing item's price and/or stackability")
     @app_commands.checks.has_any_role(MANAGER_ROLE_NAME)
     @app_commands.describe(
         item="Item to edit",
@@ -107,7 +111,7 @@ class ShopCog(commands.Cog):
         items = shops.setdefault("items", {})
         if item not in items:
             return await interaction.response.send_message(
-                f"❌ Item `{item}` not found. Use `/add_item` to create it.", **ephemeral_kwargs(interaction))
+                f"❌ Item `{item}` not found. Use `/item add` to create it.", **ephemeral_kwargs(interaction))
         entry = items[item]
         changes = []
 
@@ -191,7 +195,7 @@ class ShopCog(commands.Cog):
     # the normal add/price paths; restore these two commands from git history if a bulk
     # re-scan is ever needed again.
 
-    @app_commands.command(name="item_info", description="Look up the price and stock of an item")
+    @item.command(name="info", description="Look up the price and stock of an item")
     @app_commands.describe(item="Item name to look up")
     @app_commands.autocomplete(item=any_item_autocomplete)
     async def item_info(self, interaction: discord.Interaction, item: str):
@@ -218,7 +222,7 @@ class ShopCog(commands.Cog):
         embed.add_field(name="Barrel size", value=f"`{BARREL_PIECES} slots × {stack_size} = {BARREL_PIECES * stack_size} items`", inline=True)
         embed.add_field(name="Stackable",
                         value=(f"`yes · ×{stack_size}`" if is_stackable else "`no · single`"), inline=True)
-        embed.set_footer(text="Managers: /item_edit to change price or stackability")
+        embed.set_footer(text="Managers: /item edit to change price or stackability")
         await interaction.response.send_message(embed=embed)
 
 

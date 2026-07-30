@@ -140,6 +140,17 @@ async def build_embed(mid: str, user=None) -> discord.Embed:
     except Exception as ex:
         log.debug("[market panel] vault line failed: %s", ex)
 
+    # /csn was retired. A button CANNOT accept a file attachment (Discord allows those
+    # only on slash commands and plain messages), so the upload path is a channel drop —
+    # cogs/events.py already ingests human-posted csn_* CSVs. Say so here, or owners will
+    # look for a command that no longer exists.
+    if rc:
+        e.add_field(name="📥 Sending CSN data",
+                    value=(f"Drop `csn_monthly_*.csv` / `csn_export_*.csv` straight into <#{rc}> "
+                           f"— it's ingested automatically. The mod's webhook does this for you.\n"
+                           f"Restocking from a shortfall: ask the bot (it previews first)."),
+                    inline=False)
+
     if user is not None and _may_manage(user, mid):
         try:
             ch = core.bot.get_channel(int(rc)) if rc else None

@@ -4128,7 +4128,7 @@ async def _process_csn_attachment(attachment: discord.Attachment, report_channel
         await report_channel.send(
             f"🆕 Added {len(newly_tagged)} new item(s) to the **{market_name or effective_market_id}** "
             f"price catalog from this report: {names}{more}\n"
-            f"Starter prices were estimated from this report's sales — check them with `/item_edit` if they look off."
+            f"Starter prices were estimated from this report's sales — check them with `/item edit` if they look off."
         )
 
 
@@ -10889,7 +10889,7 @@ AVAILABLE SLASH COMMANDS (share these when asked):
 
 Orders & Workers:
 - /orders — Show open production requests
-- /order — (Managers) Order an existing catalog item from workers. Leave the worker field blank to ask ALL workers (batched ping); set a worker to assign it directly to ONE person via DM with no mass ping. Item must exist (/add_item) and have a price (/item_edit).
+- /order — (Managers) Order an existing catalog item from workers. Leave the worker field blank to ask ALL workers (batched ping); set a worker to assign it directly to ONE person via DM with no mass ping. Item must exist (/item add) and have a price (/item edit).
 
 Futures Orders (custom item + enchant requests, separate from the regular catalog /orders board):
 - /futures_order — Request a custom item with specific enchants/quality (e.g. "Fortune III, Unbreaking" picks,
@@ -10905,7 +10905,6 @@ Balances & Payouts:
 - /balance_history — Your recent coin movements (Managers can view another user's)
 
 Reports & CSN:
-- /csn — Upload a CSN export/monthly CSV, saves history and shows chart
 - /import_earnings — (Managers) Import a CSV/Excel earnings summary (one row per month) into a market
 - /csn_audit — (Managers) Verify a market's CSN month: dedup stats, net, and pricing
 
@@ -10960,8 +10959,6 @@ Inventory & Stock Alarms (/inventory subcommands — live barrel fullness from C
   (Barrel capacity and low-stock alarms are managed on the dashboard website.)
 
 Items & Setup:
-- /add_item — Create a new item and set its coin price
-- /item_info — Look up an item's price, stock, and market
 - /shop_rename_item — Rename an item (updates all open orders too)
 - /manager_panel — (Managers) Open the Manager control panel
 - /website_login — Get a one-time code to log in on the dashboard website
@@ -11303,6 +11300,18 @@ _AI_TOOLS = [
         }
     },
     {
+        "name": "clean_item_names",
+        "description": "Find and fix item names that swallowed shop-sign lore (server announcements, crate labels, colour codes) so only the real enchants remain — e.g. 'Diamond Pickaxe - Announcement \u00bb You can do anything... Efficiency VI... Unbreaking III' becomes 'Diamond Pickaxe - Efficiency VI, Unbreaking III'. Managers only. PREVIEWS by default; pass apply=true only after the user has seen the preview and agreed. Brews/potions are skipped unless brews=true, because a potion's lore is its name.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "apply": {"type": "boolean", "description": "false (default) = preview only. true = actually rename."},
+                "brews": {"type": "boolean", "description": "Include potions/brews (strip colour codes, keep words). Default false."}
+            },
+            "required": []
+        }
+    },
+    {
         "name": "create_bulk_orders",
         "description": "Create MANY restock orders at once from a pasted list (managers and market owners). Replaces the retired /order_bulk. Use when someone gives you a list of items and quantities to order from workers. One per line as 'Item name | quantity'. Unknown items still post at price 0 and are flagged. For made-to-order/futures items use create_futures_bulk instead.",
         "input_schema": {
@@ -11491,6 +11500,7 @@ _AI_TOOLS = [
         "input_schema": {
             "type": "object",
             "properties": {
+                "apply": {"type": "boolean", "description": "false (default) = PREVIEW the shortfall list only. true = actually create the worker orders. Always preview first and let the user confirm."},
                 "market": {"type": "string", "description": "Market id."},
                 "min_deficit": {"type": "integer", "description": "Ignore items short by less than this (default 1)."}
             },
@@ -12560,6 +12570,61 @@ async def _ai_tool_propose_code_change(guild, channel, user, args):
         return f"❌ Failed: {type(e).__name__}: {e}"
 
 
+async def _ai_tool_clean_item_names(guild, channel, user, args):
+    """Salvage scraped item names that swallowed sign lore (server announcements, crate
+    labels) so only the real enchants remain.
+
+    Runs IN-PROCESS against the live DB — the host panel gives no shell, so a standalone
+    script was unusable. Logic is imported from clean_item_names.py rather than copied,
+    so the two can never drift.
+
+    Brews are skipped unless brews=true: a potion's lore IS its name and the only thing
+    telling two apart — stripping it would merge rows that hold real stock.
+    """
+    if not _ai_is_manager(user):
+        return "❌ Managers only — this renames catalog and stock rows."
+    try:
+        import importlib
+        import clean_item_names as _cin
+        importlib.reload(_cin)
+    except Exception as e:
+        return f"⚠️ Couldn't load clean_item_names.py: {e}"
+    brews = bool(args.get("brews"))
+    apply = bool(args.get("apply"))
+    import Restocker_db as _db
+    try:
+        with _db.db() as conn:
+            plan = _cin.plan(conn, brews=brews)
+            changes = [x for x in plan if x[4] and not x[5].startswith("SKIP")]
+            skips = [x for x in plan if x[5].startswith("SKIP")]
+            if not changes and not skips:
+                return "✅ Nothing to clean — no lore-contaminated item names found."
+            lines = []
+            for _t, _c, r, old, new, kind in changes[:12]:
+                lines.append(f"• `{old[:70]}`\n   → **{new[:70]}**")
+            body = "\n".join(lines) or "*none*"
+            more = f"\n…and {len(changes)-12} more" if len(changes) > 12 else ""
+            skiptxt = ""
+            if skips:
+                skiptxt = ("\n\n⚠️ **Skipped** (would merge two rows into one — needs a "
+                           f"human): {len(skips)}\n"
+                           + "\n".join(f"• `{x[3][:60]}`" for x in skips[:4]))
+            if not apply:
+                return (f"**Preview — {len(changes)} change(s)**"
+                        + ("" if brews else " (brews skipped; pass brews=true to include)")
+                        + f"\n{body}{more}{skiptxt}\n\nNothing written. Ask me to apply it.")
+            for t, col, r, old, new, kind in changes:
+                if t == "items":
+                    conn.execute("UPDATE items SET name=? WHERE name=?", (new, old))
+                else:
+                    conn.execute("UPDATE market_stock SET item=? WHERE market_id=? AND item=?",
+                                 (new, r["market_id"], old))
+            conn.commit()
+    except Exception as e:
+        return f"⚠️ Clean failed: {type(e).__name__}: {e}"
+    return (f"✅ Renamed **{len(changes)}** item name(s).\n{body}{more}{skiptxt}")
+
+
 async def _ai_tool_create_bulk_orders(guild, channel, user, args):
     """Was /order_bulk. The parsing, pricing and market-ownership guards all live in
     cogs.orders.build_bulk_orders — this is only the permission check and the call, so
@@ -13129,8 +13194,19 @@ async def _ai_tool_create_restock_orders(guild, channel, user, args):
     if not to_order:
         return (f"Nothing short by >= {min_def} for {mid}."
                 + (f" ({skipped} scanned item(s) aren't in the catalog.)" if skipped else ""))
+    ranked = sorted(to_order, key=lambda r: -r[1])
+    top = ", ".join(f"{it} ({d:,})" for it, d, _ in ranked[:8])
+    # PREVIEW FIRST. This creates real worker orders; /csn used to gate the same action
+    # behind restock -> confirm_restock, and dropping that gate along with the command
+    # would have made "restock vtech" create orders on the first ask.
+    if not bool(args.get("apply")):
+        lines = "\n".join(f"• {it} — short {d:,}" for it, d, _ in ranked[:15])
+        more = f"\n…and {len(ranked)-15} more" if len(ranked) > 15 else ""
+        return (f"**Preview — {len(to_order)} restock order(s) for `{mid}`** (nothing created yet)\n"
+                f"{lines}{more}"
+                + (f"\n\n{skipped} scanned item(s) aren't in the catalog and were skipped." if skipped else "")
+                + "\n\nSay the word and I'll create them.")
     created = _create_restock_orders(to_order)
-    top = ", ".join(f"{it} ({d:,})" for it, d, _ in sorted(to_order, key=lambda r: -r[1])[:8])
     return (f"Created {created} restock order(s) for {mid} from real deficit."
             + (f" {skipped} skipped (not in catalog)." if skipped else "")
             + f" Biggest shortfalls: {top}")
@@ -13759,6 +13835,7 @@ _AI_TOOL_MAP = {
     "get_channel_config":   _ai_tool_get_channel_config,
     "set_channel_config":   _ai_tool_set_channel_config,
     "propose_code_change":  _ai_tool_propose_code_change,
+    "clean_item_names":      _ai_tool_clean_item_names,
     "create_bulk_orders":    _ai_tool_create_bulk_orders,
     "create_futures_bulk":   _ai_tool_create_futures_bulk,
     "create_futures_order": _ai_tool_create_futures_order,
@@ -13766,6 +13843,7 @@ _AI_TOOL_MAP = {
 
 # Tools whose effects are destructive/moderation-level — flagged in the audit log.
 _AI_SENSITIVE_TOOLS = {
+    "clean_item_names",     # renames catalog + stock rows
     "create_bulk_orders",   # writes real worker orders
     "create_futures_bulk",  # files a real order for approval
     "manage_ai_access",   # grants the power to talk to me — always audit it
