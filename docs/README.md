@@ -51,7 +51,7 @@ replacement, or just answer from your own tools:
 | `/enchant_area …`, `/escrow …`, `/suggest …`, `/network …` | retired entirely (unused) |
 | `/fees …`, `/investor sync|payout|set_pool|apply_roles|liquidate` | rare admin — say a manager must do it manually |
 | `/admin` repair tools (repair_all/payouts/order, backfill_team_perf, dedupe_perflog, migrate_stock, hive_audit, purge_brews, value_free_stock, csn_provenance, csn_delete_month) | one-off fixes, already done |
-| `/loyalty register_ign`, `/team perf` | `/register_ign`, `/team settings` |
+| `/loyalty register_ign`, `/team perf` | `/me → Link in-game name`, `/team settings` |
 
 `/admin` now holds only: `wipe`, `ai_audit`, `dm_setup`, `rebuild_market_channel`,
 `fix_month_close`, `csn_cleanup`.

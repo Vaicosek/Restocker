@@ -133,30 +133,26 @@ class LoyaltyCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    loyalty = app_commands.Group(name="loyalty", description="Loyalty points, tiers, and rewards")
-
-    @loyalty.command(name="hub", description="Your loyalty: points, tier, leaderboard, redeem (managers: settings)")
-    async def loyalty_hub(self, interaction: discord.Interaction):
-        """One entry point. Members get stats/leaderboard/redeem; managers also get the
-        settings panel and pending redemptions."""
-        from views.loyalty_settings import LoyaltyHubView, build_hub_embed
+    @app_commands.command(name="me",
+                          description="Your stuff — coins, in-game names, team, loyalty points")
+    async def me_panel(self, interaction: discord.Interaction):
+        """One picker row replacing /me, /me → Link in-game name, /me → Join a team and /me → Loyalty & rewards.
+        None of those were manager tools — they were what an ordinary worker needs,
+        scattered across four commands."""
+        from views.me_panel import MePanelView, build_embed
         await interaction.response.send_message(
-            embed=build_hub_embed(interaction.user, interaction.guild),
-            view=LoyaltyHubView(interaction.user.id, is_manager(interaction)),
-            ephemeral=True)
+            embed=build_embed(interaction.user),
+            view=MePanelView(interaction.user.id), ephemeral=True)
 
 
 
-    # Top-level alias — every bot message says "run /register_ign", so that exact command
+
+
+    # Top-level alias — every bot message says "run /me → Link in-game name", so that exact command
     # must exist (the /loyalty subcommand kept for compatibility). Same logic, one path.
-    @app_commands.command(name="register_ign",
-                          description="Register YOUR Minecraft in-game name so your wages reach you — run again to add alts")
-    @app_commands.describe(ign="Your Minecraft username (a main or an alt — alts pool into your one account)")
-    async def register_ign_toplevel(self, interaction: discord.Interaction, ign: str):
-        await self._register_ign_impl(interaction, ign)
 
     # NOTE: the old /loyalty register_ign subcommand was removed 2026-07-28 — every bot
-    # message points people at the top-level /register_ign, so having both was just a
+    # message points people at the top-level /me → Link in-game name, so having both was just a
     # confusing duplicate (and it frees a slot in the 25-subcommand /loyalty group).
     async def _register_ign_impl(self, interaction: discord.Interaction, ign: str):
         import re as _re2, Restocker_db as _db_ri
@@ -177,7 +173,7 @@ class LoyaltyCog(commands.Cog):
         if _db_ri.count_igns(uid) >= MAX_IGNS_PER_USER:
             return await interaction.response.send_message(
                 f"❌ You've hit the max of **{MAX_IGNS_PER_USER}** in-game names. "
-                f"Ask a manager to unlink one you no longer use (`/loyalty hub` → Manager settings).", ephemeral=True)
+                f"Ask a manager to unlink one you no longer use (`/me → Loyalty & rewards` → Manager settings).", ephemeral=True)
         # AUDIT FIX (high): money-bearing IGNs can't be self-claimed (anti-squatting) —
         # unpaid harvest coins would flow to whoever registered the name first.
         try:

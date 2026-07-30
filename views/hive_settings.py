@@ -72,7 +72,7 @@ def build_embed(market_id: str) -> discord.Embed:
         bits = [f"**{len(rows)}** unpaid line(s) · value **{value:,.0f}** "
                 f"→ wages **{value * wage / 100:,.0f}**"]
         if unreg:
-            bits.append("⏳ held (needs /register_ign): "
+            bits.append("⏳ held (needs /me → Link in-game name): "
                         + ", ".join(f"{i} {v:,.0f}" for i, v in list(unreg.items())[:4]))
         if unvalued:
             bits.append("⚠️ skipped (no value set): "

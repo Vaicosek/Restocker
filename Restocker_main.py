@@ -590,7 +590,7 @@ async def _upsert_worker_receipt(client: discord.Client, uid: int, order: dict) 
         emb = discord.Embed(title="✅ Completed orders",
                             description="\n".join(lines)[:4000],
                             color=discord.Color.green())
-        emb.set_footer(text="Rolling receipt — newest at the bottom · payouts are in /balance")
+        emb.set_footer(text="Rolling receipt — newest at the bottom · payouts are in /me")
         if msg is not None:
             await msg.edit(embed=emb)
         else:
@@ -2281,7 +2281,7 @@ async def _open_assist_ticket(
         except Exception:
             ign = ""
         ign_line = (f"IGN: `{ign}`\n" if ign
-                    else "IGN: *not registered — ask the worker or have them run `/register_ign`*\n")
+                    else "IGN: *not registered — ask the worker or have them run `/me → Link in-game name`*\n")
         body = (
             f"{mention_prefix}"
             f"🔑 **Trust / Claim-Access Request**\n"
@@ -10899,10 +10899,9 @@ Futures Orders (custom item + enchant requests, separate from the regular catalo
 - /futures_orders — (Managers) List futures orders by status (pending/approved/declined/all)
 
 Balances & Payouts:
-- /balance — Show your coin balance (Managers can view any user's)
+- /me — Show your coin balance (Managers can view any user's)
 - /deposit — (Managers) Add coins to a user's account
 - /withdraw_request — Request a coins withdrawal (opens a manager ticket)
-- /balance_history — Your recent coin movements (Managers can view another user's)
 
 Reports & CSN:
 - /import_earnings — (Managers) Import a CSV/Excel earnings summary (one row per month) into a market
@@ -10927,7 +10926,7 @@ using the same server coin balance as everything else:
 - /market treasury / /market treasury_withdraw — (Manager/Owner) view a market's treasury / withdraw its excess
 
 Teams & Manager Overrides (/team subcommands) — how a manager gets workers and earns a cut:
-- /team join — (Worker) join a manager's team and register your EXACT Minecraft IGN
+- /me → Join a team — (Worker) join a manager's team and register your EXACT Minecraft IGN
 - /team add — (Manager) add a worker to your team; you can set their IGN inline (worker + ign)
 - /team remove — (Manager) remove a worker from your team
 - /team list — (Manager) your team members and their registered IGNs
@@ -10942,17 +10941,14 @@ HOW THE MANAGER CUT WORKS (explain this when asked): a worker registers their EX
   - Loyalty points: the manager gets a matching ~5% of the worker's loyalty points.
   - Chest-shop sales: an optional % of the worker's monthly CSN sales net (OFF by default).
   - Team projects: a funder hands a manager a budget from the Manager Panel; the manager pays their team from the same panel and keeps whatever's left (15% is the default manager cut).
-So the flow is: worker joins a manager (/team join) and registers their IGN → does orders and/or runs their shop → the server pays the worker their FULL amount (coins via /balance, plus interest and loyalty perks) and separately mints the manager an override commission on top. The cross-team leaderboard drives competition for efficiency.
+So the flow is: worker joins a manager (/me → Join a team) and registers their IGN → does orders and/or runs their shop → the server pays the worker their FULL amount (coins via /me, plus interest and loyalty perks) and separately mints the manager an override commission on top. The cross-team leaderboard drives competition for efficiency.
 
 Brew & Tool Codes (/brew and /tool subcommands — shared name store):
 - /brew list / /brew set / /brew remove — map raw potion codes (e.g. Potion#32L) to readable names
 - /tool set / /tool remove / /tool list — same, for tool/equipment codes (e.g. Diamond Pickaxe#ahc)
 
 Loyalty (/loyalty subcommands):
-- /loyalty stats — your loyalty points, tier, interest rate, and payout bonus
-- /loyalty leaderboard — top loyalty point holders
-- /register_ign — register your exact Minecraft username (run again to add alt accounts — all your IGNs pool into one account)
-- /loyalty settings — (Managers) one panel: points, IGN links, unlinked employees
+- /me → Link in-game name — register your exact Minecraft username (run again to add alt accounts — all your IGNs pool into one account)
 
 Inventory & Stock Alarms (/inventory subcommands — live barrel fullness from CSN stock scans):
 - /inventory stock — live shop stock / barrel fullness for a market (lowest first)
@@ -11304,6 +11300,18 @@ _AI_TOOLS = [
                 "request": {"type": "string", "description": "Plain-English description of the change to make to that file"}
             },
             "required": ["file", "request"]
+        }
+    },
+    {
+        "name": "credit_team_work",
+        "description": "Re-attribute an order's team credit to the workers who actually did it. Managers claim and fulfil on their team's behalf, so the ledger records the manager as the worker and the team looks idle — this fixes that. Managers only, own team only. Ask who did what and in what quantity before calling.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "order": {"type": "string", "description": "Order number, e.g. '33' or 'order#33'."},
+                "splits": {"type": "string", "description": "Who did how much, e.g. '@alice 20, @bob 10' or '1234567890 20, 987654321 10'. Quantities should add up to the order."}
+            },
+            "required": ["order", "splits"]
         }
     },
     {
@@ -12658,6 +12666,58 @@ async def _ai_tool_propose_code_change(guild, channel, user, args):
         return f"❌ Failed: {type(e).__name__}: {e}"
 
 
+async def _ai_tool_credit_team_work(guild, channel, user, args):
+    """Re-attribute an order to the team members who actually did it.
+
+    Managers claim and fulfil on their team's behalf, so the perf ledger records the
+    MANAGER as the worker and the team reads as idle. This splits an order's credit
+    across the real workers. Manager-only, and only over your OWN team's orders.
+    """
+    if not _ai_is_manager(user):
+        return "❌ Managers only."
+    import Restocker_db as _db
+    mid = str(getattr(user, "id", 0))
+    order = str(args.get("order") or "").strip().lstrip("#")
+    if not order:
+        return "❌ Which order? e.g. order=33."
+    detail = order if order.startswith("order#") else f"order#{order}"
+
+    raw = args.get("splits") or []
+    if isinstance(raw, str):
+        parts = []
+        for chunk in raw.replace(";", ",").split(","):
+            bits = chunk.strip().split()
+            if len(bits) >= 2:
+                parts.append((bits[0].strip("<@!>"), bits[1]))
+        raw = [{"user_id": a, "qty": b} for a, b in parts]
+
+    team = {str(w) for w in (_db.get_team(mid) or [])}
+    splits = []
+    for r in raw:
+        wid = str(r.get("user_id", "")).strip().strip("<@!>")
+        try:
+            q = int(r.get("qty") or 0)
+        except Exception:
+            return f"❌ Quantity for <@{wid}> isn't a number."
+        if not wid.isdigit() or q <= 0:
+            return "❌ Each split needs a Discord user id and a positive quantity."
+        # Only your own team: otherwise a manager could move another team's credit.
+        if wid not in team and wid != mid:
+            return (f"❌ <@{wid}> isn't on your team. Add them in `/team settings` first "
+                    f"— credit can only go to your own workers.")
+        splits.append((wid, q))
+    if not splits:
+        return "❌ Give me who did the work and how much, e.g. splits='@alice 20, @bob 10'."
+
+    n = await run_on_bot_loop(_db.reassign_team_perf, mid, detail, splits)
+    if not n:
+        return (f"❌ No perf-ledger row found for `{detail}` under your team. "
+                f"Only orders your team was credited for can be re-attributed.")
+    who = ", ".join(f"<@{w}> ({q:,})" for w, q in splits)
+    return (f"✅ `{detail}` re-credited to {who}.\n"
+            f"Coins and points were split by quantity; the totals are unchanged.")
+
+
 async def _ai_tool_manage_outages(guild, channel, user, args):
     """Was /outage add|list|remove.
 
@@ -13020,7 +13080,7 @@ async def _ai_tool_get_hive_status(guild, channel, user, args):
         tot = sum(e["val"] for e in per.values())
         lines.append(f"Unpaid: {len(rows)} rows, value {tot:,.0f} (wages ≈ {tot*pct/100:,.0f}):")
         for ign, e in sorted(per.items(), key=lambda kv: -kv[1]["val"]):
-            reg = "" if e["uid"] else " (UNREGISTERED — held until /register_ign)"
+            reg = "" if e["uid"] else " (UNREGISTERED — held until /me → Link in-game name)"
             lines.append(f"• {ign}: {e['qty']:,} pcs, value {e['val']:,.0f}{reg}")
     return "\n".join(lines[:25])
 
@@ -13653,7 +13713,7 @@ async def _ai_tool_run_hive_payout(guild, channel, user, args):
     pct = _hive_harvester_pct()
     held = ""
     if unregistered:
-        held += "\nHeld (unregistered, needs /register_ign): " + ", ".join(
+        held += "\nHeld (unregistered, needs /me → Link in-game name): " + ", ".join(
             f"{i} ({v:,.0f} value)" for i, v in list(unregistered.items())[:6])
     if unvalued:
         held += "\nSkipped (no value set): " + ", ".join(
@@ -13987,6 +14047,7 @@ _AI_TOOL_MAP = {
     "get_channel_config":   _ai_tool_get_channel_config,
     "set_channel_config":   _ai_tool_set_channel_config,
     "propose_code_change":  _ai_tool_propose_code_change,
+    "credit_team_work":      _ai_tool_credit_team_work,
     "manage_outages":        _ai_tool_manage_outages,
     "clean_item_names":      _ai_tool_clean_item_names,
     "create_bulk_orders":    _ai_tool_create_bulk_orders,
@@ -13996,6 +14057,7 @@ _AI_TOOL_MAP = {
 
 # Tools whose effects are destructive/moderation-level — flagged in the audit log.
 _AI_SENSITIVE_TOOLS = {
+    "credit_team_work",     # moves who gets credit for real work
     "clean_item_names",     # renames catalog + stock rows
     "create_bulk_orders",   # writes real worker orders
     "create_futures_bulk",  # files a real order for approval

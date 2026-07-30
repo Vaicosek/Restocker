@@ -346,7 +346,7 @@ class HiveCog(commands.Cog):
                 if res["owner_line"]:
                     receipt += "\n" + res["owner_line"]
                 if unregistered:
-                    receipt += ("\n⚠ Not registered (need `/register_ign`): "
+                    receipt += ("\n⚠ Not registered (need `/me → Link in-game name`): "
                                 + ", ".join(unregistered))
                 try:
                     await message.channel.send(receipt[:1900],
@@ -357,7 +357,7 @@ class HiveCog(commands.Cog):
                 try:
                     await message.channel.send(
                         "🐝 Harvest recorded, but these IGNs aren't linked to Discord yet — "
-                        "they'll be paid automatically once they run `/register_ign`: "
+                        "they'll be paid automatically once they run `/me → Link in-game name`: "
                         + ", ".join(unregistered),
                         allowed_mentions=discord.AllowedMentions.none())
                 except Exception:

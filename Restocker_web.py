@@ -879,13 +879,19 @@ def _load_orders_data() -> dict:
     return {"markets": out}
 
 
-def _load_teams_data(days: int = 7) -> dict:
+def _load_teams_data(days: int = 0) -> dict:
     """Cross-team performance leaderboard from the perf ledger (read-only).
-    Names are resolved to in-game names; Discord IDs are never exposed."""
+    Names are resolved to in-game names; Discord IDs are never exposed.
+
+    days=0 means ALL TIME, and that is the default. It used to be 7, which quietly showed
+    a fraction of each team's work — a manager with 12 fulfilled orders across three weeks
+    displayed as 1. Nothing was lost; the window just hid it, and the page gave no way to
+    widen it.
+    """
     try:
         import Restocker_db as db
         from datetime import datetime, timedelta, timezone
-        since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat() if days else None
         rows = db.get_all_team_perf(since)
     except Exception as e:
         print(f"[teams] DB unavailable: {e}")
@@ -2052,7 +2058,12 @@ table.t tr:hover td{background:var(--hover)}
 __NAV__
 <div class="content">
 <div class="panel" style="border-top:0">
-<div class="ph"><span class="t">Team leaderboard · last <span id="d">7</span> days</span><span class="t mono" id="gen"></span></div>
+<div class="ph"><span class="t">Team leaderboard · <span id="d">all time</span></span>
+  <span style="margin-left:auto;display:flex;gap:6px">
+    <a href="/teams" id="pAll" style="font:inherit;font-size:11px;padding:2px 9px;border:1px solid var(--line2);color:var(--muted);text-decoration:none">All time</a>
+    <a href="/teams?days=30" id="p30" style="font:inherit;font-size:11px;padding:2px 9px;border:1px solid var(--line2);color:var(--muted);text-decoration:none">This month</a>
+  </span>
+  <span class="t mono" id="gen" style="margin-left:10px"></span></div>
 <table class="t"><thead><tr><th style="width:40px">#</th><th>Team</th><th>Members</th><th>Orders</th><th>Order ¢</th><th>Sales ¢</th><th>Futures</th><th>Total ¢</th></tr></thead>
 <tbody id="tb"></tbody></table>
 <div id="empty" class="faint" style="display:none;padding:36px;text-align:center;font-size:12px">No team activity yet.</div>
@@ -2064,7 +2075,9 @@ const TD=__TEAMS_JSON__;
 const fmt=n=>Math.round(n||0).toLocaleString('en-US').replace(/,/g,' ');
 const esc=s=>String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;');
 const ts=(TD&&TD.teams)||[];
-document.getElementById('d').textContent=(TD&&TD.days)||7;
+document.getElementById('d').textContent=(TD&&TD.days)?('last '+TD.days+' days'):'all time';
+(function(){var on=(TD&&TD.days)?'p30':'pAll',el=document.getElementById(on);
+ if(el){el.style.color='var(--ink2)';el.style.borderColor='var(--accent)';}})();
 document.getElementById('gen').textContent=(TD&&TD.generated)||'';
 document.getElementById('empty').style.display=ts.length?'none':'';
 document.getElementById('tb').innerHTML=ts.map((t,i)=>{
@@ -2078,7 +2091,13 @@ document.getElementById('tb').innerHTML=ts.map((t,i)=>{
 
 
 async def _handle_teams_page(request):
-    teams = _cached("teams_data", _load_teams_data)
+    try:
+        days = max(0, min(int(request.query.get("days") or 0), 3650))
+    except Exception:
+        days = 0
+    # Cache key MUST include the window: a single "teams_data" key would serve the
+    # all-time numbers under the 30-day heading and vice versa.
+    teams = _cached(f"teams_data:{days}", lambda: _load_teams_data(days))
     html = (_TEAMS_HTML.replace("__TERMINAL_CSS__", _TERMINAL_CSS)
             .replace("__NAV__", _TERMINAL_NAV).replace("__TEAMS_JSON__", _jscript(teams)))
     return web.Response(text=html, content_type="text/html")

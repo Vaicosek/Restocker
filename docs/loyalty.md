@@ -14,16 +14,21 @@ redeemed for rewards.
 | Expert | 15,000 | 0.35% | +8% |
 | Elite | 40,000 | 0.5% | +12% |
 
-## Commands
-- `/loyalty hub` — ONE panel: your points/tier, leaderboard, redeem. Managers also gep holders.
-- `/loyalty redeem` — spend points on a reward (a manager/owner pays it out).
-  `/loyalty redemptions` / `approve` / `deny` — the approval queue.
-- `/loyalty settings` — (manager) ONE panel: add/set points, link/unlink IGNs, see who's
-  unlinked, look up who holds an IGN, preview the unlinked reminder.
+## Where it lives (no /loyalty command any more)
+- **`/me`** — every worker-facing thing in one panel: coins, in-game names, team, and
+  loyalty points/tier. Its **Loyalty & rewards** button opens the hub: leaderboard,
+  redeem, and (managers only) the settings panel and the pending-redemption queue.
+- Managers reach add/set points, link/unlink IGNs, the unlinked-employee list, IGN
+  look-up and the reminder preview from that same hub → **Manager settings**.
+- There is no `/loyalty`, `/balance`, `/register_ign` or `/team join` any more — all four
+  folded into `/me`.
 
 ## IGN registry (critical for pay)
-- `/register_ign` — a worker links their Minecraft name. **Run again to add alts.**
-- Members keep `/loyalty stats`, `leaderboard`, `redeem` and `redemptions`.
+- `/me` → **Link in-game name** — a worker links their Minecraft name. **Run again to
+  add alts**; alts pool into one account.
+- Money-bearing IGNs cannot be self-claimed: if an IGN has unpaid harvests waiting, a
+  manager must link it after verifying it's theirs. Anti-squatting, and it still applies
+  through the panel.
 - The panel PREVIEWS the unlinked reminder only. Actually DMing — and especially the
   deadline that strips roles — goes through the bot so it can confirm first.
 

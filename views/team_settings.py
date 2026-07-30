@@ -1,6 +1,6 @@
 """TeamSettings — one panel replacing /team add · remove · name · list · mine · leaderboard.
 
-`/team join` deliberately stays a command: it is the one WORKERS run, and making people
+`/me → Join a team` deliberately stays a command: it is the one WORKERS run, and making people
 hunt for a panel to register their in-game name is exactly how IGNs end up unset — which
 silently breaks CSN attribution for their sales.
 
@@ -52,11 +52,11 @@ def build_embed(manager_id: int) -> discord.Embed:
                 name="⚠️ Attribution gap",
                 value=(f"{missing} member(s) have no in-game name linked, so their CSN sales "
                        f"and harvests can't be credited. Use **Add / link IGN**, or have them "
-                       f"run `/team join`."),
+                       f"run `/me → Join a team`."),
                 inline=False)
     else:
         e.add_field(name="Roster",
-                    value="Empty — add someone, or have them run `/team join manager:@you ign:<name>`.",
+                    value="Empty — add someone, or have them run `/me → Join a team manager:@you ign:<name>`.",
                     inline=False)
     e.set_footer(text="IGNs are what link CSN sales back to a Discord account.")
     return e

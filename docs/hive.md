@@ -25,7 +25,7 @@ this; they were replaced by it.
 - **Bind this channel / Unbind** — make the current channel a feed for the selected site.
 - **Item value / Wage % / Owner split** — modals for the per-piece value, the harvester
   percentage, and a partner owner's cut.
-- The panel also shows unpaid value, who's held for lacking `/register_ign`, and which
+- The panel also shows unpaid value, who's held for lacking `/me → Link in-game name`, and which
   items are skipped for having no value set.
 
 Also available as AI tools: `set_hive_autopay`, `run_hive_payout`,
@@ -62,6 +62,6 @@ value comes up:
 - **No double-pay.** Each sale is unique by `(market, ign, item, qty, sale_ts)` via the
   `uq_hive_sale` index, so re-posting, re-scanning, or two instances reporting the same
   shop still pays once. Safe to re-run backfills.
-- **Unregistered harvesters are held, not lost.** If an IGN hasn't run `/register_ign`,
+- **Unregistered harvesters are held, not lost.** If an IGN hasn't run `/me → Link in-game name`,
   its wage waits and pays automatically once they register.
 - Setting the wage/value is **never retroactive** — it applies to future payouts only.

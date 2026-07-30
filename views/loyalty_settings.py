@@ -83,7 +83,7 @@ def build_embed(guild) -> discord.Embed:
                         inline=False)
     except Exception as ex:
         log.debug("[loyalty panel] redemption count failed: %s", ex)
-    e.set_footer(text="Members use /loyalty hub for stats, leaderboard and redeem.")
+    e.set_footer(text="Members use /me → Loyalty & rewards for stats, leaderboard and redeem.")
     return e
 
 
@@ -298,7 +298,7 @@ def build_hub_embed(user, guild=None) -> discord.Embed:
     e.add_field(name="All-time", value=f"`{total:,.0f}`", inline=True)
     e.add_field(name=(f"IGNs ({len(igns)})" if len(igns) > 1 else "IGN"),
                 value=(", ".join((f"`{g}` ★" if i == 0 else f"`{g}`") for i, g in enumerate(igns))
-                       if igns else "*not registered — /register_ign*"),
+                       if igns else "*not registered — /me → Link in-game name*"),
                 inline=(len(igns) <= 1))
     e.add_field(name="Interest", value=f"`{tier['interest_weekly_pct']}%/wk`", inline=True)
     e.add_field(name="Payout bonus", value=f"`+{tier['payout_bonus_pct']}%`", inline=True)

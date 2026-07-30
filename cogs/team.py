@@ -35,63 +35,12 @@ class TeamCog(commands.Cog):
 
     team = app_commands.Group(name="team", description="Worker teams + manager overrides (synced to your in-game name)")
 
-    @team.command(name="join", description="Join a manager's team and register your EXACT in-game name")
-    @app_commands.describe(manager="The manager whose team you're joining",
-                           ign="Your EXACT Minecraft username (case-sensitive) - used to track your chest-shop sales")
-    async def join(self, interaction: discord.Interaction, manager: discord.Member, ign: str):
-        ign = ign.strip()
-        if not _IGN_RE.match(ign):
-            return await interaction.response.send_message(
-                "Invalid IGN - must be 3-16 characters: letters, numbers, underscores.", ephemeral=True)
-        if manager.bot or manager.id == interaction.user.id:
-            return await interaction.response.send_message(
-                "Pick a real manager (not yourself or a bot).", ephemeral=True)
-        owner = db.get_user_id_by_ign(ign)
-        if owner and str(owner) != str(interaction.user.id):
-            return await interaction.response.send_message(
-                f"IGN `{ign}` is already registered to someone else. Use your own exact name.", ephemeral=True)
-        existing = db.get_manager_of(str(interaction.user.id))
-        if existing and str(existing) != str(manager.id):
-            return await interaction.response.send_message(
-                f"You're already on <@{existing}>'s team - ask them to remove you in `/team settings` first.", ephemeral=True)
-        # AUDIT FIX (high): money-bearing IGNs can't be self-claimed (anti-squatting).
-        try:
-            _pend_val = db.ign_unpaid_value(ign)
-        except Exception:
-            _pend_val = 0
-        if _pend_val > 0:
-            return await interaction.response.send_message(
-                f"⚠️ `{ign}` has **{int(_pend_val):,}** coins of unpaid harvests waiting, so it "
-                f"can't be self-claimed. Ask a manager to link it (they'll verify it's yours).",
-                ephemeral=True)
-        # AUDIT FIX (high): /team join bypassed the per-user IGN cap — re-running it
-        # with different names let one account squat hundreds of IGNs preemptively.
-        try:
-            _max = int(getattr(core, "MAX_IGNS_PER_USER", 12) or 12)
-            if db.count_igns(str(interaction.user.id)) >= _max and ign not in (db.get_igns(str(interaction.user.id)) or []):
-                return await interaction.response.send_message(
-                    f"❌ You've hit the max of **{_max}** in-game names. Ask a manager to "
-                    f"unlink one you no longer use first.", ephemeral=True)
-        except Exception:
-            pass
-        db.set_ign(str(interaction.user.id), ign)
-        db.delete_ign_pending(str(interaction.user.id))   # registered now → cancel any pending
-        # role-strip deadline (every registration path must clear this, or the deadline loop
-        # would strip the role of someone who DID register)
-        db.set_team_member(str(interaction.user.id), str(manager.id))
-        await interaction.response.send_message(
-            f"Joined {manager.mention}'s team as **{ign}**. Your orders (and tracked sales) now credit them.",
-            ephemeral=True)
-        try:
-            await manager.send(f"{interaction.user.mention} (IGN `{ign}`) joined your team.")
-        except Exception:
-            pass
 
     @team.command(name="settings",
                   description="(Manager) TeamSettings — roster, add/remove, rename, leaderboard")
     async def team_settings(self, interaction: discord.Interaction):
         """One panel replacing add / remove / name / list / mine / leaderboard.
-        `/team join` stays separate — that's the one workers run."""
+        `/me → Join a team` stays separate — that's the one workers run."""
         if not is_manager(interaction):
             return await interaction.response.send_message("Managers only.", ephemeral=True)
         from views.team_settings import TeamSettingsView, build_embed

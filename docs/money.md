@@ -1,7 +1,7 @@
 # Money — balances, withdrawals, investors, fees
 
 ## Balances
-- `/balance [user]` — coin balance (others require Manager).
+- `/me [user]` — coin balance (others require Manager).
 - Balance history, manual credits and withdrawal requests are handled by the AI (ask it) or
   through the ticket flow — the old `/balance_history`, `/deposit` and `/withdraw_request`
   commands were retired.

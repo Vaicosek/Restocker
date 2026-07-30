@@ -37,26 +37,6 @@ class MoneyCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    @app_commands.command(name="balance", description="Show your coin balance (or another user's if Manager).")
-
-
-    @app_commands.describe(user="(Managers) Optional: check someone else's balance")
-    async def balance_cmd(self, interaction: discord.Interaction, user: Optional[discord.User] = None):
-        target = user or interaction.user
-
-
-        if user is not None and not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only (for checking others).", **ephemeral_kwargs(interaction))
-
-        data = _load_balances()
-        u = _get_user_bal(data["users"], target.id)
-
-        await interaction.response.send_message(
-            f"💰 Balance for {target.mention}\n"
-            f"• Coins: **{u['coins']}**\n"
-            f"• Principal: **{u.get('principal', u['coins'])}**",
-            **ephemeral_kwargs(interaction)
-        )
 
     @app_commands.command(
         name="futures_order",

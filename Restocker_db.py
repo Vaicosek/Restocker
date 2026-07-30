@@ -1867,6 +1867,46 @@ def record_team_perf(manager_id: str, worker_id: str, kind: str,
              float(coins or 0), float(points or 0), int(qty or 0), detail or ""))
 
 
+def reassign_team_perf(manager_id: str, detail: str, splits: list) -> int:
+    """Re-attribute one already-logged order to the people who actually did the work.
+
+    A manager claims and fulfils on their team's behalf — that is the intended workflow —
+    so every perf row lands with worker_id == manager_id and the team looks idle. This
+    replaces that single row with one row per worker, splitting coins/qty by share.
+
+    `splits` is [(worker_id, qty), ...]. Coins are apportioned by qty so the total is
+    preserved exactly: the last worker absorbs the rounding remainder, otherwise repeated
+    splits would slowly leak coins out of the ledger.
+    """
+    if not splits:
+        return 0
+    with db() as conn:
+        row = conn.execute(
+            "SELECT * FROM team_perf_log WHERE manager_id=? AND detail=? LIMIT 1",
+            (str(manager_id), str(detail))).fetchone()
+        if row is None:
+            return 0
+        src = dict(row)
+        total_qty = sum(int(q or 0) for _, q in splits) or 1
+        coins = float(src.get("coins") or 0)
+        points = float(src.get("points") or 0)
+        conn.execute("DELETE FROM team_perf_log WHERE id=?", (src["id"],))
+        assigned_c = assigned_p = 0.0
+        for n, (wid, q) in enumerate(splits):
+            q = int(q or 0)
+            last = (n == len(splits) - 1)
+            c = round(coins - assigned_c, 4) if last else round(coins * q / total_qty, 4)
+            pt = round(points - assigned_p, 4) if last else round(points * q / total_qty, 4)
+            assigned_c += c
+            assigned_p += pt
+            conn.execute(
+                "INSERT INTO team_perf_log (manager_id, worker_id, kind, coins, points, qty, detail, created_at) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (str(manager_id), str(wid), src["kind"], c, pt, q, src["detail"],
+                 src.get("created_at")))
+        return len(splits)
+
+
 def team_perf_exists(manager_id: str, detail: str, kind: str = "order") -> bool:
     """True if a perf-ledger row already exists for this manager+detail+kind.
     Used by the backfill to stay idempotent (never double-credit an order)."""
