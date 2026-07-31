@@ -141,17 +141,18 @@ class WebOrderView(discord.ui.View):
         )
 
     async def _do_approve(self, interaction: discord.Interaction, *, ping_workers: bool):
+        _oid = self._resolve(interaction)
+        if not _oid:
+            return await interaction.response.send_message(
+                "⚠️ Couldn't identify this order — it predates message-id "
+                "tracking and its embed carries no #number.", ephemeral=True)
+
         try:
             import Restocker_db as _db
             order = _db.get_web_order(_oid)
         except Exception as e:
             await interaction.response.send_message(f"⚠️ DB error: {e}", ephemeral=True)
             return
-        _oid = self._resolve(interaction)
-        if not _oid:
-            return await interaction.response.send_message(
-                "⚠️ Couldn't identify this order.", ephemeral=True)
-
 
         if not order:
             await interaction.response.send_message("⚠️ Order not found.", ephemeral=True)
@@ -381,16 +382,17 @@ class FuturesOrderView(discord.ui.View):
         import Restocker_db as _db
         from datetime import datetime, timezone as _tz, timedelta
 
-        try:
-            order = _db.get_futures_order(_oid)
-        except Exception as e:
-            await interaction.response.send_message(f"⚠️ DB error: {e}", ephemeral=True)
-            return
         _oid = self._resolve(interaction)
         if not _oid:
             return await interaction.response.send_message(
                 "⚠️ Couldn't identify this order — it predates message-id "
                 "tracking and its embed carries no #number.", ephemeral=True)
+
+        try:
+            order = _db.get_futures_order(_oid)
+        except Exception as e:
+            await interaction.response.send_message(f"⚠️ DB error: {e}", ephemeral=True)
+            return
 
 
         if not order:

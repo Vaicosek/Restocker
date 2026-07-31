@@ -13265,8 +13265,25 @@ async def _ai_tool_create_futures_bulk(guild, channel, user, args):
     try:
         from views.web import FuturesBulkView, _futures_bulk_preview_embed
         bulk = _db.get_futures_bulk(bulk_id)
-        msg = await channel.send(embed=_futures_bulk_preview_embed(bulk),
-                                 view=FuturesBulkView(bulk_id))
+        # Post to the FUTURES approval channel, not wherever the bot happened to be
+        # pinged — otherwise the card lands in whatever market channel the manager was
+        # chatting in and the people who review futures never see it.
+        post_ch = bot.get_channel(FUTURES_CHANNEL_ID) if FUTURES_CHANNEL_ID else None
+        if post_ch is None and WEB_ORDERS_CHANNEL_ID:
+            post_ch = bot.get_channel(WEB_ORDERS_CHANNEL_ID)   # same fallback the single path uses
+        if post_ch is None:
+            post_ch = channel                                   # last resort: where we were pinged
+        ping = ""
+        try:
+            owner_role = discord.utils.get(post_ch.guild.roles, name=OWNER_ROLE_NAME)
+            ping = owner_role.mention if owner_role else ""
+        except Exception:
+            pass
+        msg = await post_ch.send(
+            content=(f"{ping} — new bulk futures order!" if ping else "New bulk futures order!"),
+            embed=_futures_bulk_preview_embed(bulk),
+            view=FuturesBulkView(bulk_id),
+            allowed_mentions=discord.AllowedMentions(roles=True))
         # The persistent view recovers the bulk id from this message id after a restart.
         _db.update_futures_bulk_status(bulk_id, "pending", notify_msg_id=str(msg.id))
     except Exception as e:
@@ -13277,7 +13294,7 @@ async def _ai_tool_create_futures_bulk(guild, channel, user, args):
     more = f"\n…and {len(parsed) - 15} more" if len(parsed) > 15 else ""
     return (f"✅ Filed bulk futures order **#{bulk_id}** for {target_name} — "
             f"{len(parsed)} line(s):\n{lines}{more}\n\n"
-            f"Approval card posted above. A manager must press **Approve & Fulfill**; "
+            f"Approval card posted in {post_ch.mention}. A manager must approve it; "
             f"nothing is ordered until they do.")
 
 
