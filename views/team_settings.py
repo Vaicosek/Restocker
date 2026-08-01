@@ -195,7 +195,7 @@ class TeamSettingsView(discord.ui.View):
 
     async def _add(self, interaction: discord.Interaction):
         await interaction.response.send_message("Pick the member — start typing their name:",
-            view=_PickMemberView(self, i.user.id), ephemeral=True)
+            view=_PickMemberView(self, interaction.user.id), ephemeral=True)
 
     async def _rename(self, interaction: discord.Interaction):
         await interaction.response.send_modal(_NameModal(self))

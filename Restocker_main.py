@@ -11350,7 +11350,8 @@ _AI_TOOLS = [
         "description": "Delete the bot's own '📦 New Production Requests' batch DMs from employees' inboxes. Managers only. PREVIEWS by default — show the counts and let the user confirm before apply=true. Use when a bad or empty digest went out.",
         "input_schema": {
             "type": "object",
-            "properties": {"apply": {"type": "boolean", "description": "false (default) = preview counts. true = actually delete."}},
+            "properties": {"apply": {"type": "boolean", "description": "false (default) = preview counts. true = actually delete."},
+                           "scan_depth": {"type": "integer", "description": "How many recent DMs to scan per employee when tracking is empty (default 30, max 100)."}},
             "required": []
         }
     },
@@ -12949,6 +12950,59 @@ async def _ai_tool_set_market_finances(guild, channel, user, args):
     return f"✅ **{markets[mid].get('name', mid)}** — " + "; ".join(out) + "."
 
 
+async def _sweep_batch_dms_by_scan(guild, user, args):
+    """Find batch digests by CONTENT when the tracking store is empty.
+
+    Matches only messages the BOT authored whose embed title is the batch digest, so a
+    real conversation can never be caught. Scans members holding the employee role.
+    """
+    if guild is None:
+        return "❌ Run this in the server so I can see who the employees are."
+    role = discord.utils.get(guild.roles, name=EMPLOYEE_ROLE_NAME)
+    if role is None:
+        return f"❌ No `{EMPLOYEE_ROLE_NAME}` role found."
+    targets = [m for m in role.members if not m.bot]
+    if not targets:
+        return f"✅ Nobody holds `{EMPLOYEE_ROLE_NAME}`."
+    try:
+        limit = max(1, min(int(args.get("scan_depth") or 30), 100))
+    except Exception:
+        limit = 30
+    TITLE = "New Production Requests"
+    apply = bool(args.get("apply"))
+    found = deleted = failed = 0
+    hit_users = []
+    for m in targets:
+        try:
+            dm = m.dm_channel or await m.create_dm()
+            async for msg in dm.history(limit=limit):
+                if msg.author.id != bot.user.id:
+                    continue
+                if not any(TITLE in str(e.title or "") for e in (msg.embeds or [])):
+                    continue
+                found += 1
+                if apply:
+                    try:
+                        await msg.delete()
+                        deleted += 1
+                    except Exception:
+                        failed += 1
+            if found and m.display_name not in hit_users:
+                hit_users.append(m.display_name)
+        except Exception:
+            continue
+    if not found:
+        return (f"✅ Scanned the last {limit} DM(s) for **{len(targets)}** employee(s) — "
+                f"no batch digests found.")
+    if not apply:
+        return (f"**Preview** — found **{found}** batch digest(s) across "
+                f"**{len(hit_users)}** employee(s) (scanned last {limit} DMs each).\n"
+                f"Only messages I sent with a '{TITLE}' embed are matched. "
+                f"Ask me to apply it.")
+    return (f"🧹 Deleted **{deleted}** batch digest(s) from {len(hit_users)} inbox(es)"
+            + (f", {failed} failed." if failed else "."))
+
+
 async def _ai_tool_sweep_batch_dms(guild, channel, user, args):
     """Delete the batch-digest DMs the bot sent to employees. PREVIEWS unless apply=true.
 
@@ -12965,7 +13019,11 @@ async def _ai_tool_sweep_batch_dms(guild, channel, user, args):
     data = load_orders()
     store = (data.get("ui", {}) or {}).get("batch_dm_messages", {}) or {}
     if not isinstance(store, dict) or not store:
-        return "✅ No tracked batch DMs — nothing to sweep."
+        # The tracking store keeps only the LATEST message id per user
+        # (_track_batch_dm_message assigns, it does not append) and entries are popped as
+        # orders close — so digests routinely outlive their tracking. Fall back to
+        # scanning each employee's DM history for the bot's own batch embed.
+        return await _sweep_batch_dms_by_scan(guild, user, args)
     total = sum(len(v) for v in store.values() if isinstance(v, list))
     if not bool(args.get("apply")):
         return (f"**Preview** — {total} tracked batch DM(s) across **{len(store)}** "

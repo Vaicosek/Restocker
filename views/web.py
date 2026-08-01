@@ -47,7 +47,7 @@ class WebOrderView(discord.ui.View):
 
     def _resolve(self, interaction) -> int:
         """Same recovery as FuturesOrderView: bot.add_view(WebOrderView(0)) means
-        _oid is 0 for every message that predates the current process."""
+        self.order_id is 0 for every message that predates the current process."""
         if self.order_id:
             return self.order_id
         msg = getattr(interaction, "message", None)
@@ -288,7 +288,7 @@ class FuturesOrderView(discord.ui.View):
 
     def _resolve(self, interaction) -> int:
         """Recover the order id. Persistent views are registered with id 0, so after a
-        restart _oid is meaningless on any pre-existing message.
+        restart self.order_id is meaningless on any pre-existing message.
 
         Three sources, in order of reliability:
           1. the id we were constructed with (fresh post, same process)
@@ -296,8 +296,8 @@ class FuturesOrderView(discord.ui.View):
           3. the embed title "New Futures Order #N" — needed because notify_msg_id was
              only written from a later version, so older messages have none.
         """
-        if _oid:
-            return _oid
+        if self.order_id:
+            return self.order_id
         msg = getattr(interaction, "message", None)
         if msg is None:
             return 0
