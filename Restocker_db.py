@@ -801,6 +801,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
         "ALTER TABLE futures_bulk_lines ADD COLUMN item_key TEXT",
         "ALTER TABLE futures_bulk_lines ADD COLUMN sold_baseline INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE futures_bulk_lines ADD COLUMN sold_override INTEGER",
+        # A bulk is a TOOL for filing several orders, not a separate thing to approve.
+        # Each line becomes an ordinary futures order; this column is how that order
+        # finds its way back to the bulk line for consignment billing on approval.
+        "ALTER TABLE futures_orders ADD COLUMN bulk_line_id INTEGER",
         # Investors (GEX.PR preferred shareholders): display name + preferred-share count
         # from the Crimson Banking cap-table export, share_pct derived from it, and a
         # running total of profit-share coins paid out.
@@ -2786,6 +2790,29 @@ def update_futures_bulk_status(bulk_id: int, status: str, reviewed_by: str = Non
             "reviewed_at=CASE WHEN ? IN ('fulfilled','declined','cancelled') THEN datetime('now') ELSE reviewed_at END, "
             "notify_msg_id=COALESCE(?, notify_msg_id) WHERE id=?",
             (status, reviewed_by, status, notify_msg_id, int(bulk_id)))
+
+
+def set_futures_order_bulk_line(order_id: int, line_id: int) -> None:
+    """Tie a futures order to the bulk line it came from."""
+    with db() as conn:
+        conn.execute("UPDATE futures_orders SET bulk_line_id=? WHERE id=?",
+                     (int(line_id), int(order_id)))
+
+
+def get_futures_bulk_line(line_id: int) -> Optional[dict]:
+    with db() as conn:
+        row = conn.execute("SELECT * FROM futures_bulk_lines WHERE id=?",
+                           (int(line_id),)).fetchone()
+        return dict(row) if row else None
+
+
+def set_futures_bulk_line_baseline(line_id: int, sold_baseline: int) -> None:
+    """Freeze the customer's CURRENT sold count for this item at approval time, so the
+    consignment invoice only charges margin on units resold AFTER the deal — not on
+    everything they had ever sold before it."""
+    with db() as conn:
+        conn.execute("UPDATE futures_bulk_lines SET sold_baseline=? WHERE id=?",
+                     (int(sold_baseline), int(line_id)))
 
 
 def set_futures_bulk_line_order(line_id: int, work_order_id: int) -> None:

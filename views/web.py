@@ -141,9 +141,14 @@ class WebOrderView(discord.ui.View):
         )
 
     async def _do_approve(self, interaction: discord.Interaction, *, ping_workers: bool):
+        # Defer FIRST: Discord kills the interaction after 3s, and everything below
+        # (order lookup, work-order creation, card posting, customer DM) is far slower.
+        # Every reply after this point must be followup.send, not response.send_message.
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True, thinking=True)
         _oid = self._resolve(interaction)
         if not _oid:
-            return await interaction.response.send_message(
+            return await interaction.followup.send(
                 "⚠️ Couldn't identify this order — it predates message-id "
                 "tracking and its embed carries no #number.", ephemeral=True)
 
@@ -151,18 +156,18 @@ class WebOrderView(discord.ui.View):
             import Restocker_db as _db
             order = _db.get_web_order(_oid)
         except Exception as e:
-            await interaction.response.send_message(f"⚠️ DB error: {e}", ephemeral=True)
+            await interaction.followup.send(f"⚠️ DB error: {e}", ephemeral=True)
             return
 
         if not order:
-            await interaction.response.send_message("⚠️ Order not found.", ephemeral=True)
+            await interaction.followup.send("⚠️ Order not found.", ephemeral=True)
             return
 
         # Block self-approval — same guard futures already has. A manager who orders through
         # the website must not be able to wave their own order through; another manager reviews
         # it. Decline is unaffected (you may always cancel your own order).
         if str(order.get("discord_id") or "") == str(interaction.user.id):
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "⚠️ You can't approve your **own** web order — another manager has to review it.",
                 ephemeral=True)
             return
@@ -171,12 +176,11 @@ class WebOrderView(discord.ui.View):
         # are stripped on approve, but a stale message or two managers racing could still fire
         # this path, so re-check the live status before doing anything.
         if str(order.get("status") or "").lower() == "approved":
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"ℹ️ Order #{_oid} is already approved — not creating duplicate orders.",
                 ephemeral=True)
             return
 
-        await interaction.response.defer(ephemeral=True, thinking=True)
 
         try:
             import Restocker_db as _db
@@ -379,31 +383,36 @@ class FuturesOrderView(discord.ui.View):
         )
 
     async def _do_approve(self, interaction: discord.Interaction, *, ping_workers: bool):
+        # Defer FIRST: Discord kills the interaction after 3s, and everything below
+        # (order lookup, work-order creation, card posting, customer DM) is far slower.
+        # Every reply after this point must be followup.send, not response.send_message.
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True, thinking=True)
         import Restocker_db as _db
         from datetime import datetime, timezone as _tz, timedelta
 
         _oid = self._resolve(interaction)
         if not _oid:
-            return await interaction.response.send_message(
+            return await interaction.followup.send(
                 "⚠️ Couldn't identify this order — it predates message-id "
                 "tracking and its embed carries no #number.", ephemeral=True)
 
         try:
             order = _db.get_futures_order(_oid)
         except Exception as e:
-            await interaction.response.send_message(f"⚠️ DB error: {e}", ephemeral=True)
+            await interaction.followup.send(f"⚠️ DB error: {e}", ephemeral=True)
             return
 
 
         if not order:
-            await interaction.response.send_message("⚠️ Order not found.", ephemeral=True)
+            await interaction.followup.send("⚠️ Order not found.", ephemeral=True)
             return
 
         # Block self-approval: an internal review has to be done by a DIFFERENT manager,
         # even if the customer happens to hold the manager role (that's how #10 got
         # self-approved). Decline is unaffected.
         if str(order.get("user_id") or "") == str(interaction.user.id):
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "⚠️ You can't approve your **own** futures order — another manager has to review it.",
                 ephemeral=True)
             return
@@ -416,7 +425,7 @@ class FuturesOrderView(discord.ui.View):
                 notify_msg_id=str(interaction.message.id) if interaction.message else None,
             )
         except Exception as e:
-            await interaction.response.send_message(f"⚠️ DB error: {e}", ephemeral=True)
+            await interaction.followup.send(f"⚠️ DB error: {e}", ephemeral=True)
             return
         try:
             _wid = str(order.get("user_id") or "")
@@ -491,6 +500,26 @@ class FuturesOrderView(discord.ui.View):
             }
             data_orders.setdefault("orders", []).append(work_order)
             save_orders(data_orders)
+
+            # If this order came from a bulk, tie the work order back to its bulk LINE.
+            # _futures_bulk_owed() reads work_order_id + sold_baseline off the line to
+            # build the consignment invoice; without this the bulk still exists for
+            # billing but never learns the work was created, so it would bill nothing
+            # however much the customer resells.
+            try:
+                _bl = (order or {}).get("bulk_line_id")
+                if _bl and _new_order_id:
+                    _db.set_futures_bulk_line_order(int(_bl), int(_new_order_id))
+                    _ln = _db.get_futures_bulk_line(int(_bl))
+                    # Freeze their CURRENT sold count, so only resales AFTER approval
+                    # count toward what they owe — not everything sold beforehand.
+                    if _ln is not None and not int(_ln.get("sold_baseline") or 0):
+                        _bulk = _db.get_futures_bulk(int(_ln["bulk_id"])) or {}
+                        _cur = core._csn_item_sold(_bulk.get("market_id") or "",
+                                                   _ln.get("item_key") or "")
+                        _db.set_futures_bulk_line_baseline(int(_bl), int(_cur))
+            except Exception as _ex:
+                print(f"[futures] bulk-line link failed: {_ex}")
             await update_order_messages(bot, work_order, allow_post=True)
             posted_ok = True
         except Exception as e:
@@ -541,7 +570,7 @@ class FuturesOrderView(discord.ui.View):
         except Exception:
             pass
 
-        await interaction.response.send_message(
+        await interaction.followup.send(
             (f"✅ Futures #{_oid} approved → posted as claimable order **#{_new_order_id}** "
              f"in the worker channel"
              if posted_ok else
@@ -631,8 +660,13 @@ class FuturesBulkModal(discord.ui.Modal, title="Bulk futures — paste item list
 
 
 class FuturesBulkView(discord.ui.View):
-    """Approve & Fulfill / Cancel for a bulk futures order. Persistent: recovers the bulk id
-    from the message it lives on, so the buttons survive a restart."""
+    """RETIRED — kept only so bot.add_view() can still adopt the buttons on bulk cards
+    posted before the change, and so those messages do not error.
+
+    A bulk is a TOOL for filing several orders, not a thing you approve. Each line is now
+    an ordinary futures order with the ordinary card and buttons; the bulk row survives
+    purely as a BILLING GROUPING that _futures_bulk_owed() reads. There is nothing left
+    to approve here, so the buttons are gone."""
 
     def __init__(self, bulk_id: int = 0):
         super().__init__(timeout=None)
@@ -648,87 +682,9 @@ class FuturesBulkView(discord.ui.View):
         except Exception:
             return 0
 
-    @discord.ui.button(label="✅ Approve & Ping Workers", style=discord.ButtonStyle.success,
-                       custom_id="futures_bulk_fulfill")
-    async def approve_ping(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._do_approve(interaction, ping_workers=True)
 
-    @discord.ui.button(label="Approve (no ping)", style=discord.ButtonStyle.primary,
-                       custom_id="futures_bulk_approve_quiet")
-    async def approve_quiet(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._do_approve(interaction, ping_workers=False)
 
-    async def _do_approve(self, interaction: discord.Interaction, *, ping_workers: bool):
-        """Was one button labelled "Approve & Fulfill". It never fulfilled anything — it
-        creates claimable work orders, exactly like the single-item card's Approve. The
-        label implied the job was DONE when no worker had touched it, and the status it
-        wrote ("fulfilled") said the same thing to every downstream reader."""
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
-        import Restocker_db as _db
-        bulk_id = self._resolve(interaction)
-        bulk = _db.get_futures_bulk(bulk_id) if bulk_id else None
-        if not bulk:
-            return await interaction.response.send_message("⚠️ Bulk order not found.", ephemeral=True)
-        if str(bulk.get("status")) in ("approved", "fulfilled"):   # "fulfilled" = pre-rename rows
-            return await interaction.response.send_message("⚠️ Already fulfilled.", ephemeral=True)
-        if str(bulk.get("status")) in ("declined", "cancelled"):
-            return await interaction.response.send_message(f"⚠️ This order is {bulk.get('status')}.", ephemeral=True)
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        try:
-            created = core._create_futures_bulk_work_orders(bulk_id)
-        except Exception as e:
-            return await interaction.followup.send(f"⚠️ Couldn't create work orders: {e}", ephemeral=True)
-        _db.update_futures_bulk_status(bulk_id, "approved", reviewed_by=str(interaction.user.id))
-        try:
-            await interaction.message.edit(embed=_futures_bulk_preview_embed(_db.get_futures_bulk(bulk_id)),
-                                           view=None)
-        except Exception:
-            pass
-        try:
-            cid = str(bulk.get("customer_id") or "")
-            if cid:
-                cust = await interaction.client.fetch_user(int(cid))
-                await cust.send(f"✅ Your bulk futures order **#{bulk_id}** was approved — "
-                                f"**{len(created)}** item(s) are now queued for our workers to craft.")
-        except Exception:
-            pass
-        if ping_workers and interaction.guild:
-            try:
-                ch = interaction.client.get_channel(WORKER_CHANNEL_ID)
-                role = discord.utils.get(interaction.guild.roles, name=EMPLOYEE_ROLE_NAME)
-                if ch and role:
-                    await ch.send(f"{role.mention} \U0001F52E **{len(created)}** new futures work "
-                                  f"order(s) from bulk #{bulk_id} — claim them in the cards below.",
-                                  allowed_mentions=discord.AllowedMentions(roles=True))
-            except Exception as ex:
-                print(f"[futures bulk] ping failed: {ex}")
-        await interaction.followup.send(
-            f"✅ Approved bulk futures **#{bulk_id}** — created **{len(created)}** claimable work "
-            f"order(s). They post to the worker channel on the next announce slot."
-            + (f" {EMPLOYEE_ROLE_NAME} pinged." if ping_workers else ""), ephemeral=True)
 
-    @discord.ui.button(label="❌ Decline", style=discord.ButtonStyle.danger,
-                       custom_id="futures_bulk_cancel")
-    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not is_manager(interaction):
-            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
-        import Restocker_db as _db
-        bulk_id = self._resolve(interaction)
-        bulk = _db.get_futures_bulk(bulk_id) if bulk_id else None
-        if not bulk:
-            return await interaction.response.send_message("⚠️ Bulk order not found.", ephemeral=True)
-        if str(bulk.get("status")) in ("approved", "fulfilled"):   # "fulfilled" = pre-rename rows
-            return await interaction.response.send_message(
-                "⚠️ Already fulfilled — the work orders exist. Cancel those individually if needed.",
-                ephemeral=True)
-        _db.update_futures_bulk_status(bulk_id, "cancelled", reviewed_by=str(interaction.user.id))
-        try:
-            await interaction.message.edit(embed=_futures_bulk_preview_embed(_db.get_futures_bulk(bulk_id)),
-                                           view=None)
-        except Exception:
-            pass
-        await interaction.response.send_message(f"🗑 Cancelled bulk futures #{bulk_id}.", ephemeral=True)
 
 
 async def post_futures_bulk_review(bulk_id: int):

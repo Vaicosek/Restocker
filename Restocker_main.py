@@ -11346,6 +11346,20 @@ _AI_TOOLS = [
         }
     },
     {
+        "name": "sweep_batch_dms",
+        "description": "Delete the bot's own '📦 New Production Requests' batch DMs from employees' inboxes. Managers only. PREVIEWS by default — show the counts and let the user confirm before apply=true. Use when a bad or empty digest went out.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"apply": {"type": "boolean", "description": "false (default) = preview counts. true = actually delete."}},
+            "required": []
+        }
+    },
+    {
+        "name": "resend_order_cards",
+        "description": "Repost every open order card to the worker channel so workers have working buttons to claim. Same as the Manager Panel's 'Resend order cards'. Managers only. Use when the order UI is missing or stale in the worker channel.",
+        "input_schema": {"type": "object", "properties": {}, "required": []}
+    },
+    {
         "name": "manage_team",
         "description": "Name a team, add or remove members, or show a roster. Managers act on their own team. Naming matters: an unnamed team appears as the manager's Discord name in the /me join list, so workers told to join by team name can't find it.",
         "input_schema": {
@@ -12935,6 +12949,94 @@ async def _ai_tool_set_market_finances(guild, channel, user, args):
     return f"✅ **{markets[mid].get('name', mid)}** — " + "; ".join(out) + "."
 
 
+async def _ai_tool_sweep_batch_dms(guild, channel, user, args):
+    """Delete the batch-digest DMs the bot sent to employees. PREVIEWS unless apply=true.
+
+    Needed because an empty digest went out to everyone: the announce loop guarded
+    `if not ready` but then filtered AGAIN when building the message body, so a run where
+    every ready order was already fully claimed produced an embed with no lines and DM'd
+    it anyway. That hole is closed, but the DMs already sent have to be cleared by hand —
+    a bot can only delete its OWN DMs, one recipient at a time.
+
+    Only touches ids in batch_dm_messages, so it can never delete a real conversation.
+    """
+    if not _ai_is_manager(user):
+        return "❌ Managers only."
+    data = load_orders()
+    store = (data.get("ui", {}) or {}).get("batch_dm_messages", {}) or {}
+    if not isinstance(store, dict) or not store:
+        return "✅ No tracked batch DMs — nothing to sweep."
+    total = sum(len(v) for v in store.values() if isinstance(v, list))
+    if not bool(args.get("apply")):
+        return (f"**Preview** — {total} tracked batch DM(s) across **{len(store)}** "
+                f"recipient(s).\nThese are the bot's own '📦 New Production Requests' "
+                f"digests. Nothing else is touched. Ask me to apply it.")
+
+    deleted = failed = 0
+    for uid_str, mids in list(store.items()):
+        try:
+            uid = int(uid_str)
+        except Exception:
+            store.pop(uid_str, None)
+            continue
+        try:
+            u = bot.get_user(uid) or await bot.fetch_user(uid)
+            dm = u.dm_channel or await u.create_dm()
+        except Exception:
+            failed += len(mids or [])
+            continue
+        for mid in list(mids or []):
+            try:
+                msg = await dm.fetch_message(int(mid))
+                await msg.delete()
+                deleted += 1
+            except Exception:
+                failed += 1        # already gone, or we lost access — treat as done
+        store.pop(uid_str, None)
+    try:
+        save_orders(data)
+    except Exception as e:
+        return f"⚠️ Deleted {deleted} but couldn't clear the tracking store: {e}"
+    return (f"🧹 Deleted **{deleted}** batch DM(s)"
+            + (f", {failed} couldn't be reached (already deleted or DMs closed)." if failed else ".")
+            + "\nThe tracking store is cleared, so nothing will be re-swept.")
+
+
+async def _ai_tool_resend_order_cards(guild, channel, user, args):
+    """Repost every open order card to the worker channel. Same action as the Manager
+    Panel's 'Resend order cards' button — this just makes it reachable by asking."""
+    if not _ai_is_manager(user):
+        return "❌ Managers only."
+    ch = bot.get_channel(WORKER_CHANNEL_ID) if WORKER_CHANNEL_ID else None
+    if ch is None:
+        return f"❌ Can't see the worker channel ({WORKER_CHANNEL_ID})."
+    data = load_orders()
+    open_orders = [o for o in (data.get("orders") or [])
+                   if isinstance(o, dict) and not _order_is_claimed_closed(o)]
+    if not open_orders:
+        return "✅ No open orders to repost."
+    posted, errs = 0, []
+    for o in sorted(open_orders, key=lambda x: int(x.get("id", 0) or 0)):
+        o["worker_announced"] = True
+        try:
+            await update_order_messages(bot, o, allow_post=True)
+            posted += 1
+        except Exception as e:
+            errs.append(f"#{o.get('id')}: {type(e).__name__}")
+    # Reload and merge ONLY what we changed: the awaits above yield, and writing the
+    # stale snapshot back would clobber any claim made in the meantime.
+    fresh = load_orders()
+    by_id = {int(x.get("id", 0) or 0): x for x in (fresh.get("orders") or []) if isinstance(x, dict)}
+    for o in open_orders:
+        f = by_id.get(int(o.get("id", 0) or 0))
+        if f is not None:
+            f["worker_announced"] = True
+            f["messages"] = o.get("messages") or f.get("messages")
+    save_orders(fresh)
+    return (f"📮 Reposted **{posted}/{len(open_orders)}** order card(s) to <#{WORKER_CHANNEL_ID}>."
+            + ("\n⚠️ " + " · ".join(errs[:5]) if errs else ""))
+
+
 async def _ai_tool_manage_team(guild, channel, user, args):
     """Name a team, add/remove members, or show a roster.
 
@@ -13256,46 +13358,73 @@ async def _ai_tool_create_futures_bulk(guild, channel, user, args):
         bulk_id = _db.create_futures_bulk(
             target_id, target_name, market_id, getattr(user, "id", 0),
             str(args.get("notes", "") or "") + f" • placed by {user} via AI")
+        line_ids = []
         for pr in parsed:
-            _db.add_futures_bulk_line(bulk_id, pr["item"], pr["qty"], pr.get("unit", "pieces"),
-                                      enchants="", raw_line=pr.get("raw", ""))
+            line_ids.append(_db.add_futures_bulk_line(
+                bulk_id, pr["item"], pr["qty"], pr.get("unit", "pieces"),
+                enchants="", raw_line=pr.get("raw", "")))
     except Exception as e:
         return f"⚠️ DB error creating the bulk order: {e}"
 
-    try:
-        from views.web import FuturesBulkView, _futures_bulk_preview_embed
-        bulk = _db.get_futures_bulk(bulk_id)
-        # Post to the FUTURES approval channel, not wherever the bot happened to be
-        # pinged — otherwise the card lands in whatever market channel the manager was
-        # chatting in and the people who review futures never see it.
-        post_ch = bot.get_channel(FUTURES_CHANNEL_ID) if FUTURES_CHANNEL_ID else None
-        if post_ch is None and WEB_ORDERS_CHANNEL_ID:
-            post_ch = bot.get_channel(WEB_ORDERS_CHANNEL_ID)   # same fallback the single path uses
-        if post_ch is None:
-            post_ch = channel                                   # last resort: where we were pinged
-        ping = ""
-        try:
-            owner_role = discord.utils.get(post_ch.guild.roles, name=OWNER_ROLE_NAME)
-            ping = owner_role.mention if owner_role else ""
-        except Exception:
-            pass
-        msg = await post_ch.send(
-            content=(f"{ping} — new bulk futures order!" if ping else "New bulk futures order!"),
-            embed=_futures_bulk_preview_embed(bulk),
-            view=FuturesBulkView(bulk_id),
-            allowed_mentions=discord.AllowedMentions(roles=True))
-        # The persistent view recovers the bulk id from this message id after a restart.
-        _db.update_futures_bulk_status(bulk_id, "pending", notify_msg_id=str(msg.id))
-    except Exception as e:
-        return (f"⚠️ Bulk order #{bulk_id} was saved with {len(parsed)} line(s), but I couldn't "
-                f"post the approval card: {e}")
+    # A bulk is a TOOL for filing several orders, not a separate thing to approve. Each
+    # line becomes an ORDINARY futures order with the ordinary card and the ordinary
+    # approve/decline buttons. The bulk row survives only as a billing grouping — it is
+    # what _futures_bulk_owed() reads for the consignment invoice.
+    from views.web import FuturesOrderView
+    post_ch = bot.get_channel(FUTURES_CHANNEL_ID) if FUTURES_CHANNEL_ID else None
+    if post_ch is None and WEB_ORDERS_CHANNEL_ID:
+        post_ch = bot.get_channel(WEB_ORDERS_CHANNEL_ID)
+    if post_ch is None:
+        post_ch = channel
 
-    lines = "\n".join(f"• {p['qty']} {p.get('unit', 'pieces')} {p['item']}" for p in parsed[:15])
-    more = f"\n…and {len(parsed) - 15} more" if len(parsed) > 15 else ""
-    return (f"✅ Filed bulk futures order **#{bulk_id}** for {target_name} — "
-            f"{len(parsed)} line(s):\n{lines}{more}\n\n"
-            f"Approval card posted in {post_ch.mention}. A manager must approve it; "
-            f"nothing is ordered until they do.")
+    ping = ""
+    try:
+        owner_role = discord.utils.get(post_ch.guild.roles, name=OWNER_ROLE_NAME)
+        ping = owner_role.mention if owner_role else ""
+    except Exception:
+        pass
+
+    filed, errs = [], []
+    for pr, line_id in zip(parsed, line_ids):
+        qty = int(pr["qty"])
+        unit = pr.get("unit", "pieces")
+        try:
+            oid = _db.save_futures_order(
+                user_id=target_id, username=target_name,
+                item=pr["item"], quantity=qty, enchants="",
+                notes=f"{qty} {unit} · bulk #{bulk_id} · placed by {user} via AI")
+            _db.set_futures_order_bulk_line(oid, line_id)
+        except Exception as e:
+            errs.append(f"{pr['item'][:28]}: {type(e).__name__}")
+            continue
+        try:
+            emb = discord.Embed(title=f"\U0001F52E New Futures Order #{oid}",
+                                color=discord.Color.gold(),
+                                timestamp=datetime.now(timezone.utc))
+            emb.add_field(name="Customer", value=f"<@{target_id}>", inline=True)
+            emb.add_field(name="Item", value=f"{qty} {unit} × {pr['item']}", inline=True)
+            emb.add_field(name="From", value=f"bulk #{bulk_id} ({len(parsed)} lines)", inline=True)
+            emb.set_footer(text="Awaiting owner review")
+            msg = await post_ch.send(
+                content=(f"{ping} — new futures order!" if ping else "New futures order!"),
+                embed=emb, view=FuturesOrderView(oid),
+                allowed_mentions=discord.AllowedMentions(roles=True))
+            _db.update_futures_order_status(oid, status="pending", reviewed_by=None,
+                                            notify_msg_id=str(msg.id))
+            filed.append(oid)
+        except Exception as e:
+            errs.append(f"#{oid} post: {type(e).__name__}")
+
+    if not filed:
+        return ("⚠️ Couldn't file any of the orders: " + " · ".join(errs[:4])) if errs else \
+               "⚠️ Nothing was filed."
+    lines = "\n".join(f"• **#{o}** — {p['qty']} {p.get('unit','pieces')} {p['item']}"
+                      for o, p in zip(filed, parsed))
+    return (f"✅ Filed **{len(filed)}** futures order(s) for {target_name} "
+            f"(billing group `bulk #{bulk_id}`):\n{lines}\n\n"
+            f"Each has its own card in {post_ch.mention} with the normal Approve / Decline "
+            f"buttons — nothing is ordered until a manager approves it."
+            + ("\n⚠️ " + " · ".join(errs[:4]) if errs else ""))
 
 
 async def _ai_tool_create_futures_order(guild, channel, user, args):
@@ -14417,6 +14546,8 @@ _AI_TOOL_MAP = {
     "migrate_market_id":     _ai_tool_migrate_market_id,
     "set_market_details":    _ai_tool_set_market_details,
     "set_market_finances":   _ai_tool_set_market_finances,
+    "sweep_batch_dms":       _ai_tool_sweep_batch_dms,
+    "resend_order_cards":    _ai_tool_resend_order_cards,
     "manage_team":           _ai_tool_manage_team,
     "credit_team_work":      _ai_tool_credit_team_work,
     "manage_outages":        _ai_tool_manage_outages,
@@ -14428,6 +14559,7 @@ _AI_TOOL_MAP = {
 
 # Tools whose effects are destructive/moderation-level — flagged in the audit log.
 _AI_SENSITIVE_TOOLS = {
+    "sweep_batch_dms",      # deletes messages from people's DMs
     "migrate_market_id",    # rewrites the key behind every holding
     "set_market_details",   # ownership + naming
     "set_market_finances",  # sets money backing share prices

@@ -2142,6 +2142,61 @@ class OrdersBrowser(View):
         return await interaction.response.send_message("🧾 **Your claims:**\n" + "\n".join(lines), ephemeral=True)
 
 
+class _BalancePickView(discord.ui.View):
+    """Look up anyone's balance. Was `/balance user:@them` (managers only) — that command
+    was folded into /me, which only ever shows your OWN balance, so the manager-side
+    lookup was lost. A UserSelect, not an id field: modals cannot search people."""
+
+    def __init__(self, user_id: int):
+        super().__init__(timeout=300)
+        self.user_id = int(user_id)
+        sel = discord.ui.UserSelect(placeholder="Search for a member…", max_values=1)
+
+        async def pick(i: discord.Interaction):
+            if not is_manager(i):
+                return await i.response.send_message("⛔ Managers only.", ephemeral=True)
+            target = sel.values[0]
+            uid = str(target.id)
+            try:
+                bal = core._get_user_bal(core._load_balances()["users"], target.id)
+                coins = float(bal.get("coins", 0) or 0)
+                principal = float(bal.get("principal", coins) or 0)
+            except Exception as ex:
+                return await i.response.send_message(f"⚠️ Couldn't read balance: {ex}", ephemeral=True)
+
+            e = discord.Embed(title=f"💰 {getattr(target, 'display_name', target)}",
+                              color=0x2ECC71 if coins >= 0 else 0xE74C3C)
+            e.add_field(name="Coins", value=f"**{coins:,.0f}**", inline=True)
+            e.add_field(name="Principal", value=f"`{principal:,.0f}`", inline=True)
+            try:
+                import Restocker_db as _d
+                igns = _d.get_igns(uid) or []
+                e.add_field(name="IGN(s)",
+                            value=(", ".join(f"`{g}`" for g in igns) if igns else "*none linked*"),
+                            inline=False)
+                mgr = _d.get_manager_of(uid)
+                e.add_field(name="Team", value=(f"<@{mgr}>'s team" if mgr else "*none*"), inline=True)
+                rows = _d.get_coin_ledger(uid, 5) if hasattr(_d, "get_coin_ledger") else []
+                if rows:
+                    e.add_field(
+                        name="Recent",
+                        value="\n".join(
+                            f"`{float(r['delta']):+,.0f}` {str(r.get('reason') or '—')[:28]}"
+                            for r in rows),
+                        inline=False)
+            except Exception as ex:
+                log.debug("[balance lookup] extras failed: %s", ex)
+            await i.response.send_message(embed=e, ephemeral=True)
+        sel.callback = pick
+        self.add_item(sel)
+
+    async def interaction_check(self, i: discord.Interaction) -> bool:
+        if int(i.user.id) != self.user_id:
+            await i.response.send_message("This panel isn't yours.", ephemeral=True)
+            return False
+        return True
+
+
 class ManagerPanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=300)
@@ -2209,6 +2264,13 @@ class ManagerPanelView(discord.ui.View):
             return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
         await interaction.response.send_modal(_PingUnclaimedModal())
 
+
+    @discord.ui.button(label="💰 Check balance", style=discord.ButtonStyle.secondary)
+    async def check_balance_btn(self, interaction: discord.Interaction, button: Button):
+        if not is_manager(interaction):
+            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
+        await interaction.response.send_message(
+            "Whose balance?", view=_BalancePickView(interaction.user.id), ephemeral=True)
 
     @discord.ui.button(label="🧹 Prune Cancelled", style=discord.ButtonStyle.danger)
     async def prune_closed(self, interaction: discord.Interaction, button: Button):

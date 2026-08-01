@@ -312,6 +312,19 @@ class LoopsCog(commands.Cog):
                         f"rem {fmt_qty(o, rem)} · {fmt_coin(price_piece)}c/piece · {fmt_coin(price_barrel)}c/barrel · ≈ {fmt_coin(total_rem)}c"
                     )
 
+                # `ready` is filtered a SECOND time above (rem <= 0 is skipped), so it can
+                # be non-empty while `lines` is empty — every ready order already fully
+                # claimed. The old code still built an embed with an empty description and
+                # DM'd it to every employee: a "New Production Requests" card listing
+                # nothing. Mark them announced so they don't re-queue, and send NOTHING.
+                if not lines:
+                    for o in ready:
+                        o["employee_announced"] = True
+                    save_orders(data)
+                    log.info("[employee_batch_dispatch_loop] %d ready order(s) all fully "
+                             "claimed — nothing to announce, no DM sent.", len(ready))
+                    return
+
                 embed = discord.Embed(
                     title="📦 New Production Requests (batch)",
                     description="\n".join(lines),
