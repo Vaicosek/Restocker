@@ -556,7 +556,7 @@ def _get_ui_store(data: dict) -> dict:
 
 
 EMPLOYEE_PING_COOLDOWN_S = _env_int("EMPLOYEE_PING_COOLDOWN_S", 300)   # 5 min
-FUTURES_CONSIGNMENT_DAYS = _env_int("FUTURES_CONSIGNMENT_DAYS", 21)    # 3 weeks to resell
+FUTURES_CONSIGNMENT_DAYS = _env_int("FUTURES_CONSIGNMENT_DAYS", 30)    # 1 month to resell
 
 
 def _employee_ping_allowed(scope: str = "orders") -> bool:
@@ -589,6 +589,42 @@ def _work_order_fulfilled(order_id) -> bool:
     except Exception:
         pass
     return False
+
+
+def _ensure_futures_billing_line(order_id: int, customer_id: str, customer_name: str,
+                                 item: str, qty: int, enchants: str = "",
+                                 market_id: str = "", created_by=0) -> int | None:
+    """Give a SINGLE futures order the same billing line a bulk line gets.
+
+    Consignment (pay per item as it resells, the rest owed at the deadline) is computed
+    entirely from futures_bulk_lines. An order filed one at a time had no line, so it was
+    never priced, never tracked and never billed — the customer simply kept the goods.
+    Every futures order now gets a one-line bulk so there is ONE billing path.
+
+    Returns the line id, or None if it already has one.
+    """
+    try:
+        import Restocker_db as _db
+        existing = _db.get_futures_order(int(order_id)) or {}
+        if existing.get("bulk_line_id"):
+            return None
+        t = _futures_tier(item or "", enchants or "")
+        wc = float(t[5]) if t else None
+        fp = float(t[6]) if t else None
+        bulk_id = _db.create_futures_bulk(
+            str(customer_id), str(customer_name), str(market_id or ""), int(created_by or 0),
+            f"single futures order #{order_id}")
+        line_id = _db.add_futures_bulk_line(
+            bulk_id, item, int(qty), "pieces", enchants=enchants or "",
+            raw_line=f"futures#{order_id}", worker_cost=wc, full_price=fp)
+        _db.set_futures_order_bulk_line(int(order_id), int(line_id))
+        if t is None:
+            log.warning("[futures] order #%s (%s) is not on the cost sheet — line %s "
+                        "created but UNPRICED.", order_id, item, line_id)
+        return line_id
+    except Exception as e:
+        log.warning("[futures] couldn't create billing line for order #%s: %s", order_id, e)
+        return None
 
 
 def _charge_futures_upfront(order: dict) -> int:
@@ -11465,6 +11501,20 @@ _AI_TOOLS = [
         }
     },
     {
+        "name": "bill_customer",
+        "description": "Charge a customer's coin balance and DM them the invoice. Managers only. PREVIEW first (apply defaults false) and show the user the before/after balance. Use for single futures orders, which carry no bulk line and so are never billed automatically, or for any ad-hoc invoice. Amount is POSITIVE and gets debited.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "user_id": {"type": "string", "description": "Customer's Discord id or @mention."},
+                "amount": {"type": "number", "description": "Coins to charge (positive)."},
+                "reason": {"type": "string", "description": "What the bill is for, shown in the DM and the ledger."},
+                "apply": {"type": "boolean", "description": "false (default) = preview. true = charge."}
+            },
+            "required": ["user_id", "amount"]
+        }
+    },
+    {
         "name": "repair_after_update",
         "description": "Backfill data older rows are missing after a bot update — currently consignment pricing on futures bulk lines (worker_cost / full_price from the cost sheet) and the 21-day deadline on already-approved deals. Managers only. PREVIEWS by default; show the user the figures before apply=true. Use when someone says 'fix from the last update' or asks why a futures deal shows nothing owed.",
         "input_schema": {
@@ -13131,6 +13181,62 @@ async def _sweep_batch_dms_by_scan(guild, user, args):
             + (f", {failed} failed." if failed else "."))
 
 
+async def _ai_tool_bill_customer(guild, channel, user, args):
+    """Charge a customer's coin balance and DM them the bill. PREVIEWS unless apply=true.
+
+    Exists because only BULK futures deals bill automatically — a single /futures_order
+    carries no line, so nothing ever charges for it. This covers those, plus any ad-hoc
+    invoice. The debit is not principal (it is a debt, not capital they contributed).
+    """
+    if not _ai_is_manager(user):
+        return "❌ Managers only — this moves real coins."
+    import Restocker_db as _db
+    raw = str(args.get("user_id") or "").strip().strip("<@!>")
+    if not raw.isdigit():
+        return "❌ I need the customer's Discord id (or an @mention)."
+    try:
+        amount = int(round(float(str(args.get("amount")).replace(",", ""))))
+    except Exception:
+        return "❌ amount must be a number."
+    if amount <= 0:
+        return "❌ amount must be positive — this charges, it does not pay out."
+    what = str(args.get("reason") or "").strip() or "futures order"
+
+    try:
+        bal = int(_db.get_balance(raw).get("coins") or 0)
+    except Exception:
+        bal = 0
+    after = bal - amount
+
+    if not bool(args.get("apply")):
+        return (f"**Preview** — charge <@{raw}> **{amount:,}**c for _{what}_.\n"
+                f"Balance `{bal:,}` → `{after:,}`"
+                + ("  ⚠️ goes negative (that is the debt)" if after < 0 else "")
+                + "\nThey get a DM with the amount and what it is for. "
+                  "Nothing charged yet — ask me to apply it.")
+
+    try:
+        coins, _ = add_coins(int(raw), -amount, counts_as_principal=False,
+                             reason=f"bill: {what}")
+    except Exception as e:
+        return f"⚠️ Charge failed, nothing was taken: {e}"
+
+    dm_note = ""
+    try:
+        u = bot.get_user(int(raw)) or await bot.fetch_user(int(raw))
+        await u.send(
+            f"🧾 **Invoice — {amount:,} coins**\n"
+            f"For: {what}\n"
+            f"Your balance is now **{coins:,}** coins."
+            + ("\n\nYou're in debt — settle with a manager to clear it."
+               if coins < 0 else ""))
+        dm_note = " DM sent."
+    except Exception:
+        dm_note = " ⚠️ Couldn't DM them (DMs closed) — tell them yourself."
+    return (f"🧾 Charged <@{raw}> **{amount:,}**c for _{what}_. "
+            f"Balance now **{coins:,}**.{dm_note}")
+
+
 async def _ai_tool_repair_after_update(guild, channel, user, args):
     """Backfill data that newer code expects but older rows never had. PREVIEWS unless
     apply=true.
@@ -13147,6 +13253,28 @@ async def _ai_tool_repair_after_update(guild, channel, user, args):
         return "❌ Managers only — this writes what customers owe."
     import Restocker_db as _db
     from datetime import timedelta as _td
+
+    # Adopt orphans first: futures orders filed one at a time never got a billing line,
+    # so they were invisible to consignment. Give them one before pricing anything.
+    adopted = []
+    try:
+        for fo in (_db.list_futures_orders() or []):
+            if fo.get("bulk_line_id"):
+                continue
+            if str(fo.get("status") or "").lower() not in ("approved", "fulfilled"):
+                continue                      # pending/declined owe nothing
+            if bool(args.get("apply")):
+                lid = _ensure_futures_billing_line(
+                    int(fo["id"]), str(fo.get("user_id") or ""),
+                    str(fo.get("username") or "?"), fo.get("item") or "",
+                    int(fo.get("quantity") or 0), fo.get("enchants") or "",
+                    market_id="", created_by=0)
+                if lid:
+                    adopted.append(fo["id"])
+            else:
+                adopted.append(fo["id"])
+    except Exception as e:
+        log.warning("[repair] adopting orphan futures orders failed: %s", e)
 
     try:
         lines = _db.get_futures_bulk_lines_all()
@@ -13175,12 +13303,16 @@ async def _ai_tool_repair_after_update(guild, channel, user, args):
             if ln["bulk_id"] not in [d[0] for d in due_fix]:
                 due_fix.append((ln["bulk_id"], ln.get("customer_name") or "?"))
 
-    if not price_fix and not due_fix and not no_tier:
+    if not price_fix and not due_fix and not no_tier and not adopted:
         return ("✅ Nothing to repair — every live bulk line is priced and every approved "
                 "deal has a deadline."
                 + (f" ({skipped} line(s) on cancelled deals left alone.)" if skipped else ""))
 
     out = []
+    if adopted:
+        out.append(f"**{len(adopted)} single futures order(s)** had no billing line "
+                   f"(never tracked, never billable) → " +
+                   ", ".join(f"#{i}" for i in adopted[:10]))
     if price_fix:
         tot_up = sum(wc * int(l["qty"] or 0) for l, wc, _ in price_fix)
         tot_mg = sum((fp - wc) * int(l["qty"] or 0) for l, wc, fp in price_fix)
@@ -13216,7 +13348,8 @@ async def _ai_tool_repair_after_update(guild, channel, user, args):
                 done_d += 1
         except Exception as e:
             log.warning("[repair] bulk %s due_at failed: %s", b, e)
-    return (f"🔧 Repaired **{done_p}** line price(s) and started **{done_d}** consignment "
+    return (f"🔧 Adopted **{len(adopted)}** orphan order(s), repaired **{done_p}** line "
+            f"price(s) and started **{done_d}** consignment "
             f"clock(s) (due {_due_iso[:10]})."
             + (f"\n⚠️ {len(no_tier)} line(s) still need a manual price." if no_tier else ""))
 
@@ -14836,6 +14969,7 @@ _AI_TOOL_MAP = {
     "migrate_market_id":     _ai_tool_migrate_market_id,
     "set_market_details":    _ai_tool_set_market_details,
     "set_market_finances":   _ai_tool_set_market_finances,
+    "bill_customer":         _ai_tool_bill_customer,
     "repair_after_update":   _ai_tool_repair_after_update,
     "sweep_batch_dms":       _ai_tool_sweep_batch_dms,
     "resend_order_cards":    _ai_tool_resend_order_cards,
@@ -14850,6 +14984,7 @@ _AI_TOOL_MAP = {
 
 # Tools whose effects are destructive/moderation-level — flagged in the audit log.
 _AI_SENSITIVE_TOOLS = {
+    "bill_customer",        # takes coins off a real person
     "repair_after_update",  # writes what customers owe
     "sweep_batch_dms",      # deletes messages from people's DMs
     "migrate_market_id",    # rewrites the key behind every holding

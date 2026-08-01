@@ -2816,6 +2816,16 @@ def get_futures_bulk_line(line_id: int) -> Optional[dict]:
         return dict(row) if row else None
 
 
+def list_futures_orders(status: str = None) -> list:
+    with db() as conn:
+        if status:
+            rows = conn.execute("SELECT * FROM futures_orders WHERE status=? ORDER BY id",
+                                (str(status),)).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM futures_orders ORDER BY id").fetchall()
+        return [dict(r) for r in rows]
+
+
 def get_futures_bulk_lines_all() -> list:
     """Every bulk line with its bulk's status — for backfills that must know whether the
     deal is live before touching its pricing."""

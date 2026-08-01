@@ -123,6 +123,12 @@ class MoneyCog(commands.Cog):
                     _db.update_futures_order_status(
                         order_id, status="pending", reviewed_by=None, notify_msg_id=str(msg.id)
                     )
+                    # Give it a billing line so consignment tracks it exactly like a bulk.
+                    core._ensure_futures_billing_line(
+                        order_id, str(interaction.user.id),
+                        getattr(interaction.user, "display_name", str(interaction.user)),
+                        item, int(quantity), enchants or "",
+                        market_id="", created_by=interaction.user.id)
                 except Exception:
                     pass
             except Exception as e:
