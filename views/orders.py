@@ -53,6 +53,7 @@ dm_claimants = core.dm_claimants
 ephemeral_kwargs = core.ephemeral_kwargs
 fmt_qty = core.fmt_qty
 is_manager = core.is_manager
+MANAGER_DM_IDS = getattr(core, "MANAGER_DM_IDS", [])  # owner ids: exempt from self-approval
 load_orders = core.load_orders
 log = core.log   # NOT auto-available — without this, the 🚨 NOT-PAID warning path NameErrors
                  # mid-payout-loop (the exact failure the payout fix was built to prevent)
@@ -461,7 +462,11 @@ class ManagerReviewView(View):
         # OWN work — another manager must review it (mirrors the website order-approval guard).
         try:
             _sa_d, _sa_o, _ = await self._load(interaction)
-            if _sa_o is not None and _claim_of(_sa_o, interaction.user.id) is not None:
+            # The OWNER is exempt: the guard exists so a manager can't quietly sign off
+            # their own payout, but the owner is the person the guard would be protecting
+            # and there may be nobody above them to review it.
+            _is_owner = int(getattr(interaction.user, "id", 0)) in MANAGER_DM_IDS
+            if (not _is_owner) and _sa_o is not None and _claim_of(_sa_o, interaction.user.id) is not None:
                 return await interaction.followup.send(
                     "⛔ You claimed/fulfilled this order — you can't approve your **own** work; "
                     "another manager has to review it.", ephemeral=True)
@@ -476,6 +481,9 @@ class ManagerReviewView(View):
             order["produced"] = requested
             order["status"] = "fulfilled"
             order["verification_ticket_id"] = None
+            # Delivery is when the upfront falls due, so it is also when the customer's
+            # resale window opens.
+            core._start_consignment_on_fulfil(order)
             return {"remaining_to_stock": max(0, requested - old_produced)}
 
         order, res = await _mutate_order(oid, _claim_approval)

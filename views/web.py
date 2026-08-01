@@ -238,7 +238,9 @@ class WebOrderView(discord.ui.View):
             pass
 
         worker_mention = ""
-        if ping_workers and interaction.guild:
+        # Rate-limited: approving several orders in a row must not ping @Employee
+        # once per order. Cards still post either way.
+        if ping_workers and interaction.guild and core._employee_ping_allowed():
             worker_role = discord.utils.get(interaction.guild.roles, name=EMPLOYEE_ROLE_NAME)
             if worker_role:
                 worker_mention = worker_role.mention
@@ -518,6 +520,10 @@ class FuturesOrderView(discord.ui.View):
                         _cur = core._csn_item_sold(_bulk.get("market_id") or "",
                                                    _ln.get("item_key") or "")
                         _db.set_futures_bulk_line_baseline(int(_bl), int(_cur))
+                    # NOTE: the consignment clock does NOT start here. The upfront falls
+                    # due on FULFILMENT, and the customer cannot resell goods that have not
+                    # been crafted yet — starting the window at approval would burn it
+                    # while the work is still queued. See _start_consignment_on_fulfil().
             except Exception as _ex:
                 print(f"[futures] bulk-line link failed: {_ex}")
             await update_order_messages(bot, work_order, allow_post=True)
@@ -539,7 +545,9 @@ class FuturesOrderView(discord.ui.View):
                     bits.append(f"**Notes:** {notes}")
                 prefix = ""
                 allowed = discord.AllowedMentions.none()
-                if ping_workers and interaction.guild:
+                # Cards always post; the ROLE MENTION is rate-limited so approving a
+                # batch of orders back-to-back doesn't ping @Employee once per order.
+                if ping_workers and interaction.guild and core._employee_ping_allowed():
                     _role = discord.utils.get(interaction.guild.roles, name=EMPLOYEE_ROLE_NAME)
                     if _role:
                         prefix = _role.mention + " "

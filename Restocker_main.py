@@ -555,6 +555,112 @@ def _get_ui_store(data: dict) -> dict:
     return data["ui"]["batch_dm_messages"]
 
 
+EMPLOYEE_PING_COOLDOWN_S = _env_int("EMPLOYEE_PING_COOLDOWN_S", 300)   # 5 min
+FUTURES_CONSIGNMENT_DAYS = _env_int("FUTURES_CONSIGNMENT_DAYS", 21)    # 3 weeks to resell
+
+
+def _employee_ping_allowed(scope: str = "orders") -> bool:
+    """True at most once per EMPLOYEE_PING_COOLDOWN_S, then False until it lapses.
+
+    Approving three orders in a row pinged @Employee three times, seconds apart. The
+    cards still post every time — only the ROLE MENTION is suppressed, so nothing is
+    hidden, workers just aren't pinged repeatedly for one batch of work.
+    """
+    import time as _t
+    key = f"employee_ping_at:{scope}"
+    try:
+        import Restocker_db as _d
+        last = float(_d.get_config(key) or 0)
+        now = _t.time()
+        if now - last < EMPLOYEE_PING_COOLDOWN_S:
+            return False
+        _d.set_config(key, str(now))
+        return True
+    except Exception:
+        return True          # never let the limiter block a ping on a DB error
+
+
+def _work_order_fulfilled(order_id) -> bool:
+    """True if that claimable work order has actually been delivered."""
+    try:
+        for o in (load_orders().get("orders") or []):
+            if int(o.get("id", 0) or 0) == int(order_id):
+                return str(o.get("status", "")).lower() == "fulfilled"
+    except Exception:
+        pass
+    return False
+
+
+def _charge_futures_upfront(order: dict) -> int:
+    """Debit the customer's balance for this delivered line's UPFRONT (worker_cost x qty).
+
+    Runs on fulfilment because that is when the goods change hands. Claim-first so a crash
+    between marking and debiting can never charge twice; the claim is released if the
+    debit fails so it can be retried. Unpriced lines are skipped and logged rather than
+    charged at zero, which would silently write the debt off.
+    """
+    try:
+        wo_id = int(order.get("id", 0) or 0)
+        if not wo_id or not order.get("futures_bulk_id"):
+            return 0
+        import Restocker_db as _db
+        ln = _db.get_futures_line_by_work_order(wo_id)
+        if not ln:
+            return 0
+        wc = ln.get("worker_cost")
+        qty = int(ln.get("qty") or 0)
+        if wc is None or qty <= 0:
+            log.warning("[futures] line %s delivered but UNPRICED — not charging; "
+                        "run repair_after_update then bill by hand.", ln.get("id"))
+            return 0
+        amount = int(round(float(wc) * qty))
+        if amount <= 0:
+            return 0
+        uid = str(ln.get("customer_id") or "")
+        if not uid.isdigit():
+            log.warning("[futures] line %s has no customer id — not charging.", ln.get("id"))
+            return 0
+        if not _db.claim_futures_line_charge(int(ln["id"])):
+            return 0                      # already charged
+        try:
+            add_coins(int(uid), -amount, counts_as_principal=False,
+                      reason=f"futures upfront: bulk #{ln['bulk_id']} line {ln['id']}")
+        except Exception:
+            _db.unclaim_futures_line_charge(int(ln["id"]))
+            raise
+        log.info("[futures] charged %s coins upfront to %s for line %s",
+                 amount, uid, ln["id"])
+        return amount
+    except Exception as e:
+        log.warning("[futures] upfront charge failed: %s", e)
+        return 0
+
+
+def _start_consignment_on_fulfil(order: dict) -> str | None:
+    """Start the 21-day consignment window when a futures work order is FULFILLED.
+
+    The upfront falls due on delivery, so the resale clock runs from the same moment —
+    otherwise the customer loses part of their window to crafting time. No-op unless the
+    order came from a bulk, and no-op if the clock is already running (the first line
+    delivered starts it for the whole deal; later lines must not extend it).
+    """
+    try:
+        bulk_id = order.get("futures_bulk_id")
+        if not bulk_id:
+            return None
+        import Restocker_db as _db
+        from datetime import timedelta as _td
+        due = (datetime.now(timezone.utc)
+               + _td(days=int(FUTURES_CONSIGNMENT_DAYS))).isoformat()
+        if _db.set_futures_bulk_due(int(bulk_id), due):
+            log.info("[futures] bulk %s fulfilled -> consignment due %s", bulk_id, due)
+        _charge_futures_upfront(order)
+        return due
+    except Exception as e:
+        log.warning("[futures] couldn't start consignment clock: %s", e)
+    return None
+
+
 def _track_batch_dm_message(data: dict, user_id: int, message_id: int) -> None:
     store = _get_ui_store(data)
     k = str(int(user_id))
@@ -7733,6 +7839,16 @@ def _futures_bulk_owed(bulk: dict) -> dict:
       remaining    = owed_so_far − paid
     Unpriced lines (no full_price) contribute nothing but are flagged."""
     market_id = bulk.get("market_id") or ""
+    # Consignment deadline: once due_at passes, every priced line bills its FULL quantity
+    # regardless of what actually resold. Without this a customer could hold stock
+    # indefinitely and never owe the margin.
+    _overdue = False
+    try:
+        _due = (bulk.get("due_at") or "").strip()
+        if _due:
+            _overdue = datetime.now(timezone.utc) >= parse_iso(_due)
+    except Exception:
+        _overdue = False
     lines_out, upfront, owed, total_margin, unpriced = [], 0.0, 0.0, 0.0, 0
     for ln in (bulk.get("lines") or []):
         qty = int(ln.get("qty") or 0)
@@ -7750,6 +7866,8 @@ def _futures_bulk_owed(bulk: dict) -> dict:
         margin = max(0.0, fp - wc)
         if ln.get("sold_override") is not None:
             resold = max(0, int(ln["sold_override"]))
+        elif _overdue:
+            resold = qty                     # deadline passed: bill the lot
         else:
             cur = _csn_item_sold(market_id, ln.get("item_key") or "")
             resold = max(0, cur - int(ln.get("sold_baseline") or 0))
@@ -7761,6 +7879,7 @@ def _futures_bulk_owed(bulk: dict) -> dict:
         lines_out.append({**pub, "priced": True, "resold": resold, "owed": round(line_owed, 2)})
     paid = float(bulk.get("paid") or 0)
     return {"upfront": round(upfront, 2), "owed_so_far": round(owed, 2),
+            "due_at": (bulk.get("due_at") or ""), "overdue": _overdue,
             "total_margin": round(total_margin, 2), "paid": round(paid, 2),
             "remaining": round(max(0.0, owed - paid), 2), "unpriced": unpriced,
             "lines": lines_out}
@@ -11346,6 +11465,15 @@ _AI_TOOLS = [
         }
     },
     {
+        "name": "repair_after_update",
+        "description": "Backfill data older rows are missing after a bot update — currently consignment pricing on futures bulk lines (worker_cost / full_price from the cost sheet) and the 21-day deadline on already-approved deals. Managers only. PREVIEWS by default; show the user the figures before apply=true. Use when someone says 'fix from the last update' or asks why a futures deal shows nothing owed.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"apply": {"type": "boolean", "description": "false (default) = preview. true = write."}},
+            "required": []
+        }
+    },
+    {
         "name": "sweep_batch_dms",
         "description": "Delete the bot's own '📦 New Production Requests' batch DMs from employees' inboxes. Managers only. PREVIEWS by default — show the counts and let the user confirm before apply=true. Use when a bad or empty digest went out.",
         "input_schema": {
@@ -13003,6 +13131,96 @@ async def _sweep_batch_dms_by_scan(guild, user, args):
             + (f", {failed} failed." if failed else "."))
 
 
+async def _ai_tool_repair_after_update(guild, channel, user, args):
+    """Backfill data that newer code expects but older rows never had. PREVIEWS unless
+    apply=true.
+
+    Right now that means consignment pricing: bulk lines created before the cost sheet was
+    wired in have NULL worker_cost/full_price, which _futures_bulk_owed() treats as
+    "unpriced" — contributing nothing. Those deals are silently unbillable, and the
+    21-day deadline has nothing to act on either.
+
+    Only ever FILLS values that are missing. Never overwrites a price already set, so a
+    hand-priced or renegotiated line is safe.
+    """
+    if not _ai_is_manager(user):
+        return "❌ Managers only — this writes what customers owe."
+    import Restocker_db as _db
+    from datetime import timedelta as _td
+
+    try:
+        lines = _db.get_futures_bulk_lines_all()
+    except Exception as e:
+        return f"⚠️ Couldn't read bulk lines: {e}"
+
+    price_fix, no_tier, due_fix, skipped = [], [], [], 0
+    DEAD = ("cancelled", "declined", "canceled")
+    for ln in lines:
+        # NEVER price a dead deal. Cancelled bulks keep their lines, and pricing them
+        # would invent debt the customer does not owe — here that was 3 cancelled
+        # attempts at the same order, i.e. 5x the real figure.
+        if str(ln.get("bulk_status") or "").lower() in DEAD:
+            skipped += 1
+            continue
+        if ln.get("worker_cost") is None or ln.get("full_price") is None:
+            t = _futures_tier(ln.get("item") or "", ln.get("enchants") or "")
+            if t is None:
+                no_tier.append(ln)
+            else:
+                price_fix.append((ln, float(t[5]), float(t[6])))
+        # Only a DELIVERED line starts the clock — having a work order just means the
+        # work was commissioned, not that the customer has the goods.
+        if (ln.get("work_order_id") and _work_order_fulfilled(ln["work_order_id"])
+                and not (ln.get("bulk_due_at") or "").strip()):
+            if ln["bulk_id"] not in [d[0] for d in due_fix]:
+                due_fix.append((ln["bulk_id"], ln.get("customer_name") or "?"))
+
+    if not price_fix and not due_fix and not no_tier:
+        return ("✅ Nothing to repair — every live bulk line is priced and every approved "
+                "deal has a deadline."
+                + (f" ({skipped} line(s) on cancelled deals left alone.)" if skipped else ""))
+
+    out = []
+    if price_fix:
+        tot_up = sum(wc * int(l["qty"] or 0) for l, wc, _ in price_fix)
+        tot_mg = sum((fp - wc) * int(l["qty"] or 0) for l, wc, fp in price_fix)
+        out.append(f"**{len(price_fix)} unpriced line(s)** → up-front `{tot_up:,.0f}`c, "
+                   f"margin `{tot_mg:,.0f}`c")
+        for l, wc, fp in price_fix[:8]:
+            out.append(f"• bulk #{l['bulk_id']} — {str(l['item'])[:38]} ×{l['qty']}: "
+                       f"cash `{wc:,.0f}` / group `{fp:,.0f}`")
+    if due_fix:
+        out.append(f"**{len(due_fix)} approved deal(s)** with no deadline → "
+                   f"{FUTURES_CONSIGNMENT_DAYS}d from now: "
+                   + ", ".join(f"#{b} ({n})" for b, n in due_fix[:6]))
+    if no_tier:
+        out.append(f"⚠️ **{len(no_tier)}** line(s) aren't on the cost sheet and need a manual "
+                   f"price: " + ", ".join(f"`{str(l['item'])[:28]}`" for l in no_tier[:5]))
+
+    if skipped:
+        out.append(f"_Skipped {skipped} line(s) on cancelled/declined deals — they owe nothing._")
+    if not bool(args.get("apply")):
+        return "**Preview**\n" + "\n".join(out) + "\n\nNothing written. Ask me to apply it."
+
+    done_p = done_d = 0
+    for l, wc, fp in price_fix:
+        try:
+            _db.set_futures_bulk_line_pricing(int(l["id"]), wc, fp)
+            done_p += 1
+        except Exception as e:
+            log.warning("[repair] line %s pricing failed: %s", l.get("id"), e)
+    _due_iso = (datetime.now(timezone.utc) + _td(days=int(FUTURES_CONSIGNMENT_DAYS))).isoformat()
+    for b, _n in due_fix:
+        try:
+            if _db.set_futures_bulk_due(int(b), _due_iso):
+                done_d += 1
+        except Exception as e:
+            log.warning("[repair] bulk %s due_at failed: %s", b, e)
+    return (f"🔧 Repaired **{done_p}** line price(s) and started **{done_d}** consignment "
+            f"clock(s) (due {_due_iso[:10]})."
+            + (f"\n⚠️ {len(no_tier)} line(s) still need a manual price." if no_tier else ""))
+
+
 async def _ai_tool_sweep_batch_dms(guild, channel, user, args):
     """Delete the batch-digest DMs the bot sent to employees. PREVIEWS unless apply=true.
 
@@ -13416,11 +13634,23 @@ async def _ai_tool_create_futures_bulk(guild, channel, user, args):
         bulk_id = _db.create_futures_bulk(
             target_id, target_name, market_id, getattr(user, "id", 0),
             str(args.get("notes", "") or "") + f" • placed by {user} via AI")
-        line_ids = []
+        # Price each line from the SAME cost sheet every other futures order uses:
+        #   worker_cost = the tier's CASH COST   (paid up front)
+        #   full_price  = the tier's GROUP PRICE (what they owe in total)
+        # margin = full_price - worker_cost, which is what _futures_bulk_owed() bills as
+        # goods resell. Leaving these NULL made every line "unpriced" and the whole deal
+        # unbillable — the invoice quoted in chat was never stored anywhere.
+        line_ids, unpriced_names = [], []
         for pr in parsed:
+            _t = _futures_tier(pr["item"], "")
+            _wc = float(_t[5]) if _t else None      # cash_cost
+            _fp = float(_t[6]) if _t else None      # group_price
+            if _t is None:
+                unpriced_names.append(pr["item"])
             line_ids.append(_db.add_futures_bulk_line(
                 bulk_id, pr["item"], pr["qty"], pr.get("unit", "pieces"),
-                enchants="", raw_line=pr.get("raw", "")))
+                enchants="", raw_line=pr.get("raw", ""),
+                worker_cost=_wc, full_price=_fp))
     except Exception as e:
         return f"⚠️ DB error creating the bulk order: {e}"
 
@@ -13482,6 +13712,8 @@ async def _ai_tool_create_futures_bulk(guild, channel, user, args):
             f"(billing group `bulk #{bulk_id}`):\n{lines}\n\n"
             f"Each has its own card in {post_ch.mention} with the normal Approve / Decline "
             f"buttons — nothing is ordered until a manager approves it."
+            + (f"\n⚠️ Not on the cost sheet, so unbillable until priced by hand: "
+               + ", ".join(f"`{n}`" for n in unpriced_names[:4]) if unpriced_names else "")
             + ("\n⚠️ " + " · ".join(errs[:4]) if errs else ""))
 
 
@@ -14604,6 +14836,7 @@ _AI_TOOL_MAP = {
     "migrate_market_id":     _ai_tool_migrate_market_id,
     "set_market_details":    _ai_tool_set_market_details,
     "set_market_finances":   _ai_tool_set_market_finances,
+    "repair_after_update":   _ai_tool_repair_after_update,
     "sweep_batch_dms":       _ai_tool_sweep_batch_dms,
     "resend_order_cards":    _ai_tool_resend_order_cards,
     "manage_team":           _ai_tool_manage_team,
@@ -14617,6 +14850,7 @@ _AI_TOOL_MAP = {
 
 # Tools whose effects are destructive/moderation-level — flagged in the audit log.
 _AI_SENSITIVE_TOOLS = {
+    "repair_after_update",  # writes what customers owe
     "sweep_batch_dms",      # deletes messages from people's DMs
     "migrate_market_id",    # rewrites the key behind every holding
     "set_market_details",   # ownership + naming

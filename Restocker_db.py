@@ -805,6 +805,13 @@ def _migrate(conn: sqlite3.Connection) -> None:
         # Each line becomes an ordinary futures order; this column is how that order
         # finds its way back to the bulk line for consignment billing on approval.
         "ALTER TABLE futures_orders ADD COLUMN bulk_line_id INTEGER",
+        # Consignment has a deadline: after it passes the customer owes the FULL margin
+        # whether or not the goods resold. Set on first approval, not at filing, because
+        # the clock should start when the work is actually commissioned.
+        "ALTER TABLE futures_bulk ADD COLUMN due_at TEXT",
+        # When the upfront for this line was charged to the customer's balance. Stops a
+        # re-fulfil (or a repair run) charging the same goods twice.
+        "ALTER TABLE futures_bulk_lines ADD COLUMN charged_at TEXT",
         # Investors (GEX.PR preferred shareholders): display name + preferred-share count
         # from the Crimson Banking cap-table export, share_pct derived from it, and a
         # running total of profit-share coins paid out.
@@ -2725,15 +2732,18 @@ def create_futures_bulk(customer_id: str, customer_name: str, market_id: str,
 
 
 def add_futures_bulk_line(bulk_id: int, item: str, qty: int, unit: str = "pieces",
-                          enchants: str = "", raw_line: str = "", item_key: str = None) -> int:
+                          enchants: str = "", raw_line: str = "", item_key: str = None,
+                          worker_cost: float = None, full_price: float = None) -> int:
     """item_key: when the line was picked from the catalog (web builder), link it immediately
     so consignment pricing/CSN matching doesn't need a manual /futures price item match."""
     with db() as conn:
         cur = conn.execute(
-            "INSERT INTO futures_bulk_lines (bulk_id, item, qty, unit, enchants, raw_line, item_key) "
-            "VALUES (?,?,?,?,?,?,?)",
+            "INSERT INTO futures_bulk_lines (bulk_id, item, qty, unit, enchants, raw_line, "
+            "item_key, worker_cost, full_price) VALUES (?,?,?,?,?,?,?,?,?)",
             (int(bulk_id), str(item), int(qty), str(unit or "pieces"),
-             str(enchants or ""), str(raw_line or ""), (str(item_key) if item_key else None)))
+             str(enchants or ""), str(raw_line or ""), (str(item_key) if item_key else None),
+             (float(worker_cost) if worker_cost is not None else None),
+             (float(full_price) if full_price is not None else None)))
         return int(cur.lastrowid)
 
 
@@ -2804,6 +2814,61 @@ def get_futures_bulk_line(line_id: int) -> Optional[dict]:
         row = conn.execute("SELECT * FROM futures_bulk_lines WHERE id=?",
                            (int(line_id),)).fetchone()
         return dict(row) if row else None
+
+
+def get_futures_bulk_lines_all() -> list:
+    """Every bulk line with its bulk's status — for backfills that must know whether the
+    deal is live before touching its pricing."""
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT l.*, b.status AS bulk_status, b.due_at AS bulk_due_at, "
+            "       b.customer_name AS customer_name "
+            "FROM futures_bulk_lines l JOIN futures_bulk b ON b.id = l.bulk_id "
+            "ORDER BY l.bulk_id, l.id").fetchall()
+        return [dict(r) for r in rows]
+
+
+def claim_futures_line_charge(line_id: int) -> bool:
+    """Atomically mark a line as charged. True means THIS caller won the race and must do
+    the debit; False means it was already charged. Claim-first, exactly like the hive
+    payout path — never debit and then mark, or a crash between the two double-charges."""
+    with db() as conn:
+        cur = conn.execute(
+            "UPDATE futures_bulk_lines SET charged_at=datetime('now') "
+            "WHERE id=? AND (charged_at IS NULL OR charged_at='')", (int(line_id),))
+        return cur.rowcount > 0
+
+
+def unclaim_futures_line_charge(line_id: int) -> None:
+    """Release the claim if the debit itself failed, so it can be retried."""
+    with db() as conn:
+        conn.execute("UPDATE futures_bulk_lines SET charged_at=NULL WHERE id=?", (int(line_id),))
+
+
+def get_futures_line_by_work_order(work_order_id: int):
+    with db() as conn:
+        row = conn.execute(
+            "SELECT l.*, b.customer_id, b.customer_name FROM futures_bulk_lines l "
+            "JOIN futures_bulk b ON b.id=l.bulk_id WHERE l.work_order_id=?",
+            (int(work_order_id),)).fetchone()
+        return dict(row) if row else None
+
+
+def set_futures_bulk_line_pricing(line_id: int, worker_cost: float, full_price: float) -> None:
+    with db() as conn:
+        conn.execute("UPDATE futures_bulk_lines SET worker_cost=?, full_price=? WHERE id=?",
+                     (float(worker_cost), float(full_price), int(line_id)))
+
+
+def set_futures_bulk_due(bulk_id: int, due_at_iso: str) -> bool:
+    """Start the consignment clock. No-op if already set, so re-approving another line
+    of the same bulk can't quietly extend the deadline."""
+    with db() as conn:
+        row = conn.execute("SELECT due_at FROM futures_bulk WHERE id=?", (int(bulk_id),)).fetchone()
+        if row is None or (row["due_at"] or "").strip():
+            return False
+        conn.execute("UPDATE futures_bulk SET due_at=? WHERE id=?", (str(due_at_iso), int(bulk_id)))
+        return True
 
 
 def set_futures_bulk_line_baseline(line_id: int, sold_baseline: int) -> None:
