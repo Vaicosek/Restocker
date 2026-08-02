@@ -68,6 +68,12 @@ def apply(conn, old: str, new: str, markets_yaml: dict = None, data_dir: str = "
     if p["collisions"]:
         raise RuntimeError("target id already present in: " + ", ".join(p["collisions"]))
     with conn:                                   # one transaction; rolls back on any error
+        # markets.market_id has children (market_shares -> markets, stock_holdings ->
+        # market_shares) declared ON UPDATE NO ACTION, so NO ordering works: rename the
+        # parent and the children dangle; rename a child and it points at a row that does
+        # not exist yet. defer_foreign_keys holds every check until COMMIT, by which point
+        # the whole graph is consistent again. It is transaction-scoped and resets itself.
+        conn.execute("PRAGMA defer_foreign_keys = ON")
         for t, col, _n in p["tables"]:
             conn.execute(f"UPDATE {t} SET {col}=? WHERE {col}=?", (new, old))
         for k, nk in p["config"]:

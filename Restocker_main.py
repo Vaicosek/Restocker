@@ -196,7 +196,7 @@ FUTURES_COST_TIERS = [
     ("tool_eff4_clean", "Pickaxe/Axe/Shovel — Eff IV, clean",                   250,  390,  850, 1100, 1450, 1850),
     ("sword_sharp5_ench", "Sword — Sharp V + Fire Aspect II/Knockback III",     750, 1170, 3000, 3750, 4900, 5200),
     ("sword_sharp5",    "Sword — Sharp V, clean",                               500,  780, 1800, 2300, 3200, 3600),
-    ("armor",           "Armor piece",                                          500,  780,  500, 1000,  950, 1125),
+    ("armor",           "Armor piece",                                          500,  780,  500, 1000,  950, 1200),
 ]
 FUTURES_TIER_BY_KEY = {t[0]: t for t in FUTURES_COST_TIERS}
 
