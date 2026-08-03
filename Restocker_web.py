@@ -812,9 +812,13 @@ def _load_inventory_data() -> dict:
         if str(mid).lower() == "test" and not cat and not sc:
             continue
         items = []
-        for it in (set(cat) | set(sc)):
+        # SCANNED items only. This is the INVENTORY page: a wiped market must read as
+        # empty, not re-fill itself with catalog price entries dressed up as barrels.
+        # The catalog is still consulted below for price/stack, it just doesn't create
+        # rows. (Tier names, futures pseudo-items and brand entries vanish with this too.)
+        for it in set(sc):
             r = sc.get(it) or {}
-            _scanned = bool(r)          # catalog-only rows have no barrel to be empty
+            _scanned = True
             cur = int(r.get("stock") or 0)
             cap = int(r.get("capacity") or 0)
             if cap <= 0:
