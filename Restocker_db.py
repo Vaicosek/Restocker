@@ -3361,6 +3361,16 @@ def set_land_balance(land: str, balance: float) -> None:
         """, (str(land), float(balance)))
 
 
+def get_all_config_prefixed(prefix: str) -> dict:
+    """Every bot_config row whose key starts with prefix, as {key: value}. Used to answer
+    reverse questions the schema can't — e.g. "which land maps to this market?", where the
+    mapping is stored land-first (land_map:<land> -> market_id)."""
+    with db() as conn:
+        rows = conn.execute("SELECT key, value FROM bot_config WHERE key LIKE ?",
+                            (f"{prefix}%",)).fetchall()
+        return {r["key"]: r["value"] for r in rows}
+
+
 def get_land_balance(land: str):
     with db() as conn:
         row = conn.execute("SELECT * FROM land_balances WHERE land=?", (str(land),)).fetchone()

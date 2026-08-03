@@ -86,9 +86,29 @@ async def build_embed(mid: str, user=None) -> discord.Embed:
     e.add_field(name="Owner", value=(f"<@{owner}>" if owner else "*unset*"), inline=True)
     e.add_field(name="Status", value=("🟢 active" if m.get("active", True) else "🔴 inactive"), inline=True)
     e.add_field(name="Fee", value=f"`{m.get('platform_fee_pct', 0)}%`", inline=True)
+    e.add_field(name="Market ID", value=f"`{mid}`", inline=True)
     e.add_field(name="Code", value=f"`{m.get('leader_code') or '—'}`", inline=True)
     rc = m.get("report_channel_id")
     e.add_field(name="Channel", value=(f"<#{rc}>" if rc else "*unbound*"), inline=True)
+    # Bound land — stored as land_map:<land> -> market id, so it has to be found by
+    # scanning. Shown because the land's balance IS this market's treasury, and there was
+    # no way to see which land that was without reading the config by hand.
+    try:
+        _lands = []
+        for _k, _v in (d.get_all_config_prefixed("land_map:") or {}).items():
+            if str(_v) == str(mid):
+                _lands.append(_k.split(":", 1)[1])
+        _lv = ", ".join(f"`{x}`" for x in _lands) if _lands else "*none bound*"
+        if _lands:
+            try:
+                _bal = sum(float(d.get_land_balance(x) or 0) for x in _lands)
+                _lv += f" · balance `{_bal:,.0f}`"
+            except Exception:
+                pass
+        e.add_field(name="🏝️ Land", value=_lv, inline=True)
+    except Exception as ex:
+        log.debug("[market panel] land lookup failed: %s", ex)
+
     e.add_field(name="Site managers",
                 value=(", ".join(f"<@{u}>" for u in mgrs[:8]) if mgrs else "*none*"), inline=True)
 
