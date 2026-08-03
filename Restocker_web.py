@@ -751,8 +751,16 @@ def _load_inventory_data() -> dict:
     # Catalog: every item per market, with its price + stack size (fallbacks below).
     catalog = {}
     try:
+        try:
+            _cal = m._load_brew_aliases() or {}
+        except Exception:
+            _cal = {}
         for name, info in (db.get_items() or {}).items():
             mid = info.get("market_id") or "main"
+            # Catalog rows carry raw #codes too (Potion#1Ow). Resolve them through the
+            # learned aliases so they merge with their scan rows instead of each raw code
+            # rendering as its own phantom 0% item.
+            name = _cal.get(name) or name
             catalog.setdefault(mid, {})[name] = {
                 "coin": float(info.get("coin", 0) or 0),
                 "stack": int(info.get("stack_size", 0) or 0) or None,
@@ -806,6 +814,7 @@ def _load_inventory_data() -> dict:
         items = []
         for it in (set(cat) | set(sc)):
             r = sc.get(it) or {}
+            _scanned = bool(r)          # catalog-only rows have no barrel to be empty
             cur = int(r.get("stock") or 0)
             cap = int(r.get("capacity") or 0)
             if cap <= 0:
@@ -830,7 +839,8 @@ def _load_inventory_data() -> dict:
                     disp = it
             disp = disp or it
             items.append({"item": disp, "stock": cur, "capacity": cap,
-                          "pct": round(pct, 1), "owner": r.get("owner") or "", "price": price,
+                          "pct": round(pct, 1), "scanned": _scanned,
+                          "owner": r.get("owner") or "", "price": price,
                           "cat": _item_category(disp or it)})
         items.sort(key=lambda x: x["pct"])
         low = sum(1 for x in items if x["capacity"] > 0 and x["pct"] <= 20.0)
@@ -1525,7 +1535,7 @@ const fmt=n=>Math.round(n||0).toLocaleString('en-US').replace(/,/g,' ');
 const esc=s=>String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;');
 const DATA=(INV&&INV.markets)||[];
 if(DATA.length>1){const _all=DATA.reduce((a,m)=>a.concat((m.items||[]).map(x=>Object.assign({},x,{_mkt:m.name||m.market_id}))),[]);
- DATA.unshift({market_id:"__all__",name:"All Markets",items:_all,count:_all.length,low:_all.filter(x=>x.capacity>0&&x.pct<=20).length});}
+ DATA.unshift({market_id:"__all__",name:"All Markets",items:_all,count:_all.length,low:_all.filter(x=>x.scanned!==false&&x.capacity>0&&x.pct<=20).length});}
 const CATORDER=["Wood & Logs","Ores & Minerals","Enchanted Gear","Redstone","Concrete & Clay","Nether","End","Ice & Snow","Farm & Food","Dyes & Wool","Mob Drops","Glass & Light","Nature","Building","Other"];
 let act=0,sortK='pct',dir=1,catAct='All',grp=false;
 const col=p=>p<=20?'var(--down)':(p<60?'var(--amber)':'var(--up)');
@@ -1543,9 +1553,10 @@ function catchips(){
   '<div class="chip'+(c===catAct?' on':'')+'" data-c="'+esc(c)+'">'+esc(c)+' · '+(c==='All'?items.length:counts[c])+'</div>').join('');
  document.querySelectorAll('#catchips .chip').forEach(el=>el.onclick=()=>{catAct=el.dataset.c;catchips();render();});}
 function rowHTML(x){const p=Math.max(0,Math.min(100,x.pct||0));
+ const nsc=(x.scanned===false);
  return '<tr'+(((x.stock||0)<=0)?' class="zero"':'')+'><td>'+esc(x.item)+(x._mkt?'<span class="mkt">'+esc(x._mkt)+'</span>':'')+'</td>'+
   '<td class="num"><div class="fillcell"><div class="fillbar"><i style="width:'+p+'%;background:'+col(p)+'"></i></div>'+
-  '<span class="pct" style="color:'+col(p)+'">'+Math.round(p)+'%</span></div></td>'+
+  '<span class="pct" style="color:'+(nsc?'var(--muted)':col(p))+'">'+(nsc?'\u2014':Math.round(p)+'%')+'</span></div></td>'+
   '<td class="num">'+fmt(x.stock)+'</td><td class="num">'+fmt(x.capacity)+'</td>'+
   '<td class="num">'+(x.price>0?(x.price<1?x.price.toFixed(2):fmt(x.price)):'—')+'</td></tr>';}
 function groupRows(rows){
@@ -1568,7 +1579,7 @@ function render(){
  const gen=document.getElementById('gen');
  const owns=window.OWNERINFO&&(window.OWNERINFO.owned||[]).some(o=>String(o.mid)===String(mk.market_id));
  gen.style.display=owns?'':'none';gen.dataset.mid=mk.market_id||'';
- const low=items.filter(x=>x.capacity>0&&x.pct<=20).length;
+ const low=items.filter(x=>x.scanned!==false&&x.capacity>0&&x.pct<=20).length;
  const cap=items.reduce((s,x)=>s+(x.capacity||0),0),st=items.reduce((s,x)=>s+(x.stock||0),0);
  const avg=cap?Math.round(100*st/cap):0;
  document.getElementById('stats').innerHTML=[
