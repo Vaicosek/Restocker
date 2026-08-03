@@ -44,6 +44,58 @@ save_yaml = core.save_yaml
 utcnow_iso = core.utcnow_iso
 
 
+async def _build_enriched_market_embed(mid: str, user: discord.User | discord.Member) -> discord.Embed:
+    """Build the MarketSettings embed (via views.market_settings.build_embed) then
+    append Market ID and Bound Land fields."""
+    from views.market_settings import build_embed as _base_build_embed
+    embed = await _base_build_embed(mid, user)
+
+    # --- Field 1: Market ID ---
+    embed.add_field(name="Market ID", value=f"`{mid}`", inline=True)
+
+    # --- Field 2: Bound Land(s) ---
+    # Query land_balances table for rows where market_id == mid
+    bound_lines = []
+    try:
+        db = getattr(core, "db", None) or getattr(core, "_db", None)
+        if db is not None:
+            # Support both async (aiosqlite) and sync (sqlite3) connections/pools
+            if hasattr(db, "execute"):  # aiosqlite connection or pool
+                async with db.execute(
+                    "SELECT land_name, balance FROM land_balances WHERE market_id = ?",
+                    (mid,),
+                ) as cursor:
+                    rows = await cursor.fetchall()
+                for land_name, balance in rows:
+                    bound_lines.append(f"**{land_name}** — `{int(balance):,}` 🪙")
+            elif hasattr(db, "cursor"):  # sync sqlite3
+                cur = db.cursor()
+                cur.execute(
+                    "SELECT land_name, balance FROM land_balances WHERE market_id = ?",
+                    (mid,),
+                )
+                for land_name, balance in cur.fetchall():
+                    bound_lines.append(f"**{land_name}** — `{int(balance):,}` 🪙")
+        else:
+            # Try load_yaml fallback (land_balances.yaml keyed by land_name)
+            lb_path = getattr(core, "LAND_BALANCES_FILE", "data/land_balances.yaml")
+            lb_data = load_yaml(lb_path) or {}
+            for land_name, info in lb_data.items():
+                if isinstance(info, dict) and info.get("market_id") == mid:
+                    bal = int(info.get("balance", 0) or 0)
+                    bound_lines.append(f"**{land_name}** — `{bal:,}` 🪙")
+    except Exception as exc:
+        log(f"[market_settings] Could not fetch land_balances for {mid}: {exc}")
+
+    embed.add_field(
+        name="Bound Land",
+        value="\n".join(bound_lines) if bound_lines else "*None*",
+        inline=True,
+    )
+
+    return embed
+
+
 class MarketCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -129,7 +181,7 @@ class MarketCog(commands.Cog):
     async def market_settings(self, interaction: discord.Interaction, market_id: str = None):
         """One panel replacing edit/loyalty/set_*/add_manager/remove_manager/go_public/
         go_private/treasury/treasury_withdraw/remove_item/vtech_group/delete."""
-        from views.market_settings import MarketSettingsView, build_embed, _may_view as _may_manage
+        from views.market_settings import MarketSettingsView, _may_view as _may_manage
         mid = (market_id or "").strip()
         markets = (_load_markets().get("markets", {}) or {})
         if not mid:
@@ -145,7 +197,7 @@ class MarketCog(commands.Cog):
                 ephemeral=True)
         view = MarketSettingsView(mid, interaction.user.id, interaction.user)
         await interaction.response.send_message(
-            embed=await build_embed(mid, interaction.user), view=view, ephemeral=True)
+            embed=await _build_enriched_market_embed(mid, interaction.user), view=view, ephemeral=True)
 
 
 
@@ -160,6 +212,7 @@ class MarketCog(commands.Cog):
 
     # Top-level (NOT under /market) — the /market group is at Discord's 25-subcommand cap,
     # and channel-binding is discoverable under a `/bind…` search here.
+
 
 
 
