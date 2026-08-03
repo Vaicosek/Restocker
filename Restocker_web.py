@@ -762,8 +762,25 @@ def _load_inventory_data() -> dict:
     # Scan: stock / capacity / listed price per (market, item).
     scan = {}
     try:
+        # Learned aliases turn raw scan names (Diamond Pickaxe#akQ, Potion#eKB) into the
+        # real enchanted/branded names. Without this the dashboard showed a dozen rows all
+        # called "Diamond Pickaxe" — the codes stripped, the enchants lost — and none of
+        # them matched a catalog entry, so everything read 0%.
+        try:
+            _al = m._load_brew_aliases() or {}
+        except Exception:
+            _al = {}
+        import re as _re
         for r in (db.get_all_market_stock() or []):
-            scan.setdefault(r.get("market_id") or "main", {})[r.get("item")] = r
+            _it = str(r.get("item") or "")
+            _nm = _al.get(_it) or _re.sub(r"#\w{1,8}$", "", _it).strip() or _it
+            _mkt = scan.setdefault(r.get("market_id") or "main", {})
+            if _nm in _mkt:                      # two codes, same real item → sum them
+                _mkt[_nm] = dict(_mkt[_nm])
+                _mkt[_nm]["stock"] = int(_mkt[_nm].get("stock") or 0) + int(r.get("stock") or 0)
+                _mkt[_nm]["capacity"] = int(_mkt[_nm].get("capacity") or 0) + int(r.get("capacity") or 0)
+            else:
+                _mkt[_nm] = r
     except Exception:
         pass
 

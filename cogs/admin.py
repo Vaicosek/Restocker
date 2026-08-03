@@ -167,6 +167,21 @@ class AdminCog(commands.Cog):
         t = str(target or "").strip().lower()
         import Restocker_db as _db
 
+        if t == "market_stock":
+            # Barrel-scan inventory for ONE market — NOT the exchange ("stock" below).
+            # Exists for exactly one accident: a scan for market A pasted into market B's
+            # channel overwrites B's inventory with A's. Next real scan repopulates.
+            mid = (market_id or "").strip()
+            if not mid:
+                return _s("❌ market_id is required for market_stock.")
+            if confirm.strip().lower() != mid.lower():
+                return _s(f"⚠️ This deletes **{mid}**'s scanned barrel inventory (the live "
+                          f"stock/capacity rows — catalog, earnings and the exchange are "
+                          f"untouched). The next scan rebuilds it. Type `{mid}` to confirm.")
+            n = _db.clear_market_stock(mid)
+            return _s(f"🧹 Cleared **{n}** scanned stock row(s) for `{mid}`. "
+                      f"Run a fresh barrel scan to repopulate.")
+
         if t == "stock":
             if confirm.strip().upper() != "CONFIRM":
                 return _s("⚠️ This **permanently deletes ALL stock data** — every listing, holding, trade "

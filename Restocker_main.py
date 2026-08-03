@@ -3311,6 +3311,35 @@ def _parse_stock_csv(csv_text: str) -> list:
     return out
 
 
+# ChestShop/Bukkit expose INTERNAL enchant names in shop lore — "Dig Speed" is
+# Efficiency, "Durability" is Unbreaking. Left untranslated, every learned gear name
+# would use vocabulary nobody searches for.
+_GEAR_ENCH_CANON = {
+    "dig speed": "Efficiency", "durability": "Unbreaking", "damage all": "Sharpness",
+    "loot bonus blocks": "Fortune", "loot bonus mobs": "Looting",
+    "protection environmental": "Protection", "protection fire": "Fire Protection",
+    "protection projectile": "Projectile Protection", "protection fall": "Feather Falling",
+    "protection explosions": "Blast Protection", "arrow damage": "Power",
+    "arrow infinite": "Infinity", "arrow knockback": "Punch", "arrow fire": "Flame",
+    "water worker": "Aqua Affinity", "oxygen": "Respiration", "depth strider": "Depth Strider",
+}
+
+
+def _parse_gear_enchants(lore) -> str:
+    """'Silk Touch I / Dig Speed V / Durability III' -> 'Silk Touch I, Efficiency V,
+    Unbreaking III'. Only lines shaped like '<words> <roman>' count, so 'Repair Cost: 3',
+    star ratings and brew flavour text can never leak in."""
+    out = []
+    for line in (lore or []):
+        t = re.sub(r"§.", "", str(line)).strip()
+        m = re.match(r"^([A-Za-z][A-Za-z ]{2,30}?)\s+([IVX]{1,5})$", t)
+        if not m:
+            continue
+        name, lvl = m.group(1).strip(), m.group(2)
+        out.append(f"{_GEAR_ENCH_CANON.get(name.lower(), name)} {lvl}")
+    return ", ".join(out)
+
+
 def _learn_brew_aliases_from_stock(rows: list) -> int:
     """Learn readable brew names from lore captured in a stock scan (the csn_stock CSV's
     'lore' column), keyed by the raw '#code' item name. Complements the profiles-JSON path
@@ -3326,6 +3355,11 @@ def _learn_brew_aliases_from_stock(rows: list) -> int:
         if not raw or "#" not in raw or (raw in aliases and "§" not in str(aliases[raw])):
             continue
         eff = _parse_brew_effects(r.get("lore") or [])
+        if not eff:
+            # Not a brew — try GEAR: shop lore carries the enchant lines, so a pickaxe
+            # named 'Diamond Pickaxe#akQ' learns 'Diamond Pickaxe - Silk Touch I,
+            # Efficiency V, Unbreaking III' exactly like brews learn their effects.
+            eff = _parse_gear_enchants(r.get("lore") or [])
         if not eff:
             continue
         base = re.sub(r"#\w{1,8}$", "", raw).strip() or "Potion"
@@ -11859,7 +11893,7 @@ _AI_TOOLS = [
             "properties": {
                 "target": {"type": "string", "description": "stock | market | market_csn | market_sales | employee_dms"},
                 "confirm": {"type": "string", "description": "The phrase the USER supplied. Omit for a dry run."},
-                "market_id": {"type": "string", "description": "Required for market, market_csn and market_sales."},
+                "market_id": {"type": "string", "description": "Required for market, market_csn, market_sales and market_stock (market_stock = clear one market's scanned barrel inventory after a wrong-channel paste; a fresh scan rebuilds it)."},
                 "limit_per_user": {"type": "integer", "description": "employee_dms only — messages scanned per user (0 = all)."}
             },
             "required": ["target"]
@@ -14517,9 +14551,9 @@ async def _ai_tool_admin_wipe(guild, channel, user, args):
     if cog is None:
         return "❌ The admin engine isn't loaded."
     target = str(args.get("target") or "").strip().lower()
-    if target not in ("stock", "market", "market_csn", "market_sales", "employee_dms"):
+    if target not in ("stock", "market", "market_csn", "market_sales", "market_stock", "employee_dms"):
         return ("❌ target must be one of: stock, market, market_csn, market_sales, "
-                "employee_dms.")
+                "market_stock, employee_dms.")
     try:
         lim = int(args.get("limit_per_user") or 0)
     except Exception:
