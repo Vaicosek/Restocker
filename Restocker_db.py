@@ -839,6 +839,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
         # Hive harvests: absolute sale timestamp from the CSN mod, so the same sale can be
         # posted/re-scanned any number of times and still pay ONCE (see the unique index below).
         "ALTER TABLE hive_harvests ADD COLUMN sale_ts TEXT",
+        # CSN per-sale stable id (mod v2.1): the mod's OWN dedup identity, shipped in the
+        # export CSV's sale_uid column. Keying on it makes bot-side dedup exactly mirror
+        # mod-side dedup — the old exact-sale_ts key drifted up to a minute per re-scan
+        # and re-ingested the same sale as "new".
+        "ALTER TABLE csn_transactions ADD COLUMN sale_uid TEXT",
     ]
     for sql in migrations:
         try:
@@ -854,6 +859,15 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_hive_sale "
                      "ON hive_harvests(market_id, ign, item, qty, sale_ts) "
                      "WHERE sale_ts IS NOT NULL")
+    except sqlite3.OperationalError:
+        pass
+
+    # CSN transactions: one row per (market, sale_uid) when the mod supplied its stable
+    # per-sale id. Partial index so legacy rows (no uid) keep using the identity index.
+    try:
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_csn_txn_uid "
+                     "ON csn_transactions(market_id, sale_uid) "
+                     "WHERE sale_uid IS NOT NULL")
     except sqlite3.OperationalError:
         pass
 
@@ -1998,7 +2012,7 @@ def adjust_etf_units(user_id: str, delta_units: float, delta_cost: float) -> flo
 def upsert_market_stock(market_id: str, item: str, owner: str = None, stock: int = 0,
                         buy_price: float = None, sell_price: float = None,
                         capacity: int = None, buy_qty: int = None,
-                        sell_qty: int = None) -> None:
+                        sell_qty: int = None, scan_ts: str = None) -> None:
     """Record a live shop-stock snapshot for one item. When `capacity` is given
     (computed as barrels × slots × stack size) it is stored as-is; otherwise
     capacity falls back to the legacy high-water mark (max stock ever seen).
@@ -2026,15 +2040,20 @@ def upsert_market_stock(market_id: str, item: str, owner: str = None, stock: int
              (int(sell_qty) if sell_qty is not None else None), now))
         # Snapshot the reading so history survives the overwrite above. One row per day —
         # a second scan the same day replaces it, so the day reflects the latest count.
+        # Keyed on the SCAN's own timestamp when the CSV provides one (timestamp_iso),
+        # not the ingest instant — a scan uploaded after midnight lands on the right day.
+        day = (str(scan_ts)[:10] if scan_ts and len(str(scan_ts)) >= 10 else now[:10])
         try:
             conn.execute(
                 "INSERT INTO market_stock_history (market_id, item, day, stock, capacity, updated_at) "
                 "VALUES (?,?,?,?,?,?) "
                 "ON CONFLICT(market_id, item, day) DO UPDATE SET stock=excluded.stock, "
                 "capacity=excluded.capacity, updated_at=excluded.updated_at",
-                (mid, item, now[:10], int(stock or 0), cap, now))
-        except Exception:
-            pass          # history is a nice-to-have; never break a live stock write
+                (mid, item, day, int(stock or 0), cap, now))
+        except Exception as e:
+            # Never break a live stock write over history — but a silently-swallowed
+            # insert made the trend charts quietly incomplete, so at least say it.
+            print(f"[db] market_stock_history insert failed for {mid}/{item}: {e}")
 
 
 def get_market_stock(market_id: str) -> dict:
@@ -3139,34 +3158,85 @@ def get_hive_harvest_summary(market_id: str) -> dict:
     return out
 
 
-def add_csn_transactions(market_id: str, rows: list) -> int:
-    """Bulk-insert per-transaction sales. Returns how many were NEW.
+def _csn_ts_seconds(ts: str):
+    """ISO timestamp → epoch seconds, or None. Tolerates the mod's trailing 'Z'."""
+    try:
+        from datetime import datetime as _dt
+        s = str(ts).strip().replace("Z", "+00:00")
+        return _dt.fromisoformat(s).timestamp()
+    except Exception:
+        return None
 
-    `rows` are dicts with actor/seller/verb/item/qty/coins/sale_ts. Duplicates are
-    dropped by the uq_csn_txn index, so re-ingesting the same file — or the same
-    shop scanned by two operators — is a no-op.
-    """
+
+def add_csn_transactions_detailed(market_id: str, rows: list) -> tuple:
+    """Bulk-insert per-transaction sales. Returns (new_count, new_rows).
+
+    `rows` are dicts with actor/seller/verb/item/qty/coins/sale_ts and (mod v2.1+)
+    sale_uid. Dedup, in order of strength:
+      1. sale_uid — the mod's own stable per-sale identity (uq_csn_txn_uid);
+      2. near-duplicate window — same (actor, seller, verb, item, qty, coins) within
+         ±90s. The mod reconstructs sale_ts from "Xm ago" with minute precision, so the
+         SAME sale re-scanned lands up to a minute away; the old exact-sale_ts key
+         called that a new sale and double-counted it;
+      3. uq_csn_txn (exact identity) as the final index-level backstop.
+
+    Returning the rows that were actually NEW lets the caller book earnings from
+    exactly what entered the ledger — a re-uploaded file books nothing twice."""
     if not rows:
-        return 0
+        return 0, []
     new = 0
+    new_rows = []
     with db() as conn:
         for r in rows:
             ts = str(r.get("sale_ts") or "").strip()
             if not ts:
                 continue                       # a sale with no time is useless here
+            uid = (str(r.get("sale_uid") or "").strip() or None)
+            actor = str(r.get("actor") or "?")
+            seller = str(r.get("seller") or "")
+            verb = str(r.get("verb") or "").lower()
+            item = str(r.get("item") or "")
+            qty = int(r.get("qty") or 0)
+            coins = float(r.get("coins") or 0)
             try:
+                if uid:
+                    dup = conn.execute(
+                        "SELECT 1 FROM csn_transactions WHERE market_id=? AND sale_uid=?",
+                        (str(market_id), uid)).fetchone()
+                    if dup:
+                        continue
+                else:
+                    mine = _csn_ts_seconds(ts)
+                    if mine is not None:
+                        cands = conn.execute(
+                            "SELECT sale_ts FROM csn_transactions WHERE market_id=? AND actor=? "
+                            "AND COALESCE(seller,'')=? AND verb=? AND item=? AND qty=? AND coins=?",
+                            (str(market_id), actor, seller, verb, item, qty, coins)).fetchall()
+                        near = False
+                        for c in cands:
+                            other = _csn_ts_seconds(c[0])
+                            if other is not None and abs(other - mine) <= 90:
+                                near = True
+                                break
+                        if near:
+                            continue
                 cur = conn.execute("""
                     INSERT OR IGNORE INTO csn_transactions
-                        (market_id, actor, seller, verb, item, qty, coins, sale_ts, sale_day)
-                    VALUES (?,?,?,?,?,?,?,?,?)
-                """, (str(market_id), str(r.get("actor") or "?"),
-                      str(r.get("seller") or ""), str(r.get("verb") or "").lower(),
-                      str(r.get("item") or ""), int(r.get("qty") or 0),
-                      float(r.get("coins") or 0), ts, ts[:10]))
-                new += cur.rowcount
+                        (market_id, actor, seller, verb, item, qty, coins, sale_ts, sale_day, sale_uid)
+                    VALUES (?,?,?,?,?,?,?,?,?,?)
+                """, (str(market_id), actor, seller, verb, item, qty, coins, ts, ts[:10], uid))
+                if cur.rowcount:
+                    new += 1
+                    new_rows.append(dict(r))
             except Exception:
                 continue
-    return new
+    return new, new_rows
+
+
+def add_csn_transactions(market_id: str, rows: list) -> int:
+    """Back-compat wrapper: insert and return only the NEW count."""
+    n, _ = add_csn_transactions_detailed(market_id, rows)
+    return n
 
 
 def get_csn_daily_sales(market_id: str, days: int = 30) -> list:

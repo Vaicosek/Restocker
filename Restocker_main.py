@@ -2752,7 +2752,11 @@ def _hive_item_value(item) -> float:
     `hive_harvests.unit_value` column are PER PIECE. Hence the defaults are
     300/64 = 4.6875 and 350/64 = 5.46875. If you ever set `hive_value:` to a
     stack price by mistake, harvesters get paid 64x too much."""
-    key = re.sub(r"\s+", " ", str(item or "").strip().lower())
+    # Strip § colour codes FIRST: "§6Honey Block" used to normalize to a key that
+    # matched nothing → value 0 → the harvester was paid NOTHING for real honey
+    # (while the old substring-matching rate table happily matched the same name).
+    key = re.sub(r"§.", "", str(item or ""))
+    key = re.sub(r"\s+", " ", key.strip().lower())
     if not key:
         return 0.0
     try:
@@ -3268,8 +3272,11 @@ def _parse_stock_csv(csv_text: str) -> list:
     out = []
     reader = csv.DictReader(iter(lines))
     for row in reader:
-        raw_item = (row.get("item") or "").strip()          # keep the raw name (with #code)
-        item = re.sub(r"#[0-9a-fA-F]{1,6}$", "", raw_item).strip()
+        # Mod v2.1+ ships the ORIGINAL name (with #code) in its own raw_item column —
+        # the display 'item' column has the code stripped by the mod, which is why
+        # deriving raw_item from it never contained '#' and alias learning was dead.
+        raw_item = (row.get("raw_item") or "").strip() or (row.get("item") or "").strip()
+        item = re.sub(r"#[a-zA-Z0-9]{1,6}$", "", (row.get("item") or "").strip()).strip()
         if not item:
             continue
         lore = [p.strip() for p in (row.get("lore") or "").split("|") if p.strip()]
@@ -3297,13 +3304,21 @@ def _parse_stock_csv(csv_text: str) -> list:
             p = _num(price_key)
             if p is None:
                 return None
-            return p / (_qty(qty_key) or 1)
+            q = _qty(qty_key)
+            if not q:
+                # Blank/zero listing qty: dividing by 1 stored the whole STACK price as
+                # the per-piece price (a 64× error that then fed valuations). Store no
+                # price at all — NULL marks the row untrusted, and the per-unit guards
+                # downstream skip it until a clean scan heals it.
+                return None
+            return p / q
         try:
             barrels = max(1, int(float((row.get("barrels") or "1").replace(",", ""))))
         except Exception:
             barrels = 1
         out.append({"owner": (row.get("owner") or "").strip(), "item": item, "stock": stock,
                     "raw_item": raw_item, "lore": lore,
+                    "ts": (row.get("timestamp_iso") or "").strip(),
                     "barrels": barrels,
                     "buy_price": _unit_price("buy_price", "buy_qty"),
                     "sell_price": _unit_price("sell_price", "sell_qty"),
@@ -3340,6 +3355,18 @@ def _parse_gear_enchants(lore) -> str:
     return ", ".join(out)
 
 
+def _sanitize_alias_name(name) -> str:
+    """Scrub a learned display name before it enters the GLOBAL alias store. Lore and
+    profile display_names are player-controlled: § codes, @everyone/@here pings, markdown
+    and zero-width characters were all learnable and then re-sent verbatim in reports."""
+    t = re.sub(r"§.", "", str(name or ""))
+    t = t.replace("@everyone", "everyone").replace("@here", "here").replace("@", "＠")
+    t = re.sub(r"[`*_~|>​‌‍⁠]", "", t)
+    t = re.sub(r"[\x00-\x1f\x7f]", "", t)
+    t = re.sub(r"\s+", " ", t).strip()
+    return t[:80]
+
+
 def _learn_brew_aliases_from_stock(rows: list) -> int:
     """Learn readable brew names from lore captured in a stock scan (the csn_stock CSV's
     'lore' column), keyed by the raw '#code' item name. Complements the profiles-JSON path
@@ -3363,7 +3390,10 @@ def _learn_brew_aliases_from_stock(rows: list) -> int:
         if not eff:
             continue
         base = re.sub(r"#\w{1,8}$", "", raw).strip() or "Potion"
-        aliases[raw] = f"{base} - {eff}"
+        clean = _sanitize_alias_name(f"{base} - {eff}")
+        if not clean:
+            continue
+        aliases[raw] = clean
         learned += 1
     if learned:
         try:
@@ -3557,10 +3587,15 @@ async def _send_stock_alarm(market_id, report_channel):
             log.warning("[stock-alarm] post failed: %s", e)
 
 
-_HARVEST_RATES = [("honeycomb", 64), ("honey block", 76)]  # (item-name substring, coins/unit = 20% of 320/380); checked in order (honeycomb first)
+# RETIRED as a payment rate — kept only as a hive-item NAME MATCHER for legacy helpers.
+# 64/76 "coins per unit" treated the 320/380 STACK prices as per-piece values, so the
+# export payout engine paid ~80× what the hive engine pays for the same honey. All
+# payouts now flow through the hive ledger at _hive_item_value × harvester %.
+_HARVEST_RATES = [("honeycomb", 64), ("honey block", 76)]
 
 
 def _harvest_rate_for(item_name: str) -> int:
+    """LEGACY (do not use for payment): substring match → old per-unit rate."""
     n = (item_name or "").lower()
     for frag, rate in _HARVEST_RATES:
         if frag in n:
@@ -3626,96 +3661,93 @@ async def _pay_honey_harvesters(rows: list, market_id: str, report_channel):
     return paid_lines
 
 
-def _honey_harvest_rows(csv_text: str):
-    """From an export CSV, list (actor, item, qty, ts) for honey the actor SOLD to the shop."""
-    import io as _io, csv as _csv
-    out = []
-    reader = _csv.reader(_io.StringIO(csv_text))
-    header = None
-    for row in reader:
-        if not row:
-            continue
-        first = (row[0] or "").strip()
-        if first.startswith("#"):
-            continue
-        if first == "actor":
-            header = row
-            continue
-        if header is None:
-            continue
-        rec = {header[i]: (row[i] if i < len(row) else "") for i in range(len(header))}
-        if (rec.get("verb") or "").strip().lower() != "sold":
-            continue
-        item = (rec.get("item") or "").strip()
-        if _harvest_rate_for(item) <= 0:
-            continue
-        actor = (rec.get("actor") or "").strip()
-        if not actor:
-            continue
-        try:
-            qty = int(float((rec.get("quantity") or "0").strip()))
-        except Exception:
-            continue
-        if qty > 0:
-            out.append((actor, item, qty, (rec.get("timestamp_iso") or "").strip()))
-    return out
+async def _pay_honey_from_export(txns: list, market_id: str, report_channel):
+    """Record (and pay) hive-harvest wages from an export's parsed transactions.
 
+    ONE LEDGER: every 'sold hive item' row is inserted into hive_harvests, deduped by
+    real sale identity (uq_hive_sale on market+ign+item+qty+sale_ts) — the exact same
+    ledger the csn-hive webhook feed writes to. The old engine here was entirely
+    separate: it compared a DRIFTING reconstructed timestamp against a forward-only
+    `harvest_last_ts` marker (+30s drift double-paid a whole period, −30s drift made
+    newer sales invisible forever) and paid 64/76 coins/piece — ~80× the hive engine's
+    value×17% wage, because it read the STACK price as a per-piece price.
 
-async def _pay_honey_from_export(csv_text: str, market_id: str, report_channel):
-    """Pay hive harvesters from an export CSV — the 'sold honey to shop' rows, matched by IGN.
-    HiveHarvesting is a permanent TEAM project: each harvester gets qty*rate coins + loyalty,
-    the payout logs to the team's project total, and their manager earns their override.
-    Forward-only per-market timestamp marker → re-uploading the same export never double-pays."""
+    Payment goes through the hive cog's claim-based settle (per-row paid flags, credits
+    guarded, value booked to the hive ledger), so a mid-run failure can never re-pay
+    earlier harvesters. Payout is immediate unless `hive_autopay:<mid>` is explicitly
+    "0" — then rows sit recorded-unpaid for /hive settings (or the 6h sweep)."""
     import Restocker_db as _db
-    rows = _honey_harvest_rows(csv_text)
+    rows = []
+    for t in (txns or []):
+        if (t.get("verb") or "").lower() != "sold":
+            continue
+        item = (t.get("item") or "").strip()
+        if _hive_item_value(item) <= 0:
+            continue
+        actor = (t.get("actor") or "").strip()
+        qty = int(t.get("qty") or 0)
+        ts = (t.get("sale_ts") or "").strip()
+        if actor and qty > 0 and ts:
+            rows.append((actor, item, qty, ts))
     if not rows:
         return []
-    key = f"harvest_last_ts:{market_id}"
+
+    msg_id = f"export:{market_id}:{int(time.time() * 1000)}"
+    new_ids = []
+    for line_no, (actor, item, qty, ts) in enumerate(rows):
+        uid = None
+        try:
+            uid = _db.get_user_id_by_ign(actor)
+        except Exception:
+            pass
+        try:
+            rid = _db.add_hive_harvest(market_id, actor, uid, item, qty,
+                                       _hive_item_value(item), msg_id, line_no, sale_ts=ts)
+            if rid:
+                new_ids.append(rid)
+        except Exception as e:
+            log.warning("[hiveharvest] ledger insert failed (%s x%s %s): %s", actor, qty, item, e)
+    if not new_ids:
+        return []            # every sale was already in the ledger — nothing owed
+    log.info("[hiveharvest] %s: %d new harvest row(s) recorded from export", market_id, len(new_ids))
+
+    autopay_off = str(_db.get_config(f"hive_autopay:{market_id}") or "") == "0"
+    cog = None
     try:
-        last_ts = _db.get_config(key) or ""
+        cog = bot.get_cog("HiveCog")
     except Exception:
-        last_ts = ""
-    new = [r for r in rows if r[3] and r[3] > last_ts]
-    if not new:
-        return []
-    max_ts = max(r[3] for r in new)
-    agg = {}
-    for actor, item, qty, _ts in new:
-        agg[(actor, item)] = agg.get((actor, item), 0) + qty
+        cog = None
     paid_lines = []
-    for (actor, item), qty in sorted(agg.items(), key=lambda kv: -kv[1]):
-        rate = _harvest_rate_for(item)
-        coins = qty * rate
-        uid = _db.get_user_id_by_ign(actor)
-        if not uid:
-            paid_lines.append(f"⚠️ `{actor}` harvested {qty:,}× {item} — not linked "
-                              f"(`/team add ign:{actor}` to pay them).")
-            continue
-        add_coins(int(uid), coins, reason=f"hiveharvest:{item}")
+    if not autopay_off and cog is not None:
         try:
-            _award_loyalty_points(int(uid), qty, reason=f"hiveharvest:{item}")
-        except Exception:
-            pass
-        try:
-            _log_team_event(str(uid), "project", coins=float(coins), points=float(qty),
-                            qty=qty, detail=f"HiveHarvesting:{item}")
-        except Exception:
-            pass
-        try:
-            _pay_manager_sales_override(str(uid), float(coins), f"hiveharvest:{item}")
-        except Exception:
-            pass
-        paid_lines.append(f"🍯 <@{uid}> (`{actor}`) +**{coins:,}c** & {qty:,} pts — {qty:,}× {item}")
-        log.info("[hiveharvest] paid %s (%s) +%sc for %s x %s", uid, actor, coins, qty, item)
-    try:
-        _db.set_config(key, max_ts)   # advance the dedup marker
-    except Exception:
-        pass
+            import cogs.hive as _hive_mod
+            hrows = _db.get_hive_harvests_by_ids(new_ids)
+            groups, unregistered, unvalued = _hive_mod._group_rows(hrows)
+            if groups:
+                res = await cog._settle_groups(str(market_id), groups, batch=msg_id)
+                paid_lines = list(res.get("paid_lines") or [])
+                if res.get("owner_line"):
+                    paid_lines.append(res["owner_line"])
+            for ign, val in (unregistered or {}).items():
+                paid_lines.append(f"⚠️ `{ign}` has {int(val):,}c of harvest waiting — not "
+                                  f"linked yet (`/me → Link in-game name`, or a manager links them).")
+            for item, qty in (unvalued or {}).items():
+                paid_lines.append(f"⚠️ {qty:,}× `{item}` recorded but has no configured value "
+                                  f"(`/hive settings` → item values).")
+        except Exception as e:
+            log.warning("[hiveharvest] settle failed (%s rows stay recorded-unpaid, the "
+                        "sweep/panel will retry): %s", len(new_ids), e)
+            paid_lines.append(f"⚠️ {len(new_ids)} harvest row(s) recorded but payment hit an "
+                              f"error — they stay queued and will be retried.")
+    else:
+        paid_lines.append(f"🐝 {len(new_ids)} harvest row(s) recorded (autopay off or hive "
+                          f"engine unavailable) — pay from `/hive settings`.")
+
     if paid_lines and report_channel is not None:
         try:
             embed = discord.Embed(title="🍯 Hive-harvest payouts (team project)",
                                   description="\n".join(paid_lines[:25]), color=0xFFC83D)
-            embed.set_footer(text="Paid for honey sold since the last export · credited to each harvester's team")
+            embed.set_footer(text="From this export's 'sold honey' rows · one ledger with the hive feed — every sale pays exactly once")
             await report_channel.send(embed=embed)
         except Exception as e:
             log.warning("[hiveharvest] summary send failed: %s", e)
@@ -3730,12 +3762,18 @@ def _stock_rows_to_csv(rows: list) -> bytes:
     buf = io.StringIO()
     w = _csv.writer(buf)
     w.writerow(["item", "owner", "stock", "capacity", "percent", "buy_price", "sell_price"])
+
+    def _noformula(s):
+        # CSV formula injection: a shop item literally named "=HYPERLINK(...)" executes
+        # when the exported sheet opens in Excel. Prefix the classic trigger characters.
+        t = str(s or "")
+        return "'" + t if t[:1] in ("=", "+", "-", "@") else t
     for x in rows:
         cap = int(x.get("capacity") or 0)
         cur = int(x.get("stock") or 0)
         pct = (100.0 * cur / cap) if cap > 0 else 100.0
         w.writerow([
-            x.get("item", ""), x.get("owner", "") or "", cur, cap, f"{pct:.1f}",
+            _noformula(x.get("item", "")), _noformula(x.get("owner", "") or ""), cur, cap, f"{pct:.1f}",
             "" if x.get("buy_price") is None else x.get("buy_price"),
             "" if x.get("sell_price") is None else x.get("sell_price"),
         ])
@@ -3775,9 +3813,32 @@ async def _record_stock_report(rows: list, market_id: str, report_channel, filen
             _db.upsert_market_stock(market_id, item, owner=r.get("owner"), stock=r["stock"],
                                     capacity=capacity,
                                     buy_price=r.get("buy_price"), sell_price=r.get("sell_price"),
-                                    buy_qty=r.get("buy_qty"), sell_qty=r.get("sell_qty"))
+                                    buy_qty=r.get("buy_qty"), sell_qty=r.get("sell_qty"),
+                                    scan_ts=r.get("ts"))
         except Exception as e:
             log.warning("[stock] upsert failed for %s: %s", r.get("item"), e)
+    # Clear STALE rows for the owners this scan covered: an item that vanished from an
+    # owner's shops (sold out barrel removed / renamed) used to linger forever in
+    # market_stock, polluting fullness and inventory valuations. Scoped PER OWNER so a
+    # partial scan by one operator can't wipe another owner's items.
+    try:
+        _scanned_owners = {str(r.get("owner") or "").strip() for r in rows if (r.get("owner") or "").strip()}
+        _scanned_items = {(str(r.get("owner") or "").strip(), r["item"]) for r in rows}
+        _removed = []
+        for it, x in list((_db.get_market_stock(market_id) or {}).items()):
+            _own = str(x.get("owner") or "").strip()
+            if _own and _own in _scanned_owners and (_own, it) not in _scanned_items:
+                _removed.append(it)
+        if _removed:
+            with _db.db() as _conn:
+                for it in _removed:
+                    _conn.execute("DELETE FROM market_stock WHERE market_id=? AND item=?",
+                                  (market_id or "main", it))
+            log.info("[stock] %s: pruned %d stale item(s) no longer in %s's scan: %s",
+                     market_id, len(_removed), "/".join(sorted(_scanned_owners))[:60],
+                     ", ".join(_removed[:10]))
+    except Exception as _e:
+        log.warning("[stock] stale-row prune skipped: %s", _e)
     st = _db.get_market_stock(market_id)
     if not st:
         return
@@ -3830,7 +3891,9 @@ async def _record_stock_report(rows: list, market_id: str, report_channel, filen
             except Exception as _e:
                 log.warning("[stock] low-stock csv failed: %s", _e)
         try:
-            await report_channel.send(_low_note, files=_low_files)
+            # Item names are player-controlled — never let a crafted name mass-ping.
+            await report_channel.send(_low_note, files=_low_files,
+                                      allowed_mentions=_NO_MASS_MENTIONS)
         except Exception:
             pass
     try:
@@ -3866,6 +3929,7 @@ async def _process_csn_attachment(attachment: discord.Attachment, report_channel
     # the channel filled with 2-3 byte-identical reports minutes apart. Suppress a
     # repost of the exact same file within CSN_AUTOREPORT_DEDUP_SECONDS. The marker
     # is stored in the shared DB, so it also de-dupes across bot instances.
+    _dedup_key = None
     if CSN_AUTOREPORT_DEDUP_SECONDS > 0:
         try:
             import Restocker_db as _db_dedup
@@ -3879,9 +3943,21 @@ async def _process_csn_attachment(attachment: discord.Attachment, report_channel
                 log.info("[csn] duplicate auto-report suppressed (%s, seen %ss ago)",
                          filename, _now_epoch - int(_prev))
                 return
-            _db_dedup.set_config(_dedup_key, _now_epoch)
         except Exception as _e:
+            _dedup_key = None
             log.debug("[csn] dedup guard skipped: %s", _e)
+
+    def _mark_processed():
+        """Stamp the duplicate-suppression marker ONLY once processing succeeded. It used
+        to be stamped before any work, so a failed run's re-drop within the window was
+        thrown away as a 'duplicate' — of a report that never actually landed."""
+        if not _dedup_key:
+            return
+        try:
+            import Restocker_db as _db_dedup2
+            _db_dedup2.set_config(_dedup_key, int(time.time()))
+        except Exception:
+            pass
 
     csv_type = _detect_csv_type(csv_text, filename)
     period_from = period_to = None
@@ -3901,35 +3977,49 @@ async def _process_csn_attachment(attachment: discord.Attachment, report_channel
         if bm:
             mid = bm.get("market_id", DEFAULT_MARKET_ID)
             if csv_mid and csv_mid != mid:
-                # Same rule as monthly reports: a declared market with a VALID code beats the
-                # channel binding, so a scan posted in the wrong channel can't overwrite
-                # another market's live stock.
-                if _verify_market_code(csv_mid, csv_code):
-                    mid = csv_mid
+                # HARDENED: a declared-market mismatch in a BOUND channel is always
+                # rejected. Recording to the declared market let anyone who lifted a
+                # market code post into that market from anywhere ("code overrides
+                # binding"); recording to the bound market is the June-2026 pollution
+                # (another market's file overwriting this channel's history). Neither —
+                # the uploader gets told exactly what's misconfigured instead.
+                try:
+                    await report_channel.send(
+                        f"⛔ Stock CSV rejected: this channel is bound to `{mid}` but the file "
+                        f"declares `{csv_mid}`.\n"
+                        f"• If this scanner really serves `{csv_mid}`: post the file in that "
+                        f"market's own channel.\n"
+                        f"• If this machine scans `{mid}`: fix `market_id` in "
+                        f"`.minecraft/sales/csn_config.json` and re-scan.",
+                        allowed_mentions=discord.AllowedMentions.none())
+                except Exception:
+                    pass
+                return
+        elif csv_mid:
+            declared = _get_market(csv_mid)
+            if not declared:
+                # Typo'd market_id but a VALID unique code → the code identifies the
+                # market ('viridianmarke' still lands in viridianmarket, not TEST).
+                _bycode = _market_id_by_code(csv_code) if csv_code else None
+                if _bycode and _verify_market_code(_bycode, csv_code):
+                    mid = _bycode
                     try:
                         await report_channel.send(
-                            f"ℹ️ Channel is bound to `{bm.get('market_id')}`, but the stock CSV "
-                            f"declares `{csv_mid}` with a valid code — recorded to `{csv_mid}`.")
+                            f"ℹ️ Stock CSV declared unknown market `{csv_mid}`, but its code "
+                            f"uniquely matches `{_bycode}` — recorded there. Fix the "
+                            f"`market_id` typo in the mod config when convenient.",
+                            allowed_mentions=discord.AllowedMentions.none())
                     except Exception:
                         pass
                 else:
                     try:
                         await report_channel.send(
-                            f"⚠️ Stock CSV declared `{csv_mid}` but its code doesn't verify — "
-                            f"recorded to `{mid}` (channel binding).")
+                            f"⚠️ Stock CSV declared unknown market `{csv_mid}` — recording to the `{mid}` "
+                            f"(fallback) market instead of a real one. "
+                            f"Register it in `/market settings` first, or check for typos.",
+                            allowed_mentions=discord.AllowedMentions.none())
                     except Exception:
                         pass
-        elif csv_mid:
-            declared = _get_market(csv_mid)
-            if not declared:
-                try:
-                    await report_channel.send(
-                        f"⚠️ Stock CSV declared unknown market `{csv_mid}` — recording to the `{mid}` "
-                        f"(fallback) market instead of a real one. "
-                        f"Register it in `/market settings` first, or check for typos."
-                    )
-                except Exception:
-                    pass
             elif not _verify_market_code(csv_mid, csv_code):
                 # No channel binding AND no valid market code → reject so randoms can't
                 # spoof a stock update onto someone else's market (mirrors monthly/export).
@@ -3937,28 +4027,30 @@ async def _process_csn_attachment(attachment: discord.Attachment, report_channel
                     await report_channel.send(
                         f"⛔ Stock report for `{csv_mid}` rejected: missing/invalid market code.\n"
                         f"A manager can bind this channel on `/market settings` (Bind/unbind channel) "
-                        f"for `{csv_mid}` — no code needed afterwards — or issue a fresh code there."
-                    )
+                        f"for `{csv_mid}` — no code needed afterwards — or issue a fresh code there.",
+                        allowed_mentions=discord.AllowedMentions.none())
                 except Exception:
                     pass
                 return
             else:
                 mid = csv_mid
-                # Code verified on an unbound channel → auto-bind so future uploads here
-                # need no code (one-time, exactly like the monthly/export path).
-                if source_channel_id:
-                    try:
-                        import Restocker_db as _db_ab
-                        _db_ab.set_market_report_channel(csv_mid, source_channel_id)
-                        await report_channel.send(
-                            f"✅ Stock CSV for `{csv_mid}` accepted (code verified) — this channel is now "
-                            f"**auto-bound** to `{csv_mid}`. Future reports here route automatically."
-                        )
-                    except Exception as _e:
-                        log.warning("[csn stock] auto-bind channel failed: %s", _e)
+                # Code verified on an unbound channel → accept, but NO auto-bind. The old
+                # auto-bind let a lifted code re-route a market's future report delivery
+                # to an attacker-chosen channel (report exfiltration + denial of delivery)
+                # — binding is a deliberate manager action in /market settings.
+                try:
+                    await report_channel.send(
+                        f"✅ Stock CSV for `{csv_mid}` accepted (code verified). Tip: a manager "
+                        f"can bind a channel to `{csv_mid}` in `/market settings` so uploads "
+                        f"there need no code.",
+                        allowed_mentions=discord.AllowedMentions.none())
+                except Exception:
+                    pass
         await _record_stock_report(rows, mid, report_channel, filename)
+        _mark_processed()
         return
 
+    txns = []
     if csv_type == "monthly":
         items, income, spent = _parse_monthly_csv(csv_text)
         m = re.search(r"(\d{4})-(\d{2})", filename)
@@ -3970,21 +4062,27 @@ async def _process_csn_attachment(attachment: discord.Attachment, report_channel
             month_label = month_key
         title = f"📅 Monthly Sales Report — {month_label}"
         title_suffix = f" — {month_label}"
+        if not items:
+            return
 
     elif csv_type == "export":
-        items, income, spent, period_from, period_to = _parse_export_csv(csv_text)
+        # Only the PERIOD header is taken from the aggregate parse here. The earnings/
+        # items an export books are derived BELOW from the transactions that actually
+        # enter the ledger as NEW — so a re-uploaded file can never book coins twice,
+        # and purchase-only exports (which used to be discarded whole at this point)
+        # flow through txn ingest and hive payout like any other.
+        _pf_items, _pf_income, _pf_spent, period_from, period_to = _parse_export_csv(csv_text)
+        txns = _parse_period_transactions(csv_text)
+        items, income, spent = {}, 0.0, 0.0
         period_str = f" — {period_from} → {period_to}" if period_from and period_to else ""
         title = f"📊 CSN Sales Report{period_str}"
-        month_key = utcnow_dt().strftime("%Y-%m")
+        month_key = utcnow_dt().strftime("%Y-%m")   # provisional — refined from sale timestamps below
         try:
             from datetime import date as _date
             month_label = _date(int(month_key[:4]), int(month_key[5:7]), 1).strftime("%B %Y")
         except Exception:
             month_label = month_key
     else:
-        return
-
-    if not items:
         return
 
     csv_market_id, csv_market_code = _extract_market_info(csv_text)
@@ -4004,48 +4102,52 @@ async def _process_csn_attachment(attachment: discord.Attachment, report_channel
     if bound_market:
         effective_market_id = bound_market.get("market_id", DEFAULT_MARKET_ID)
         if csv_market_id and csv_market_id != effective_market_id:
-            # THE FILE KNOWS ITS MARKET. When the CSV declares a different market AND its
-            # code verifies, the declaration wins — a re-posted file in the wrong channel
-            # must never overwrite that channel's market history (this is exactly how
-            # toolshop's June 2026 got copied into 7 other markets). Channel binding only
-            # decides when the declaration is absent/unverifiable.
-            if _verify_market_code(csv_market_id, csv_market_code):
-                _bound_id = bound_market.get("market_id")
-                effective_market_id = csv_market_id
-                market_warning = (
-                    f"ℹ️ This channel is bound to `{_bound_id}`, but the CSV "
-                    f"declares `{csv_market_id}` with a valid code — recorded to "
-                    f"`{csv_market_id}` (the file identifies its own market)."
-                )
-                # The data lands correctly, but the finished report is delivered to the
-                # DECLARED market's channel — so the people standing in THIS channel never
-                # learn their scanner is misconfigured, and the mistake runs for weeks
-                # (freezone scanning under vtech's market_id is exactly this). Say it here.
-                try:
+            # HARDENED: a declared-market mismatch in a bound channel is always REJECTED.
+            # "Valid code overrides the binding" let anyone who lifted a market code from
+            # a readable channel book forged earnings into that market from anywhere; and
+            # recording to the BOUND market instead is exactly how toolshop's June 2026
+            # got copied into 7 other markets. Neither side of that trade is safe — so
+            # nothing is recorded, and the uploader is told precisely what to fix.
+            _bound_id = bound_market.get("market_id")
+            _code_ok = _verify_market_code(csv_market_id, csv_market_code)
+            try:
+                if _code_ok:
                     await report_channel.send(
-                        f"⚠️ **This scanner is configured for the wrong market.**\n"
-                        f"This channel belongs to **`{_bound_id}`**, but the uploaded report declares "
-                        f"**`{csv_market_id}`** (code verified) — so it was recorded to "
-                        f"**`{csv_market_id}`**, not `{_bound_id}`.\n\n"
-                        f"If this machine really scans **{_bound_id}**, open "
-                        f"`.minecraft/sales/csn_config.json` and set:\n"
-                        f"```json\n\"market_id\": \"{_bound_id}\",\n\"market_code\": \"<from /market settings "
-                        f"market_id:{_bound_id}>\"\n```\n"
-                        f"then press **K** again to re-scan. Until then every scan from this machine "
-                        f"is credited to `{csv_market_id}`."
-                    )
-                except Exception as _we:
-                    log.debug("[csn] mismatch warning failed: %s", _we)
-                log.warning("[csn] MARKET MISMATCH: channel %s is bound to %s but CSV declared %s",
-                            source_channel_id, _bound_id, csv_market_id)
-            else:
-                market_warning = (
-                    f"⚠️ CSV declared market `{csv_market_id}` but its code doesn't verify — "
-                    f"recorded to `{effective_market_id}` (channel binding). If this file really "
-                    f"belongs to `{csv_market_id}`, fix the mod config's market_code."
-                )
+                        f"⛔ **Report rejected — market mismatch.**\n"
+                        f"This channel belongs to **`{_bound_id}`**, but the file declares "
+                        f"**`{csv_market_id}`** (code verified). Nothing was recorded.\n"
+                        f"• If this scanner really serves `{csv_market_id}`: post the report in "
+                        f"that market's own channel (or any unbound channel).\n"
+                        f"• If this machine scans `{_bound_id}`: open "
+                        f"`.minecraft/sales/csn_config.json`, set `market_id` to `{_bound_id}` "
+                        f"with its code from `/market settings`, then press F6 to re-scan.",
+                        allowed_mentions=discord.AllowedMentions.none())
+                else:
+                    await report_channel.send(
+                        f"⛔ Report rejected: this channel is bound to `{_bound_id}` but the CSV "
+                        f"declares `{csv_market_id}` and its code doesn't verify. Nothing was "
+                        f"recorded — fix the mod config's market_id/market_code and re-scan.",
+                        allowed_mentions=discord.AllowedMentions.none())
+            except Exception as _we:
+                log.debug("[csn] mismatch warning failed: %s", _we)
+            log.warning("[csn] REJECTED market mismatch: channel %s bound to %s, CSV declared %s (code_ok=%s)",
+                        source_channel_id, _bound_id, csv_market_id, _code_ok)
+            return
     elif csv_market_id:
         declared_market = _get_market(csv_market_id)
+        if not declared_market and csv_market_code:
+            # Typo'd market_id but a valid UNIQUE code → the code identifies the market
+            # ('viridianmarke' still lands in viridianmarket instead of the TEST fallback).
+            _bycode = _market_id_by_code(csv_market_code)
+            if _bycode:
+                declared_market = _get_market(_bycode)
+                if declared_market:
+                    market_warning = (
+                        f"ℹ️ CSV declared unknown market `{csv_market_id}`, but its code uniquely "
+                        f"matches `{_bycode}` — recorded there. Fix the `market_id` typo in the "
+                        f"mod config when convenient."
+                    )
+                    csv_market_id = _bycode
         if declared_market:
             code_ok = _verify_market_code(csv_market_id, csv_market_code)
             if not code_ok:
@@ -4053,22 +4155,22 @@ async def _process_csn_attachment(attachment: discord.Attachment, report_channel
                     await report_channel.send(
                         f"⛔ CSN report for `{csv_market_id}` rejected: missing/invalid market code.\n"
                         f"A manager can bind this channel on `/market settings` (Bind/unbind channel) "
-                        f"for `{csv_market_id}` — no code needed afterwards — or issue a fresh code there."
-                    )
+                        f"for `{csv_market_id}` — no code needed afterwards — or issue a fresh code there.",
+                        allowed_mentions=discord.AllowedMentions.none())
                 except Exception:
                     pass
                 return
             effective_market_id = csv_market_id
-            if source_channel_id and not bound_market:
-                try:
-                    import Restocker_db as _db_ab
-                    _db_ab.set_market_report_channel(csv_market_id, source_channel_id)
-                    market_warning = (
-                        f"✅ CSV declared market `{csv_market_id}` (code verified) — accepted and "
-                        f"**auto-bound** this channel. Future reports here route to `{csv_market_id}`."
-                    )
-                except Exception as _e:
-                    log.warning("[csn] auto-bind channel failed: %s", _e)
+            # Accepted on a code-verified file — but NO auto-bind. Auto-binding let a
+            # lifted code re-route a market's report delivery to an attacker-chosen
+            # channel (exfiltration + denial of delivery). Binding stays a deliberate
+            # manager action in /market settings.
+            if source_channel_id and not market_warning:
+                market_warning = (
+                    f"✅ CSV declared market `{csv_market_id}` (code verified) — accepted. Tip: a "
+                    f"manager can bind this channel to `{csv_market_id}` in `/market settings` so "
+                    f"future uploads here need no code."
+                )
         else:
             market_warning = (
                 f"⚠️ CSV declared unknown market `{csv_market_id}` — no such market in the database. "
@@ -4080,20 +4182,73 @@ async def _process_csn_attachment(attachment: discord.Attachment, report_channel
     # A `# PERIOD` export carries every individual sale (who bought what, and when).
     # csn_history only keeps monthly per-item totals, so this is the only place that
     # detail survives. Stored against the SAME resolved market as the earnings, and
-    # deduped on full sale identity so re-scans are free.
+    # deduped on sale_uid (mod v2.1+) / near-duplicate identity so re-scans are free.
     if csv_type == "export":
+        _new_txns = []
         try:
-            _txns = _parse_period_transactions(csv_text)
-            if _txns:
+            if txns:
                 import Restocker_db as _db_txn
-                _new = _db_txn.add_csn_transactions(effective_market_id, _txns)
+                _new, _new_txns = _db_txn.add_csn_transactions_detailed(effective_market_id, txns)
                 log.info("[csn txn] %s: %d/%d transaction(s) recorded from %s",
-                         effective_market_id, _new, len(_txns), filename)
+                         effective_market_id, _new, len(txns), filename)
         except Exception as _te:
             log.warning("[csn txn] ingest failed for %s: %s", filename, _te)
+
+        # Earnings/items from ONLY the newly-recorded transactions — a re-uploaded (or
+        # partially-overlapping) export books exactly the sales the ledger didn't already
+        # hold. 'sold' rows now also fill the ITEM side (bought_qty/net_coins), so the
+        # expense per item and the comb/free-stock valuation below work on exports.
+        for _t in _new_txns:
+            _it = _t.get("item") or ""
+            _q = int(_t.get("qty") or 0)
+            _c = float(_t.get("coins") or 0)
+            _v = (_t.get("verb") or "").lower()
+            if not _it:
+                continue
+            _d = items.setdefault(_it, {"sold_qty": 0, "bought_qty": 0, "net_coins": 0.0})
+            if _v == "bought":
+                _d["sold_qty"] = _d.get("sold_qty", 0) + _q
+                _d["net_coins"] = _d.get("net_coins", 0.0) + _c
+                income += _c
+            elif _v == "sold":
+                _d["bought_qty"] = _d.get("bought_qty", 0) + _q
+                _d["net_coins"] = _d.get("net_coins", 0.0) + _c
+                spent += abs(_c)
+
+        # Month attribution from the SALES' OWN timestamps (majority month), not "now":
+        # a 35-day export used to file last month's sales into the current month.
+        _mcounts = {}
+        for _t in (_new_txns or txns):
+            _mk = (_t.get("sale_ts") or "")[:7]
+            if len(_mk) == 7:
+                _mcounts[_mk] = _mcounts.get(_mk, 0) + 1
+        if _mcounts:
+            month_key = max(_mcounts.items(), key=lambda kv: kv[1])[0]
+            try:
+                from datetime import date as _date
+                month_label = _date(int(month_key[:4]), int(month_key[5:7]), 1).strftime("%B %Y")
+            except Exception:
+                month_label = month_key
+
+        # HiveHarvesting payout — BEFORE the txn_only/no-items gates, so purchase-only
+        # exports and monthly-accompanied exports still pay wages. All parsed rows go in
+        # (not just new ones): the hive ledger dedups on real sale identity itself, so
+        # a line that failed to pay on an earlier upload gets another chance here.
+        try:
+            await _pay_honey_from_export(txns, effective_market_id, report_channel)
+        except Exception as _e:
+            log.warning("[hiveharvest] export hook failed: %s", _e)
+
     # When a monthly report accompanies this file, that one carries the earnings —
     # recording both would double-count every coin. Transactions are already saved.
     if txn_only:
+        _mark_processed()
+        return
+
+    if not items:
+        # Nothing new to book (all duplicates, or an empty file) — the ledger/hive work
+        # above already happened; only the earnings/report side is skipped.
+        _mark_processed()
         return
 
     # Combs (and any other item we choose to price) arrive via 0-coin collection shops:
@@ -4129,9 +4284,15 @@ async def _process_csn_attachment(attachment: discord.Attachment, report_channel
     except Exception as _e:
         log.warning("[csn] comb/acquired-stock valuation failed: %s", _e)
 
-    _record_to_market_history(effective_market_id, month_key, month_label, filename, income, spent, items)
+    # Exports MERGE into the month (they carry one period's partials — replacing used to
+    # clobber the whole month's cumulative totals); monthly reports REPLACE (the monthly
+    # file re-aggregates the entire month and is authoritative for it).
+    _merge_month = (csv_type == "export")
+    _record_to_market_history(effective_market_id, month_key, month_label, filename,
+                              income, spent, items, merge=_merge_month)
     if effective_market_id == DEFAULT_MARKET_ID:
-        _record_to_history(month_key, month_label, filename, income, spent, items)
+        _record_to_history(month_key, month_label, filename, income, spent, items,
+                           merge=_merge_month)
 
     try:
         _mgr_sales = _credit_manager_on_csn(effective_market_id, month_key, float(income) - float(spent))
@@ -4168,7 +4329,12 @@ async def _process_csn_attachment(attachment: discord.Attachment, report_channel
             else:
                 est_price = 0
             import Restocker_db as _db_items
-            _db_items.upsert_item(name=item_name, coin=int(round(est_price)), stock=0,
+            # Real stack size, not a blanket stackable/64 (the exact 64× book-value bug:
+            # a stack-1 armor set registered as 64-stackable read a barrel as 3,456 pcs),
+            # and the price keeps its decimals (1.25/piece used to round to 1).
+            _stk = _detect_stack_size(item_name) or 64
+            _db_items.upsert_item(name=item_name, coin=round(float(est_price), 2), stock=0,
+                                   stackable=(_stk > 1), stack_size=_stk,
                                    market_id=effective_market_id)
             newly_tagged.append(item_name)
         if newly_tagged:
@@ -4188,12 +4354,8 @@ async def _process_csn_attachment(attachment: discord.Attachment, report_channel
     except Exception as _e:
         log.debug("[loyalty] CSN hook skipped: %s", _e)
 
-    # HiveHarvesting payout: pay harvesters from an EXPORT CSV's "sold honey" rows (per-actor).
-    if csv_type == "export":
-        try:
-            await _pay_honey_from_export(csv_text, effective_market_id, report_channel)
-        except Exception as _e:
-            log.warning("[hiveharvest] export hook failed: %s", _e)
+    # (HiveHarvesting payout moved ABOVE the txn_only/no-items gates — see the export
+    # ingest block — so wages are paid on every export delivery, deduped by the ledger.)
 
     market_info = _get_market(effective_market_id)
     market_name = (market_info or {}).get("name", effective_market_id) if effective_market_id != DEFAULT_MARKET_ID else None
@@ -4292,7 +4454,9 @@ async def _process_csn_attachment(attachment: discord.Attachment, report_channel
     if overflow:
         await dest_channel.send(f"**📋 All Items (continued):**\n{chr(10).join(overflow[:30])[:1900]}")
     if market_warning:
-        await report_channel.send(market_warning)
+        # market ids come from the uploaded file — never let a crafted one ping.
+        await report_channel.send(market_warning,
+                                  allowed_mentions=discord.AllowedMentions.none())
     if _csn_anom:
         try:
             await report_channel.send(_csn_anom)
@@ -4304,8 +4468,10 @@ async def _process_csn_attachment(attachment: discord.Attachment, report_channel
         await report_channel.send(
             f"🆕 Added {len(newly_tagged)} new item(s) to the **{market_name or effective_market_id}** "
             f"price catalog from this report: {names}{more}\n"
-            f"Starter prices were estimated from this report's sales — check them with `/item edit` if they look off."
+            f"Starter prices were estimated from this report's sales — check them with `/item edit` if they look off.",
+            allowed_mentions=discord.AllowedMentions.none()
         )
+    _mark_processed()
 
 
 _ready_once = False
@@ -6358,7 +6524,11 @@ def _learn_brew_aliases_from_profiles(profiles: dict) -> int:
             continue
         base = str(key).split("@", 1)[0].strip() or "Potion"
         dn = (prof.get("display_name") or "").strip()
-        name = dn if dn else f"{base} - {effects}"
+        # display_name comes VERBATIM from an uploaded JSON — sanitize before it enters
+        # the global alias store (pings/markdown/§ used to be learnable and re-sent).
+        name = _sanitize_alias_name(dn if dn else f"{base} - {effects}")
+        if not name:
+            continue
         for h in (prof.get("known_hashes") or []):
             h = str(h).strip()
             # Skip existing aliases, EXCEPT heal ones still carrying raw § colour codes
@@ -6396,14 +6566,22 @@ async def _process_csn_profiles(attachment, report_channel):
 
 
 def _extract_market_info(csv_text: str) -> tuple[str, str]:
-    """Extract # MARKET,market_id,market_code from CSV header. Returns (id, code) or ('', '')."""
+    """Extract # MARKET,market_id,market_code from CSV header. Returns (id, code) or ('', '').
+
+    Uses the csv module (a comma inside a quoted code used to truncate the split) and
+    honours the LAST # MARKET line: the mod re-emits the header every run, so on a
+    mid-month config change or code rotation the newest declaration wins."""
+    found = ("", "")
     for line in csv_text.splitlines():
         s = line.strip()
         if s.startswith("# MARKET"):
-            parts = s.split(",")
+            try:
+                parts = next(csv.reader([s]))
+            except Exception:
+                parts = s.split(",")
             if len(parts) >= 3:
-                return parts[1].strip(), parts[2].strip()
-    return "", ""
+                found = ((parts[1] or "").strip(), (parts[2] or "").strip())
+    return found
 
 
 def _verify_market_code(market_id: str, market_code: str) -> bool:
@@ -6434,49 +6612,80 @@ def _market_id_by_code(market_code: str) -> str | None:
 
 
 def _load_csn_history() -> dict:
-    try:
-        import Restocker_db as _db
-        return _db.csn_get_market("main")
-    except Exception as e:
-        log.error("[csn] DB read failed (main), YAML fallback: %s", e)
-        return load_yaml(CSN_HISTORY_FILE, {"months": {}})
+    # Same store and the SAME YAML fallback file as _load_csn_for_market("main") — the
+    # two used to back up "main" to two different files (csn_history.yml vs
+    # csn_history_main.yml), each holding half the truth.
+    return _load_csn_for_market("main")
 
 
 def _save_csn_history(data: dict) -> bool:
-    ok = False
-    try:
-        import Restocker_db as _db
-        _db.csn_save_market("main", data)
-        ok = True
-    except Exception as e:
-        log.error("[csn] DB write failed (main): %s", e)
-    try:
-        save_yaml(CSN_HISTORY_FILE, data)   # write-only YAML backup
-    except Exception:
-        pass
-    return ok
+    return _save_csn_for_market("main", data)
+
+
+def _merge_month_entry(months: dict, month_key: str, label: str, source: str,
+                       income: float, spent: float, items: dict) -> dict:
+    """MERGE one report's numbers into an existing month entry (adding income/spent and
+    per-item quantities) instead of replacing it — an export upload carries one period's
+    partials, and replacement used to wipe the month's correct cumulative totals."""
+    cur = months.get(month_key)
+    if not isinstance(cur, dict):
+        cur = {"label": label, "source": "", "income": 0.0, "spent": 0.0, "items": {}}
+    new_income = float(cur.get("income", 0) or 0) + round(income, 2)
+    new_spent = float(cur.get("spent", 0) or 0) + round(spent, 2)
+    merged_items = dict(cur.get("items") or {})
+    for item, v in items.items():
+        e = merged_items.get(item)
+        if not isinstance(e, dict):
+            e = {"sold_qty": 0, "bought_qty": 0, "net_coins": 0.0}
+        merged_items[item] = {
+            "sold_qty":   int(e.get("sold_qty", 0) or 0) + int(v.get("sold_qty", 0) or 0),
+            "bought_qty": int(e.get("bought_qty", 0) or 0) + int(v.get("bought_qty", 0) or 0),
+            "net_coins":  round(float(e.get("net_coins", 0) or 0) + float(v.get("net_coins", 0) or 0), 2),
+        }
+    _src = str(cur.get("source") or "")
+    if source and source not in _src:
+        _src = (_src + " + " + source).strip(" +")
+    return {
+        "label":       cur.get("label") or label,
+        "source":      _src,
+        "recorded_at": utcnow_iso(),
+        "income":      round(new_income, 2),
+        "spent":       round(new_spent, 2),
+        "net":         round(new_income - new_spent, 2),
+        "items":       merged_items,
+    }
 
 
 def _record_to_history(month_key: str, label: str, source: str,
                         income: float, spent: float,
-                        items: dict) -> None:
+                        items: dict, merge: bool = False) -> None:
     history = _load_csn_history()
-    history.setdefault("months", {})[month_key] = {
-        "label":       label,
-        "source":      source,
-        "recorded_at": utcnow_iso(),
-        "income":      round(income, 2),
-        "spent":       round(spent, 2),
-        "net":         round(income - spent, 2),
-        "items": {
-            item: {
-                "sold_qty":   v.get("sold_qty", 0),
-                "bought_qty": v.get("bought_qty", 0),
-                "net_coins":  round(v.get("net_coins", 0.0), 2),
-            }
-            for item, v in items.items()
-        },
-    }
+    if history.get("_degraded"):
+        log.error("[csn] REFUSING to record 'main' history: the load fell back to a "
+                  "possibly-stale source (DB read failed). Booking now would overwrite "
+                  "real months with the fallback's contents on save.")
+        return
+    months = history.setdefault("months", {})
+    if merge:
+        months[month_key] = _merge_month_entry(months, month_key, label, source,
+                                               income, spent, items)
+    else:
+        months[month_key] = {
+            "label":       label,
+            "source":      source,
+            "recorded_at": utcnow_iso(),
+            "income":      round(income, 2),
+            "spent":       round(spent, 2),
+            "net":         round(income - spent, 2),
+            "items": {
+                item: {
+                    "sold_qty":   v.get("sold_qty", 0),
+                    "bought_qty": v.get("bought_qty", 0),
+                    "net_coins":  round(v.get("net_coins", 0.0), 2),
+                }
+                for item, v in items.items()
+            },
+        }
     _save_csn_history(history)
 
 
@@ -6516,10 +6725,12 @@ def _parse_period_transactions(csv_text: str) -> list:
     throwing away `actor` and `timestamp_iso` — the two columns that make daily and
     per-customer reporting possible. This keeps them.
 
-    Returns [{actor, seller, verb, item, qty, coins, sale_ts}]; rows without a usable
-    timestamp are dropped (they can't be deduped or placed on a day).
+    Returns [{actor, seller, verb, item, qty, coins, sale_ts, sale_uid}]; rows without a
+    usable timestamp are dropped (they can't be deduped or placed on a day) — with a log
+    line counting them, so the loss is visible.
     """
     out, header = [], None
+    dropped_no_ts = 0
     for row in csv.reader(io.StringIO(csv_text)):
         if not row:
             continue
@@ -6532,9 +6743,15 @@ def _parse_period_transactions(csv_text: str) -> list:
         if header is None:
             continue
         rec = {header[i]: (row[i] if i < len(row) else "") for i in range(len(header))}
+        # sale_uid: the mod's own stable per-sale identity (new column). Rows written by
+        # a newer mod than the file's header may carry it positionally beyond the header.
+        uid = (rec.get("sale_uid") or "").strip()
+        if not uid and "sale_uid" not in header and len(row) > len(header):
+            uid = (row[len(header)] or "").strip()
         ts = (rec.get("timestamp_iso") or "").strip()
         item = (rec.get("item") or "").strip()
         if not ts or not item or len(ts) < 10:
+            dropped_no_ts += 1
             continue
         try:
             qty = int((rec.get("quantity") or "0").strip())
@@ -6549,7 +6766,12 @@ def _parse_period_transactions(csv_text: str) -> list:
             "qty":    qty,
             "coins":  coins,
             "sale_ts": ts,
+            "sale_uid": uid or None,
         })
+    if dropped_no_ts:
+        # These used to vanish silently — rows with a blank/short timestamp can't be
+        # deduped or placed on a day, but their existence is worth a line in the log.
+        log.warning("[csn txn] %d row(s) dropped for missing/short timestamp_iso", dropped_no_ts)
     return out
 
 
@@ -6567,9 +6789,16 @@ def _parse_export_csv(csv_text: str) -> tuple:
         if not row:
             continue
         first = (row[0] or "").strip()
-        if first.startswith("# PERIOD") and len(row) >= 3:
-            period_from = (row[1] or "").strip()
-            period_to   = (row[2] or "").strip()
+        if first.startswith("# PERIOD"):
+            if len(row) >= 3:
+                period_from = (row[1] or "").strip()
+                period_to   = (row[2] or "").strip()
+            elif len(row) == 2:
+                # Legacy header carried only the FILENAME ("# PERIOD,csn_export_2026-08-01.csv")
+                # — mine the date out of it so the report title still shows a period start.
+                _pm = re.search(r"(\d{4}-\d{2}-\d{2})", row[1] or "")
+                if _pm:
+                    period_from = _pm.group(1)
             continue
         if first.startswith("#"):
             continue
@@ -6619,11 +6848,19 @@ def _parse_monthly_csv(csv_text: str) -> tuple:
     global _LAST_MONTHLY_PARSE_META
     all_lines = csv_text.splitlines()
     header_line = None
+    mode_hint = ""
     for line in all_lines:
         s = line.strip()
-        if s and not s.startswith("#"):
+        # `# MODE,delta` — stamped by the mod (v2.1+): every RUN block holds ONLY that
+        # run's fresh entries. With the hint present the blocks are simply summed; the
+        # cumulative-vs-delta classifier below is only for legacy files without it
+        # (where a wrong "cumulative" guess discarded 33–50% of real earnings).
+        if s.startswith("# MODE"):
+            parts = s.split(",", 1)
+            if len(parts) > 1:
+                mode_hint = parts[1].strip().lower()
+        if s and not s.startswith("#") and header_line is None:
             header_line = s
-            break
     if not header_line:
         return {}, 0.0, 0.0
 
@@ -6658,15 +6895,19 @@ def _parse_monthly_csv(csv_text: str) -> tuple:
     if not runs:
         return {}, 0.0, 0.0
 
-    # ── de-duplicate identical RUN timestamps (count each run once) ───────────
+    # ── de-duplicate IDENTICAL RUN blocks (same timestamp AND same rows) ──────
+    # Keyed on (ts, content): a crash/re-export writing the same block twice still
+    # counts once, but two DIFFERENT blocks sharing a timestamp are both kept —
+    # the old ts-only dedup silently REPLACED the first with the last.
     dedup = {}
     order = []
     for ts, rows in runs:
-        if ts not in dedup:
-            order.append(ts)
-        dedup[ts] = rows
+        key = (ts, tuple(rows))
+        if key not in dedup:
+            order.append(key)
+            dedup[key] = rows
     dup_removed = len(runs) - len(order)
-    runs = [(ts, dedup[ts]) for ts in order]
+    runs = [(key[0], dedup[key]) for key in order]
 
     def parse_rows(rows):
         d = {}
@@ -6721,7 +6962,10 @@ def _parse_monthly_csv(csv_text: str) -> tuple:
                 a["times_bought"] += v.get("times_bought", 0)
         return out
 
-    if len(run_dicts) == 1:
+    if mode_hint == "delta":
+        # The file SAYS its blocks are deltas — no guessing, just sum them all.
+        agg, mode = _agg_sum(run_dicts), "delta(header)"
+    elif len(run_dicts) == 1:
         agg, mode = run_dicts[0], "single"
     else:
         # per-item monotonicity across consecutive runs -> cumulative signature
@@ -8552,6 +8796,10 @@ def _ensure_fallback_market() -> str:
 
 
 def _csn_file_for_market(market_id: str) -> str:
+    # "main" unifies on the legacy CSN_HISTORY_FILE — _load_csn_history and
+    # _load_csn_for_market("main") used to back up to two different YAML files.
+    if not market_id or market_id == "main":
+        return CSN_HISTORY_FILE
     m = _get_market(market_id)
     if m and m.get("csn_history_file"):
         return str(m["csn_history_file"])
@@ -8564,10 +8812,21 @@ def _load_csn_for_market(market_id: str) -> dict:
         return _db.csn_get_market(market_id or "main")
     except Exception as e:
         log.error("[csn] DB read failed (%s), YAML fallback: %s", market_id, e)
-        return load_yaml(_csn_file_for_market(market_id), {"months": {}})
+        data = load_yaml(_csn_file_for_market(market_id), {"months": {}})
+        # Mark the result DEGRADED: it may be an empty default or a stale YAML mirror.
+        # csn_save_market DELETEs everything and reinserts what was loaded, so saving a
+        # degraded load back would destroy the market's real history (a transient DB
+        # lock used to be enough to trigger exactly that). _save_csn_for_market refuses.
+        data["_degraded"] = True
+        return data
 
 
 def _save_csn_for_market(market_id: str, data: dict) -> bool:
+    if isinstance(data, dict) and data.get("_degraded"):
+        log.error("[csn] REFUSING to save history for %s: the data came from a degraded "
+                  "load (DB read failed → empty/stale fallback). Saving would DELETE the "
+                  "market's real months and replace them with the fallback.", market_id)
+        return False
     ok = False
     try:
         import Restocker_db as _db
@@ -8793,24 +9052,35 @@ def _backfill_csn_to_db() -> None:
 
 
 def _record_to_market_history(market_id: str, month_key: str, label: str, source: str,
-                               income: float, spent: float, items: dict) -> None:
+                               income: float, spent: float, items: dict,
+                               merge: bool = False) -> None:
     history = _load_csn_for_market(market_id)
-    history.setdefault("months", {})[month_key] = {
-        "label":       label,
-        "source":      source,
-        "recorded_at": utcnow_iso(),
-        "income":      round(income, 2),
-        "spent":       round(spent, 2),
-        "net":         round(income - spent, 2),
-        "items": {
-            item: {
-                "sold_qty":   v.get("sold_qty", 0),
-                "bought_qty": v.get("bought_qty", 0),
-                "net_coins":  round(v.get("net_coins", 0.0), 2),
-            }
-            for item, v in items.items()
-        },
-    }
+    if history.get("_degraded"):
+        log.error("[csn] REFUSING to record %s %s: history load was degraded (DB read "
+                  "failed). The report was NOT booked — re-upload once the DB is healthy.",
+                  market_id, month_key)
+        return
+    months = history.setdefault("months", {})
+    if merge:
+        months[month_key] = _merge_month_entry(months, month_key, label, source,
+                                               income, spent, items)
+    else:
+        months[month_key] = {
+            "label":       label,
+            "source":      source,
+            "recorded_at": utcnow_iso(),
+            "income":      round(income, 2),
+            "spent":       round(spent, 2),
+            "net":         round(income - spent, 2),
+            "items": {
+                item: {
+                    "sold_qty":   v.get("sold_qty", 0),
+                    "bought_qty": v.get("bought_qty", 0),
+                    "net_coins":  round(v.get("net_coins", 0.0), 2),
+                }
+                for item, v in items.items()
+            },
+        }
     _save_csn_for_market(market_id, history)
     _recompute_share_price(market_id, reason="csn_report")
     # If this market rolls its profit up into a parent stock, that parent's valuation just
@@ -9828,16 +10098,22 @@ def _skim_insurance(market_id, trade_total) -> int:
 
 
 def _market_asset_value(market_id) -> float:
-    """Coin value of a market's live inventory (stock x sell price, fallback buy)."""
+    """Coin value of a market's live inventory (stock x sell price, fallback buy).
+
+    Counts only rows stored on a per-UNIT basis (sell_qty/buy_qty present) — a NULL-qty
+    row is a LEGACY per-STACK price stored raw, and valuing it per-unit inflates the
+    book value up to 64×. Same guard the website applies (Restocker_web '99M inventory /
+    383% backed' bug); legacy rows self-heal on the next fresh stock scan."""
     import Restocker_db as _db
     total = 0.0
     for it, x in (_db.get_market_stock(market_id) or {}).items():
-        px = x.get("sell_price")
-        if px is None:
-            px = x.get("buy_price")
-        if px is None:
+        stk = float(x.get("stock") or 0)
+        if stk <= 0:
             continue
-        total += float(x.get("stock") or 0) * float(px)
+        if x.get("sell_qty") is not None and x.get("sell_price") is not None:
+            total += stk * float(x["sell_price"])
+        elif x.get("buy_qty") is not None and x.get("buy_price") is not None:
+            total += stk * float(x["buy_price"])
     return total
 
 

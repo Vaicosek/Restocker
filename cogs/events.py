@@ -117,21 +117,47 @@ class EventsCog(commands.Cog):
 
         # A human dropping a CSN report CSV (csn_monthly/export/stock) should get it LOGGED — the
         # AI mention handler can't see attachments, and the webhook-only path below skips humans, so
-        # a manager uploading the file used to be ignored. Route it straight to the validated importer
-        # (it verifies the market's secret code from the "# MARKET,<id>,<code>" header), with or
-        # without an @mention. Result posts in this channel so they get immediate feedback.
+        # a manager uploading the file used to be ignored. AUDIT FIX (critical): this path had NO
+        # auth at all — any guild member's csn_*.csv went straight to the importer, which could
+        # book forged earnings, re-price shares and trigger harvest payouts. Now the uploader must
+        # be a manager, OR the file itself must carry a VERIFYING "# MARKET,<id>,<code>" header.
+        # txn_only is passed exactly like the webhook path: when a monthly file accompanies the
+        # export in the same message, only the monthly one books earnings (no double-count).
         if (not message.author.bot) and message.guild is not None and message.attachments:
             _human_csn = [a for a in message.attachments
                           if a.filename.lower().endswith(".csv")
                           and any(k in a.filename.lower() for k in ("csn_monthly", "csn_export", "csn_stock"))]
             if _human_csn:
+                _roles = {r.name for r in message.author.roles} if hasattr(message.author, "roles") else set()
+                _is_mgr_up = (MANAGER_ROLE_NAME in _roles or MANAGER_ROLE_ALT in _roles
+                              or message.author.id in MANAGER_DM_IDS)
                 try:
                     await message.add_reaction("📥")
                 except Exception:
                     pass
+                _has_monthly_h = any("csn_monthly" in a.filename.lower() for a in _human_csn)
                 for _att in _human_csn:
                     try:
-                        await _process_csn_attachment(_att, message.channel, source_channel_id=message.channel.id)
+                        if not _is_mgr_up:
+                            _txt = (await _att.read()).decode("utf-8", errors="replace")
+                            _mid, _code = core._extract_market_info(_txt)
+                            if not (_mid and _code and core._verify_market_code(_mid, _code)):
+                                log.warning("[csn] REJECTED human upload %s from %s — not a "
+                                            "manager and no valid market code in the file.",
+                                            _att.filename, message.author.id)
+                                try:
+                                    await message.reply(
+                                        f"⛔ `{_att.filename}` not imported: uploads need a manager, "
+                                        f"or the file must carry its market's valid "
+                                        f"`# MARKET,<id>,<code>` header (the mod writes it when "
+                                        f"market_id/market_code are set in CSN settings).",
+                                        allowed_mentions=discord.AllowedMentions.none())
+                                except Exception:
+                                    pass
+                                continue
+                        await _process_csn_attachment(
+                            _att, message.channel, source_channel_id=message.channel.id,
+                            txn_only=("csn_export" in _att.filename.lower() and _has_monthly_h))
                     except Exception as _e:
                         log.error("CSN human upload failed: %s", _e)
                         try:
@@ -204,7 +230,22 @@ class EventsCog(commands.Cog):
             _a.filename.lower().endswith(".csv")
             and any(k in _a.filename.lower() for k in ("csn_monthly", "csn_export", "csn_stock"))
             for _a in message.attachments)
-        if _has_csn_csv:
+        _has_csn_json = any(
+            _a.filename.lower().endswith(".json") and "csn_profiles" in _a.filename.lower()
+            for _a in message.attachments)
+        # AUDIT FIX (high): the old gate was GLOBAL trust-on-first-use — the first poster
+        # ever was locked in with no code check at all, and any poster that once carried
+        # one valid code was trusted for ALL markets forever. Now:
+        #   • the env allowlist (CSN_WEBHOOK_IDS) + legacy global config still work;
+        #   • otherwise trust is PER MARKET (csn_allowed_posters:<mid>), earned only by
+        #     delivering a file whose declared market code verifies — and it vouches the
+        #     poster for THAT market only;
+        #   • a channel bound to a market accepts that market's files (posting there
+        #     already required guild-controlled channel access);
+        #   • there is no blind first-poster lock-in any more.
+        _poster_trusted = False
+        _bound_mid = None
+        if _has_csn_csv or _has_csn_json:
             import Restocker_db as _dbw
             _allowed = set(_CSN_ALLOWED_WEBHOOK_IDS)
             try:
@@ -212,46 +253,53 @@ class EventsCog(commands.Cog):
                 _allowed |= {int(x) for x in _cfg.replace(" ", "").split(",") if x.strip().isdigit()}
             except Exception:
                 pass
-            if not _allowed:
-                # first ever CSN poster — lock it in
+            _poster_trusted = _poster_id in _allowed
+            try:
+                _bm = _dbw.get_market_by_channel(message.channel.id)
+                _bound_mid = _bm.get("market_id") if _bm else None
+            except Exception:
+                _bound_mid = None
+
+            async def _csn_attachment_allowed(_a) -> bool:
+                """Gate ONE attachment: trusted poster, bound-channel match, per-market
+                vouch, or a verifying market code inside the file (which then vouches
+                this poster for that one market)."""
+                if _poster_trusted:
+                    return True
                 try:
-                    _dbw.set_config("csn_allowed_posters", str(_poster_id))
-                    log.info("[csn] TOFU: locked CSN ingest to poster %s", _poster_id)
-                except Exception:
-                    pass
-            elif _poster_id not in _allowed:
-                # Trust-on-first-use locked ingest to ONE webhook — but every market has its
-                # own webhook (18 of them), so every market except the first was rejected and
-                # its uploads left rotting in the channel as raw CSV. The real credential is
-                # the market CODE inside the file: a forger can't produce a valid one. So a
-                # new poster is accepted (and remembered) as soon as it delivers a file whose
-                # declared market verifies; anything unsigned is still refused.
-                _vouched = False
-                try:
-                    for _a in message.attachments:
-                        if not _a.filename.lower().endswith(".csv"):
-                            continue
-                        _txt = (await _a.read()).decode("utf-8", errors="replace")
-                        _mid, _code = core._extract_market_info(_txt)
-                        if _mid and _code and core._verify_market_code(_mid, _code):
-                            _vouched = True
-                            break
+                    _txt = (await _a.read()).decode("utf-8", errors="replace")
+                    _mid, _code = core._extract_market_info(_txt)
                 except Exception as _ve:
-                    log.warning("[csn] poster vouch check failed: %s", _ve)
-                if not _vouched:
-                    log.warning("[csn] REJECTED CSN report from unknown poster %s — no valid "
-                                "market code in the file. Add its id to csn_allowed_posters "
-                                "(or CSN_WEBHOOK_IDS) if this is a legitimate relay.",
-                                _poster_id)
-                    return
-                try:
-                    _allowed.add(_poster_id)
-                    _dbw.set_config("csn_allowed_posters",
-                                    ",".join(str(x) for x in sorted(_allowed)))
-                    log.info("[csn] poster %s accepted — carried a valid market code; "
-                             "added to csn_allowed_posters.", _poster_id)
-                except Exception:
-                    pass
+                    log.warning("[csn] poster vouch check failed for %s: %s", _a.filename, _ve)
+                    return False
+                if _bound_mid and (not _mid or _mid == _bound_mid):
+                    return True
+                if _mid:
+                    try:
+                        _per = str(_dbw.get_config(f"csn_allowed_posters:{_mid}") or "")
+                        if str(_poster_id) in {x.strip() for x in _per.split(",") if x.strip()}:
+                            return True
+                    except Exception:
+                        pass
+                    if _code and core._verify_market_code(_mid, _code):
+                        try:
+                            _per = str(_dbw.get_config(f"csn_allowed_posters:{_mid}") or "")
+                            _ids = {x.strip() for x in _per.split(",") if x.strip()}
+                            _ids.add(str(_poster_id))
+                            _dbw.set_config(f"csn_allowed_posters:{_mid}", ",".join(sorted(_ids)))
+                            log.info("[csn] poster %s vouched for market %s (valid code).",
+                                     _poster_id, _mid)
+                        except Exception:
+                            pass
+                        return True
+                log.warning("[csn] REJECTED %s from poster %s — no binding/vouch/valid code "
+                            "for its market. Add the id to CSN_WEBHOOK_IDS or "
+                            "csn_allowed_posters if this is a legitimate relay.",
+                            _a.filename, _poster_id)
+                return False
+        else:
+            async def _csn_attachment_allowed(_a) -> bool:
+                return True
         _processed_any = False
         _all_transport = bool(message.attachments)
         # The mod posts the monthly aggregate AND the per-transaction period file in one
@@ -269,7 +317,17 @@ class EventsCog(commands.Cog):
                 report_channel = message.channel
             # csn_profiles.json — the mod's captured item lore. Auto-learn readable brew
             # names (potion effects) from it so reports stop showing raw #codes.
+            # AUDIT FIX: this used to bypass the poster gate entirely (it sat outside the
+            # .csv allowlist check) and wrote display_names verbatim into the GLOBAL alias
+            # store. Now only trusted posters / bound channels feed it (and the learner
+            # sanitizes every name it stores).
             if name.endswith(".json") and "csn_profiles" in name:
+                if not (_poster_trusted or _bound_mid):
+                    log.warning("[csn] REJECTED csn_profiles.json from unvouched poster %s "
+                                "in unbound channel #%s.", _poster_id,
+                                getattr(message.channel, "name", message.channel.id))
+                    _all_transport = False
+                    continue
                 try:
                     await _process_csn_profiles(att, report_channel)
                     _processed_any = True
@@ -281,6 +339,9 @@ class EventsCog(commands.Cog):
                     or ("csn_monthly" not in name and "csn_export" not in name
                         and "csn_stock" not in name)):
                 _all_transport = False        # carries something that isn't CSN transport — keep
+                continue
+            if not await _csn_attachment_allowed(att):
+                _all_transport = False        # rejected — keep the raw file visible for review
                 continue
             try:
                 await _process_csn_attachment(
