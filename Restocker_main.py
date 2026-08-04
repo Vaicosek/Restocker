@@ -7907,12 +7907,14 @@ def _create_restock_orders(to_order: list, market_id=None) -> int:
             "priority_role": "TESTER",
             "verification_ticket_id": None, "assist_ticket_id": None,
             "assist_ticket_ids": {}, "blocked_claimers": [],
-            # The market being restocked wins. Only fall back to the item's home
-            # market when no market_id was passed (e.g. the stock-alarm view). Without
-            # this, an item first registered by another market (its catalog entry
-            # carries that market_id) would mis-tag the order — a build for Amazonia
-            # could stamp a line [BNL] just because BNL created that item.
-            "market_id": market_id or info.get("market_id"),
+            # The market being restocked, EXACTLY as passed — never the item's home
+            # market. The old fallback (info.get("market_id")) stamped local orders
+            # with whichever market first registered the item in the catalog, so a
+            # local Diamond build showed [Freezone] in worker pings just because
+            # Freezone's upload owned Diamond's catalog entry. Callers that know the
+            # market pass it (website, stock-alarm view, AI tool); a local order
+            # carries None and is displayed untagged.
+            "market_id": market_id or None,
         }
         data_orders.setdefault("orders", []).append(order)
         created += 1
@@ -7931,7 +7933,10 @@ async def _post_bulk_order_board(bot, channel, orders: list) -> None:
     items_data = (_load_items().get("items") or {})
     markets = (_load_markets().get("markets") or {})
     for o in orders:
-        mid = o.get("market_id") or (items_data.get(str(o.get("item") or "")) or {}).get("market_id") or "main"
+        # Group by the ORDER's market only — the item-catalog fallback mis-grouped
+        # local orders under whichever market first registered the item (see
+        # _create_restock_orders). Local/untagged orders group under "main".
+        mid = o.get("market_id") or "main"
         by_market.setdefault(mid, []).append(o)
     total_orders = len(orders)
     total_payout = 0.0
@@ -14647,7 +14652,7 @@ async def _ai_tool_create_restock_orders(guild, channel, user, args):
                 f"{lines}{more}"
                 + (f"\n\n{skipped} scanned item(s) aren't in the catalog and were skipped." if skipped else "")
                 + "\n\nSay the word and I'll create them.")
-    created = _create_restock_orders(to_order)
+    created = _create_restock_orders(to_order, mid)
     return (f"Created {created} restock order(s) for {mid} from real deficit."
             + (f" {skipped} skipped (not in catalog)." if skipped else "")
             + f" Biggest shortfalls: {top}")

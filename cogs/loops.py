@@ -160,15 +160,22 @@ class LoopsCog(commands.Cog):
                         pass
 
                 lines = []
-                _items_data_ping = _load_items().get("items", {})
                 _markets_ping    = _load_markets().get("markets", {})
                 for o in ready[:25]:
                     rem       = remaining_to_assign(o)
                     item_name = o.get('item', '')
-                    item_info = _items_data_ping.get(item_name, {})
-                    mid       = item_info.get("market_id", "main")
-                    mkt_name  = (_markets_ping.get(mid) or {}).get("name", mid.capitalize())
-                    lines.append(f"• **#{o['id']}** {item_name} · rem {fmt_qty(o, rem)} `[{mkt_name}]`")
+                    # Tag with the ORDER's market (the land being restocked), never the
+                    # item's catalog home market — the catalog belongs to whichever
+                    # market first registered the item, which mis-tagged local orders
+                    # (a local Diamond build showed [Freezone] because Freezone's
+                    # upload owned Diamond's catalog entry). Local orders
+                    # (no market / main) get no tag at all.
+                    mid = str(o.get("market_id") or "")
+                    tag = ""
+                    if mid and mid != "main":
+                        mkt_name = (_markets_ping.get(mid) or {}).get("name", mid.capitalize())
+                        tag = f" `[{mkt_name}]`"
+                    lines.append(f"• **#{o['id']}** {item_name} · rem {fmt_qty(o, rem)}{tag}")
 
                 header     = "New restock requests:" if len(ready) > 1 else "New restock request:"
                 content    = f"{mention} 🔔 **{header}**\n" + "\n".join(lines)

@@ -169,7 +169,7 @@ class StockAlarmView(discord.ui.View):
         if not to_order:
             return await interaction.response.send_message(
                 "Nothing to order right now (stock recovered, or items not in catalog).", ephemeral=True)
-        created = _create_restock_orders(to_order)
+        created = _create_restock_orders(to_order, mid)
         top = ", ".join(f"{it} ({d:,})" for it, d, _ in sorted(to_order, key=lambda r: -r[1])[:8])
         try:
             await interaction.response.edit_message(
