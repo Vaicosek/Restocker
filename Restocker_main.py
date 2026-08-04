@@ -6380,6 +6380,9 @@ _POTION_EFFECTS = {
     "lighting strikes", "lightning strikes",
     # XP brews ("lvl 30 xp" in lore)
     "lvl", "xp",
+    # Level-less abbreviations ("levit + slowfall" on Potion#aku) — bare words need an
+    # EXACT vocabulary hit, the prefix rule only helps when a level number follows.
+    "levit", "slowfall", "invis",
 }
 
 
