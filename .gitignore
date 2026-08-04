@@ -16,7 +16,10 @@ backups/
 
 # Runtime YAML state the bot writes (the DB is the source of truth; these are its
 # write-only mirrors/fallbacks and would cause the same pull conflicts if tracked).
-data/state/
+data/state/*
+# EXCEPTION: the curated brew→effect map is hand-maintained CONFIG (the bot only
+# reads it), so it must travel to the server through git like code does.
+!data/state/brew_effects_manual.yml
 data/csn_history/
 data/exports/
 

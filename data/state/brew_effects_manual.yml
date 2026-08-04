@@ -1,0 +1,102 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Curated brew  →  effect map   (hand-maintained)
+#
+# Source: the "brews" server  #recipes  forum (channel 1308041752573247538),
+# read 2026-07-14. These are the authoritative effects for brews whose lore is
+# pure flavour text (no parseable effect line), so the auto-parser can't name
+# them. Entries here ALWAYS win over the auto-parser and are NEVER overwritten
+# by the bot's learn/purge routines — this file is yours to edit.
+#
+# Matching is fuzzy on the brew's in-game name: colour/format codes (§, &),
+# the trailing #variant-hash, fancy unicode (small-caps ꜱᴄʜɪᴢᴏ, math-bold
+# 𝐵𝒾𝑔), case and punctuation are all ignored. So you only need ONE plain-text
+# key per brew; add extra keys only when a brew ships under several names.
+#
+# Format:   "<brew name>": "<effects to show>"
+# ─────────────────────────────────────────────────────────────────────────────
+brews:
+  # ── Vaicos / Mardurak line ──────────────────────────────────────────────
+  "Blood Of Mardurak": "Fire Resistance + Regeneration"
+  "Mardurak Haste": "Haste 5"
+  "Mardurak Redstone Enhancer": "Haste 5 + Speed 2"
+  "Obisidios Jetpack": "Levitation + Slow Falling"
+  "Obidios Nuclear Power": "XP +1395"
+  "Wukong Minion": "Summon Elder Guardian"
+  "Insomniac Mayri": "Invisibility"
+  "DILF Delux": "XP +1395"
+  "Greyhame Dragon Scales": "Fire Resistance"
+  "Strong bOi": "Strength 2"
+
+  # ── Gandalf line ────────────────────────────────────────────────────────
+  "Rustvan Fisheries' Magneto-hook": "Unluck 10"
+  "Rustvan Labs MM-6 Injector": "Haste 2"
+  "Rustvan Acolyte Rite of Summoning": "Summon Elder Guardian"
+  "Myrdalf's Defibrillator": "Health Boost 1 + Regeneration 1"
+  "Myrdalf's Trenbolone": "Strength 2 + Speed 2"
+  "Big Mechs": "Haste 5"
+  "Mini Mechs": "Haste 5"
+  "Medium Mechs": "Haste 5"
+  "Trident XP": "XP +1395"
+  "Nos": "Haste 5"
+  "Notusan Palinka - Fire Res": "Fire Resistance"
+  "Notusan Palinka": "Fire Resistance"
+  "Stormgovan Horseshoe - Luck": "Luck 3"
+  "Stormgovan Horseshoe": "Luck 3"
+  "Blue Lemon": "Luck 3"
+  "Yellow Watermelon": "Regeneration 1"
+
+  # ── Infera line ─────────────────────────────────────────────────────────
+  "Dryads Wrath": "Speed 2 + Strength 2"
+  "Cat Hair": "Regeneration 1"
+
+  # ── Macca line ──────────────────────────────────────────────────────────
+  "Schizo Juice": "Haste 5 + Speed 2"
+  "Action Surge": "Strength 2 + Speed 2"
+  "Adrenaline Surge": "Strength 2 + Speed 2"
+  "CoC Spring Trap": "Levitation 50 + Slow Falling 1"
+
+  # ── House Brewtaker line ────────────────────────────────────────────────
+  # Quality-tiered names (Sludge / Muck / <good>). Only the distinctive good-tier
+  # name is mapped — Sludge & Muck are shared by both brews, so mapping them would
+  # be ambiguous.
+  "Fisherman's Friend": "Luck 3"
+  "Fisherman's Folly": "Unluck 10"
+
+  # ── From the market price list ──────────────────────────────────────────
+  # Catalog entries carry the effect as a suffix, e.g. "Cell's Regeneration (Regen 1)".
+  # Keys stay clean — matching is on word boundaries, so the suffix is ignored.
+  "Cell's Regeneration": "Regeneration 1"
+  "The Hora": "Strength 2 + Speed 2 + Slowness"
+  "Emporium-Warlord": "Strength 2 + Speed 2"
+  "Fres Regen": "Fire Resistance + Regeneration"
+  "Ussviksye Tyahiliks": "Fire Resistance + Regeneration"
+  "Honey Comb 2": "Health Boost 1 + Regeneration 1"
+  "Thick Skin": "Health Boost 1"
+  "Turtle Master": "Turtle Master"
+
+  # ── Added 2026-08-04 (re-read of the #recipes forum) ────────────────────
+  # Fire RES post: three stage-names for the same brew
+  "Morning Mix": "Fire Resistance"
+  "Golden Sludge": "Fire Resistance"
+  "Sunset Mortar": "Fire Resistance"
+  # Gandalf's obfuscated (&k) renames — the underlying text is what CSN exports
+  "Popped Ice": "Health Boost 1"
+  "Blue Moon": "Unluck 10"
+  "Caffeine Crystals": "Speed 2"
+  "Tropical Fruits": "Strength 2"
+  # Valorys Vitality Fireres+Regen (original post message deleted, title kept)
+  "Valorys Vitality": "Fire Resistance + Regeneration"
+  "Terrabrew": "Strength 2 + Speed 2"
+  "Phoenix Rage": "Strength 2"
+
+  # ── Lore-named barrels (in-game item name is just "Potion"; identity lives in
+  #    the flavour lore, so these keys are the FULL stored names) ─────────────
+  # = The Hora (Strength/2 Speed/2 + Slow/2 debuff), confirmed from the recipe
+  "Potion - §s§8[§7⭑⭑⭑⭑⭑§8], §t§x§E§F§B§F§0§4§oFast and Slow your kneecaps blow, §u, §y§7Barrel aged": "Strength 2 + Speed 2 + Slowness"
+  "Fast and Slow your kneecaps blow": "Strength 2 + Speed 2 + Slowness"
+  # = Strong bOi (Increase_Damage/2 + short Slow_Digging/2), confirmed from the recipe
+  "Potion - §s§8[§7⭑⭑⭑⭑⭑§8], §t§bGank or not to Gank that is the Gankstion., §t§bMakes you Strong like true §dC-., §u, §y§7Barrel aged": "Strength 2"
+  "Gank or not to Gank that is the Gankstion": "Strength 2"
+
+  # = ☾ Insomniac Mayri ☽ (Invisibility) — flavour-lore barrel, "a gift to Mayra"
+  "Potion - §s§8[§7⭑⭑⭑⭑⭑§8], §t§x§5§6§6§1§B§Clooking f§x§6§E§5§B§B§6or you., §t§x§8§5§5§4§A§Fhessence of the nigh§x§6§E§5§B§B§6t, this cloak will shield your presen§x§5§6§6§1§B§Cce to all whom may be, §t§x§B§5§4§7§A§3hands of the emissary Sacon the §x§9§D§4§E§A§9Witch as a gift to Mayra. Infused wit§x§8§5§5§4§A§Fh the sweet, §t§x§E§4§3§A§9§6This potion was blessed by the §x§C§C§4§1§9§CGrand Witch Meru, and placed in the, §u, §y§7Barrel aged": "Invisibility"
