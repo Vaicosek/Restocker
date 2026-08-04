@@ -6459,6 +6459,48 @@ def _manual_brew_effects_for(name) -> str:
     return mp.get(_fold_brew_name(name), "") if mp else ""
 
 
+def _load_manual_brew_names() -> dict:
+    """The brew map's `names:` section — {folded stored/scanned name: canonical brew
+    name}. Same fuzzy folding as the effects map. This is how a barrel scanned under a
+    lore-junk key ("Potion - [★★★★★], Gank or not to Gank…") resolves to the REAL brew
+    ("Strong bOi") that the price catalog knows."""
+    raw = load_yaml(BREW_MANUAL_FILE, None)
+    if not isinstance(raw, dict):
+        return {}
+    src = raw.get("names")
+    if not isinstance(src, dict):
+        return {}
+    out: dict = {}
+    for k, v in src.items():
+        nm = str(v or "").strip()
+        fk = _fold_brew_name(k)
+        if fk and nm:
+            out[fk] = nm
+    return out
+
+
+def _manual_brew_name_for(name) -> str:
+    """Canonical brew name for a scanned/stored key, or '' if not mapped."""
+    mp = _load_manual_brew_names()
+    return mp.get(_fold_brew_name(name), "") if mp else ""
+
+
+def _order_item_name(item) -> str:
+    """The name a restock ORDER should carry for this stock row. Pricing and worker
+    cost key on catalog names, so orders must use the brew's real name — never the raw
+    scanned key. names: map first; else the cleaned display name; else the raw key."""
+    try:
+        nm = _manual_brew_name_for(item)
+        if nm:
+            return nm
+    except Exception:
+        pass
+    try:
+        return _pretty_item_name(item) or str(item)
+    except Exception:
+        return str(item)
+
+
 def _pretty_item_name(raw) -> str:
     """Canonical display name for any item, used by both the sales report and the website.
 
@@ -8266,21 +8308,30 @@ def _stock_refill_plan(market_id: str, target_pct: float = 80.0, item_targets: d
         if need <= 0:
             at_target += 1
             continue
-        if item not in known:
+        # Resolve the ORDER name. Brew barrels scan under raw/lore keys that never match
+        # a catalog entry, so they were silently unorderable ("item not in known") and
+        # unpriceable. The brew map's names: section resolves the scanned key to the
+        # REAL brew name ("Strong bOi", "The Hora"…) — which the catalog prices.
+        order_key = item if item in known else ""
+        if not order_key:
+            _cand = _order_item_name(item)
+            if _cand and _cand != item and _cand in known:
+                order_key = _cand
+        if not order_key:
             continue
-        if item in active:
+        if item in active or order_key in active:
             skipped_active += 1
             continue
         # Sanity guards: don't auto-create pointless (0-coin) or runaway-payout orders.
-        piece_price = float((known[item] or {}).get("coin", 0) or 0)
+        piece_price = float((known[order_key] or {}).get("coin", 0) or 0)
         if piece_price <= 0:
-            skipped_guard.append({"item": item, "reason": "no_price", "payout": 0})
+            skipped_guard.append({"item": order_key, "reason": "no_price", "payout": 0})
             continue
         payout = need * piece_price
         if ORDER_MAX_AUTO_PAYOUT > 0 and payout > ORDER_MAX_AUTO_PAYOUT:
-            skipped_guard.append({"item": item, "reason": "over_cap", "payout": int(payout)})
+            skipped_guard.append({"item": order_key, "reason": "over_cap", "payout": int(payout)})
             continue
-        to_order.append((item, need, known[item]))
+        to_order.append((order_key, need, known[order_key]))
     to_order.sort(key=lambda t: -t[1])
     return to_order, skipped_active, at_target, skipped_guard
 
@@ -9072,6 +9123,62 @@ def _backfill_csn_to_db() -> None:
         log.warning("[csn backfill] market scan failed: %s", e)
     if total:
         log.info("[csn backfill] imported %d legacy month(s) into the DB", total)
+
+
+def _seed_brew_catalog_20260804() -> None:
+    """One-shot: register the NAMED brews in the item catalog with their agreed pricing
+    (Market Sell Price → coin, Worker Cost → worker_cost, category 'brews', stack 1).
+    Source: the price sheet from the brews-server Discord (Aug 2026). Group Buy price is
+    80% of market by convention, so it isn't stored. Guarded by a config flag AND a
+    per-item existence check — an owner's later /item edit is never overwritten."""
+    import Restocker_db as _db
+    FLAG = "brew_catalog_seed_20260804"
+    try:
+        if str(_db.get_config(FLAG) or "") == "1":
+            return
+    except Exception:
+        return
+    BREWS = [  # (catalog name, market sell price, worker cost)
+        ("Blood Of Mardurak",         205.00,  71.75),
+        ("The Hora",                   95.00,  50.00),
+        ("Ussviksye Tyahiliks",       205.00,  71.75),
+        ("Insomniac Mayri",            95.00,  50.00),
+        ("Mardurak Haste",            127.35,  50.00),
+        ("Emporium Warlord",           95.00,  50.00),
+        ("Speed2",                    120.00,  50.00),
+        ("Obidios Nuclear Power",     850.00, 297.50),
+        ("Mardurak Redstone Enhancer",150.00,  52.50),
+        ("Cell's Regeneration",       127.35,  50.00),
+        ("Honey Comb 2",              190.00,  66.50),
+        ("Thick Skin",                127.35,  50.00),
+        ("Greyhame Dragon Scales",    127.35,  50.00),
+        ("Turtle Master",             250.00,   None),
+    ]
+    try:
+        existing = set((_load_items().get("items") or {}).keys())
+    except Exception:
+        existing = set()
+    n = 0
+    for name, coin, wc in BREWS:
+        if name in existing:
+            continue                       # never clobber a hand-edited entry
+        try:
+            _db.upsert_item(name=name, coin=float(coin), stock=0, stackable=False,
+                            stack_size=1, unit_type="pieces", market_id="greyhames")
+            with _db.db() as conn:
+                conn.execute("UPDATE items SET category='brews' WHERE name=?", (name,))
+                if wc is not None:
+                    conn.execute("UPDATE items SET worker_cost=? WHERE name=?",
+                                 (float(wc), name))
+            n += 1
+        except Exception as e:
+            log.warning("[brew seed] %s failed: %s", name, e)
+    try:
+        _db.set_config(FLAG, "1")
+    except Exception:
+        pass
+    if n:
+        log.info("[brew seed] registered %d named brew(s) with pricing", n)
 
 
 def _record_to_market_history(market_id: str, month_key: str, label: str, source: str,
@@ -15767,6 +15874,10 @@ async def _main():
         log.warning("[csn backfill] skipped: %s", e)
     try:
         _apply_market_registry_20260727()
+        try:
+            _seed_brew_catalog_20260804()
+        except Exception as _bse:
+            log.warning("[brew seed] startup hook failed: %s", _bse)
     except Exception as e:
         log.warning("[market registry] skipped: %s", e)
     try:

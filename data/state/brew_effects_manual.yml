@@ -100,3 +100,26 @@ brews:
 
   # = ☾ Insomniac Mayri ☽ (Invisibility) — flavour-lore barrel, "a gift to Mayra"
   "Potion - §s§8[§7⭑⭑⭑⭑⭑§8], §t§x§5§6§6§1§B§Clooking f§x§6§E§5§B§B§6or you., §t§x§8§5§5§4§A§Fhessence of the nigh§x§6§E§5§B§B§6t, this cloak will shield your presen§x§5§6§6§1§B§Cce to all whom may be, §t§x§B§5§4§7§A§3hands of the emissary Sacon the §x§9§D§4§E§A§9Witch as a gift to Mayra. Infused wit§x§8§5§5§4§A§Fh the sweet, §t§x§E§4§3§A§9§6This potion was blessed by the §x§C§C§4§1§9§CGrand Witch Meru, and placed in the, §u, §y§7Barrel aged": "Invisibility"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Scanned-key → CANONICAL BREW NAME. Restock orders use these names, because
+# pricing and worker cost live in the item catalog under them. Same fuzzy
+# folding as the effects map. Colour-hex lore matched against the recipes
+# forum identified each barrel. (Luck 3 and UnLuck 10 barrels are deliberately
+# unmapped — several recipes share those effects; add them when you're sure.)
+# ─────────────────────────────────────────────────────────────────────────────
+names:
+  "Potion - §s§8[§7⭑⭑⭑⭑⭑§8], §t§flvl 30 xp, §u, §y§7Barrel aged": "Obidios Nuclear Power"
+  "Potion - §s§8[§7⭑⭑⭑⭑⭑§8], §t§x§E§F§B§F§0§4§oFast and Slow your kneecaps blow, §u, §y§7Barrel aged": "The Hora"
+  "Potion - §s§8[§7⭑⭑⭑⭑⭑§8], §t§bGank or not to Gank that is the Gankstion., §t§bMakes you Strong like true §dC-., §u, §y§7Barrel aged": "Strong bOi"
+  "Potion - Potion of Long Turtle Master": "Turtle Master"
+  "Potion - §s§8[§7⭑⭑⭑⭑⭑§8], §t§x§7§A§0§0§8§Chaste 5, §u, §y§7Barrel aged": "Mardurak Haste"
+  "Potion - §s§8[§7⭑⭑⭑⭑⭑§8], §t§x§A§D§D§8§E§6§oStr 2 + Speed 2, §u, §y§7Barrel aged": "Emporium Warlord"
+  "Potion - §s§8[§7⭑⭑⭑⭑⭑§8], §t§x§2§5§9§6§B§EHP boost I, §u, §y§7Barrel aged": "Thick Skin"
+  "Potion - §s§8[§7⭑⭑⭑⭑⭑§8], §t§flevit + slowfall, §u, §y§7Barrel aged": "Obisidios Jetpack"
+  "Potion - §s§8[§7⭑⭑⭑⭑⭑§8], §t§x§5§6§6§1§B§Clooking f§x§6§E§5§B§B§6or you., §t§x§8§5§5§4§A§Fhessence of the nigh§x§6§E§5§B§B§6t, this cloak will shield your presen§x§5§6§6§1§B§Cce to all whom may be, §t§x§B§5§4§7§A§3hands of the emissary Sacon the §x§9§D§4§E§A§9Witch as a gift to Mayra. Infused wit§x§8§5§5§4§A§Fh the sweet, §t§x§E§4§3§A§9§6This potion was blessed by the §x§C§C§4§1§9§CGrand Witch Meru, and placed in the, §u, §y§7Barrel aged": "Insomniac Mayri"
+  "Potion - §s§8[§7⭑⭑⭑⭑⭑§8], §t§x§F§4§2§9§2§9(Fire res, Regeneration), §t§x§F§4§2§9§2§9Regrows limbs even inside a lava, §u, §y§7Barrel aged": "Blood Of Mardurak"
+  "Potion - §s§8[§7⭑⭑⭑⭑⭑§8], §t§f§oRegen 1, HP Boost 1, §u, §y§7Barrel aged": "Honey Comb 2"
+  "Potion - §s§8[§7⭑⭑⭑⭑⭑§8], §t§x§F§F§F§F§F§F§oRegen 1, HP Boost 1, §u, §y§7Barrel aged": "Honey Comb 2"
+  "Potion - §s§8[§7⭑⭑⭑⭑⭑§8], §t§9haste 5 + Speed 2, §u, §y§7Barrel aged": "Mardurak Redstone Enhancer"
+  "Potion - §s§8[§7⭑⭑⭑⭑⭑§8], §t§x§F§5§2§7§E§4Regeneration I, §u, §y§7Barrel aged": "Cell's Regeneration"

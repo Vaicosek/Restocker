@@ -670,8 +670,8 @@ def _public_markets(markets: dict) -> dict:
 # the fly from the display name. First-match-wins; ORDER MATTERS for overlaps
 # (redstone lamp→Redstone, nether wart→Farm, soul sand→Nether).
 _INV_CAT_ORDER = [
-    "Wood & Logs", "Ores & Minerals", "Enchanted Gear", "Redstone", "Concrete & Clay",
-    "Nether", "End", "Ice & Snow", "Farm & Food", "Dyes & Wool",
+    "Wood & Logs", "Ores & Minerals", "Enchanted Gear", "Brews", "Redstone",
+    "Concrete & Clay", "Nether", "End", "Ice & Snow", "Farm & Food", "Dyes & Wool",
     "Mob Drops", "Glass & Light", "Nature", "Building", "Other",
 ]
 _INV_CAT_RULES = [
@@ -682,6 +682,10 @@ _INV_CAT_RULES = [
                         "chestplate", "leggings", "boots", "elytra", "trident",
                         "crossbow", "bow", "shears", "fishing rod", "flint and steel",
                         "mace", "brush", "shield", "horse armor"]),
+    # Brews before everything food-adjacent: a "Potion — …" display name must never
+    # fall through to Farm & Food (honey ingredients) or Other. Named brews without
+    # the word "potion" are caught by the brew-map check in _item_category below.
+    ("Brews", ["potion", "brew", "elixir", "splash", "lingering"]),
     ("Redstone", ["redstone", "repeater", "comparator", "piston", "observer",
                   "hopper", "dispenser", "dropper", "rail", "tripwire",
                   "daylight", "note block", "lever", "activator", "sculk sensor"]),
@@ -724,6 +728,14 @@ _INV_CAT_RULES = [
 
 def _item_category(name: str) -> str:
     n = (name or "").lower()
+    # Curated brews carry no "potion" keyword ("Blood Of Mardurak", "Thick Skin") —
+    # the brew map is the authority on what is a brew.
+    try:
+        import Restocker_main as m
+        if m._manual_brew_effects_for(name) or m._manual_brew_name_for(name):
+            return "Brews"
+    except Exception:
+        pass
     for cat, kws in _INV_CAT_RULES:
         for kw in kws:
             if kw in n:
@@ -1540,7 +1552,7 @@ const esc=s=>String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;');
 const DATA=(INV&&INV.markets)||[];
 if(DATA.length>1){const _all=DATA.reduce((a,m)=>a.concat((m.items||[]).map(x=>Object.assign({},x,{_mkt:m.name||m.market_id}))),[]);
  DATA.unshift({market_id:"__all__",name:"All Markets",items:_all,count:_all.length,low:_all.filter(x=>x.scanned!==false&&x.capacity>0&&x.pct<=20).length});}
-const CATORDER=["Wood & Logs","Ores & Minerals","Enchanted Gear","Redstone","Concrete & Clay","Nether","End","Ice & Snow","Farm & Food","Dyes & Wool","Mob Drops","Glass & Light","Nature","Building","Other"];
+const CATORDER=["Wood & Logs","Ores & Minerals","Enchanted Gear","Brews","Redstone","Concrete & Clay","Nether","End","Ice & Snow","Farm & Food","Dyes & Wool","Mob Drops","Glass & Light","Nature","Building","Other"];
 let act=0,sortK='pct',dir=1,catAct='All',grp=false;
 const col=p=>p<=20?'var(--down)':(p<60?'var(--amber)':'var(--up)');
 const catsIn=items=>{const c={};items.forEach(x=>{const k=x.cat||'Other';c[k]=(c[k]||0)+1;});
