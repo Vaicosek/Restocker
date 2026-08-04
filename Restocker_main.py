@@ -6368,6 +6368,18 @@ _POTION_EFFECTS = {
     "conduit power", "dolphin's grace", "dolphins grace", "bad omen", "hero of the village",
     "decay", "health boost", "slow fall", "unluck", "bad luck", "darkness", "wind charged",
     "weaving", "oozing", "infested",
+    # Brewery lore abbreviations seen on the server ("(Fire res, Regeneration)",
+    # "HP boost I") — without these the shortened forms failed the exact-match test
+    # and the effect silently dropped out of the learned brew name.
+    "fire res", "hp boost", "regen", "night vis", "water breath",
+    # Full effect vocabulary from the server's SW_Brewery_Sheet (Basic/Medium/Ultimate
+    # brew tabs) — custom Brewery effects the vanilla-potion list didn't cover.
+    "burn", "glow", "smite", "puke", "firework", "particle", "play sound",
+    "display message", "display title", "set nation", "set race", "set religion",
+    "attribute curse", "attribute cure", "remove alc", "area of effect", "aoe",
+    "lighting strikes", "lightning strikes",
+    # XP brews ("lvl 30 xp" in lore)
+    "lvl", "xp",
 }
 
 
@@ -6465,6 +6477,14 @@ def _pretty_item_name(raw) -> str:
         return n
     base, sep, tail = n.partition(" - ")
     base = base.strip() or "Potion"
+    # ENCHANTED GEAR is not a brew: "Diamond Shovel - Efficiency IV, Unbreaking III"
+    # used to fall through here, fail the potion-effect test, and get its whole suffix
+    # stripped — every gear variant then collapsed to the same bare name on the website.
+    # The enchant list IS the item's identity; keep it (cleaned via the canon map).
+    if sep and not low.startswith(("potion", "splash potion", "lingering potion")):
+        _gear = _parse_gear_enchants([s.strip() for s in tail.split(",")])
+        if _gear:
+            return f"{base} - {_gear}"
     effects = _parse_brew_effects([tail if sep else n])
     if effects:
         return f"{base} — {effects}"
@@ -7907,14 +7927,12 @@ def _create_restock_orders(to_order: list, market_id=None) -> int:
             "priority_role": "TESTER",
             "verification_ticket_id": None, "assist_ticket_id": None,
             "assist_ticket_ids": {}, "blocked_claimers": [],
-            # The market being restocked, EXACTLY as passed — never the item's home
-            # market. The old fallback (info.get("market_id")) stamped local orders
-            # with whichever market first registered the item in the catalog, so a
-            # local Diamond build showed [Freezone] in worker pings just because
-            # Freezone's upload owned Diamond's catalog entry. Callers that know the
-            # market pass it (website, stock-alarm view, AI tool); a local order
-            # carries None and is displayed untagged.
-            "market_id": market_id or None,
+            # The market being restocked wins. Only fall back to the item's home
+            # market when no market_id was passed (e.g. the stock-alarm view). Without
+            # this, an item first registered by another market (its catalog entry
+            # carries that market_id) would mis-tag the order — a build for Amazonia
+            # could stamp a line [BNL] just because BNL created that item.
+            "market_id": market_id or info.get("market_id"),
         }
         data_orders.setdefault("orders", []).append(order)
         created += 1
@@ -7933,10 +7951,7 @@ async def _post_bulk_order_board(bot, channel, orders: list) -> None:
     items_data = (_load_items().get("items") or {})
     markets = (_load_markets().get("markets") or {})
     for o in orders:
-        # Group by the ORDER's market only — the item-catalog fallback mis-grouped
-        # local orders under whichever market first registered the item (see
-        # _create_restock_orders). Local/untagged orders group under "main".
-        mid = o.get("market_id") or "main"
+        mid = o.get("market_id") or (items_data.get(str(o.get("item") or "")) or {}).get("market_id") or "main"
         by_market.setdefault(mid, []).append(o)
     total_orders = len(orders)
     total_payout = 0.0
@@ -14652,7 +14667,7 @@ async def _ai_tool_create_restock_orders(guild, channel, user, args):
                 f"{lines}{more}"
                 + (f"\n\n{skipped} scanned item(s) aren't in the catalog and were skipped." if skipped else "")
                 + "\n\nSay the word and I'll create them.")
-    created = _create_restock_orders(to_order, mid)
+    created = _create_restock_orders(to_order)
     return (f"Created {created} restock order(s) for {mid} from real deficit."
             + (f" {skipped} skipped (not in catalog)." if skipped else "")
             + f" Biggest shortfalls: {top}")
