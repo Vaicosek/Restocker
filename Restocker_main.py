@@ -10826,6 +10826,105 @@ def exec_stock_trade(side, user_id, market_id, shares, name=None):
     return _do_stock_trade(side, user_id, market_id, shares, name)
 
 
+def _liquidate_holdings(holder_id, market_id=None, recipient_id=None, apply: bool = False) -> dict:
+    """ADMIN: force-sell someone's shares at the live market price, optionally moving the
+    proceeds to another user. Returns {ok, applied, lines[], total, sold_markets, notes[]}.
+
+    Every sale goes through the SAME `_do_stock_trade` engine a voluntary sale uses, so
+    the price impact, treasury debit, cost-basis removal and trade-log entry are identical
+    to the holder having pressed Sell themselves — a liquidation can never quietly mint
+    coins or leave the exchange's books inconsistent. The transfer (if any) is then a
+    separate, separately-logged coin movement, so the audit trail reads honestly:
+    "X sold N shares" followed by "N coins moved X → Y".
+
+    Deliberately NOT silent: the holder is DM'd by the caller. Someone finding their
+    portfolio emptied with no explanation is how trust in a shared economy dies.
+
+    Runs on the bot's event loop only (it calls the trade engine) — web callers must go
+    through run_on_bot_loop().
+    """
+    import Restocker_db as _db
+    out = {"ok": False, "applied": bool(apply), "lines": [], "total": 0,
+           "sold_markets": [], "notes": []}
+    holder_id = str(holder_id).strip()
+    if not holder_id.isdigit():
+        out["notes"].append("Holder must be a Discord user id.")
+        return out
+
+    if market_id:
+        h = _db.get_holding(holder_id, market_id)
+        holdings = [h] if h and float(h.get("shares") or 0) > 0 else []
+        if not holdings:
+            out["notes"].append(f"No holding in `{market_id}`.")
+    else:
+        holdings = [h for h in (_db.get_portfolio(holder_id) or [])
+                    if float(h.get("shares") or 0) > 0]
+        if not holdings:
+            out["notes"].append("This user holds no shares anywhere.")
+    if not holdings:
+        out["ok"] = True          # nothing to do is a success, not an error
+        return out
+
+    total = 0
+    for h in holdings:
+        mid = str(h.get("market_id") or "")
+        owned = float(h.get("shares") or 0)
+        whole = int(owned)                      # the engine trades whole shares only
+        dust = owned - whole
+        listing = _db.get_market_shares(mid) or {}
+        price = float(listing.get("share_price") or 0)
+        mname = (_get_market(mid) or {}).get("name", mid)
+
+        if not listing.get("active"):
+            out["notes"].append(
+                f"`{mid}` is delisted — its holdings are frozen and cannot be sold. "
+                f"Relist it first if these {owned:,.0f} share(s) must be liquidated.")
+            continue
+        if whole < 1:
+            out["notes"].append(f"`{mid}`: only {owned:,.4f} fractional share(s) — nothing whole to sell.")
+            continue
+
+        est = int(round(price * whole))
+        if not apply:
+            out["lines"].append(f"• **{mname}** (`{mid}`) — {whole:,} share(s) ≈ `{est:,}` 🪙 "
+                                f"at `{price:,.2f}`/share")
+            total += est
+            out["sold_markets"].append(mid)
+            if dust > 0.0001:
+                out["notes"].append(f"`{mid}`: {dust:,.4f} fractional share(s) would remain.")
+            continue
+
+        r = _do_stock_trade("sell", holder_id, mid, whole)
+        if not r.get("ok"):
+            out["notes"].append(f"`{mid}`: sale failed — {r.get('msg')}")
+            continue
+        got = int(r.get("total") or 0)
+        total += got
+        out["sold_markets"].append(mid)
+        out["lines"].append(f"• **{mname}** (`{mid}`) — sold {whole:,} share(s) for `{got:,}` 🪙 "
+                            f"at `{float(r.get('fill') or 0):,.2f}`/share"
+                            + (f" · price now `{float(r['new_price']):,.2f}`" if r.get("new_price") else ""))
+        if dust > 0.0001:
+            out["notes"].append(f"`{mid}`: {dust:,.4f} fractional share(s) left (engine trades whole shares).")
+
+    out["total"] = total
+    if apply and recipient_id and total > 0:
+        # Move the proceeds. Two explicit ledger movements rather than a silent
+        # re-credit, so both sides show up in the coin history.
+        try:
+            deduct_coins(holder_id, total, reduce_principal=True,
+                         reason=f"liquidation transfer -> {recipient_id}")
+            add_coins(recipient_id, total, counts_as_principal=True,
+                      reason=f"liquidation of <@{holder_id}>")
+            out["lines"].append(f"➡️ Transferred `{total:,}` 🪙 to <@{recipient_id}>.")
+        except Exception as e:
+            out["notes"].append(f"Sales completed, but the coin transfer FAILED: {e} — "
+                                f"the proceeds are still on <@{holder_id}>'s balance.")
+            log.warning("[liquidate] transfer failed %s -> %s: %s", holder_id, recipient_id, e)
+    out["ok"] = True
+    return out
+
+
 def _do_bond_buy(user_id, bond_id, units, name=None) -> dict:
     """Buy bond units. Extracted from /bond buy so the website can run the SAME path.
 
@@ -12303,6 +12402,32 @@ _AI_TOOLS = [
                 "limit_per_user": {"type": "integer", "description": "employee_dms only — messages scanned per user (0 = all)."}
             },
             "required": ["target"]
+        }
+    },
+    {
+        "name": "get_market_holders",
+        "description": "The full shareholder table (cap table) for one listed market: every holder, their share count, % of the company, current value and unrealised profit — plus the unissued free float. Use whenever someone asks who owns a stock, who the biggest holder is, or wants the holders/cap table of a market like 'vtech' or 'greyhames'.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "market": {"type": "string", "description": "Market id, e.g. 'vtech'."},
+                "limit": {"type": "integer", "description": "Max holders to list (default 25)."}
+            },
+            "required": ["market"]
+        }
+    },
+    {
+        "name": "liquidate_holdings",
+        "description": "ADMIN: force-sell a user's stock holdings at the live market price, optionally transferring the proceeds to someone else (managers only). Use when asked to liquidate/seize/cash out a player's shares — e.g. a departing member, an inactive account, or a settlement. Sells through the normal exchange engine, so the price moves and the market treasury pays exactly as if they had sold voluntarily. Preview by default: it returns what WOULD be sold and for how much. To actually execute, pass confirm = the holder's Discord user id. NEVER supply that confirm value yourself — show the person the preview, and only pass it through once THEY state the id back to you. The holder is always DM'd afterwards.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "user": {"type": "string", "description": "The holder whose shares get sold — Discord user id or @mention."},
+                "market": {"type": "string", "description": "Market id to liquidate (e.g. 'greyhames'). Omit to liquidate EVERY market they hold."},
+                "to": {"type": "string", "description": "Optional: user id / @mention who receives the proceeds. Omit to leave the coins with the holder (a pure cash-out)."},
+                "confirm": {"type": "string", "description": "The holder's user id, stated by the person asking. Omit for a preview."}
+            },
+            "required": ["user"]
         }
     },
     {
@@ -14608,6 +14733,114 @@ async def _ai_tool_set_drip(guild, channel, user, args):
     return "DRIP off — payouts arrive as coins again."
 
 
+async def _ai_tool_get_market_holders(guild, channel, user, args):
+    """Cap table for one market. Read-only, so it isn't manager-gated — holdings are
+    already public on the exchange page."""
+    import Restocker_db as _db
+    mid = str(args.get("market") or "").strip()
+    if not mid:
+        return "❌ Which market? e.g. `vtech`."
+    listing = _db.get_market_shares(mid)
+    if not listing:
+        return f"❌ `{mid}` has never been listed on the exchange."
+    try:
+        limit = int(args.get("limit") or 25)
+    except Exception:
+        limit = 25
+    limit = max(1, min(limit, 100))
+
+    price = float(listing.get("share_price") or 0)
+    so = float(listing.get("shares_outstanding") or 0)
+    holders = sorted(_db.get_holders(mid) or [],
+                     key=lambda h: -float(h.get("shares") or 0))
+    held = sum(float(h.get("shares") or 0) for h in holders)
+    mname = (_get_market(mid) or {}).get("name", mid)
+
+    if not holders:
+        return (f"**{mname}** (`{mid}`) — nobody holds any shares yet.\n"
+                f"All `{so:,.0f}` share(s) are unissued · `{price:,.2f}` 🪙/share.")
+
+    try:
+        names = load_yaml("stock_names.yml", {}) or {}
+    except Exception:
+        names = {}
+
+    rows = []
+    for h in holders[:limit]:
+        uid = str(h.get("user_id") or "")
+        sh = float(h.get("shares") or 0)
+        val = sh * price
+        basis = float(h.get("cost_basis") or 0)
+        pnl = val - basis
+        pct = (sh / so * 100.0) if so > 0 else 0.0
+        who = names.get(uid) or f"user {uid}"
+        rows.append(f"• **{who}** (<@{uid}>) — `{sh:,.0f}` sh · {pct:.1f}% · "
+                    f"`{val:,.0f}` 🪙 · P/L `{pnl:+,.0f}`")
+
+    free = max(0.0, so - held)
+    more = f"\n… +{len(holders) - limit} more holder(s)" if len(holders) > limit else ""
+    return (f"**{mname}** (`{mid}`) shareholder table — `{price:,.2f}` 🪙/share, "
+            f"`{so:,.0f}` shares outstanding\n"
+            + "\n".join(rows) + more
+            + f"\n\n{len(holders)} holder(s) own `{held:,.0f}` sh ({(held / so * 100.0) if so else 0:.1f}%) · "
+              f"unissued float `{free:,.0f}` sh · market cap `{so * price:,.0f}` 🪙")
+
+
+async def _ai_tool_liquidate_holdings(guild, channel, user, args):
+    """Force-sell a holder's shares; optionally hand the proceeds to someone else.
+
+    Two gates, both deliberate: managers only, and an exact confirm phrase (the holder's
+    own user id) before anything moves — the same shape as admin_wipe, because this is
+    equally irreversible. Without confirm it is a pure preview.
+    """
+    if not _ai_is_manager(user):
+        return "❌ Managers only — liquidating someone's holdings is manager-gated."
+    holder = str(args.get("user") or "").strip().strip("<@!>").strip(">")
+    if not holder.isdigit():
+        return "❌ Who? Give me the holder's Discord user id (or @mention them)."
+    recipient = str(args.get("to") or "").strip().strip("<@!>").strip(">")
+    if recipient and not recipient.isdigit():
+        return "❌ The `to` recipient must be a Discord user id or @mention."
+    mid = str(args.get("market") or "").strip() or None
+    confirm = str(args.get("confirm") or "").strip().strip("<@!>").strip(">")
+    apply = (confirm == holder)
+
+    try:
+        res = await run_on_bot_loop(_liquidate_holdings, holder, mid, recipient or None, apply)
+    except Exception as e:
+        log.warning("[liquidate] failed: %s", e)
+        return f"❌ Liquidation failed: {e}"
+
+    scope = f"`{mid}`" if mid else "every market they hold"
+    head = (f"**Liquidation — <@{holder}>, {scope}**\n" if apply
+            else f"**Preview — liquidating <@{holder}>, {scope}** *(nothing has moved yet)*\n")
+    body = "\n".join(res.get("lines") or []) or "_Nothing to sell._"
+    tail = ""
+    if res.get("notes"):
+        tail += "\n\n⚠️ " + "\n⚠️ ".join(res["notes"])
+    if not apply and res.get("total"):
+        dest = f" and send them to <@{recipient}>" if recipient else " (coins stay with them)"
+        tail += (f"\n\nThis would raise roughly `{res['total']:,}` 🪙{dest}.\n"
+                 f"Large blocks move the price down as they sell, so the real total can be lower.\n"
+                 f"To go ahead, tell me the holder's id — `{holder}` — as the confirmation.")
+    elif apply:
+        tail += f"\n\n**Total: `{res.get('total', 0):,}` 🪙.**"
+        # The holder learns about it from the bot, not by noticing an empty portfolio.
+        try:
+            _u = guild.get_member(int(holder)) if guild else None
+            _u = _u or await bot.fetch_user(int(holder))
+            if _u:
+                _what = (f"your **{mid}** shares" if mid else "your share holdings")
+                _where = (f" The proceeds were transferred to <@{recipient}>."
+                          if recipient else
+                          f" The `{res.get('total', 0):,}` 🪙 proceeds are on your balance.")
+                await safe_dm(_u, f"📉 A manager liquidated {_what} at market price."
+                                  f"{_where} Ask a manager if this wasn't expected.")
+        except Exception as _de:
+            tail += f"\n*(couldn't DM the holder: {_de})*"
+    return head + body + tail
+
+
 async def _ai_tool_stock_buyback(guild, channel, user, args):
     if not _ai_is_manager(user):
         return "❌ Managers only."
@@ -15389,6 +15622,8 @@ _AI_TOOL_MAP = {
     "purge_channel":        _ai_tool_purge_channel,
     "csn_cleanup":          _ai_tool_csn_cleanup,
     "admin_wipe":           _ai_tool_admin_wipe,
+    "get_market_holders":   _ai_tool_get_market_holders,
+    "liquidate_holdings":   _ai_tool_liquidate_holdings,
     "manage_ai_access":     _ai_tool_manage_ai_access,
     "get_ai_audit":         _ai_tool_get_ai_audit,
     "fix_month_close":      _ai_tool_fix_month_close,
@@ -15440,6 +15675,7 @@ _AI_SENSITIVE_TOOLS = {
     "send_channel_message", "ping_user", "propose_code_change", "set_item_price",
     "run_hive_payout", "rebuild_market_channel", "rebuild_hive_channel",
     "purge_channel", "csn_cleanup", "fix_month_close", "admin_wipe", "set_channel_config", "set_hive_autopay", "set_team_feed", "set_lands_feed_channel", "stock_buyback", "stock_dividends",
+    "liquidate_holdings",   # force-sells someone else's shares and can move the coins
     "create_restock_orders", "log_manual_restock",
     "add_item", "get_market_code", "create_futures_order", "dm_market_setup",
 }
