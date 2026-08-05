@@ -146,6 +146,7 @@ class LandsCog(commands.Cog):
         touched = set()
         balances = {}
         new_entries = 0
+        batch = {}          # land → kind → [count, signed_total] for THIS ingest's new rows
         for line in content.split("\n"):
             line = line.strip()
             mb = _BAL_RX.match(line)
@@ -163,6 +164,9 @@ class LandsCog(commands.Cog):
                 nb = _money(nb_m.group(1)) if nb_m else None
                 if _db.add_land_entry(land, no, ts, kind, amt, nb, body):
                     new_entries += 1
+                    b = batch.setdefault(land, {}).setdefault(kind, [0, 0.0])
+                    b[0] += 1
+                    b[1] += amt
                 touched.add(land)
         if not touched:
             return
@@ -189,17 +193,66 @@ class LandsCog(commands.Cog):
             else:
                 line += " · *(unbound — `/market settings` → Edit links it)*"
             report.append(line)
-        if new_entries or balances:
+            # Human digest of what this batch actually contained — the raw pipe lines
+            # are deleted below, so the story ("18 withdrawals −1,644,550") lives here.
+            b = batch.get(land) or {}
+            bits = []
+            _KINDS = (("deposit", "deposit(s)"), ("withdraw", "withdrawal(s)"),
+                      ("taxes", "tax collection(s)"), ("other", "member/other event(s)"))
+            for kind, label in _KINDS:
+                if kind in b:
+                    cnt, tot = b[kind]
+                    if kind == "other" or abs(tot) < 0.005:
+                        bits.append(f"{cnt} {label}")
+                    else:
+                        bits.append(f"{cnt} {label} `{tot:+,.0f}`")
+            if bits:
+                report.append("   ↳ " + " · ".join(bits))
+        # SILENT BY DEFAULT: the feed is machine transport — the bot ingests it, the
+        # treasury/fee numbers update, the raw dump is deleted below, and NOTHING is
+        # posted. The channel stays clean; the data lives on the dashboard and in
+        # /market settings. Set config lands_feed_verbose=1 if you ever want the
+        # per-ingest summary card back.
+        verbose = False
+        try:
+            verbose = str(_db.get_config("lands_feed_verbose") or "") == "1"
+        except Exception:
+            pass
+        if unlocked:
+            # Still worth a log line even when mute — an unlocked feed means any
+            # webhook anywhere can write treasuries.
+            log.warning("[lands] feed ingested from an UNLOCKED channel (%s) — ask the "
+                        "bot to lock the lands feed channel.", message.channel.id)
+        if new_entries and verbose:
             try:
                 warn = ("⚠️ **No lands-feed channel is locked** — this was accepted from "
-                         "**any** webhook, including ones belonging to other markets. Run "
-                         "Ask the bot to lock the feed channel to restrict ingestion to your official feed "
-                         "channel and close this gap.\n\n") if unlocked else ""
-                await message.channel.send(
-                    warn + f"✅ Lands feed ingested — {new_entries} new entrie(s), "
-                    f"{len(balances)} balance(s).\n" + "\n".join(report)[:1700])
+                         "**any** webhook, including ones belonging to other markets. "
+                         "Ask the bot to lock the feed channel to restrict ingestion to your "
+                         "official feed channel and close this gap.") if unlocked else ""
+                emb = discord.Embed(
+                    title="🏦 Lands feed",
+                    description="\n".join(report)[:3900],
+                    color=0xC9A227)
+                emb.set_footer(text=f"{new_entries} new ledger entrie(s) · "
+                                    f"{len(balances)} balance snapshot(s)")
+                await message.channel.send(content=(warn or None), embed=emb,
+                                           allowed_mentions=discord.AllowedMentions.none())
             except Exception:
                 pass
+        if new_entries or balances:
+            # De-clutter: the raw LANDS-ENTRY|…|… pipe dump is machine transport, not
+            # something anyone should read — once ingested, delete it so only the card
+            # above remains (exactly like CSN CSV uploads). Opt out with config
+            # lands_keep_uploads=1. Needs Manage Messages in the feed channel.
+            try:
+                if str(_db.get_config("lands_keep_uploads") or "") != "1":
+                    await message.delete()
+            except discord.Forbidden:
+                log.warning("[lands] can't delete the raw feed post in #%s — I need Manage "
+                            "Messages there. The feed was ingested fine, it just stays visible.",
+                            getattr(message.channel, "name", message.channel.id))
+            except Exception as e:
+                log.warning("[lands] raw-feed cleanup skipped: %s", e)
 
     # ── commands ─────────────────────────────────────────────────────────────
 
