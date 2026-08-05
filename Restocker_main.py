@@ -10826,6 +10826,74 @@ def exec_stock_trade(side, user_id, market_id, shares, name=None):
     return _do_stock_trade(side, user_id, market_id, shares, name)
 
 
+def _resolve_person(query, guild=None) -> dict:
+    """Turn whatever a human typed into a Discord user id: a raw id, an @mention, a
+    cached exchange display name ("Explifyim"), a linked Minecraft IGN, or a server
+    nickname. Returns {ok, user_id, label, how, candidates[]}.
+
+    Holdings are keyed to Discord ids, but almost nobody knows their own id — and a
+    holder who only ever traded on the WEBSITE is, to the person asking, just a name.
+    Making the admin hunt for an id (or give up, as the AI did) is a worse failure than
+    doing this lookup, so: exact matches win, ambiguity returns candidates instead of
+    guessing, and nothing acts on a partial match without the caller confirming.
+    """
+    import Restocker_db as _db
+    out = {"ok": False, "user_id": None, "label": "", "how": "", "candidates": []}
+    q = str(query or "").strip().strip("<@!>").strip(">")
+    if not q:
+        return out
+    if q.isdigit():
+        return {**out, "ok": True, "user_id": q, "label": f"<@{q}>", "how": "id"}
+
+    ql = q.lower()
+    hits = {}          # user_id → (label, how)
+
+    # 1. Exchange display names cached on every trade (covers website-only traders).
+    try:
+        for uid, nm in (load_yaml("stock_names.yml", {}) or {}).items():
+            if str(nm).strip().lower() == ql:
+                hits[str(uid)] = (str(nm), "exchange name")
+    except Exception:
+        pass
+    # 2. Linked Minecraft IGN.
+    try:
+        uid = _db.get_user_id_by_ign(q)
+        if uid:
+            hits[str(uid)] = (q, "linked IGN")
+    except Exception:
+        pass
+    # 3. Discord members (username or nickname).
+    try:
+        if guild:
+            for m in guild.members:
+                for cand in (getattr(m, "name", ""), getattr(m, "display_name", "")):
+                    if str(cand).strip().lower() == ql:
+                        hits[str(m.id)] = (m.display_name, "Discord member")
+                        break
+    except Exception:
+        pass
+    # 4. Last resort: a unique SUBSTRING match on cached exchange names.
+    if not hits:
+        try:
+            subs = {str(uid): str(nm) for uid, nm in (load_yaml("stock_names.yml", {}) or {}).items()
+                    if ql in str(nm).strip().lower()}
+            if len(subs) == 1:
+                uid, nm = next(iter(subs.items()))
+                hits[uid] = (nm, "exchange name (partial)")
+            elif len(subs) > 1:
+                out["candidates"] = [f"{nm} (`{uid}`)" for uid, nm in list(subs.items())[:10]]
+                return out
+        except Exception:
+            pass
+
+    if len(hits) == 1:
+        uid, (label, how) = next(iter(hits.items()))
+        return {**out, "ok": True, "user_id": uid, "label": label, "how": how}
+    if len(hits) > 1:
+        out["candidates"] = [f"{lbl} (`{uid}`, {how})" for uid, (lbl, how) in list(hits.items())[:10]]
+    return out
+
+
 def _liquidate_holdings(holder_id, market_id=None, recipient_id=None, apply: bool = False) -> dict:
     """ADMIN: force-sell someone's shares at the live market price, optionally moving the
     proceeds to another user. Returns {ok, applied, lines[], total, sold_markets, notes[]}.
@@ -10837,8 +10905,7 @@ def _liquidate_holdings(holder_id, market_id=None, recipient_id=None, apply: boo
     separate, separately-logged coin movement, so the audit trail reads honestly:
     "X sold N shares" followed by "N coins moved X → Y".
 
-    Deliberately NOT silent: the holder is DM'd by the caller. Someone finding their
-    portfolio emptied with no explanation is how trust in a shared economy dies.
+    Silent: nobody is notified. The trade log and the AI audit log are the record.
 
     Runs on the bot's event loop only (it calls the trade engine) — web callers must go
     through run_on_bot_loop().
@@ -12418,13 +12485,13 @@ _AI_TOOLS = [
     },
     {
         "name": "liquidate_holdings",
-        "description": "ADMIN: force-sell a user's stock holdings at the live market price, optionally transferring the proceeds to someone else (managers only). Use when asked to liquidate/seize/cash out a player's shares — e.g. a departing member, an inactive account, or a settlement. Sells through the normal exchange engine, so the price moves and the market treasury pays exactly as if they had sold voluntarily. Preview by default: it returns what WOULD be sold and for how much. To actually execute, pass confirm = the holder's Discord user id. NEVER supply that confirm value yourself — show the person the preview, and only pass it through once THEY state the id back to you. The holder is always DM'd afterwards.",
+        "description": "ADMIN: force-sell a user's stock holdings at the live market price, optionally transferring the proceeds to someone else (managers only). Use when asked to liquidate/seize/cash out a player's shares — e.g. a departing member, an inactive account, or a settlement. Sells through the normal exchange engine, so the price moves and the market treasury pays exactly as if they had sold voluntarily. Preview by default: it returns what WOULD be sold and for how much. To actually execute, pass confirm = the holder's Discord user id. NEVER supply that confirm value yourself — show the person the preview, and only pass it through once THEY state the id back to you. Runs silently: do NOT DM or otherwise notify the holder unless the person asking explicitly tells you to.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "user": {"type": "string", "description": "The holder whose shares get sold — Discord user id or @mention."},
+                "user": {"type": "string", "description": "The holder whose shares get sold. A Discord id, @mention, Minecraft IGN, server nickname, or the NAME they trade under on the exchange/website (e.g. 'Explifyim') all work — you do NOT need a Discord id. If the name is ambiguous you'll get a list to pick from."},
                 "market": {"type": "string", "description": "Market id to liquidate (e.g. 'greyhames'). Omit to liquidate EVERY market they hold."},
-                "to": {"type": "string", "description": "Optional: user id / @mention who receives the proceeds. Omit to leave the coins with the holder (a pure cash-out)."},
+                "to": {"type": "string", "description": "Optional: who receives the proceeds — same flexible name/id matching as 'user'. Omit to leave the coins with the holder (a pure cash-out)."},
                 "confirm": {"type": "string", "description": "The holder's user id, stated by the person asking. Omit for a preview."}
             },
             "required": ["user"]
@@ -14795,12 +14862,29 @@ async def _ai_tool_liquidate_holdings(guild, channel, user, args):
     """
     if not _ai_is_manager(user):
         return "❌ Managers only — liquidating someone's holdings is manager-gated."
-    holder = str(args.get("user") or "").strip().strip("<@!>").strip(">")
-    if not holder.isdigit():
-        return "❌ Who? Give me the holder's Discord user id (or @mention them)."
-    recipient = str(args.get("to") or "").strip().strip("<@!>").strip(">")
-    if recipient and not recipient.isdigit():
-        return "❌ The `to` recipient must be a Discord user id or @mention."
+
+    _h = _resolve_person(args.get("user"), guild)
+    if not _h.get("ok"):
+        if _h.get("candidates"):
+            return ("❓ Several people match that — say which one (or give the id):\n"
+                    + "\n".join(f"• {c}" for c in _h["candidates"]))
+        return ("❌ I couldn't find anyone by that name. I can match a Discord id, an "
+                "@mention, a linked Minecraft IGN, a server nickname, or the display name "
+                "they trade under on the exchange. If they only ever traded on the website "
+                "and never under that name, ask `get_market_holders` for the market's cap "
+                "table — it lists every holder with their id.")
+    holder = _h["user_id"]
+    holder_label = _h.get("label") or f"<@{holder}>"
+
+    recipient = ""
+    if str(args.get("to") or "").strip():
+        _r = _resolve_person(args.get("to"), guild)
+        if not _r.get("ok"):
+            if _r.get("candidates"):
+                return ("❓ Several people match the recipient — say which one:\n"
+                        + "\n".join(f"• {c}" for c in _r["candidates"]))
+            return "❌ I couldn't identify who should receive the proceeds."
+        recipient = _r["user_id"]
     mid = str(args.get("market") or "").strip() or None
     confirm = str(args.get("confirm") or "").strip().strip("<@!>").strip(">")
     apply = (confirm == holder)
@@ -14812,8 +14896,9 @@ async def _ai_tool_liquidate_holdings(guild, channel, user, args):
         return f"❌ Liquidation failed: {e}"
 
     scope = f"`{mid}`" if mid else "every market they hold"
-    head = (f"**Liquidation — <@{holder}>, {scope}**\n" if apply
-            else f"**Preview — liquidating <@{holder}>, {scope}** *(nothing has moved yet)*\n")
+    _who = (f"**{holder_label}** (<@{holder}>)" if _h.get("how") != "id" else f"<@{holder}>")
+    head = (f"**Liquidation — {_who}, {scope}**\n" if apply
+            else f"**Preview — liquidating {_who}, {scope}** *(nothing has moved yet)*\n")
     body = "\n".join(res.get("lines") or []) or "_Nothing to sell._"
     tail = ""
     if res.get("notes"):
@@ -14825,19 +14910,9 @@ async def _ai_tool_liquidate_holdings(guild, channel, user, args):
                  f"To go ahead, tell me the holder's id — `{holder}` — as the confirmation.")
     elif apply:
         tail += f"\n\n**Total: `{res.get('total', 0):,}` 🪙.**"
-        # The holder learns about it from the bot, not by noticing an empty portfolio.
-        try:
-            _u = guild.get_member(int(holder)) if guild else None
-            _u = _u or await bot.fetch_user(int(holder))
-            if _u:
-                _what = (f"your **{mid}** shares" if mid else "your share holdings")
-                _where = (f" The proceeds were transferred to <@{recipient}>."
-                          if recipient else
-                          f" The `{res.get('total', 0):,}` 🪙 proceeds are on your balance.")
-                await safe_dm(_u, f"📉 A manager liquidated {_what} at market price."
-                                  f"{_where} Ask a manager if this wasn't expected.")
-        except Exception as _de:
-            tail += f"\n*(couldn't DM the holder: {_de})*"
+        # NO DM to the holder. Whether someone gets told their shares were sold is the
+        # operator's call, not the tool's — it stays silent and the action is recorded
+        # in the AI audit log instead.
     return head + body + tail
 
 
