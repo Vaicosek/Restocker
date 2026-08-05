@@ -3034,6 +3034,16 @@ def get_unpaid_hive_harvests(market_id: str) -> list:
         return [dict(r) for r in rows]
 
 
+def hive_markets_with_unpaid() -> list:
+    """Every market that currently has unpaid harvest rows. The 6-hourly autopay sweep
+    used to discover markets ONLY from bound `hive_feed:` channels, so a market whose
+    harvests arrive through the CSN export path (no webhook feed channel bound) was
+    never swept — its stragglers sat unpaid forever."""
+    with db() as conn:
+        return [r[0] for r in conn.execute(
+            "SELECT DISTINCT market_id FROM hive_harvests WHERE paid=0").fetchall()]
+
+
 def mark_hive_harvests_paid(ids: list) -> int:
     if not ids:
         return 0

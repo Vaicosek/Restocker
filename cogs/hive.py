@@ -171,8 +171,19 @@ class HiveCog(commands.Cog):
             feeds = _db.get_config_prefix("hive_feed:") or {}
         except Exception as e:
             log.warning("[hive sweep] can't read feeds: %s", e)
+            feeds = {}
+        # Markets to consider = those with a bound feed channel PLUS any market that
+        # simply has unpaid rows. Harvests now also arrive via the CSN export path,
+        # which needs no feed channel — discovering markets from `hive_feed:` alone
+        # meant those markets were never swept and their stragglers never paid.
+        mids = {str(v) for v in feeds.values()}
+        try:
+            mids |= {str(m) for m in (_db.hive_markets_with_unpaid() or [])}
+        except Exception as e:
+            log.warning("[hive sweep] unpaid-market scan failed: %s", e)
+        if not mids:
             return
-        for mid in sorted({str(v) for v in feeds.values()}):
+        for mid in sorted(mids):
             try:
                 if str(_db.get_config(f"hive_autopay:{mid}") or "") != "1":
                     continue                      # respect autopay being off
