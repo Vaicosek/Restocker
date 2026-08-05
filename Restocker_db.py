@@ -2978,6 +2978,25 @@ def add_hive_harvest(market_id: str, ign: str, user_id, item: str, qty: int,
     re-scanned any number of times still pays exactly once. The id lets auto-payout settle
     exactly the rows it just created."""
     with db() as conn:
+        # NEAR-DUPLICATE GUARD. uq_hive_sale keys on the EXACT sale_ts, but the mod
+        # reconstructs that timestamp from "Xh Ym ago" — minute precision — so the SAME
+        # sale gets a slightly different absolute time on every run (observed: 14:18:21
+        # vs 14:18:47 for one sale, and three rows spanning 48s for another). Each new
+        # timestamp slipped past the unique index as a "new" sale and was PAID AGAIN.
+        # Measured damage before this guard: 76 duplicate rows, 63,211 coins overpaid.
+        # Two ingest paths make it worse — the csn-hive webhook lines and the export CSV
+        # both describe the same sales with independently-drifting timestamps.
+        # So: same market+ign+item+qty within ±120s is the same sale, full stop.
+        if sale_ts:
+            mine = _csn_ts_seconds(sale_ts)
+            if mine is not None:
+                for row in conn.execute(
+                        "SELECT sale_ts FROM hive_harvests WHERE market_id=? AND ign=? "
+                        "AND item=? AND qty=? AND sale_ts IS NOT NULL",
+                        (str(market_id), str(ign), str(item), int(qty))).fetchall():
+                    other = _csn_ts_seconds(row[0])
+                    if other is not None and abs(other - mine) <= 120:
+                        return None            # already ingested — never pay twice
         cur = conn.execute(
             "INSERT OR IGNORE INTO hive_harvests "
             "(market_id, ign, user_id, item, qty, unit_value, msg_id, line_no, sale_ts) "

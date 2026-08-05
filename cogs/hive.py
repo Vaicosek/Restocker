@@ -352,13 +352,15 @@ class HiveCog(commands.Cog):
             groups, unregistered, _unvalued = _group_rows(rows)
             if groups:
                 res = await self._settle_groups(str(mid), groups, batch=str(message.id))
-                receipt = ("🐝 **Harvest wages paid** (`hive-harvesting` project · "
-                           f"value {_fmt(res['value_total'])}):\n" + "\n".join(res["paid_lines"]))
-                if res["owner_line"]:
-                    receipt += "\n" + res["owner_line"]
+                # ONE LINE. The per-harvester breakdown used to be dumped in full on
+                # every single ingest — with several markets exporting on a loop that
+                # buried the channel. Who got what is already in each person's coin
+                # history, the team-project ledger and /hive settings; the channel only
+                # needs to know the run happened and what it was worth.
+                receipt = (f"🐝 Harvest run · {len(groups)} harvester(s) · "
+                           f"value {_fmt(res['value_total'])} · wages {_fmt(res['harv_total'])}")
                 if unregistered:
-                    receipt += ("\n⚠ Not registered (need `/me → Link in-game name`): "
-                                + ", ".join(unregistered))
+                    receipt += f" · {len(unregistered)} unlinked IGN(s) held"
                 try:
                     await message.channel.send(receipt[:1900],
                                                allowed_mentions=discord.AllowedMentions.none())

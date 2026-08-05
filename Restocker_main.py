@@ -3718,14 +3718,18 @@ async def _pay_honey_from_export(txns: list, market_id: str, report_channel):
     except Exception:
         cog = None
     paid_lines = []
+    _paid_total, _paid_count, _held_igns = 0, 0, {}
     if not autopay_off and cog is not None:
         try:
             import cogs.hive as _hive_mod
             hrows = _db.get_hive_harvests_by_ids(new_ids)
             groups, unregistered, unvalued = _hive_mod._group_rows(hrows)
+            _held_igns = unregistered or {}
             if groups:
                 res = await cog._settle_groups(str(market_id), groups, batch=msg_id)
                 paid_lines = list(res.get("paid_lines") or [])
+                _paid_total = float(res.get("harv_total") or 0)
+                _paid_count = len(groups)
                 if res.get("owner_line"):
                     paid_lines.append(res["owner_line"])
             for ign, val in (unregistered or {}).items():
@@ -3743,12 +3747,17 @@ async def _pay_honey_from_export(txns: list, market_id: str, report_channel):
         paid_lines.append(f"🐝 {len(new_ids)} harvest row(s) recorded (autopay off or hive "
                           f"engine unavailable) — pay from `/hive settings`.")
 
-    if paid_lines and report_channel is not None:
+    # ONE LINE, and only when this export actually settled something. The full
+    # per-harvester breakdown posted on every export drowned the channel — several
+    # markets exporting on a loop meant a wall of text per run. The detail lives in
+    # each harvester's coin history, the team-project ledger and /hive settings.
+    if report_channel is not None and (_paid_total or _paid_count):
         try:
-            embed = discord.Embed(title="🍯 Hive-harvest payouts (team project)",
-                                  description="\n".join(paid_lines[:25]), color=0xFFC83D)
-            embed.set_footer(text="From this export's 'sold honey' rows · one ledger with the hive feed — every sale pays exactly once")
-            await report_channel.send(embed=embed)
+            msg = (f"🍯 Harvest run · {_paid_count} harvester(s) · "
+                   f"wages {int(_paid_total):,}")
+            if _held_igns:
+                msg += f" · {len(_held_igns)} unlinked IGN(s) held"
+            await report_channel.send(msg, allowed_mentions=discord.AllowedMentions.none())
         except Exception as e:
             log.warning("[hiveharvest] summary send failed: %s", e)
     return paid_lines
@@ -4165,12 +4174,13 @@ async def _process_csn_attachment(attachment: discord.Attachment, report_channel
             # lifted code re-route a market's report delivery to an attacker-chosen
             # channel (exfiltration + denial of delivery). Binding stays a deliberate
             # manager action in /market settings.
-            if source_channel_id and not market_warning:
-                market_warning = (
-                    f"✅ CSV declared market `{csv_market_id}` (code verified) — accepted. Tip: a "
-                    f"manager can bind this channel to `{csv_market_id}` in `/market settings` so "
-                    f"future uploads here need no code."
-                )
+            # SILENT: a valid code being accepted is the NORMAL case. Announcing it (with
+            # a bind tip) on every single upload was pure channel noise — every export
+            # from every market posted the same paragraph. It goes to the log instead.
+            if source_channel_id:
+                log.info("[csn] %s accepted on unbound channel %s (code verified); "
+                         "bind it in /market settings to skip the code.",
+                         csv_market_id, source_channel_id)
         else:
             market_warning = (
                 f"⚠️ CSV declared unknown market `{csv_market_id}` — no such market in the database. "
