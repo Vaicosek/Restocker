@@ -157,7 +157,8 @@ class EventsCog(commands.Cog):
                                 continue
                         await _process_csn_attachment(
                             _att, message.channel, source_channel_id=message.channel.id,
-                            txn_only=("csn_export" in _att.filename.lower() and _has_monthly_h))
+                            txn_only=("csn_export" in _att.filename.lower() and _has_monthly_h),
+                            source_key=f"user:{message.author.id}")
                     except Exception as _e:
                         log.error("CSN human upload failed: %s", _e)
                         try:
@@ -344,9 +345,13 @@ class EventsCog(commands.Cog):
                 _all_transport = False        # rejected — keep the raw file visible for review
                 continue
             try:
+                # source_key identifies WHICH shop uploaded this. A market scanned by
+                # several alts gets one monthly file per alt, each covering only its own
+                # sales — keyed this way they sum instead of overwriting each other.
                 await _process_csn_attachment(
                     att, report_channel, source_channel_id=message.channel.id,
-                    txn_only=("csn_export" in name and _has_monthly))
+                    txn_only=("csn_export" in name and _has_monthly),
+                    source_key=str(_poster_id))
                 _processed_any = True
             except Exception as e:
                 log.error("CSN on_message processing failed: %s", e)

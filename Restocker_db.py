@@ -177,6 +177,23 @@ CREATE TABLE IF NOT EXISTS csn_history (
     net         REAL NOT NULL DEFAULT 0,
     PRIMARY KEY (market_id, month)
 );
+-- Per-SOURCE monthly contributions. One market can be scanned by several shops, each
+-- running its own CSN mod and uploading its own monthly file that covers ONLY its own
+-- sales. Treating each such file as authoritative for the month made the last upload
+-- win and silently discard the others — greyhames' August flip-flopped between 17,171
+-- and 2,867,935 depending on which alt posted most recently. Every uploader now keeps
+-- its own row here, and the month in csn_history is the SUM of them, so re-uploading a
+-- file replaces that source's slice (idempotent) instead of the whole month.
+CREATE TABLE IF NOT EXISTS csn_month_sources (
+    market_id   TEXT NOT NULL,
+    month       TEXT NOT NULL,
+    source_key  TEXT NOT NULL,            -- the uploading webhook/poster, one per shop
+    income      REAL NOT NULL DEFAULT 0,
+    spent       REAL NOT NULL DEFAULT 0,
+    items_json  TEXT,
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (market_id, month, source_key)
+);
 CREATE TABLE IF NOT EXISTS csn_history_items (
     market_id     TEXT NOT NULL DEFAULT 'main',
     month         TEXT NOT NULL,
@@ -1575,6 +1592,53 @@ def csn_save_market(market_id: str, data: dict) -> None:
                      int(iv.get("times_sold", 0) or 0), int(iv.get("times_bought", 0) or 0),
                      float(iv.get("income_coins", 0) or 0), float(iv.get("expense_coins", 0) or 0)),
                 )
+
+
+def csn_set_month_source(market_id: str, month: str, source_key: str,
+                         income: float, spent: float, items: dict) -> None:
+    """Record ONE uploader's contribution to a market-month. Replaces that uploader's
+    previous figures for the same month, so re-uploading its file is idempotent and
+    never double-counts."""
+    conn_items = json.dumps(items or {}, ensure_ascii=False)
+    now = datetime.now(timezone.utc).isoformat()
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO csn_month_sources (market_id, month, source_key, income, spent,"
+            " items_json, updated_at) VALUES (?,?,?,?,?,?,?) "
+            "ON CONFLICT(market_id, month, source_key) DO UPDATE SET "
+            "income=excluded.income, spent=excluded.spent, items_json=excluded.items_json,"
+            " updated_at=excluded.updated_at",
+            (str(market_id), str(month), str(source_key), float(income or 0),
+             float(spent or 0), conn_items, now))
+
+
+def csn_month_totals(market_id: str, month: str) -> dict:
+    """The market-month rolled up across EVERY uploader: {income, spent, items, sources}.
+    This is the real total for a market scanned by several shops."""
+    income = spent = 0.0
+    items: dict = {}
+    n = 0
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT income, spent, items_json FROM csn_month_sources "
+            "WHERE market_id=? AND month=?", (str(market_id), str(month))).fetchall()
+    for r in rows:
+        n += 1
+        income += float(r["income"] or 0)
+        spent += float(r["spent"] or 0)
+        try:
+            part = json.loads(r["items_json"] or "{}")
+        except Exception:
+            part = {}
+        for item, v in (part or {}).items():
+            if not isinstance(v, dict):
+                continue
+            e = items.setdefault(item, {"sold_qty": 0, "bought_qty": 0, "net_coins": 0.0})
+            e["sold_qty"] += int(v.get("sold_qty", 0) or 0)
+            e["bought_qty"] += int(v.get("bought_qty", 0) or 0)
+            e["net_coins"] = round(float(e["net_coins"]) + float(v.get("net_coins", 0) or 0), 2)
+    return {"income": round(income, 2), "spent": round(spent, 2),
+            "items": items, "sources": n}
 
 
 def csn_all_market_ids() -> list:

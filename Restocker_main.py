@@ -3924,7 +3924,7 @@ _ACQ_VALUE_PER_PIECE = {
 
 
 async def _process_csn_attachment(attachment: discord.Attachment, report_channel, source_channel_id=None,
-                                  txn_only: bool = False):
+                                  txn_only: bool = False, source_key=None):
     filename = attachment.filename
     try:
         csv_text = (await attachment.read()).decode("utf-8", errors="replace")
@@ -4295,9 +4295,29 @@ async def _process_csn_attachment(attachment: discord.Attachment, report_channel
         log.warning("[csn] comb/acquired-stock valuation failed: %s", _e)
 
     # Exports MERGE into the month (they carry one period's partials — replacing used to
-    # clobber the whole month's cumulative totals); monthly reports REPLACE (the monthly
-    # file re-aggregates the entire month and is authoritative for it).
+    # clobber the whole month's cumulative totals).
+    #
+    # A MONTHLY file re-aggregates the whole month for the shop that produced it — but a
+    # market can be scanned by SEVERAL shops, each uploading a file covering only its own
+    # sales. Replacing the month with whichever arrived last is how greyhames' August
+    # flip-flopped between 17,171 and 2,867,935. So each uploader's figures are stored
+    # under its own source key and the month becomes the SUM across uploaders: still
+    # idempotent per uploader, but no longer mutually destructive.
     _merge_month = (csv_type == "export")
+    if csv_type == "monthly":
+        _src = str(source_key or f"file:{filename}")
+        try:
+            import Restocker_db as _db_src
+            _db_src.csn_set_month_source(effective_market_id, month_key, _src,
+                                         income, spent, items)
+            _roll = _db_src.csn_month_totals(effective_market_id, month_key)
+            if _roll.get("sources", 0) > 1:
+                log.info("[csn] %s %s: rolled up %d uploader(s) -> income %.0f",
+                         effective_market_id, month_key, _roll["sources"], _roll["income"])
+            income, spent, items = _roll["income"], _roll["spent"], _roll["items"]
+        except Exception as _se:
+            log.warning("[csn] month-source rollup failed (using this file alone): %s", _se)
+
     _record_to_market_history(effective_market_id, month_key, month_label, filename,
                               income, spent, items, merge=_merge_month)
     if effective_market_id == DEFAULT_MARKET_ID:
@@ -4428,12 +4448,34 @@ async def _process_csn_attachment(attachment: discord.Attachment, report_channel
     # + file card + link button); embed fallback otherwise. A LayoutView can't carry
     # content/embeds, so the "report received" line lives inside the layout's container.
     _report_url = f"https://dashboard.vaicosmarket.com/report/{effective_market_id}/{month_key}"
-    _layout = _build_csn_layout(embed, footer, _report_url,
-                                chart_filename=_chart_name, xlsx_filename=_xlsx_name)
-    if _layout is not None:
-        await dest_channel.send(view=_layout, files=files)
-    else:
-        await dest_channel.send(content="📥 **CSN report received:**", embed=embed, files=files)
+    # POST THE CARD ONLY WHEN THE NUMBERS MOVED. Several shops scan the same market and
+    # each upload triggered a full report card, so the channel filled with cards showing
+    # identical (or worse, contradictory) totals. Fingerprint the month's figures: if
+    # they haven't changed since the last card for this market+month, the data is still
+    # ingested — the card is just not re-posted. Config csn_always_card=1 restores the
+    # old always-post behaviour.
+    _card_ok = True
+    try:
+        import Restocker_db as _db_card
+        _fp = f"{round(float(income), 2)}|{round(float(spent), 2)}|{len(items)}"
+        _fp_key = f"csn_card_fp:{effective_market_id}:{month_key}"
+        if (str(_db_card.get_config("csn_always_card") or "") != "1"
+                and str(_db_card.get_config(_fp_key) or "") == _fp):
+            _card_ok = False
+            log.info("[csn] %s %s unchanged (%s) — report card suppressed",
+                     effective_market_id, month_key, _fp)
+        else:
+            _db_card.set_config(_fp_key, _fp)
+    except Exception as _ce:
+        log.debug("[csn] card-dedup check skipped: %s", _ce)
+
+    if _card_ok:
+        _layout = _build_csn_layout(embed, footer, _report_url,
+                                    chart_filename=_chart_name, xlsx_filename=_xlsx_name)
+        if _layout is not None:
+            await dest_channel.send(view=_layout, files=files)
+        else:
+            await dest_channel.send(content="📥 **CSN report received:**", embed=embed, files=files)
     if _mgr_sales and _mgr_sales.get("owner"):
         try:
             await _team_live(

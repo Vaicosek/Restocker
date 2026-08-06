@@ -119,10 +119,16 @@ def _group_rows(rows: list):
             v = int(round(int(r.get("qty") or 0) * val))
             unregistered[str(r.get("ign"))] = unregistered.get(str(r.get("ign")), 0) + v
             continue
-        g = groups.setdefault(str(uid), {"ign": r.get("ign"), "ids": [], "qty": 0, "value": 0.0})
+        g = groups.setdefault(str(uid), {"ign": r.get("ign"), "ids": [], "qty": 0,
+                                         "value": 0.0, "items": {}})
         g["ids"].append(int(r["id"]))
         g["qty"] += int(r.get("qty") or 0)
         g["value"] += int(r.get("qty") or 0) * val
+        # Per-item tally so the harvester's DM can say WHAT they delivered, not just a
+        # lump "N pcs" — they sell honey and comb at different values and ask why.
+        it = g["items"].setdefault(str(r.get("item")), {"qty": 0, "value": 0.0})
+        it["qty"] += int(r.get("qty") or 0)
+        it["value"] += int(r.get("qty") or 0) * val
     return groups, unregistered, unvalued
 
 
@@ -289,9 +295,23 @@ class HiveCog(commands.Cog):
             try:
                 user = self.bot.get_user(int(uid)) or await self.bot.fetch_user(int(uid))
                 if user:
-                    await safe_dm(user, f"🐝 Harvest wage: **{_fmt(pay)}** coins for "
-                                        f"{_fmt(g['qty'])} pcs (`{market_id}`, hive-harvesting project). "
-                                        f"+{lp} loyalty pts.")
+                    # Itemised, and it states the rate — "why did I get this much?" is
+                    # the question people actually ask, so answer it in the message.
+                    breakdown = " · ".join(
+                        f"{_fmt(v['qty'])}× {item}"
+                        for item, v in sorted(g.get("items", {}).items(),
+                                              key=lambda kv: -kv[1]["qty"]))
+                    # new_bal comes straight back from add_coins above — no second read,
+                    # so the figure quoted is exactly the balance this payment produced.
+                    try:
+                        bal_line = f"\nYour balance is now **{_fmt(new_bal)}** coins."
+                    except Exception:
+                        bal_line = ""
+                    await safe_dm(user,
+                        f"🐝 **Harvest paid — {_fmt(pay)} coins**\n"
+                        f"{breakdown or _fmt(g['qty']) + ' pcs'}\n"
+                        f"Worth {_fmt(g['value'])} at shop value · your cut {pct:g}% · "
+                        f"+{lp} loyalty pts · market `{market_id}`.{bal_line}")
             except Exception:
                 pass
             await _aio.sleep(0.35)
