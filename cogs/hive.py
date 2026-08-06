@@ -46,6 +46,276 @@ def _fmt(n) -> str:
     return f"{int(round(float(n))):,}"
 
 
+# ── central hive-project report ──────────────────────────────────────────────
+# One place that always answers "how is the hive project actually doing" without
+# anyone running a command: posted when the bot comes up, and again after every
+# 6h autopay sweep. Config key `hive_report_channel` overrides the default, and
+# setting it to "0" turns the whole thing off.
+HIVE_REPORT_CHANNEL_DEFAULT = 1525241251967012874
+
+
+def _hive_report_channel_id() -> int:
+    try:
+        import Restocker_db as _db
+        raw = str(_db.get_config("hive_report_channel") or "").strip()
+        if raw:
+            return int(raw)
+    except Exception:
+        pass
+    return HIVE_REPORT_CHANNEL_DEFAULT
+
+
+def _hive_report_markets() -> list:
+    """Every hive site worth reporting on: those with a bound feed channel, those
+    holding unpaid rows, and those with any harvest history at all."""
+    import Restocker_db as _db
+    mids = set()
+    try:
+        mids |= {str(v) for v in (_db.get_config_prefix("hive_feed:") or {}).values()}
+    except Exception:
+        pass
+    try:
+        mids |= {str(m) for m in (_db.hive_markets_with_unpaid() or [])}
+    except Exception:
+        pass
+    try:
+        with _db.db() as conn:
+            mids |= {str(r[0]) for r in conn.execute(
+                "SELECT DISTINCT market_id FROM hive_harvests").fetchall()}
+    except Exception:
+        pass
+    return sorted(m for m in mids if m)
+
+
+def build_hive_project_report(trigger: str = "startup") -> list:
+    """The full hive-project picture as a list of Discord-sized message strings.
+
+    Per site: value harvested, wages paid, what is still owed, every harvester with
+    their quantity/value/wage, the honey-vs-comb split, and coins parked on IGNs that
+    were never linked to a Discord account. Read-only — it never moves a coin."""
+    import Restocker_db as _db
+    pct = core._hive_harvester_pct()
+    mids = _hive_report_markets()
+    if not mids:
+        return []
+
+    out = [f"🐝 **Hive project report** · {trigger} · harvester wage {pct:g}%"]
+    g_value = g_paid_value = g_unpaid_value = g_unlinked = 0.0
+    g_qty = 0
+
+    for mid in mids:
+        try:
+            summary = _db.get_hive_harvest_summary(mid) or {}
+        except Exception as e:
+            out.append(f"\n**`{mid}`** — could not read summary: {e}")
+            continue
+        if not summary:
+            continue
+
+        qty = sum(m.get("qty", 0) for m in summary.values())
+        value = sum(m.get("value", 0.0) for m in summary.values())
+        paid_value = sum(m.get("paid_value", 0.0) for m in summary.values())
+        unpaid_value = max(0.0, value - paid_value)
+        g_qty += qty
+        g_value += value
+        g_paid_value += paid_value
+        g_unpaid_value += unpaid_value
+
+        owner_pct = core._hive_owner_pct(mid)
+        autopay = "on" if core.hive_autopay_on(mid) else "**OFF**"
+        mname = (core._get_market(mid) or {}).get("name", mid)
+
+        out.append(
+            f"\n**{mname}** (`{mid}`) · autopay {autopay}"
+            f"\n{_fmt(qty)} pcs harvested · worth **{_fmt(value)}** · "
+            f"wages paid {_fmt(paid_value * pct / 100.0)}"
+            + (f" · owner cut {owner_pct:g}%" if owner_pct else "")
+            + (f"\n⚠️ **{_fmt(unpaid_value)}** of value still unpaid "
+               f"(≈{_fmt(unpaid_value * pct / 100.0)} in wages owed)" if unpaid_value > 0 else ""))
+
+        # who harvested, and what they earned
+        by_ign, by_item = {}, {}
+        for mo in summary.values():
+            for ign, v in (mo.get("by_ign") or {}).items():
+                a = by_ign.setdefault(ign, {"qty": 0, "value": 0.0})
+                a["qty"] += v.get("qty", 0); a["value"] += v.get("value", 0.0)
+            for item, v in (mo.get("by_item") or {}).items():
+                a = by_item.setdefault(item, {"qty": 0, "value": 0.0})
+                a["qty"] += v.get("qty", 0); a["value"] += v.get("value", 0.0)
+
+        if by_item:
+            out.append("· " + " · ".join(
+                f"{_fmt(v['qty'])}× {item} ({_fmt(v['value'])})"
+                for item, v in sorted(by_item.items(), key=lambda kv: -kv[1]["value"])))
+
+        for ign, v in sorted(by_ign.items(), key=lambda kv: -kv[1]["value"]):
+            wage = v["value"] * pct / 100.0
+            linked = None
+            try:
+                linked = _db.get_user_id_by_ign(ign)
+            except Exception:
+                pass
+            tag = f"<@{linked}>" if linked else f"`{ign}` ⚠️ not linked"
+            out.append(f"  • {tag} — {_fmt(v['qty'])} pcs · "
+                       f"{_fmt(v['value'])} value · {_fmt(wage)} earned"
+                       + ("" if linked else " (cannot be paid)"))
+            if not linked:
+                g_unlinked += wage
+
+    out.append(
+        f"\n**Total** · {_fmt(g_qty)} pcs · {_fmt(g_value)} value · "
+        f"{_fmt(g_paid_value * pct / 100.0)} wages paid")
+    if g_unpaid_value > 0:
+        out.append(f"Unpaid backlog: {_fmt(g_unpaid_value)} value "
+                   f"(≈{_fmt(g_unpaid_value * pct / 100.0)} in wages)")
+    if g_unlinked > 0:
+        out.append(f"Stuck on unlinked IGNs: **{_fmt(g_unlinked)}** — link them, or clear "
+                   f"the ledger with the `settle_unlinked_harvests` tool.")
+
+    # chunk to Discord's 2000-char limit, never splitting a line
+    msgs, cur = [], ""
+    for line in out:
+        piece = line if line.startswith("\n") else "\n" + line
+        if len(cur) + len(piece) > 1900:
+            msgs.append(cur.strip("\n"))
+            cur = ""
+        cur += piece
+    if cur.strip():
+        msgs.append(cur.strip("\n"))
+    return msgs
+
+
+def build_harvester_statements() -> dict:
+    """{user_id: message} — one personal statement per LINKED harvester: how much
+    honey and comb they have delivered, what it was worth, what they have already
+    been paid, and anything still owed. Read-only."""
+    import Restocker_db as _db
+    pct = core._hive_harvester_pct()
+    people = {}
+    for mid in _hive_report_markets():
+        try:
+            summary = _db.get_hive_harvest_summary(mid) or {}
+        except Exception:
+            continue
+        for mo in summary.values():
+            for ign, v in (mo.get("by_ign") or {}).items():
+                a = people.setdefault(str(ign), {"qty": 0, "value": 0.0, "sites": set(),
+                                                 "items": {}, "uid": None})
+                a["qty"] += v.get("qty", 0)
+                a["value"] += v.get("value", 0.0)
+                a["sites"].add(mid)
+        # per-item detail is only available market-wide, so attribute it per site
+        # by re-reading the raw rows (cheap: this table is small).
+        try:
+            with _db.db() as conn:
+                for r in conn.execute(
+                        "SELECT ign, item, SUM(qty) q, SUM(qty*unit_value) v, "
+                        "SUM(CASE WHEN paid=1 THEN qty*unit_value ELSE 0 END) pv, "
+                        "MAX(user_id) uid "
+                        "FROM hive_harvests WHERE market_id=? GROUP BY ign, item",
+                        (str(mid),)).fetchall():
+                    a = people.setdefault(str(r[0]), {"qty": 0, "value": 0.0,
+                                                      "sites": set(), "items": {},
+                                                      "uid": None})
+                    it = a["items"].setdefault(str(r[1]), {"qty": 0, "value": 0.0, "paid": 0.0})
+                    it["qty"] += int(r[2] or 0)
+                    it["value"] += float(r[3] or 0)
+                    it["paid"] += float(r[4] or 0)
+                    # The harvest rows already carry the account they were attributed to;
+                    # trust that first and only fall back to the IGN registry, so someone
+                    # who was linked at payout time still gets their statement even if the
+                    # registry entry was later renamed or removed.
+                    if r[5] and not a.get("uid"):
+                        a["uid"] = str(r[5])
+        except Exception:
+            pass
+
+    out = {}
+    for ign, a in people.items():
+        uid = a.get("uid")
+        if not uid:
+            try:
+                uid = _db.get_user_id_by_ign(ign)
+            except Exception:
+                uid = None
+        if not uid:
+            continue                          # nobody to DM; the report flags these
+        value = sum(i["value"] for i in a["items"].values()) or a["value"]
+        paid_value = sum(i["paid"] for i in a["items"].values())
+        qty = sum(i["qty"] for i in a["items"].values()) or a["qty"]
+        earned = value * pct / 100.0
+        already = paid_value * pct / 100.0
+        owed = max(0.0, earned - already)
+        breakdown = " · ".join(
+            f"{_fmt(i['qty'])}× {item}"
+            for item, i in sorted(a["items"].items(), key=lambda kv: -kv[1]["qty"]))
+        msg = (f"🐝 **Your harvest so far**\n"
+               f"{breakdown or _fmt(qty) + ' pcs'}\n"
+               f"That's **{_fmt(qty)}** pieces worth **{_fmt(value)}** coins at shop value.\n"
+               f"Your cut is {pct:g}% — **{_fmt(earned)}** coins earned in total, "
+               f"of which **{_fmt(already)}** has already been paid to you.")
+        if owed >= 1:
+            msg += f"\n**{_fmt(owed)}** is still to come — it pays out automatically."
+        else:
+            msg += "\nYou're fully paid up. Thanks for keeping the hives running."
+        out[str(uid)] = msg
+    return out
+
+
+async def dm_harvester_statements() -> int:
+    """DM every linked harvester their personal statement. Returns how many were sent.
+    Deliberately NOT run on the 6h sweep — that would be four DMs a day per person."""
+    import asyncio as _aio
+    sent = 0
+    try:
+        statements = build_harvester_statements()
+    except Exception as e:
+        log.warning("[hive report] could not build harvester statements: %s", e)
+        return 0
+    for uid, msg in statements.items():
+        try:
+            user = bot.get_user(int(uid)) or await bot.fetch_user(int(uid))
+            if user is None:
+                continue
+            await safe_dm(user, msg)
+            sent += 1
+        except Exception as e:
+            log.info("[hive report] DM to %s failed: %s", uid, e)
+        await _aio.sleep(0.4)                 # gentle on the DM rate limit
+    log.info("[hive report] sent %d harvester statement(s)", sent)
+    return sent
+
+
+async def post_hive_project_report(trigger: str = "startup") -> bool:
+    """Post the report to the central hive channel. Never raises: a reporting
+    problem must not take the sweep — or the bot's startup — down with it."""
+    try:
+        cid = _hive_report_channel_id()
+        if not cid:
+            return False                      # hive_report_channel = 0 disables it
+        chan = bot.get_channel(cid)
+        if chan is None:
+            try:
+                chan = await bot.fetch_channel(cid)
+            except Exception as e:
+                log.warning("[hive report] channel %s unreachable: %s", cid, e)
+                return False
+        msgs = build_hive_project_report(trigger)
+        if not msgs:
+            log.info("[hive report] nothing to report (no hive sites with history)")
+            return False
+        import asyncio as _aio
+        for i, m in enumerate(msgs):
+            await chan.send(m)
+            if i + 1 < len(msgs):
+                await _aio.sleep(0.4)         # stay clear of the channel rate limit
+        log.info("[hive report] posted %d message(s) to #%s (%s)", len(msgs), cid, trigger)
+        return True
+    except Exception as e:
+        log.warning("[hive report] failed: %s", e)
+        return False
+
+
 
 
 def _ingest_lines(market_id: str, msg_id: str, lines: list, start_line: int = 0) -> list:
@@ -166,6 +436,7 @@ class HiveIngestModal(discord.ui.Modal, title="Paste hive feed lines"):
 class HiveCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        self._reported_this_boot = False
         self.autopay_sweep_loop.start()
 
     async def cog_unload(self):
@@ -194,8 +465,6 @@ class HiveCog(commands.Cog):
             mids |= {str(m) for m in (_db.hive_markets_with_unpaid() or [])}
         except Exception as e:
             log.warning("[hive sweep] unpaid-market scan failed: %s", e)
-        if not mids:
-            return
         for mid in sorted(mids):
             try:
                 # AUDIT FIX (medium, 2026-08-06): one shared definition — unset means ON,
@@ -218,6 +487,19 @@ class HiveCog(commands.Cog):
                          mid, f"{res['harv_total']:,.0f}", f"{res['value_total']:,.0f}", len(groups))
             except Exception as e:
                 log.warning("[hive sweep] %s failed: %s", mid, e)
+
+        # The central hive-project report. tasks.loop runs its first iteration as soon
+        # as the bot is ready, so this doubles as the "bot just started" report; every
+        # later iteration is the 6-hourly one. Personal DMs go out on the FIRST run
+        # only — four statements a day per harvester would be spam.
+        try:
+            first = not self._reported_this_boot
+            self._reported_this_boot = True
+            await post_hive_project_report("bot started" if first else "6h sweep")
+            if first:
+                await dm_harvester_statements()
+        except Exception as e:
+            log.warning("[hive report] post-sweep reporting failed: %s", e)
 
     @autopay_sweep_loop.before_loop
     async def _before_autopay_sweep(self):

@@ -369,6 +369,47 @@ check("_extract_shop_name reads the mod's # SHOP stamp",
 check("_extract_shop_name returns '' when the stamp is absent",
       NS["_extract_shop_name"]("# MARKET,vtech,AB12\n# RUN,x\n") == "")
 
+# ── G. the central hive-project report ──────────────────────────────────────
+# Read-only reporting posted on bot start and after each 6h sweep. The numbers
+# must reconcile: lifetime earned == already paid + still owed.
+import types as _types
+_hcore = _types.SimpleNamespace()
+_hcore._hive_harvester_pct = lambda: 15.0
+_hcore._hive_owner_pct = lambda mid: 0.0
+_hcore.hive_autopay_on = lambda mid: True
+_hcore._get_market = lambda mid: {"name": mid}
+_hive_src = open(os.path.join(BOT, "cogs", "hive.py"), encoding="utf-8").read()
+_HNS = {"core": _hcore, "log": _Log(), "sys": sys}
+for _n in ast.parse(_hive_src).body:
+    if isinstance(_n, ast.FunctionDef) and _n.name in {
+            "_fmt", "_hive_report_markets", "build_hive_project_report",
+            "build_harvester_statements"}:
+        exec(compile(ast.Module([_n], []), "hivecog", "exec"), _HNS)
+    if isinstance(_n, ast.Assign):
+        for _t in _n.targets:
+            if isinstance(_t, ast.Name) and _t.id == "HIVE_REPORT_CHANNEL_DEFAULT":
+                exec(compile(ast.Module([_n], []), "hivecog", "exec"), _HNS)
+
+db.set_config("hive_value:honeycomb block", "4.6875")
+_r1 = db.add_hive_harvest("repmkt", "Reporty", "777", "Honeycomb Block", 1000, 4.6875,
+                          "msg:rep", 0, sale_ts="2026-08-01T10:00:00Z")
+_r2 = db.add_hive_harvest("repmkt", "Reporty", "777", "Honeycomb Block", 400, 4.6875,
+                          "msg:rep", 1, sale_ts="2026-08-02T10:00:00Z")
+db.claim_hive_harvests([_r1])                     # half of it already paid
+_msgs = _HNS["build_hive_project_report"]("test")
+_all = "\n".join(_msgs)
+check("hive report renders and mentions the site", "repmkt" in _all, _all[:200])
+check("hive report shows the unpaid backlog", "still unpaid" in _all, _all[:400])
+check("hive report chunks under Discord's limit", all(len(m) <= 1900 for m in _msgs),
+      str([len(m) for m in _msgs]))
+_st = _HNS["build_harvester_statements"]()
+check("a linked harvester gets a personal statement", "777" in _st, str(list(_st)))
+if "777" in _st:
+    _txt = _st["777"]
+    # 1400 pcs x 4.6875 = 6562.5 value; 15% = 984 earned; 1000 pcs paid -> 703 paid
+    check("statement reconciles: earned = paid + still to come",
+          "984" in _txt and "703" in _txt and "281" in _txt, _txt)
+
 print()
 print("FAILURES:", FAIL)
 sys.exit(1 if FAIL else 0)
