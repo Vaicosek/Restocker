@@ -55,11 +55,16 @@ HIVE_REPORT_CHANNEL_DEFAULT = 1525241251967012874
 
 
 def _hive_report_channel_id() -> int:
+    """HIVE_REPORT_CHANNEL_ID is the canonical key — it is registered in cogs/config.py
+    so /config and the AI's set_channel_config can rebind it like any other channel.
+    `hive_report_channel` is the lowercase key this shipped with and is still honoured.
+    Either one set to 0 turns the automatic report off."""
     try:
         import Restocker_db as _db
-        raw = str(_db.get_config("hive_report_channel") or "").strip()
-        if raw:
-            return int(raw)
+        for key in ("HIVE_REPORT_CHANNEL_ID", "hive_report_channel"):
+            raw = str(_db.get_config(key) or "").strip()
+            if raw:
+                return int(float(raw))
     except Exception:
         pass
     return HIVE_REPORT_CHANNEL_DEFAULT

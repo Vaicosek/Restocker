@@ -43,6 +43,11 @@ _CHANNEL_KEYS = [
     ("Trade-network forum channel", "NETWORK_FORUM_CHANNEL_ID"),
     ("Payment-proof archive channel", "PAYMENT_PROOF_CHANNEL_ID"),
     ("Fulfillment-proof archive channel", "FULFILL_PROOF_CHANNEL_ID"),
+    # Where the hive project report lands (posted on bot start and after each 6h
+    # autopay sweep). Registered here so /config and the AI's set_channel_config can
+    # rebind it — it used to be a bare bot_config key neither of them knew about, so
+    # asking the bot where the hive report went got "no such key".
+    ("Hive project report channel", "HIVE_REPORT_CHANNEL_ID"),
 ]
 _GUILD_KEY = ("Funds-report guild", "FUNDS_REPORT_GUILD_ID")
 
