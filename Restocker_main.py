@@ -4016,8 +4016,9 @@ async def _process_csn_attachment(attachment: discord.Attachment, report_channel
                         f"declares `{csv_mid}`.\n"
                         f"• If this scanner really serves `{csv_mid}`: post the file in that "
                         f"market's own channel.\n"
-                        f"• If this machine scans `{mid}`: fix `market_id` in "
-                        f"`.minecraft/sales/csn_config.json` and re-scan.",
+                        f"• If this machine scans `{mid}`: open the CSN mod's settings "
+                        f"screen in-game (Mod Menu → CSN Export, or the settings key), set "
+                        f"**Market ID** to `{mid}`, and re-scan.",
                         allowed_mentions=discord.AllowedMentions.none())
                 except Exception:
                     pass
@@ -4145,9 +4146,10 @@ async def _process_csn_attachment(attachment: discord.Attachment, report_channel
                         f"**`{csv_market_id}`** (code verified). Nothing was recorded.\n"
                         f"• If this scanner really serves `{csv_market_id}`: post the report in "
                         f"that market's own channel (or any unbound channel).\n"
-                        f"• If this machine scans `{_bound_id}`: open "
-                        f"`.minecraft/sales/csn_config.json`, set `market_id` to `{_bound_id}` "
-                        f"with its code from `/market settings`, then press F6 to re-scan.",
+                        f"• If this machine scans `{_bound_id}`: open the CSN mod's settings "
+                        f"screen in-game (Mod Menu → CSN Export), set **Market ID** to "
+                        f"`{_bound_id}` and **Market Code** to its code from `/market settings`, "
+                        f"then press F6 to re-scan.",
                         allowed_mentions=discord.AllowedMentions.none())
                 else:
                     await report_channel.send(
@@ -11895,6 +11897,20 @@ Teams & Manager Overrides (/team subcommands) — how a manager gets workers and
 - /team leaderboard — cross-team leaderboard so teams compete on efficiency
 - /team webhook / /team channel / /team unbind — (Manager) bind/unbind a live team feed + weekly digest
 - Manager Panel → Fund project / Pay from project — hand a manager a budget; they pay their team and keep the rest
+CSN MOD SETUP — GET THIS RIGHT, YOU KEEP GETTING IT WRONG:
+The CSN mod is configured ENTIRELY through its in-game settings screen: **Mod Menu → CSN Export
+→ Config**. Never tell anyone to edit, open, create or paste anything into
+`.minecraft/sales/csn_config.json` — that file exists, but it is the mod's own storage and
+hand-editing it is not the supported path and not what owners should be told to do.
+What a new market owner needs, and where each value goes IN THAT SCREEN:
+  • Discord Webhook URL — the webhook for their bound report channel
+  • Market ID — e.g. `lulachmarket`
+  • Market Code — the verification code from /market settings
+  • Your Land Claim Name(s) — comma-separated, exactly as `/la` shows them
+Then F6 exports sales, and the stock-scan key captures shop fullness.
+If a webhook other than the bot's auto-generated one should be used, say so plainly and give
+that URL — do not make the owner reconcile two different webhooks on their own.
+
 HOW THE MANAGER CUT WORKS (explain this when asked): a worker registers their EXACT in-game name (IGN) so the CSN mod's "who sold what" links to their Discord account. The manager then earns override commissions on that worker's activity, paid as MINTED bonuses ON TOP — they are NEVER taken from the worker, who always keeps their full earnings:
   - Order payouts: the manager earns ~5% (default) of each worker's fulfilled-order payout.
   - Loyalty points: the manager gets a matching ~5% of the worker's loyalty points.
@@ -16598,4 +16614,30 @@ from views.stock import StockTradeModal, StockPanelView, StockAlarmView
 from views.web import FuturesOrderView, WebOrderView, PayoutReviewView, InvestorWithdrawApprovalView, FuturesBulkView
 # __VIEW_IMPORTS__
 
-asyncio.run(_main())
+# ── Event-loop watchdog ──────────────────────────────────────────────────────
+# 2026-08-06: the bot pegged a CPU core and Discord logged "heartbeat blocked for
+# more than 10 seconds", which cascaded into gateway invalidations, cloudflared TLS
+# timeouts and even `lookup localhost` failing — all symptoms of a STARVED EVENT
+# LOOP, not of a network fault. discord.py's stack dump only samples wherever the
+# loop happened to be standing, which is not enough to name the culprit. asyncio's
+# own slow-callback logging names the exact coroutine and how long it hogged the
+# loop. Threshold via env CSN_SLOW_CALLBACK_SECONDS; set 0 to switch it off.
+try:
+    _slow_cb = float(os.getenv("CSN_SLOW_CALLBACK_SECONDS", "0.5") or 0)
+except Exception:
+    _slow_cb = 0.5
+
+if _slow_cb > 0:
+    logging.getLogger("asyncio").setLevel(logging.WARNING)
+
+    async def _main_with_watchdog():
+        _loop = asyncio.get_running_loop()
+        _loop.slow_callback_duration = _slow_cb
+        _loop.set_debug(True)
+        log.info("[watchdog] slow-callback logging ON — anything holding the event "
+                 "loop longer than %.2fs will be named in the log.", _slow_cb)
+        await _main()
+
+    asyncio.run(_main_with_watchdog())
+else:
+    asyncio.run(_main())

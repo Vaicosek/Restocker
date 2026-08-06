@@ -64,6 +64,23 @@ update_order_messages = core.update_order_messages
 _team_perf_embed = core._team_perf_embed
 _team_post = core._team_post
 
+async def _load_orders_async():
+    """load_orders() off the event loop.
+
+    2026-08-06: Discord logged "heartbeat blocked for more than 10 seconds" with the
+    loop standing inside load_orders(), and the container sat at 100% CPU — the gateway
+    dropped, cloudflared's TLS handshakes timed out, and even `lookup localhost` failed.
+    Those are all symptoms of a starved event loop, not a network fault.
+
+    load_orders() is synchronous SQLite + a full normalisation pass over every order, and
+    the fast loops below call it every 15 seconds. It is quick on a small table, but it is
+    still CPU work sitting directly on the loop, and under any contention it becomes the
+    thing that blocks heartbeats. A worker thread costs nothing here and takes the whole
+    class of stall off the table."""
+    import asyncio as _aio
+    return await _aio.to_thread(load_orders)
+
+
 class LoopsCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -83,7 +100,7 @@ class LoopsCog(commands.Cog):
 
                 now = datetime.now(timezone.utc)
 
-                data = load_orders()
+                data = await _load_orders_async()
                 orders_list = data.get("orders", []) or []
 
                 ready = [
@@ -142,7 +159,7 @@ class LoopsCog(commands.Cog):
                 # Un-strand any order whose card FAILED to post: revert worker_announced so the
                 # next loop retries it. Successfully-posted orders stay marked → no double-post.
                 if _failed_ids:
-                    _fd = load_orders()
+                    _fd = await _load_orders_async()
                     _fset = set(_failed_ids)
                     for _fo in _fd.get("orders", []):
                         if isinstance(_fo, dict) and int(_fo.get("id", 0) or 0) in _fset:
@@ -183,7 +200,7 @@ class LoopsCog(commands.Cog):
 
                 content_hash = hashlib.sha1(content.encode("utf-8", errors="ignore")).hexdigest()
 
-                data2 = load_orders()
+                data2 = await _load_orders_async()
                 ui2 = data2.setdefault("ui", {})
                 last_hash = ui2.get("last_worker_ping_hash")
                 last_hash_ts = ui2.get("last_worker_ping_ts")
@@ -209,7 +226,7 @@ class LoopsCog(commands.Cog):
 
                             # Reload before saving — the history scan above awaited, so data2
                             # may be stale (see the main save below for the full rationale).
-                            _d = load_orders()
+                            _d = await _load_orders_async()
                             _u = _d.setdefault("ui", {})
                             _u["last_worker_ping_hash"] = content_hash
                             _u["last_worker_ping_ts"] = now_ts2
@@ -237,7 +254,7 @@ class LoopsCog(commands.Cog):
                 # order row, so a claim made during the minutes-long DM loop would be reverted
                 # to unclaimed (→ double claim / double payout). Reload fresh and write ONLY
                 # the ui dedup keys this loop actually owns.
-                data3 = load_orders()
+                data3 = await _load_orders_async()
                 ui3 = data3.setdefault("ui", {})
                 ui3["last_worker_ping_hash"] = content_hash
                 ui3["last_worker_ping_ts"] = now_ts2
@@ -278,7 +295,7 @@ class LoopsCog(commands.Cog):
 
                 now = datetime.now(timezone.utc)
 
-                data = load_orders()
+                data = await _load_orders_async()
                 orders_list = data.get("orders", []) or []
 
                 ready = []
@@ -344,7 +361,7 @@ class LoopsCog(commands.Cog):
                     log.error("[employee_batch_dispatch_loop] save_orders failed; NOT sending to avoid duplicates.")
                     return
 
-                data = load_orders()
+                data = await _load_orders_async()
                 store = _get_ui_store(data)
 
                 sent = 0
@@ -406,7 +423,7 @@ class LoopsCog(commands.Cog):
                     except Exception:
                         failed += 1
 
-                fresh = load_orders()
+                fresh = await _load_orders_async()
                 for _mid, _msgid in dm_tracks:
                     _track_batch_dm_message(fresh, _mid, _msgid)
                 save_orders(fresh)
