@@ -157,9 +157,28 @@ class VotingCog(commands.Cog):
 
     @vote_close_loop.before_loop
     async def _before_vote_close(self):
-        await self.bot.wait_until_ready()
+        # Cogs load BEFORE bot.start(), so wait_until_ready() can be reached while the
+        # client is still uninitialised — discord.py then raises RuntimeError and the
+        # task dies for the whole boot, silently (the traceback only surfaces at
+        # shutdown as "Task exception was never retrieved"). Poll until the client
+        # exists, then wait properly. Same fix as cogs/hive.py and cogs/loops.py.
+        import asyncio as _aio
+        for _ in range(600):
+            try:
+                await self.bot.wait_until_ready()
+                return
+            except RuntimeError:
+                await _aio.sleep(1)
+        log.error("[vote] gave up waiting for the gateway — the close loop will not run.")
 
     async def cog_load(self):
+        # Only start here on a live reload (gateway already up); the normal boot path
+        # starts the loop from on_ready, after login.
+        if self.bot.is_ready() and not self.vote_close_loop.is_running():
+            self.vote_close_loop.start()
+
+    @commands.Cog.listener()
+    async def on_ready(self):
         if not self.vote_close_loop.is_running():
             self.vote_close_loop.start()
 

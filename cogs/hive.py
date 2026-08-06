@@ -42,6 +42,35 @@ _market_owner_id = core._market_owner_id
 PROJECT_DETAIL = "project:hive-harvesting"
 
 
+async def _wait_ready(bot) -> bool:
+    """Wait for the gateway, surviving the client not existing yet.
+
+    THE BUG THIS FIXES (found in the live console, 2026-08-06): cogs are loaded BEFORE
+    `bot.start()` is called. A loop started in `__init__` therefore reaches its
+    `before_loop` while `Client._ready` is still MISSING, and discord.py raises
+
+        RuntimeError: Client has not been properly initialised.
+
+    from `wait_until_ready()`. That exception kills the task **permanently and
+    silently** — nothing retries it, and the only trace is a "Task exception was never
+    retrieved" dump at SHUTDOWN, hours later. The 6-hourly `autopay_sweep_loop` had been
+    dead on every boot for exactly this reason, which is why harvest rows piled up unpaid
+    and no sweep line ever appeared in the log.
+
+    Polling until the client is initialised, then waiting properly, makes the loop
+    immune to how early the cog happens to be loaded."""
+    import asyncio as _aio
+    for _ in range(600):                       # ~10 minutes of patience, then give up
+        try:
+            await bot.wait_until_ready()
+            return True
+        except RuntimeError:
+            await _aio.sleep(1)                # bot.start() hasn't run yet — wait for it
+    log.error("[hive] gave up waiting for the gateway after 10 minutes — the sweep and "
+              "the startup report will not run this boot.")
+    return False
+
+
 def _fmt(n) -> str:
     return f"{int(round(float(n))):,}"
 
@@ -453,13 +482,32 @@ class HiveCog(commands.Cog):
         # The sweep's own first run happens seconds after boot, at the same moment the
         # startup task posts. Without this the channel got the report twice.
         self._sweep_reported_once = False
-        # The startup report gets its OWN task. It used to ride on the back of the
-        # payout sweep, which meant anything that stopped the sweep — an exception
-        # before it reached the report, the loop never starting, the loop being
-        # cancelled — silently took the report with it, and the symptom was an empty
-        # channel with no explanation. These two jobs are independent now.
-        self.startup_report_loop.start()
-        self.autopay_sweep_loop.start()
+        # DO NOT start the loops here. __init__ runs during load_extension, which is
+        # BEFORE bot.start() — so before_loop's wait_until_ready() hits an uninitialised
+        # client, raises RuntimeError, and the task dies for the whole boot. That is
+        # precisely what had been killing autopay_sweep_loop on every single start (no
+        # sweep line ever reached the log, and harvest rows sat unpaid). cogs/loops.py
+        # already solved this; the hive cog now follows the same pattern — start from
+        # on_ready, or from cog_load only when the bot is already up (a live reload).
+
+    def _start_loops(self):
+        # startup_report_loop is count=1, so once it has run is_running() goes False.
+        # Without the _reported_this_boot guard a gateway RESUME would re-fire on_ready
+        # and post the report again.
+        if not self._reported_this_boot and not self.startup_report_loop.is_running():
+            self.startup_report_loop.start()
+        if not self.autopay_sweep_loop.is_running():
+            self.autopay_sweep_loop.start()
+
+    async def cog_load(self):
+        if self.bot.is_ready():          # live cog reload — the gateway is already up
+            self._start_loops()
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        # Fires after login, so wait_until_ready() returns instantly and the loops
+        # actually run.
+        self._start_loops()
 
     async def cog_unload(self):
         self.autopay_sweep_loop.cancel()
@@ -470,6 +518,9 @@ class HiveCog(commands.Cog):
     async def startup_report_loop(self):
         """Runs exactly once, shortly after the bot is ready. Nothing else depends on
         it and it depends on nothing else."""
+        if not self.bot.is_ready():
+            log.error("[hive report] startup task woke without a ready gateway — aborting")
+            return
         log.info("[hive report] startup task firing (channel %s)", _hive_report_channel_id())
         try:
             self._reported_this_boot = True
@@ -486,7 +537,8 @@ class HiveCog(commands.Cog):
     @startup_report_loop.before_loop
     async def _before_startup_report(self):
         import asyncio as _aio
-        await self.bot.wait_until_ready()
+        if not await _wait_ready(self.bot):
+            return
         # Give the channel cache and the other cogs a moment to settle so the first
         # thing the report does isn't a cold fetch_channel.
         await _aio.sleep(15)
@@ -558,7 +610,7 @@ class HiveCog(commands.Cog):
 
     @autopay_sweep_loop.before_loop
     async def _before_autopay_sweep(self):
-        await self.bot.wait_until_ready()
+        await _wait_ready(self.bot)
 
     hive = app_commands.Group(
         name="hive",
