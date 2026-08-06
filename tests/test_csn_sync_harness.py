@@ -19,7 +19,7 @@ sys.path.insert(0, BOT)
 SRC = open(os.path.join(BOT, "Restocker_main.py"), encoding="utf-8").read()
 tree = ast.parse(SRC)
 WANT = {"_parse_monthly_csv", "_parse_period_transactions", "_parse_export_csv",
-        "_extract_market_info", "_merge_month_entry", "_sanitize_alias_name",
+        "_extract_market_info", "_extract_shop_name", "_merge_month_entry", "_sanitize_alias_name",
         "_parse_stock_csv", "_learn_brew_aliases_from_stock", "_parse_gear_enchants",
         "_brew_text_has_junk", "_hive_item_value", "_harvest_rate_for"}
 segs = []
@@ -261,6 +261,113 @@ tp = NS["_parse_period_transactions"](ttxt)
 check("round-trip: apostrophe/quotes/commas/§ survive",
       len(tp) == 1 and tp[0]["actor"] == "greyhame’s" and tp[0]["item"] == 'A "quoted", item§6'
       and abs(tp[0]["coins"] - 1.25) < 1e-9, str(tp))
+
+# ═════════════════════════════════════════════════════════════════════════════
+# TEST 10+: regressions for the four-agent audit of 2026-08-06.
+# Each of these reproduces a CONFIRMED bug — they fail against the code as it
+# stood before that audit.
+# ═════════════════════════════════════════════════════════════════════════════
+
+# ── A. `# MODE,delta` must be scoped to its own RUN block ────────────────────
+# One block written by the upgraded mod used to relabel every legacy CUMULATIVE
+# block in the same file (the mod APPENDS), summing month-to-date snapshots
+# instead of taking the last one. Measured: a true 200,085 reported as 3,102,858.
+_HDR = ("item,total_sold_qty,total_bought_qty,net_coins,times_sold,times_bought,"
+        "income_coins,expense_coins")
+def _blk(rows, ts, mode=None):
+    s = f"# MODE,{mode}\n" if mode else ""
+    s += f"# RUN,{ts}\n"
+    for it, q, inc in rows:
+        s += f"{it},{q},0,{inc},1,0,{inc},0\n"
+    return s
+
+_legacy = "# MONTHLY_REPORT,x\n" + _HDR + "\n" + "".join(
+    _blk([("Diamond", q, inc)], f"2026-08-0{i}T00:00:00Z")
+    for i, (q, inc) in enumerate([(10, 1000.0), (20, 2000.0), (30, 3000.0)], 1))
+_i, _inc, _sp = NS["_parse_monthly_csv"](_legacy)
+check("legacy cumulative file: last snapshot wins (3000)", abs(_inc - 3000.0) < 0.01, str(_inc))
+
+_mixed = _legacy + _blk([("Diamond", 2, 200.0)], "2026-08-05T00:00:00Z", mode="delta")
+_i, _inc, _sp = NS["_parse_monthly_csv"](_mixed)
+check("mixed file: cumulative prefix + delta block = 3200 (was 6200)",
+      abs(_inc - 3200.0) < 0.01, str(_inc))
+check("mixed file reports its mode honestly",
+      "mixed" in str(NS["_LAST_MONTHLY_PARSE_META"].get("mode")),
+      str(NS["_LAST_MONTHLY_PARSE_META"]))
+
+_pure = "# MONTHLY_REPORT,x\n" + _HDR + "\n" + "".join(
+    _blk([("Diamond", 1, 100.0)], f"2026-08-0{i}T00:00:00Z", mode="delta") for i in range(1, 6))
+_i, _inc, _sp = NS["_parse_monthly_csv"](_pure)
+check("pure delta file still simply sums (500)", abs(_inc - 500.0) < 0.01, str(_inc))
+
+# ── B. the ±90s window must run for uid-bearing rows too ────────────────────
+# A uid MISS used to fall straight through to INSERT, so the same sale re-read
+# with a drifted timestamp (a different minute bucket → a different uid) was
+# inserted twice and its coins booked as fresh earnings.
+def _uid(actor, seller, verb, qty, item, coins, ts):
+    return hashlib.sha256(
+        f"{actor}|{seller}|{verb}|{qty}|{item}|{coins}|{ts[:16]}".encode()).hexdigest()[:32]
+
+def _row(ts):
+    return {"actor": "Drifty", "seller": "Vaicos", "verb": "bought", "item": "Netherite Scrap",
+            "qty": 3, "coins": 900.0, "sale_ts": ts,
+            "sale_uid": _uid("Drifty", "Vaicos", "bought", 3, "Netherite Scrap", 900.0, ts)}
+
+nA, _ = db.add_csn_transactions_detailed("driftmkt", [_row("2026-08-03T15:34:59.400Z")])
+nB, _ = db.add_csn_transactions_detailed("driftmkt", [_row("2026-08-03T15:35:12.900Z")])
+check("uid-bearing re-read 13s later across a minute boundary: rejected",
+      nA == 1 and nB == 0, f"{nA}/{nB}")
+nC, _ = db.add_csn_transactions_detailed("driftmkt", [_row("2026-08-03T15:45:00.000Z")])
+check("genuinely repeated sale 10 min later still recorded", nC == 1, str(nC))
+
+# ── C. hive dedup must not be scoped to the market ──────────────────────────
+# The same physical sale exported under two market ids created two payable rows
+# and each market settled it independently. Live in the DB: JesseNapoleon's four
+# Honey Block sales under both 'greyhames' and 'vtech'.
+_hts = "2026-08-05T15:54:52.124Z"
+h1 = db.add_hive_harvest("mktA", "Harvey", None, "Honey Block", 546, 5.46875, "msg:a", 0, sale_ts=_hts)
+h2 = db.add_hive_harvest("mktB", "Harvey", None, "Honey Block", 546, 5.46875, "msg:b", 0, sale_ts=_hts)
+check("same sale under a SECOND market id is rejected", h1 and not h2, f"{h1}/{h2}")
+h3 = db.add_hive_harvest("mktB", "Harvey", None, "Honey Block", 546, 5.46875, "msg:c", 0,
+                         sale_ts="2026-08-05T17:54:52.124Z")
+check("a real second harvest 2h later still records", bool(h3), str(h3))
+
+# ── D. claim_hive_harvests must report WHICH rows it won ────────────────────
+# _settle_groups released its whole id list on a partial claim, un-paying rows
+# another run had already moved coins for; the next sweep paid them again.
+_ids = []
+for i in range(4):
+    _ids.append(db.add_hive_harvest("claimmkt", "Clara", "42", "Honeycomb Block", 100 + i,
+                                    4.6875, "msg:claim", i, sale_ts=f"2026-08-0{i+1}T10:00:00Z"))
+_ids = [i for i in _ids if i]
+_runB = db.claim_hive_harvests(_ids[2:])          # the other settle run wins two rows
+_runA = db.claim_hive_harvests(_ids)              # this run then claims what is left
+check("claim returns only the rows it actually flipped",
+      sorted(_runA) == sorted(_ids[:2]) and sorted(_runB) == sorted(_ids[2:]),
+      f"A={_runA} B={_runB}")
+check("the two runs' claims are disjoint — no row can be paid twice",
+      not (set(_runA) & set(_runB)), f"{_runA} / {_runB}")
+
+# ── E. one month source per FILE, not per poster ────────────────────────────
+# The same file re-uploaded by a manager counted as an extra shop.
+_it = {"Diamond": {"sold_qty": 10, "net_coins": 1000.0}}
+db.csn_set_month_source("srcmkt", "2026-08", "poster:111", 1000.0, 0.0, _it)
+db.csn_set_month_source("srcmkt", "2026-08", "poster:222", 1000.0, 0.0, _it)   # same file, by hand
+_r = db.csn_month_totals("srcmkt", "2026-08")
+check("identical file via a second transport does not multiply the month",
+      abs(_r["income"] - 1000.0) < 0.01 and _r["sources"] == 1, str(_r))
+db.csn_set_month_source("srcmkt", "2026-08", "poster:333", 250.0, 0.0,
+                        {"Emerald": {"sold_qty": 5, "net_coins": 250.0}})
+_r = db.csn_month_totals("srcmkt", "2026-08")
+check("a genuinely different shop still adds to the month",
+      abs(_r["income"] - 1250.0) < 0.01 and _r["sources"] == 2, str(_r))
+
+# ── F. the mod must stamp # SHOP so the rollup can key on the shop ──────────
+check("_extract_shop_name reads the mod's # SHOP stamp",
+      NS["_extract_shop_name"]("# MARKET,vtech,AB12\n# SHOP,Vaicos_Isman\n# RUN,x\n")
+      == "Vaicos_Isman")
+check("_extract_shop_name returns '' when the stamp is absent",
+      NS["_extract_shop_name"]("# MARKET,vtech,AB12\n# RUN,x\n") == "")
 
 print()
 print("FAILURES:", FAIL)

@@ -68,6 +68,53 @@ def find_duplicate_clusters(conn):
     return out
 
 
+def find_cross_market_clusters(conn, skip_ids=()):
+    """The same physical sale exported twice under two different market_ids.
+
+    add_hive_harvest's +/-120s guard and the uq_hive_sale index are both keyed on
+    market_id, so when the mod's configured market id changes between two runs the
+    identical sale lands twice - once per market - and each market settles it
+    independently. Grouping ignores market_id; the keeper is the row belonging to the
+    market that owns the most harvest rows overall (i.e. the live one), because that
+    is where the hive feeds and the autopay flag point."""
+    skip = set(skip_ids)
+    weight = {m: n for m, n in conn.execute(
+        "SELECT market_id, COUNT(*) FROM hive_harvests GROUP BY market_id").fetchall()}
+    rows = [r for r in conn.execute(
+        "SELECT * FROM hive_harvests WHERE sale_ts IS NOT NULL").fetchall()
+        if r["id"] not in skip]
+
+    groups = {}
+    for r in rows:
+        groups.setdefault((r["ign"], r["item"], r["qty"]), []).append(r)
+
+    out = []
+    for members in groups.values():
+        if len({r["market_id"] for r in members}) < 2:
+            continue
+        members = sorted(members, key=lambda r: ts_seconds(r["sale_ts"]) or 0)
+        cluster = [members[0]]
+        for r in members[1:]:
+            prev = ts_seconds(cluster[-1]["sale_ts"])
+            cur = ts_seconds(r["sale_ts"])
+            if prev is not None and cur is not None and abs(cur - prev) <= WINDOW_SECONDS:
+                cluster.append(r)
+            else:
+                if len({x["market_id"] for x in cluster}) > 1:
+                    out.append(_split_cross(cluster, weight))
+                cluster = [r]
+        if len({x["market_id"] for x in cluster}) > 1:
+            out.append(_split_cross(cluster, weight))
+    return out
+
+
+def _split_cross(cluster, weight):
+    """Keep the row in the busiest (live) market; everything else is the duplicate."""
+    ranked = sorted(cluster, key=lambda r: (-weight.get(r["market_id"], 0),
+                                            ts_seconds(r["sale_ts"]) or 0))
+    return ranked[0], ranked[1:]
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--db", default="restocker.db", help="path to restocker.db")
@@ -87,6 +134,10 @@ def main():
         wage_pct = 17.0
 
     clusters = find_duplicate_clusters(conn)
+    same_market_dups = sum(len(d) for _k, d in clusters)
+    cross = find_cross_market_clusters(
+        conn, skip_ids=[d["id"] for _k, dd in clusters for d in dd])
+    clusters = clusters + cross
     if not clusters:
         print("No duplicate hive rows found - nothing to do.")
         return 0
@@ -103,6 +154,13 @@ def main():
 
     print(f"Wage rate: {wage_pct:g}%   Window: +/-{WINDOW_SECONDS}s")
     print(f"Duplicate rows: {len(dup_ids)} across {len(clusters)} sale(s)")
+    print(f"  same market (timestamp drift): {same_market_dups}")
+    print(f"  same sale under two market ids: {len(dup_ids) - same_market_dups}")
+    for keeper, dups in cross:
+        for d in dups:
+            print(f"    keep #{keeper['id']} [{keeper['market_id']}] "
+                  f"drop #{d['id']} [{d['market_id']}] "
+                  f"{d['ign']} {d['qty']}x {d['item']} @ {d['sale_ts']}")
     print(f"Duplicated harvest value: {dup_value:,.0f}")
     print("\nOverpaid wages (already credited):")
     total = 0.0

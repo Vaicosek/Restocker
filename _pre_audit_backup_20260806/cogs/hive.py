@@ -120,17 +120,10 @@ def _group_rows(rows: list):
             unregistered[str(r.get("ign"))] = unregistered.get(str(r.get("ign")), 0) + v
             continue
         g = groups.setdefault(str(uid), {"ign": r.get("ign"), "ids": [], "qty": 0,
-                                         "value": 0.0, "items": {}, "by_id": {}})
+                                         "value": 0.0, "items": {}})
         g["ids"].append(int(r["id"]))
         g["qty"] += int(r.get("qty") or 0)
         g["value"] += int(r.get("qty") or 0) * val
-        # AUDIT FIX (high): keep each row's own qty/value so a settle run that only
-        # wins PART of its snapshot can pay for exactly what it claimed instead of
-        # releasing the whole group (which used to un-pay rows another run had
-        # already moved coins for, and the next sweep paid them twice).
-        g["by_id"][int(r["id"])] = {"item": str(r.get("item")),
-                                    "qty": int(r.get("qty") or 0),
-                                    "value": int(r.get("qty") or 0) * val}
         # Per-item tally so the harvester's DM can say WHAT they delivered, not just a
         # lump "N pcs" — they sell honey and comb at different values and ask why.
         it = g["items"].setdefault(str(r.get("item")), {"qty": 0, "value": 0.0})
@@ -198,11 +191,7 @@ class HiveCog(commands.Cog):
             return
         for mid in sorted(mids):
             try:
-                # AUDIT FIX (medium, 2026-08-06): one shared definition — unset means ON,
-                # matching the export path that has actually been paying people. This
-                # used to read "== '1'", so an unconfigured market was paid on export but
-                # skipped by the sweep, and its unpaid rows piled up forever.
-                if not core.hive_autopay_on(mid):
+                if str(_db.get_config(f"hive_autopay:{mid}") or "") != "1":
                     continue                      # respect autopay being off
                 rows = _db.get_unpaid_hive_harvests(mid)
                 if not rows:
@@ -243,6 +232,7 @@ class HiveCog(commands.Cog):
         paid_lines, harv_total = [], 0
         settled_value = 0
         for uid, g in sorted(groups.items(), key=lambda kv: -kv[1]["value"]):
+            pay = int(round(g["value"] * pct / 100.0))
             # AUDIT FIX (high): CLAIM FIRST, pay after. Two concurrent settle runs
             # (the autopay listener mid-batch + a manager's manual payout) used to
             # snapshot the same unpaid rows and BOTH paid them. The claim is one
@@ -250,31 +240,17 @@ class HiveCog(commands.Cog):
             # fails releases the claim so the rows stay payable — and value is only
             # BOOKED for rows settled in this run, so a later retry can't book the
             # same production twice.
-            #
-            # AUDIT FIX (high, 2026-08-06): claim_hive_harvests returns the ids THIS
-            # run actually flipped. On a partial claim we now pay for exactly those
-            # rows and leave the rest to whoever owns them. The old code released the
-            # WHOLE id list on a partial claim, which reset rows the other run had
-            # already paid coins for back to unpaid — the next sweep paid them again.
-            claimed_ids = _db.claim_hive_harvests(g["ids"])
-            if not claimed_ids:
+            claimed = _db.mark_hive_harvests_paid(g["ids"])
+            if claimed <= 0:
                 continue                       # another settle run owns these rows
-            if len(claimed_ids) < len(g["ids"]):
-                # Recompute this run's share from the rows we actually won. Never
-                # touch the rows we lost — they belong to the run that claimed them.
-                by_id = g.get("by_id") or {}
-                won = [by_id.get(i) for i in claimed_ids if by_id.get(i)]
-                g = dict(g)
-                g["ids"] = list(claimed_ids)
-                g["qty"] = sum(w["qty"] for w in won)
-                g["value"] = sum(w["value"] for w in won)
-                items = {}
-                for w in won:
-                    it = items.setdefault(w["item"], {"qty": 0, "value": 0.0})
-                    it["qty"] += w["qty"]
-                    it["value"] += w["value"]
-                g["items"] = items
-            pay = int(round(g["value"] * pct / 100.0))
+            if claimed < len(g["ids"]):
+                # ambiguous overlap with another run's snapshot — release and let the
+                # next run recompute cleanly; no coins move on ambiguity.
+                try:
+                    _db.unmark_hive_harvests_paid(g["ids"])
+                except Exception:
+                    pass
+                continue
             if pay <= 0:
                 settled_value += g["value"]    # produced value with a 0-coin wage still books
                 continue
@@ -390,8 +366,8 @@ class HiveCog(commands.Cog):
                 await message.add_reaction("🐝")
             except Exception:
                 pass
-            if not core.hive_autopay_on(mid):          # unset = ON; "0" = record-only
-                return
+            if str(_db.get_config(f"hive_autopay:{mid}") or "") != "1":
+                return                                 # record-only until autopay is on
             rows = _db.get_hive_harvests_by_ids(new_ids)
             groups, unregistered, _unvalued = _group_rows(rows)
             if groups:

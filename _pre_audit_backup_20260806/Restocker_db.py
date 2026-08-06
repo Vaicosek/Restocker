@@ -1598,39 +1598,10 @@ def csn_set_month_source(market_id: str, month: str, source_key: str,
                          income: float, spent: float, items: dict) -> None:
     """Record ONE uploader's contribution to a market-month. Replaces that uploader's
     previous figures for the same month, so re-uploading its file is idempotent and
-    never double-counts.
-
-    AUDIT FIX (high, 2026-08-06): source_key used to be pure TRANSPORT identity (the
-    Discord poster id, or the filename). The same physical file arriving by a second
-    route — a manager re-uploading it by hand, a webhook rotated to another bot user —
-    looked like a brand-new shop and its figures were ADDED to the month, multiplying
-    the total. Before inserting a new source we now check whether some other source row
-    for this market-month holds byte-identical item figures; if so that is the same
-    file, and we update THAT row instead of adding a second one."""
+    never double-counts."""
     conn_items = json.dumps(items or {}, ensure_ascii=False)
     now = datetime.now(timezone.utc).isoformat()
     with db() as conn:
-        try:
-            mine = conn.execute(
-                "SELECT 1 FROM csn_month_sources WHERE market_id=? AND month=? AND source_key=?",
-                (str(market_id), str(month), str(source_key))).fetchone()
-            if not mine and conn_items not in ("{}", "null"):
-                twin = conn.execute(
-                    "SELECT source_key FROM csn_month_sources "
-                    "WHERE market_id=? AND month=? AND items_json=? "
-                    "AND income=? AND spent=?",
-                    (str(market_id), str(month), conn_items,
-                     float(income or 0), float(spent or 0))).fetchone()
-                if twin:
-                    # Same file, different transport. Keep the original row; just
-                    # refresh its timestamp so it doesn't look stale.
-                    conn.execute(
-                        "UPDATE csn_month_sources SET updated_at=? "
-                        "WHERE market_id=? AND month=? AND source_key=?",
-                        (now, str(market_id), str(month), str(twin[0])))
-                    return
-        except Exception:
-            pass       # never let the dedup probe block the real write
         conn.execute(
             "INSERT INTO csn_month_sources (market_id, month, source_key, income, spent,"
             " items_json, updated_at) VALUES (?,?,?,?,?,?,?) "
@@ -3080,24 +3051,13 @@ def add_hive_harvest(market_id: str, ign: str, user_id, item: str, qty: int,
         # Two ingest paths make it worse — the csn-hive webhook lines and the export CSV
         # both describe the same sales with independently-drifting timestamps.
         # So: same market+ign+item+qty within ±120s is the same sale, full stop.
-        #
-        # AUDIT FIX (high, 2026-08-06): the guard below no longer filters on market_id.
-        # A sale is a physical event — the same honey leaving the same barrel — and the
-        # market id is just how the exporter happened to be configured at the time. When
-        # the mod's market id changes between two runs (or an export CSV is bound to one
-        # market while the hive webhook feed is bound to another), the identical sale
-        # landed once per market and EACH market settled it independently. That is live
-        # in the database right now: JesseNapoleon's four Honey Block sales exist under
-        # both 'greyhames' and 'vtech' with byte-identical timestamps. Harvester+item+qty
-        # within ±120s is one sale no matter which market claims it; the first market to
-        # record it owns it.
         if sale_ts:
             mine = _csn_ts_seconds(sale_ts)
             if mine is not None:
                 for row in conn.execute(
-                        "SELECT sale_ts FROM hive_harvests WHERE ign=? COLLATE NOCASE "
+                        "SELECT sale_ts FROM hive_harvests WHERE market_id=? AND ign=? "
                         "AND item=? AND qty=? AND sale_ts IS NOT NULL",
-                        (str(ign), str(item), int(qty))).fetchall():
+                        (str(market_id), str(ign), str(item), int(qty))).fetchall():
                     other = _csn_ts_seconds(row[0])
                     if other is not None and abs(other - mine) <= 120:
                         return None            # already ingested — never pay twice
@@ -3178,42 +3138,9 @@ def mark_hive_harvests_paid(ids: list) -> int:
         return cur.rowcount
 
 
-def claim_hive_harvests(ids: list) -> list:
-    """Claim rows for payment and return the ids THIS call actually flipped.
-
-    mark_hive_harvests_paid only reports HOW MANY it claimed, which is not enough when
-    two settle runs overlap: on a partial claim the caller released its whole id list
-    and un-paid rows the other run had already moved coins for, so the next sweep paid
-    them a second time. Callers must release exactly what this returned, never the
-    list they asked for."""
-    if not ids:
-        return []
-    want = [int(i) for i in ids]
-    q = ",".join("?" * len(want))
-    with db() as conn:
-        try:
-            rows = conn.execute(
-                f"UPDATE hive_harvests SET paid=1, paid_at=datetime('now') "
-                f"WHERE id IN ({q}) AND paid=0 RETURNING id", want).fetchall()
-            return [int(r[0]) for r in rows]
-        except Exception:
-            # RETURNING needs SQLite 3.35+. The read and the write share one connection
-            # and one transaction, so no other writer can slip between them.
-            claimable = [int(r[0]) for r in conn.execute(
-                f"SELECT id FROM hive_harvests WHERE id IN ({q}) AND paid=0",
-                want).fetchall()]
-            if claimable:
-                q2 = ",".join("?" * len(claimable))
-                conn.execute(
-                    f"UPDATE hive_harvests SET paid=1, paid_at=datetime('now') "
-                    f"WHERE id IN ({q2}) AND paid=0", claimable)
-            return claimable
-
-
 def unmark_hive_harvests_paid(ids: list) -> int:
-    """Release a claim taken by claim_hive_harvests — used when the payment that
-    followed the claim failed, so the rows go back to payable. Pass ONLY the ids
-    claim_hive_harvests returned; releasing rows another run claimed double-pays them."""
+    """Release a claim taken by mark_hive_harvests_paid — used when the payment
+    that followed the claim failed, so the rows go back to payable."""
     if not ids:
         return 0
     with db() as conn:
@@ -3371,41 +3298,21 @@ def add_csn_transactions_detailed(market_id: str, rows: list) -> tuple:
                         (str(market_id), uid)).fetchone()
                     if dup:
                         continue
-                # AUDIT FIX (high, 2026-08-06): the ±90s window now runs for EVERY row,
-                # not only rows without a sale_uid. A uid MISS used to fall straight
-                # through to INSERT, which defeated the whole point of the window: the
-                # mod derives sale_ts from a minute-granularity "Xm ago" string, so a
-                # re-read of the same sale can land in the next minute bucket and hash
-                # to a DIFFERENT uid (measured: ~1 re-read in 3). Two alts scanning the
-                # same market did it constantly, and 182 of the live rows have no uid at
-                # all so a re-export with a uid could never match them. Verified: the
-                # same production sale replayed 60s later inserted a second time and its
-                # coins were booked as fresh earnings.
-                mine = _csn_ts_seconds(ts)
-                if mine is not None:
-                    cands = conn.execute(
-                        "SELECT id, sale_ts, sale_uid FROM csn_transactions "
-                        "WHERE market_id=? AND actor=? "
-                        "AND COALESCE(seller,'')=? AND verb=? AND item=? AND qty=? AND coins=?",
-                        (str(market_id), actor, seller, verb, item, qty, coins)).fetchall()
-                    near_id = None
-                    near_uid = None
-                    for c in cands:
-                        other = _csn_ts_seconds(c[1])
-                        if other is not None and abs(other - mine) <= 90:
-                            near_id, near_uid = c[0], c[2]
-                            break
-                    if near_id is not None:
-                        # Backfill the uid onto the legacy row so the cheap fast path
-                        # catches this sale next time instead of re-scanning.
-                        if uid and not near_uid:
-                            try:
-                                conn.execute(
-                                    "UPDATE csn_transactions SET sale_uid=? WHERE id=?",
-                                    (uid, int(near_id)))
-                            except Exception:
-                                pass       # a uid collision here just means no fast path
-                        continue
+                else:
+                    mine = _csn_ts_seconds(ts)
+                    if mine is not None:
+                        cands = conn.execute(
+                            "SELECT sale_ts FROM csn_transactions WHERE market_id=? AND actor=? "
+                            "AND COALESCE(seller,'')=? AND verb=? AND item=? AND qty=? AND coins=?",
+                            (str(market_id), actor, seller, verb, item, qty, coins)).fetchall()
+                        near = False
+                        for c in cands:
+                            other = _csn_ts_seconds(c[0])
+                            if other is not None and abs(other - mine) <= 90:
+                                near = True
+                                break
+                        if near:
+                            continue
                 cur = conn.execute("""
                     INSERT OR IGNORE INTO csn_transactions
                         (market_id, actor, seller, verb, item, qty, coins, sale_ts, sale_day, sale_uid)

@@ -2781,24 +2781,6 @@ def _hive_harvester_pct() -> float:
     return 17.0
 
 
-def hive_autopay_on(market_id) -> bool:
-    """Is automatic harvest payout enabled for this market?
-
-    AUDIT FIX (medium, 2026-08-06): ONE definition, used everywhere. The flag used to be
-    read three incompatible ways — the export path paid when it was unset ("not '0'"),
-    while the 6h sweep, the feed listener and the /hive status panel all treated unset as
-    OFF ("== '1'"). A market that had never been configured therefore paid its harvesters
-    on export but not on the sweep, and the panel reported "off" while coins were moving.
-
-    Unset means ON, matching the export path — the path that has actually been paying
-    people. Turning it off stays explicit: `hive_autopay:<mid>` = "0"."""
-    try:
-        import Restocker_db as _db
-        return str(_db.get_config(f"hive_autopay:{market_id}") or "") != "0"
-    except Exception:
-        return True
-
-
 def _hive_owner_pct(market_id) -> float:
     """Partner-owner's cut of harvested value on this market (0 on V Tech's own hives;
     e.g. 32 for a 60/40-after-harvesters partner). Config 'hive_owner_pct:<mid>'."""
@@ -3729,7 +3711,7 @@ async def _pay_honey_from_export(txns: list, market_id: str, report_channel):
         return []            # every sale was already in the ledger — nothing owed
     log.info("[hiveharvest] %s: %d new harvest row(s) recorded from export", market_id, len(new_ids))
 
-    autopay_off = not hive_autopay_on(market_id)
+    autopay_off = str(_db.get_config(f"hive_autopay:{market_id}") or "") == "0"
     cog = None
     try:
         cog = bot.get_cog("HiveCog")
@@ -4323,17 +4305,7 @@ async def _process_csn_attachment(attachment: discord.Attachment, report_channel
     # idempotent per uploader, but no longer mutually destructive.
     _merge_month = (csv_type == "export")
     if csv_type == "monthly":
-        # AUDIT FIX (high, 2026-08-06): prefer the shop's own `# SHOP` stamp over the
-        # transport identity. source_key is the Discord poster id, so the SAME file
-        # arriving by a second route counted as an extra uploader and multiplied the
-        # month. csn_set_month_source also refuses an identical-figures twin as a
-        # belt-and-braces guard for files written by older mod builds.
-        _shop = ""
-        try:
-            _shop = _extract_shop_name(csv_text)
-        except Exception:
-            _shop = ""
-        _src = (f"shop:{_shop}" if _shop else str(source_key or f"file:{filename}"))
+        _src = str(source_key or f"file:{filename}")
         try:
             import Restocker_db as _db_src
             _db_src.csn_set_month_source(effective_market_id, month_key, _src,
@@ -6729,24 +6701,6 @@ def _extract_market_info(csv_text: str) -> tuple[str, str]:
     return found
 
 
-def _extract_shop_name(csv_text: str) -> str:
-    """`# SHOP,<seller ign>` — stamped by the mod (2026-08-06+) so the bot can tell WHICH
-    shop produced a monthly file. This is the correct key for the per-uploader month
-    rollup: it is intrinsic to the shop, so the same file re-posted by a manager or
-    through a rotated webhook still counts once instead of multiplying the month."""
-    found = ""
-    for line in csv_text.splitlines():
-        s = line.strip()
-        if s.startswith("# SHOP"):
-            try:
-                parts = next(csv.reader([s]))
-            except Exception:
-                parts = s.split(",")
-            if len(parts) >= 2 and (parts[1] or "").strip():
-                found = (parts[1] or "").strip()
-    return found
-
-
 def _verify_market_code(market_id: str, market_code: str) -> bool:
     """Return True if market_code matches the stored leader_code for this market."""
     if not market_id or not market_code:
@@ -7011,32 +6965,26 @@ def _parse_monthly_csv(csv_text: str) -> tuple:
     global _LAST_MONTHLY_PARSE_META
     all_lines = csv_text.splitlines()
     header_line = None
+    mode_hint = ""
     for line in all_lines:
         s = line.strip()
+        # `# MODE,delta` — stamped by the mod (v2.1+): every RUN block holds ONLY that
+        # run's fresh entries. With the hint present the blocks are simply summed; the
+        # cumulative-vs-delta classifier below is only for legacy files without it
+        # (where a wrong "cumulative" guess discarded 33–50% of real earnings).
+        if s.startswith("# MODE"):
+            parts = s.split(",", 1)
+            if len(parts) > 1:
+                mode_hint = parts[1].strip().lower()
         if s and not s.startswith("#") and header_line is None:
             header_line = s
-            break
     if not header_line:
         return {}, 0.0, 0.0
 
-    # ── split into (timestamp, [rows], mode) RUN blocks ──────────────────────
-    # `# MODE,delta` — stamped by the mod (v2.1+) immediately before its own `# RUN`
-    # line: that block holds ONLY that run's fresh entries.
-    #
-    # AUDIT FIX (high, 2026-08-06): the hint is PER BLOCK, not per file. It used to be
-    # scanned globally, so the first block written by the upgraded mod relabelled every
-    # legacy block in the same file — and the mod APPENDS to the existing
-    # csn_monthly_<month>.csv. Those legacy blocks are month-to-date CUMULATIVE
-    # snapshots, so summing them instead of taking the last one inflated the month
-    # enormously (reproduced: a true 200,085 reported as 3,102,858). Markets with
-    # cumulative-mode files exist in production right now. A mixed file is now split:
-    # delta-tagged blocks are summed, untagged blocks go through the legacy classifier,
-    # and the two results are added.
+    # ── split into (timestamp, [rows]) RUN blocks ────────────────────────────
     runs = []
     cur_ts = None
     cur_rows = []
-    cur_mode = ""
-    pending_mode = ""
     seen_run = False
     for line in all_lines:
         s = line.strip()
@@ -7044,16 +6992,11 @@ def _parse_monthly_csv(csv_text: str) -> tuple:
             continue
         if s.startswith("# RUN"):
             if seen_run:
-                runs.append((cur_ts, cur_rows, cur_mode))
+                runs.append((cur_ts, cur_rows))
             seen_run = True
             parts = s.split(",", 1)
             cur_ts = parts[1].strip() if len(parts) > 1 and parts[1].strip() else f"run{len(runs)}"
             cur_rows = []
-            cur_mode = pending_mode      # the MODE line just above belongs to THIS block
-            pending_mode = ""
-        elif s.startswith("# MODE"):
-            parts = s.split(",", 1)
-            pending_mode = parts[1].strip().lower() if len(parts) > 1 else ""
         elif s.startswith("#"):
             continue
         elif s == header_line:
@@ -7061,12 +7004,11 @@ def _parse_monthly_csv(csv_text: str) -> tuple:
         else:
             cur_rows.append(line)
     if seen_run:
-        runs.append((cur_ts, cur_rows, cur_mode))
+        runs.append((cur_ts, cur_rows))
     else:
         rows = [l for l in all_lines
                 if l.strip() and not l.strip().startswith("#") and l.strip() != header_line]
-        # No RUN markers at all: a bare file. A MODE line anywhere still applies to it.
-        runs = [("__norun__", rows, pending_mode)] if rows else []
+        runs = [("__norun__", rows)] if rows else []
     if not runs:
         return {}, 0.0, 0.0
 
@@ -7076,13 +7018,13 @@ def _parse_monthly_csv(csv_text: str) -> tuple:
     # the old ts-only dedup silently REPLACED the first with the last.
     dedup = {}
     order = []
-    for ts, rows, bmode in runs:
+    for ts, rows in runs:
         key = (ts, tuple(rows))
         if key not in dedup:
             order.append(key)
-            dedup[key] = (rows, bmode)
+            dedup[key] = rows
     dup_removed = len(runs) - len(order)
-    runs = [(key[0], dedup[key][0], dedup[key][1]) for key in order]
+    runs = [(key[0], dedup[key]) for key in order]
 
     def parse_rows(rows):
         d = {}
@@ -7117,9 +7059,7 @@ def _parse_monthly_csv(csv_text: str) -> tuple:
             e["times_bought"] += t_bought
         return d
 
-    parsed = [(parse_rows(rows), bmode) for _ts, rows, bmode in runs]
-    parsed = [(d, m) for d, m in parsed if d]
-    run_dicts = [d for d, _m in parsed]
+    run_dicts = [d for d in (parse_rows(rows) for _, rows in runs) if d]
     if not run_dicts:
         return {}, 0.0, 0.0
 
@@ -7139,13 +7079,12 @@ def _parse_monthly_csv(csv_text: str) -> tuple:
                 a["times_bought"] += v.get("times_bought", 0)
         return out
 
-    def _classify_and_agg(dicts):
-        """Legacy path: no per-block MODE stamp, so guess cumulative vs delta."""
-        if not dicts:
-            return {}, "empty"
-        if len(dicts) == 1:
-            return dicts[0], "single"
-        run_dicts = dicts
+    if mode_hint == "delta":
+        # The file SAYS its blocks are deltas — no guessing, just sum them all.
+        agg, mode = _agg_sum(run_dicts), "delta(header)"
+    elif len(run_dicts) == 1:
+        agg, mode = run_dicts[0], "single"
+    else:
         # per-item monotonicity across consecutive runs -> cumulative signature
         # Classify each consecutive run pair: cumulative files show pairs where
         # (almost) every shared item RISES ("up"), with the occasional clean global
@@ -7185,23 +7124,6 @@ def _parse_monthly_csv(csv_text: str) -> tuple:
             agg = _agg_sum([run_dicts[i] for i in seg_last_idx])
         else:
             agg, mode = _agg_sum(run_dicts), "delta"
-        return agg, mode
-
-    delta_dicts = [d for d, m in parsed if m == "delta"]
-    legacy_dicts = [d for d, m in parsed if m != "delta"]
-    if delta_dicts and not legacy_dicts:
-        # Every block is stamped — no guessing, just sum them.
-        agg, mode = _agg_sum(delta_dicts), "delta(header)"
-    elif legacy_dicts and not delta_dicts:
-        agg, mode = _classify_and_agg(legacy_dicts)
-    else:
-        # Mixed file: the legacy prefix is classified on its own (it may well be
-        # cumulative snapshots), the stamped blocks are summed, and the two add up.
-        legacy_agg, legacy_mode = _classify_and_agg(legacy_dicts)
-        agg = _agg_sum([legacy_agg, _agg_sum(delta_dicts)])
-        mode = f"mixed({legacy_mode}+delta)"
-        log.info("[csn] monthly parse: mixed file — %d legacy block(s) treated as %s, "
-                 "%d delta block(s) summed", len(legacy_dicts), legacy_mode, len(delta_dicts))
 
     log.info("[csn] monthly parse: %d run block(s), %d duplicate(s) removed, mode=%s",
              len(runs) + dup_removed, dup_removed, mode)
@@ -8419,7 +8341,6 @@ def _stock_refill_plan(market_id: str, target_pct: float = 80.0, item_targets: d
     st = _db.get_market_stock(market_id) or {}
     to_order, skipped_active, at_target = [], 0, 0
     skipped_guard = []   # [{item, reason, payout}] — 0-coin or over-cap items dropped
-    pending = {}         # order_key -> total pieces needed across ALL barrels for it
     for row in st.values():
         item = str(row.get("item") or "").strip()
         if not item or _is_future_item(item):
@@ -8453,17 +8374,6 @@ def _stock_refill_plan(market_id: str, target_pct: float = 80.0, item_targets: d
         if item in active or order_key in active:
             skipped_active += 1
             continue
-        # AUDIT FIX (medium, 2026-08-06): accumulate by ORDER KEY before the guards run.
-        # This loop walks one row per scanned BARREL, and several barrels routinely
-        # resolve to the same catalog item — brew barrels especially, whose lore-junk
-        # keys all map through _order_item_name to one canonical brew name. Appending
-        # per row meant N separate orders for one item: the "never double-orders" active
-        # check was computed from a snapshot taken before the loop so it never saw the
-        # orders this same run was creating, and ORDER_MAX_AUTO_PAYOUT was applied to
-        # each slice instead of the total, so a batch well over the cap sailed through.
-        pending[order_key] = pending.get(order_key, 0) + need
-
-    for order_key, need in pending.items():
         # Sanity guards: don't auto-create pointless (0-coin) or runaway-payout orders.
         piece_price = float((known[order_key] or {}).get("coin", 0) or 0)
         if piece_price <= 0:
@@ -11121,26 +11031,11 @@ def _liquidate_holdings(holder_id, market_id=None, recipient_id=None, apply: boo
         # Move the proceeds. Two explicit ledger movements rather than a silent
         # re-credit, so both sides show up in the coin history.
         try:
-            # AUDIT FIX (medium, 2026-08-06): credit exactly what was DEDUCTED, not the
-            # notional proceeds. deduct_coins clamps at zero (adjust_balance does
-            # MAX(0, coins - amt)), so a holder whose balance was already below the
-            # proceeds — a negative-equity account, or a balance spent by a limit order
-            # that filled between the sale and the transfer — had less taken off than
-            # the recipient was given. That difference was newly minted coins.
-            import Restocker_db as _db_liq
-            _before = int((_db_liq.get_balance(str(holder_id)) or {}).get("coins") or 0)
             deduct_coins(holder_id, total, reduce_principal=True,
                          reason=f"liquidation transfer -> {recipient_id}")
-            _after = int((_db_liq.get_balance(str(holder_id)) or {}).get("coins") or 0)
-            moved = max(0, _before - _after)
-            if moved > 0:
-                add_coins(recipient_id, moved, counts_as_principal=True,
-                          reason=f"liquidation of <@{holder_id}>")
-            out["lines"].append(f"➡️ Transferred `{moved:,}` 🪙 to <@{recipient_id}>.")
-            if moved < total:
-                out["notes"].append(
-                    f"Proceeds were `{total:,}` but only `{moved:,}` could be taken off "
-                    f"<@{holder_id}> (balance ran out) — the shortfall was NOT minted.")
+            add_coins(recipient_id, total, counts_as_principal=True,
+                      reason=f"liquidation of <@{holder_id}>")
+            out["lines"].append(f"➡️ Transferred `{total:,}` 🪙 to <@{recipient_id}>.")
         except Exception as e:
             out["notes"].append(f"Sales completed, but the coin transfer FAILED: {e} — "
                                 f"the proceeds are still on <@{holder_id}>'s balance.")
@@ -14785,7 +14680,7 @@ async def _ai_tool_get_hive_status(guild, channel, user, args):
     import Restocker_db as _db
     mid = str(args.get("market") or "vtech").strip().lower()
     rows = _db.get_unpaid_hive_harvests(mid)
-    autopay = "ON" if hive_autopay_on(mid) else "off"
+    autopay = "ON" if str(_db.get_config(f"hive_autopay:{mid}") or "") == "1" else "off"
     pct = _hive_harvester_pct()
     with _db.db() as _conn:
         hv = {str(r[0]).split("hive_value:", 1)[-1]: r[1] for r in
