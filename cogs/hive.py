@@ -298,7 +298,13 @@ async def post_hive_project_report(trigger: str = "startup") -> bool:
             try:
                 chan = await bot.fetch_channel(cid)
             except Exception as e:
-                log.warning("[hive report] channel %s unreachable: %s", cid, e)
+                # Loud on purpose: "nothing appeared in the channel" is impossible to
+                # diagnose from a debug line nobody reads.
+                log.error("[hive report] CANNOT REACH CHANNEL %s (%s). The report was built "
+                          "but not posted. Check the id, that the bot is in that server, and "
+                          "that it has View Channel + Send Messages. Run /hive report to see "
+                          "this error in Discord, or /hive report here:True to post where you "
+                          "are.", cid, e)
                 return False
         msgs = build_hive_project_report(trigger)
         if not msgs:
@@ -495,11 +501,13 @@ class HiveCog(commands.Cog):
         try:
             first = not self._reported_this_boot
             self._reported_this_boot = True
-            await post_hive_project_report("bot started" if first else "6h sweep")
-            if first:
+            log.info("[hive report] sweep finished; posting the %s report to channel %s",
+                     "startup" if first else "6h", _hive_report_channel_id())
+            ok = await post_hive_project_report("bot started" if first else "6h sweep")
+            if first and ok:
                 await dm_harvester_statements()
         except Exception as e:
-            log.warning("[hive report] post-sweep reporting failed: %s", e)
+            log.error("[hive report] post-sweep reporting failed: %s", e, exc_info=True)
 
     @autopay_sweep_loop.before_loop
     async def _before_autopay_sweep(self):
@@ -720,6 +728,66 @@ class HiveCog(commands.Cog):
         await self._handle_feed_message(after, start_line=already)
 
     # ── config commands ───────────────────────────────────────────────────────
+    @hive.command(name="report",
+                  description="(Managers) Post the hive project report now — and say plainly if it can't")
+    @app_commands.describe(
+        here="Post it in THIS channel instead of the configured hive-report channel",
+        dm_harvesters="Also DM every linked harvester their personal statement")
+    async def hive_report(self, interaction: discord.Interaction,
+                          here: bool = False, dm_harvesters: bool = False):
+        """Manual trigger. The automatic report is deliberately quiet on failure — it must
+        never take the payout sweep down — which makes 'nothing appeared' impossible to
+        diagnose. This does the same work but reports the outcome, and the reason, to you."""
+        if not is_manager(interaction):
+            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
+        try:
+            msgs = build_hive_project_report("manual")
+        except Exception as e:
+            return await interaction.followup.send(
+                f"❌ Could not build the report: `{e}`", ephemeral=True)
+        if not msgs:
+            return await interaction.followup.send(
+                "No hive sites with any harvest history — nothing to report.", ephemeral=True)
+
+        cid = _hive_report_channel_id()
+        target, why = None, ""
+        if here:
+            target = interaction.channel
+        elif not cid:
+            why = "`hive_report_channel` is set to 0, so automatic reports are switched off."
+        else:
+            target = bot.get_channel(cid)
+            if target is None:
+                try:
+                    target = await bot.fetch_channel(cid)
+                except Exception as e:
+                    why = (f"I can't reach channel `{cid}` — `{e}`.\n"
+                           f"Either that id is wrong, it's in a server I'm not in, or I'm "
+                           f"missing **View Channel** / **Send Messages** there. Fix the "
+                           f"permission, or point me somewhere else with "
+                           f"`/hive report here:True` and set `hive_report_channel`.")
+        if target is None:
+            return await interaction.followup.send(f"❌ {why}", ephemeral=True)
+
+        import asyncio as _aio
+        try:
+            for i, m in enumerate(msgs):
+                await target.send(m)
+                if i + 1 < len(msgs):
+                    await _aio.sleep(0.4)
+        except Exception as e:
+            return await interaction.followup.send(
+                f"❌ Built the report fine, but posting to {getattr(target, 'mention', cid)} "
+                f"failed: `{e}` — that's almost certainly a missing **Send Messages** "
+                f"permission.", ephemeral=True)
+
+        note = f"✅ Posted {len(msgs)} message(s) to {getattr(target, 'mention', cid)}."
+        if dm_harvesters:
+            sent = await dm_harvester_statements()
+            note += f"\n📬 Sent {sent} harvester statement(s)."
+        await interaction.followup.send(note, ephemeral=True)
+
     @hive.command(name="settings",
                   description="(Managers) HiveSettings — one panel: feeds, wage, split, values, autopay, payout")
     @app_commands.describe(market_id="Hive site to open on (blank = this channel's site, else the first bound one)")
