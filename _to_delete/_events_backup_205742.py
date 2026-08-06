@@ -260,25 +260,6 @@ class EventsCog(commands.Cog):
                 _bound_mid = _bm.get("market_id") if _bm else None
             except Exception:
                 _bound_mid = None
-            # A HIVE FEED binding counts as a channel binding too. Hive sites post into
-            # their own #<site>-hive-site channel, bound to the parent market via
-            # /hive settings — but this gate only looked at the market's
-            # report_channel_id, and a market has exactly ONE of those. So six
-            # legitimately-bound vtech hive channels read as "unbound" and every upload
-            # from them was rejected, which is why Sapirdorf's and NDA Farm's harvests
-            # never landed. Posting in a bound hive channel already requires
-            # guild-controlled access — the same argument that makes the market
-            # binding sufficient.
-            if not _bound_mid:
-                try:
-                    _feeds = _dbw.get_config_prefix("hive_feed:") or {}
-                    _bound_mid = (_feeds.get("hive_feed:%s" % message.channel.id)
-                                  or _feeds.get(str(message.channel.id)) or None)
-                    if _bound_mid:
-                        log.info("[csn] channel %s accepted via its hive-feed binding to %s",
-                                 message.channel.id, _bound_mid)
-                except Exception:
-                    pass
 
             async def _csn_attachment_allowed(_a) -> bool:
                 """Gate ONE attachment: trusted poster, bound-channel match, per-market
@@ -286,17 +267,6 @@ class EventsCog(commands.Cog):
                 this poster for that one market)."""
                 if _poster_trusted:
                     return True
-                # Escape hatch: csn_trust_any_webhook=1 accepts ANY webhook upload with
-                # no code and no binding. OFF by default for a reason — a webhook URL is
-                # a delivery address, not a credential, and anyone holding a leaked one
-                # could file forged earnings that move share price, dividends and hive
-                # wages. Turn it on only if you accept that.
-                try:
-                    if _is_webhook and str(
-                            _dbw.get_config("csn_trust_any_webhook") or "") == "1":
-                        return True
-                except Exception:
-                    pass
                 try:
                     _txt = (await _a.read()).decode("utf-8", errors="replace")
                     _mid, _code = core._extract_market_info(_txt)

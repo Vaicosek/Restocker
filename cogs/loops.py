@@ -698,7 +698,14 @@ class LoopsCog(commands.Cog):
     async def stock_dashboard_loop(self, ):
         """Keep the registered market dashboard message fresh."""
         try:
-            core._snapshot_market_index(force=True)   # 5-min heartbeat for the Abexilas index
+            # OFF THE EVENT LOOP. This walks every public market and, for each one,
+            # _backing_rating -> _market_quality -> _db.load_orders() — a FULL order
+            # load and normalisation PER MARKET. On the live bot that held the loop
+            # long enough for Discord to log "heartbeat blocked for more than 10
+            # seconds", which cascaded into gateway invalidation, cloudflared TLS
+            # timeouts and DNS lookups failing. The work is unchanged; it just no
+            # longer happens on the thread that has to answer heartbeats.
+            await asyncio.to_thread(core._snapshot_market_index, True)   # Abexilas index
         except Exception:
             pass
         try:
@@ -814,7 +821,10 @@ class LoopsCog(commands.Cog):
             import Restocker_db as _db, time as _t
             now = int(_t.time())
             try:
-                allcfg = _db.get_all_config() or {}
+                # Also off-loop: this was observed blocking heartbeats for over 20
+                # seconds — not because the query is heavy, but because it waits on
+                # the SQLite lock the index snapshot above was holding.
+                allcfg = (await asyncio.to_thread(_db.get_all_config)) or {}
             except Exception:
                 allcfg = {}
             live_others = []

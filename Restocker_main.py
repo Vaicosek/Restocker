@@ -16218,16 +16218,96 @@ def _ai_tools_public_cached():
     return _AI_TOOLS_PUBLIC_CACHED or _ai_tools_cached()
 
 
+# ── Lazy tool loading ────────────────────────────────────────────────────────
+# Even the manager path carried all 72 schemas (~12,600 tokens) on every turn, for a
+# question that usually needs one of about a dozen. So: send a CORE set plus one
+# meta-tool, `find_tools`. When the model needs something rarer it searches by
+# keyword, gets the matching schemas attached for the rest of the conversation, and
+# calls them normally. Cost is one extra round trip on the rare turns that need it;
+# saving is ~10,000 tokens on all the others.
+_AI_CORE_EXTRA_NAMES = {
+    "dm_market_setup", "get_market_code", "setup_market_owner",
+    "send_channel_message", "set_item_price", "create_restock_orders",
+    "manage_team", "get_team_csn", "run_hive_payout", "set_hive_autopay",
+    "note_to_self", "list_notes", "get_ai_audit",
+}
+
+_AI_FIND_TOOL = {
+    "name": "find_tools",
+    "description": (
+        "Search your OWN toolbox for capabilities that are not currently attached. "
+        "Most tools are kept out of the prompt to save cost; this is how you reach "
+        "them. Call it with a few keywords describing what you need to DO (e.g. "
+        "'futures bulk order', 'wipe market data', 'rebuild channel', 'land status'). "
+        "The matching tools are then attached and callable for the rest of this "
+        "conversation. If a user asks for something you have no tool for, ALWAYS try "
+        "this before saying you cannot do it."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string",
+                      "description": "Keywords describing the capability you need."}
+        },
+        "required": ["query"],
+    },
+}
+
+
+def _ai_core_tools() -> list:
+    """The always-attached set: everything a normal user can use, plus the manager
+    tools that actually get reached for daily, plus find_tools."""
+    names = set(_AI_PUBLIC_TOOL_NAMES) | set(_AI_CORE_EXTRA_NAMES)
+    out = [dict(t) for t in _AI_TOOLS if t.get("name") in names]
+    out.append(dict(_AI_FIND_TOOL))
+    if out:
+        out[-1] = {**out[-1], "cache_control": {"type": "ephemeral"}}
+    return out
+
+
+_AI_CORE_CACHED = None
+
+
+def _ai_core_cached():
+    global _AI_CORE_CACHED
+    if _AI_CORE_CACHED is None:
+        try:
+            _AI_CORE_CACHED = _ai_core_tools()
+        except Exception as e:
+            log.warning("[ai] core tool list build failed (%s) — using full", e)
+            _AI_CORE_CACHED = _ai_tools_cached()
+    return _AI_CORE_CACHED
+
+
+def _ai_find_tools(query: str) -> tuple:
+    """(summary_text, [matching tool dicts]) for a keyword search over every tool."""
+    q = [w for w in re.split(r"[^a-z0-9]+", str(query or "").lower()) if len(w) > 2]
+    if not q:
+        return "Give me some keywords describing what you need to do.", []
+    scored = []
+    for t in _AI_TOOLS:
+        hay = (t.get("name", "") + " " + t.get("description", "")).lower()
+        score = sum(hay.count(w) for w in q) + 3 * sum(w in t.get("name", "") for w in q)
+        if score:
+            scored.append((score, t))
+    scored.sort(key=lambda kv: -kv[0])
+    top = [t for _sc, t in scored[:6]]
+    if not top:
+        return (f"No tool matches '{query}'. That capability does not exist — say so "
+                f"plainly rather than inventing one."), []
+    lines = "\n".join(f"• {t['name']} — {t.get('description','')[:160]}" for t in top)
+    return (f"Attached {len(top)} tool(s); they are callable now:\n{lines}"), top
+
+
 def _ai_tools_for(member, guild) -> list:
     """Full set for managers and inside the admin guild; small set for everyone else."""
     try:
-        if ADMIN_GUILD_ID and getattr(guild, "id", None) == ADMIN_GUILD_ID:
-            return _ai_tools_cached()
-        if _ai_is_manager(member):
-            return _ai_tools_cached()
+        if (ADMIN_GUILD_ID and getattr(guild, "id", None) == ADMIN_GUILD_ID) \
+                or _ai_is_manager(member):
+            return _ai_core_cached()      # core + find_tools; the rest on demand
     except Exception:
         pass
-    return _ai_tools_public_cached()
+    return _ai_tools_public_cached()      # customers never need find_tools
 
 
 _anthropic_client = None
@@ -16344,6 +16424,8 @@ Current context:
     try:
         async with channel.typing():
             # Each iteration is a whole request. Real answers land in 2-3.
+            _base_tools = _ai_tools_for(member, guild)
+            _extra_tools = []          # tools attached mid-conversation by find_tools
             for _ in range(6):
                 response = await loop.run_in_executor(
                     None,
@@ -16351,7 +16433,7 @@ Current context:
                         model=_AI_MODEL,
                         max_tokens=1024,
                         system=system,
-                        tools=_ai_tools_for(member, guild),
+                        tools=(_base_tools + _extra_tools),
                         messages=messages,
                     )
                 )
@@ -16361,6 +16443,21 @@ Current context:
                     assistant_content = response.content
                     for block in response.content:
                         if block.type != "tool_use":
+                            continue
+                        if block.name == "find_tools":
+                            _msg, _found = _ai_find_tools(
+                                (block.input or {}).get("query", ""))
+                            _have = {t.get("name") for t in _base_tools} | \
+                                    {t.get("name") for t in _extra_tools}
+                            for _t in _found:
+                                if _t.get("name") not in _have:
+                                    _extra_tools.append(dict(_t))
+                            _ai_audit_record(member, "find_tools", block.input, _msg)
+                            tool_results.append({
+                                "type": "tool_result",
+                                "tool_use_id": block.id,
+                                "content": _msg,
+                            })
                             continue
                         handler = _AI_TOOL_MAP.get(block.name)
                         if handler:
