@@ -48,3 +48,7 @@ Thumbs.db
 deploy.bat
 deploy_log.txt
 .fuse_hidden*
+
+# lock files moved aside by tooling — never belongs in git
+_git_stale_locks/
+restocker.log
