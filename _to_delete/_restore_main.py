@@ -303,25 +303,6 @@ MANAGER_DM_IDS: list[int] = _env_ids("MANAGER_DM_IDS", [1203738126850461738, 694
 
 EMPLOYEE_ROLE_NAME = _env_str("EMPLOYEE_ROLE_NAME", "Employee")
 MANAGER_ROLE_NAME = _env_str("MANAGER_ROLE_NAME", "Manager")
-# ── Admin guild ──────────────────────────────────────────────────────────────
-# A private server holding the FULL command set and the FULL AI toolset. Every other
-# guild gets only what an outsider needs — prices, balance, place an order. Their
-# server stays uncluttered, and a customer asking "what's a diamond worth" no longer
-# ships ~12,600 tokens of tool schema they cannot use. 0 disables the split.
-ADMIN_GUILD_ID = _env_int("ADMIN_GUILD_ID", 0)
-
-# The ONLY commands outsiders see. Match the top-level command/group name exactly.
-# Verified against the actual tree — top-level commands are: me, orders, item,
-# manager_panel, website_login; groups are: market, team, hive, realestate, sales,
-# settings. Outsiders get the five that serve a customer or a worker; everything
-# else is company plumbing and lives only in the admin guild.
-PUBLIC_COMMAND_NAMES = {
-    "me",             # own balance, loyalty, IGN link, join a team
-    "orders",         # browse and claim open work
-    "market",         # market info + /market sales (its own manager checks still apply)
-    "item",           # look up an item and its price
-    "website_login",  # dashboard access
-}
 MANAGER_ROLE_ALT  = _env_str("MANAGER_ROLE_ALT", "Admin")
 OWNER_ROLE_NAME   = _env_str("OWNER_ROLE_NAME", "Owner")   # pinged for futures-order review
 HARVESTER_ROLE_NAME = _env_str("HARVESTER_ROLE_NAME", "Hauler")
@@ -4719,13 +4700,7 @@ async def on_ready():
         # Guild-scoped copies show up ALONGSIDE the global ones, so every command appears
         # twice in the picker. An older build used copy_global_to() for instant registration;
         # clear those out. Global is the single source of truth.
-        # EXCEPT the admin guild, where guild-scoped commands are deliberate. This loop
-        # used to wipe every guild unconditionally, which made an admin-guild command set
-        # impossible — it worked until the next restart, then silently vanished.
-        _admin_guild = discord.Object(id=ADMIN_GUILD_ID) if ADMIN_GUILD_ID else None
         for _g in bot.guilds:
-            if ADMIN_GUILD_ID and _g.id == ADMIN_GUILD_ID:
-                continue
             try:
                 if await bot.tree.fetch_commands(guild=_g):
                     bot.tree.clear_commands(guild=_g)
@@ -4733,43 +4708,10 @@ async def on_ready():
                     print(f"🧽 Removed duplicate guild-scoped commands in {_g.name}.")
             except Exception as _ge:
                 log.warning("[sync] guild dedupe failed for %s: %s", _g.id, _ge)
-        if _needs and _admin_guild is not None:
-            # Admin guild gets EVERYTHING (guild-scoped registers instantly, no 1-hour
-            # global propagation). Global keeps only PUBLIC_COMMAND_NAMES.
-            _all = list(bot.tree.get_commands())
-            _private = [c for c in _all if c.name not in PUBLIC_COMMAND_NAMES]
-            try:
-                bot.tree.clear_commands(guild=_admin_guild)
-                for _c in _all:
-                    bot.tree.add_command(_c, guild=_admin_guild)
-                await bot.tree.sync(guild=_admin_guild)
-                print(f"🔐 Admin guild: {len(_all)} command(s) registered.")
-            except Exception as _ae:
-                log.error("[sync] admin-guild sync failed (%s) — syncing everything "
-                          "globally so you are never left without commands.", _ae)
-                await bot.tree.sync()
-                _db_sync.set_config("_cmd_sync_sig", _sig)
-                print("🌍 Global sync (admin split skipped).")
-                return
-            for _c in _private:
-                try:
-                    bot.tree.remove_command(_c.name)
-                except Exception:
-                    pass
+        if _needs:
             await bot.tree.sync()
             _db_sync.set_config("_cmd_sync_sig", _sig)
-            print(f"🌍 Global: {len(_all) - len(_private)} public command(s) "
-                  f"({len(_private)} kept admin-only).")
-            # Restore them in-memory so this process can still dispatch them.
-            for _c in _private:
-                try:
-                    bot.tree.add_command(_c, override=True)
-                except Exception:
-                    pass
-        elif _needs:
-            await bot.tree.sync()
-            _db_sync.set_config("_cmd_sync_sig", _sig)
-            print("🌍 Global slash commands synced (no ADMIN_GUILD_ID set).")
+            print("🌍 Global slash commands synced.")
         else:
             print("🌍 Slash commands unchanged — sync skipped (avoids rate limits).")
     except Exception as e:
@@ -12904,11 +12846,7 @@ def _resolve_member(guild, identifier: str):
 
 
 _AI_CONVERSATION_HISTORY: dict[int, list] = {}
-# 4, not 10. Retained history is replayed IN FULL every turn at full price and,
-# unlike the tools/system prefix, cannot be cached — it changes each time.
-_AI_HISTORY_MAX = 4
-# Ceiling on one tool result fed back to the model (~1k tokens).
-_AI_TOOL_RESULT_MAX = 4000
+_AI_HISTORY_MAX = 10
 
 
 async def _ai_tool_get_user_roles(guild, channel, user, args):
@@ -16176,60 +16114,6 @@ def _ai_audit_record(user, tool_name, args, result):
         pass
 
 
-# ── Prompt caching + toolset gating ──────────────────────────────────────────
-# Every turn re-sent the full tool schema (72 tools ≈ 12,600 tokens) plus the static
-# system prompt (≈2,400) at full input price. Caching that prefix makes every later
-# turn bill a fraction; gating means outsiders never carry it at all.
-_AI_TOOLS_CACHED = None
-_AI_TOOLS_PUBLIC_CACHED = None
-
-_AI_PUBLIC_TOOL_NAMES = {
-    "get_item_prices", "get_market_pricing", "get_open_orders", "get_user_balance",
-    "get_loyalty", "get_market_earnings", "get_stock_fullness", "get_hive_status",
-    "get_hive_harvester_detail", "get_land_status", "note_to_self", "list_notes",
-}
-
-
-def _ai_tools_cached():
-    global _AI_TOOLS_CACHED
-    if _AI_TOOLS_CACHED is None:
-        try:
-            t = [dict(x) for x in _AI_TOOLS]
-            if t:
-                t[-1] = {**t[-1], "cache_control": {"type": "ephemeral"}}
-            _AI_TOOLS_CACHED = t
-        except Exception as e:
-            log.warning("[ai] cached tool list build failed (%s) — using raw", e)
-            _AI_TOOLS_CACHED = _AI_TOOLS
-    return _AI_TOOLS_CACHED
-
-
-def _ai_tools_public_cached():
-    global _AI_TOOLS_PUBLIC_CACHED
-    if _AI_TOOLS_PUBLIC_CACHED is None:
-        try:
-            t = [dict(x) for x in _AI_TOOLS if x.get("name") in _AI_PUBLIC_TOOL_NAMES]
-            if t:
-                t[-1] = {**t[-1], "cache_control": {"type": "ephemeral"}}
-            _AI_TOOLS_PUBLIC_CACHED = t
-        except Exception as e:
-            log.warning("[ai] public tool list build failed (%s) — using full", e)
-            _AI_TOOLS_PUBLIC_CACHED = None
-    return _AI_TOOLS_PUBLIC_CACHED or _ai_tools_cached()
-
-
-def _ai_tools_for(member, guild) -> list:
-    """Full set for managers and inside the admin guild; small set for everyone else."""
-    try:
-        if ADMIN_GUILD_ID and getattr(guild, "id", None) == ADMIN_GUILD_ID:
-            return _ai_tools_cached()
-        if _ai_is_manager(member):
-            return _ai_tools_cached()
-    except Exception:
-        pass
-    return _ai_tools_public_cached()
-
-
 _anthropic_client = None
 
 
@@ -16319,8 +16203,7 @@ async def handle_ai_mention(message: discord.Message):
         return
 
     now_utc = datetime.now(timezone.utc)
-    # Static half cached; the per-call context is not (it changes every minute).
-    _ctx_block = f"""
+    system = _AI_SYSTEM + f"""
 
 Current context:
 - User: {user.display_name} (ID: {user.id})
@@ -16332,10 +16215,6 @@ Current context:
 - AI-allowed users (the ONLY Discord IDs who may @mention you): {', '.join(str(x) for x in sorted(_ai_allowed_ids())) or 'none'}
   If asked who can use you / who is on your allow-list, answer with EXACTLY these IDs — this is who can chat with you. Do NOT confuse it with manager roles (that is a separate thing about what actions a user can perform). Managers change this list by asking you — call manage_ai_access. The /ai_allow command was retired.
 """
-    system = [
-        {"type": "text", "text": _AI_SYSTEM, "cache_control": {"type": "ephemeral"}},
-        {"type": "text", "text": _ctx_block},
-    ]
 
     history = _AI_CONVERSATION_HISTORY.get(channel.id, [])
     messages = history + [{"role": "user", "content": content}]
@@ -16343,15 +16222,14 @@ Current context:
 
     try:
         async with channel.typing():
-            # Each iteration is a whole request. Real answers land in 2-3.
-            for _ in range(6):
+            for _ in range(10):
                 response = await loop.run_in_executor(
                     None,
                     lambda: client.messages.create(
                         model=_AI_MODEL,
                         max_tokens=1024,
                         system=system,
-                        tools=_ai_tools_for(member, guild),
+                        tools=_AI_TOOLS,
                         messages=messages,
                     )
                 )
@@ -16374,8 +16252,7 @@ Current context:
                         tool_results.append({
                             "type": "tool_result",
                             "tool_use_id": block.id,
-                            "content": (str(result)[:_AI_TOOL_RESULT_MAX] + "\n… [truncated]")
-                                       if len(str(result)) > _AI_TOOL_RESULT_MAX else str(result),
+                            "content": str(result),
                         })
                     messages.append({"role": "assistant", "content": assistant_content})
                     messages.append({"role": "user", "content": tool_results})
