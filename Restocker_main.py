@@ -4333,7 +4333,26 @@ async def _process_csn_attachment(attachment: discord.Attachment, report_channel
             _shop = _extract_shop_name(csv_text)
         except Exception:
             _shop = ""
-        _src = (f"shop:{_shop}" if _shop else str(source_key or f"file:{filename}"))
+        # SUM ONLY ACROSS SHOPS WE CAN POSITIVELY TELL APART.
+        #
+        # The rollup exists because a market can be scanned by several shops, each
+        # uploading a file covering only its own sales. But it can only be RIGHT when
+        # the files really are disjoint. Keyed on the Discord poster it wasn't: five
+        # alts scanning the same shops each uploaded a near-identical monthly file and
+        # the month was summed to more than double the truth (observed live: 520,114
+        # became 1,110,717). Adding up files that describe the same sales invents money,
+        # and that number drives share price, dividends and platform fees.
+        #
+        # So: sum only when the mod's `# SHOP` stamp names a distinct shop. Files from
+        # older builds carry no stamp, so they all share ONE bucket and REPLACE each
+        # other — the pre-rollup behaviour, which can undercount a genuinely multi-shop
+        # market but can never fabricate coins. Rebuild the mod on every alt and true
+        # multi-shop markets start summing correctly again.
+        _src = f"shop:{_shop}" if _shop else "shop:unstamped"
+        if not _shop:
+            log.info("[csn] %s %s: no `# SHOP` stamp (old mod build) — this file REPLACES "
+                     "the unstamped figures for the month instead of adding to them",
+                     effective_market_id, month_key)
         try:
             import Restocker_db as _db_src
             _db_src.csn_set_month_source(effective_market_id, month_key, _src,
@@ -4497,12 +4516,34 @@ async def _process_csn_attachment(attachment: discord.Attachment, report_channel
     except Exception as _ce:
         log.debug("[csn] card-dedup check skipped: %s", _ce)
 
-    if _card_ok:
+    # QUIET BY DEFAULT. Five alts scanning on a loop turned this channel into a wall of
+    # full report cards — chart, xlsx, per-day table, top earners — several times an hour,
+    # for a month whose numbers barely moved. The data is always ingested; what changes
+    # here is how loudly it is announced. One line is the default. `csn_full_card=1`
+    # brings the whole card back, and the dashboard link always has the detail.
+    _full_card = False
+    try:
+        import Restocker_db as _db_fc
+        _full_card = str(_db_fc.get_config("csn_full_card") or "") == "1"
+    except Exception:
+        pass
+
+    if _card_ok and _full_card:
         _layout = _build_csn_layout(embed, footer, _report_url,
                                     chart_filename=_chart_name, xlsx_filename=_xlsx_name)
         if _layout is not None:
             await dest_channel.send(view=_layout, files=files)
         else:
+            await dest_channel.send(content="📥 **CSN report received:**", embed=embed, files=files)
+    elif _card_ok:
+        try:
+            _net = float(income) - float(spent)
+            await dest_channel.send(
+                f"📊 **{month_label}** · `{effective_market_id}` · "
+                f"{float(income):,.0f} in · {float(spent):,.0f} out · "
+                f"**{_net:+,.0f}** net · <{_report_url}>")
+        except Exception as _1e:
+            log.warning("[csn] one-line summary failed, falling back to the card: %s", _1e)
             await dest_channel.send(content="📥 **CSN report received:**", embed=embed, files=files)
     if _mgr_sales and _mgr_sales.get("owner"):
         try:

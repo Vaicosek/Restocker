@@ -448,10 +448,46 @@ class HiveCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self._reported_this_boot = False
+        # The sweep's own first run happens seconds after boot, at the same moment the
+        # startup task posts. Without this the channel got the report twice.
+        self._sweep_reported_once = False
+        # The startup report gets its OWN task. It used to ride on the back of the
+        # payout sweep, which meant anything that stopped the sweep — an exception
+        # before it reached the report, the loop never starting, the loop being
+        # cancelled — silently took the report with it, and the symptom was an empty
+        # channel with no explanation. These two jobs are independent now.
+        self.startup_report_loop.start()
         self.autopay_sweep_loop.start()
 
     async def cog_unload(self):
         self.autopay_sweep_loop.cancel()
+        self.startup_report_loop.cancel()
+
+    # ── startup hive-project report ──────────────────────────────────────────
+    @tasks.loop(count=1)
+    async def startup_report_loop(self):
+        """Runs exactly once, shortly after the bot is ready. Nothing else depends on
+        it and it depends on nothing else."""
+        log.info("[hive report] startup task firing (channel %s)", _hive_report_channel_id())
+        try:
+            self._reported_this_boot = True
+            ok = await post_hive_project_report("bot started")
+            if ok:
+                sent = await dm_harvester_statements()
+                log.info("[hive report] startup report done, %d statement(s) DM'd", sent)
+            else:
+                log.error("[hive report] startup report did NOT post — see the error above. "
+                          "Run /hive report in Discord to see the reason interactively.")
+        except Exception as e:
+            log.error("[hive report] startup report crashed: %s", e, exc_info=True)
+
+    @startup_report_loop.before_loop
+    async def _before_startup_report(self):
+        import asyncio as _aio
+        await self.bot.wait_until_ready()
+        # Give the channel cache and the other cogs a moment to settle so the first
+        # thing the report does isn't a cold fetch_channel.
+        await _aio.sleep(15)
 
     # ── periodic autopay sweep ───────────────────────────────────────────────
     # Autopay fires on ingest, but a harvest can sit unpaid for other reasons: the
@@ -503,14 +539,18 @@ class HiveCog(commands.Cog):
         # as the bot is ready, so this doubles as the "bot just started" report; every
         # later iteration is the 6-hourly one. Personal DMs go out on the FIRST run
         # only — four statements a day per harvester would be spam.
+        # The 6-hourly report. The FIRST sweep of a boot is skipped here because
+        # startup_report_loop already covers it — otherwise the channel would get two
+        # copies seconds apart.
         try:
-            first = not self._reported_this_boot
-            self._reported_this_boot = True
-            log.info("[hive report] sweep finished; posting the %s report to channel %s",
-                     "startup" if first else "6h", _hive_report_channel_id())
-            ok = await post_hive_project_report("bot started" if first else "6h sweep")
-            if first and ok:
-                await dm_harvester_statements()
+            if not getattr(self, "_sweep_reported_once", False):
+                self._sweep_reported_once = True
+                log.info("[hive report] first sweep of this boot — the startup task owns "
+                         "that report, skipping the sweep copy")
+            else:
+                log.info("[hive report] sweep finished; posting the 6h report to channel %s",
+                         _hive_report_channel_id())
+                await post_hive_project_report("6h sweep")
         except Exception as e:
             log.error("[hive report] post-sweep reporting failed: %s", e, exc_info=True)
 
