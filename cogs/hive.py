@@ -446,7 +446,9 @@ class HiveIngestModal(discord.ui.Modal, title="Paste hive feed lines"):
 
 class HiveCog(commands.Cog):
     def __init__(self, bot):
+        import time as _t
         self.bot = bot
+        self._booted_at = _t.time()      # so /hive report can prove which build is running
         self._reported_this_boot = False
         # The sweep's own first run happens seconds after boot, at the same moment the
         # startup task posts. Without this the channel got the report twice.
@@ -786,6 +788,24 @@ class HiveCog(commands.Cog):
         if not is_manager(interaction):
             return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
         await interaction.response.defer(ephemeral=True)
+
+        # Diagnostics first. "I restarted and still nothing appeared" is unanswerable
+        # without knowing whether this process is even running the build that has the
+        # startup task, and whether that task has had its turn yet.
+        import time as _t
+        up = int(_t.time() - getattr(self, "_booted_at", _t.time()))
+        up_txt = (f"{up}s" if up < 120 else f"{up // 60}m" if up < 7200 else f"{up // 3600}h")
+        if not hasattr(self, "_booted_at"):
+            state = ("⚠️ This process is running an **older build** — it has no startup "
+                     "report task at all. Pull and restart.")
+        elif self._reported_this_boot:
+            state = f"✅ Startup report already fired this boot (up {up_txt})."
+        elif up < 40:
+            state = (f"⏳ Booted {up_txt} ago — the startup report waits 15s after ready, "
+                     f"so it hasn't had its turn yet. Check the channel in a moment.")
+        else:
+            state = (f"❌ Up {up_txt} and the startup report never fired. The task isn't "
+                     f"starting — check the console for lines beginning `[hive report]`.")
         try:
             msgs = build_hive_project_report("manual")
         except Exception as e:
@@ -827,7 +847,8 @@ class HiveCog(commands.Cog):
                 f"failed: `{e}` — that's almost certainly a missing **Send Messages** "
                 f"permission.", ephemeral=True)
 
-        note = f"✅ Posted {len(msgs)} message(s) to {getattr(target, 'mention', cid)}."
+        note = (f"{state}\n\n✅ Posted {len(msgs)} message(s) to "
+                f"{getattr(target, 'mention', cid)} (channel `{cid}`).")
         if dm_harvesters:
             sent = await dm_harvester_statements()
             note += f"\n📬 Sent {sent} harvester statement(s)."
