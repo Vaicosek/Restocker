@@ -11002,6 +11002,41 @@ def _monthly_investor_report() -> None:
             log.warning("[report] monthly investor report failed for %s: %s", mid, e)
 
 
+# Orders grouped by market, memoised for a few seconds — for SCORING only.
+#
+# _market_quality() is called once PER MARKET by _snapshot_market_index(), and each
+# call used to run a full _db.load_orders() and then scan the whole table looking for
+# its own market's rows. With 17 public markets that is 17 complete table loads and
+# 17 full scans every 5 minutes from stock_dashboard_loop — which pegged a core for
+# the duration of every tick. Moving the loop off the event loop stopped it blocking
+# heartbeats; it did not stop it burning CPU.
+#
+# One load, grouped once, reused across the whole pass. The score is a trailing
+# 30-day metric, so a few seconds of staleness cannot change an answer.
+_QUALITY_ORDERS = {"ts": 0.0, "by_market": None}
+_QUALITY_ORDERS_TTL = 30.0
+
+
+def _quality_orders_by_market() -> dict:
+    import time as _t
+    now = _t.time()
+    cached = _QUALITY_ORDERS.get("by_market")
+    if cached is not None and (now - _QUALITY_ORDERS.get("ts", 0.0)) < _QUALITY_ORDERS_TTL:
+        return cached
+    grouped = {}
+    try:
+        import Restocker_db as _db
+        for o in (_db.load_orders() or []):
+            grouped.setdefault(str(o.get("market_id") or ""), []).append(o)
+    except Exception:
+        # A read failure must not zero every market's score — reuse the last good
+        # grouping if we have one, and only fall back to empty on a cold start.
+        return cached if cached is not None else {}
+    _QUALITY_ORDERS["by_market"] = grouped
+    _QUALITY_ORDERS["ts"] = now
+    return grouped
+
+
 def _market_quality(market_id) -> dict:
     """Composite quality score (0..1) for a public market — the full picture behind
     the rating, the index weight, the earnings multiple and the ABX fund's buying:
@@ -11043,9 +11078,7 @@ def _market_quality(market_id) -> dict:
     try:
         from datetime import timedelta as _td
         cutoff = (datetime.now(timezone.utc) - _td(days=30)).strftime("%Y-%m-%d")
-        for o in (_db.load_orders() or []):
-            if str(o.get("market_id") or "") != mid:
-                continue
+        for o in _quality_orders_by_market().get(mid, []):
             ts = str(o.get("updated_at") or o.get("created_at") or "")
             if ts[:10] < cutoff:
                 continue
