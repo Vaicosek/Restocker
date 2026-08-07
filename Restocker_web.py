@@ -75,22 +75,70 @@ _SESSIONS: dict = {}
 _LINK_ATTEMPTS: dict = {}
 _REQ_HITS: dict = {}
 _last_throttle_sweep: float = 0.0
+import threading as _threading
+
 _CACHE: dict = {}
 
 
-def _cached(key: str, producer, ttl: float = 8.0):
-    """Memoise an expensive loader for `ttl` seconds. The dashboard re-reads
-    every market YAML and runs per-market DB queries on each request; without
-    this an unauthenticated flood of `/` could starve the shared event loop the
-    Discord bot also runs on."""
+_CACHE_LOCK = _threading.Lock()
+_CACHE_INFLIGHT: dict = {}          # key -> Thread currently refreshing it
+
+
+def _cached(key: str, producer, ttl: float = 60.0):
+    """Memoise an expensive loader, stampede-proof, stale-while-revalidate.
+
+    The old version was a bare 8s TTL with no locking, and that is how the
+    dashboard pinned a core and stopped responding. Every loader here is
+    SYNCHRONOUS and heavy — _load_inventory_data re-reads every market YAML and
+    runs per-market DB queries — so it blocks the web thread's whole event loop
+    while it runs. Once one pass took longer than the TTL, every arriving request
+    found the entry expired and recomputed it, each queueing behind the last. CPU
+    sat at 100%, pages never finished, and cloudflared logged the abandoned
+    requests as "Incoming request ended abruptly".
+
+    Now: a fresh value is returned as-is; an EXPIRED value is still returned
+    immediately while exactly ONE background thread refreshes it; and only a cold
+    key (nothing cached at all) actually waits. So a slow producer costs one
+    thread, not one per request, and a reader is never blocked by a refresh."""
     import time as _t
     now = _t.time()
     hit = _CACHE.get(key)
     if hit and hit[0] > now:
         return hit[1]
-    val = producer()
-    _CACHE[key] = (now + ttl, val)
-    return val
+
+    def _refresh():
+        try:
+            val = producer()
+            _CACHE[key] = (_t.time() + ttl, val)
+        except Exception as e:
+            # Keep serving the stale value rather than blanking the page, but
+            # push the retry out so a broken producer can't spin.
+            print(f"[web cache] refresh of {key!r} failed: {e}", flush=True)
+            if key in _CACHE:
+                _CACHE[key] = (_t.time() + min(ttl, 30.0), _CACHE[key][1])
+        finally:
+            with _CACHE_LOCK:
+                _CACHE_INFLIGHT.pop(key, None)
+
+    if hit:                                  # stale but usable → refresh behind it
+        with _CACHE_LOCK:
+            if key not in _CACHE_INFLIGHT:
+                th = _threading.Thread(target=_refresh, name=f"cache:{key}", daemon=True)
+                _CACHE_INFLIGHT[key] = th
+                th.start()
+        return hit[1]
+
+    # Cold key: someone has to pay for it, but only one caller — the rest wait on
+    # that same thread instead of each running their own copy.
+    with _CACHE_LOCK:
+        th = _CACHE_INFLIGHT.get(key)
+        if th is None:
+            th = _threading.Thread(target=_refresh, name=f"cache:{key}", daemon=True)
+            _CACHE_INFLIGHT[key] = th
+            th.start()
+    th.join(timeout=25.0)
+    hit = _CACHE.get(key)
+    return hit[1] if hit else producer()
 
 
 def _load_sessions() -> dict:
