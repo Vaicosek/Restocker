@@ -16053,20 +16053,79 @@ async def _ai_tool_get_hive_harvester_detail(guild, channel, user, args):
 
 
 async def _ai_tool_get_market_earnings(guild, channel, user, args):
+    """Earnings for one market — and, when it belongs to a group, the COMPANY total.
+
+    Asking for `vtech` used to return only its own CSN rows, which for a hive site are
+    the chest-shop purchases. That silently omitted two things: the hive ledger (the
+    chest shops buy honey at 0 coins, so the real value is booked there, not in CSN),
+    and the rest of the group. "V Tech earnings" means GreyHames plus the hives plus
+    Dragons Mart, which is exactly what prices the V Tech stock — so report that."""
+    import Restocker_db as _db_e
     mid = str(args.get("market") or "").strip().lower()
     if not mid:
         return "Give a market id."
     months = (_load_csn_for_market(mid) or {}).get("months", {}) or {}
-    if not months:
+    hive = {}
+    try:
+        hive = _db_e.get_hive_months(mid) or {}
+    except Exception:
+        hive = {}
+    if not months and not hive:
         return f"No recorded earnings for '{mid}'."
-    keys = sorted(months.keys())
-    tot_inc = sum(float(m.get("income", 0) or 0) for m in months.values())
-    tot_net = sum(float(m.get("net", 0) or 0) for m in months.values())
-    lines = [f"{mid}: {len(keys)} month(s) recorded · lifetime income {tot_inc:,.0f}, net {tot_net:,.0f}"]
+
+    own = {}
+    for k, m in months.items():
+        if isinstance(m, dict):
+            own[k] = own.get(k, 0.0) + float(m.get("net", 0) or 0)
+    for k, n in hive.items():
+        own[k] = own.get(k, 0.0) + float(n or 0)
+
+    keys = sorted(own.keys())
+    tot_inc = sum(float(m.get("income", 0) or 0) for m in months.values() if isinstance(m, dict))
+    lines = [f"{mid}: {len(keys)} month(s) recorded · lifetime income {tot_inc:,.0f}, "
+             f"net {sum(own.values()):,.0f}"]
     for k in keys[-6:]:
-        m = months[k]
-        lines.append(f"• {m.get('label', k)}: income {float(m.get('income',0)):,.0f}, "
-                     f"spent {float(m.get('spent',0)):,.0f}, net {float(m.get('net',0)):,.0f}")
+        m = months.get(k) or {}
+        bits = [f"net {own[k]:,.0f}"]
+        if isinstance(m, dict) and m:
+            bits.insert(0, f"income {float(m.get('income',0) or 0):,.0f}")
+            bits.insert(1, f"spent {float(m.get('spent',0) or 0):,.0f}")
+        if hive.get(k):
+            bits.append(f"of which hives {float(hive[k]):,.0f}")
+        lines.append(f"• {(m.get('label') if isinstance(m, dict) else None) or k}: " + ", ".join(bits))
+
+    # The company view: whichever market carries the group's stock, plus every market
+    # rolling into it at its share. For an independent market this adds nothing.
+    try:
+        parent = _market_rollup_parent(mid) or mid
+        children = _rollup_children(parent)
+        if children:
+            combined = _rollup_combined_months(parent) or {}
+            if combined:
+                label = _market_stock_label(parent)
+                members = [parent] + [c for c, _ in children]
+                ck = sorted(combined.keys())
+                # CSN income across the group, shown alongside the rolled-up net. They
+                # differ because the net also carries each site's hive ledger, and on a
+                # hive site the chest-shop purchases already appear in CSN — so the two
+                # are NOT interchangeable. Showing both keeps that visible instead of
+                # quietly picking one.
+                inc = {}
+                for mm in members:
+                    for k2, md in ((_load_csn_for_market(mm) or {}).get("months", {}) or {}).items():
+                        if isinstance(md, dict):
+                            inc[k2] = inc.get(k2, 0.0) + float(md.get("income", 0) or 0)
+                lines.append("")
+                lines.append(f"**{label}** group ({', '.join(members)}) — what prices the stock:")
+                for k in ck[-6:]:
+                    bits = [f"net {combined[k]:,.0f}"]
+                    if inc.get(k):
+                        bits.insert(0, f"CSN income {inc[k]:,.0f}")
+                    lines.append(f"• {k}: " + " · ".join(bits))
+                lines.append(f"lifetime net {sum(combined.values()):,.0f} "
+                             f"across {len(ck)} month(s)")
+    except Exception as _re:
+        log.debug("[earnings] rollup view skipped: %s", _re)
     return "\n".join(lines)
 
 
