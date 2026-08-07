@@ -6784,9 +6784,34 @@ _MATPLOTLIB_OK = False
 CSN_HISTORY_FILE  = "csn_history.yml"
 BREW_ALIASES_FILE = "brew_aliases.yml"
 
+# ── brew reference maps: parsed once per file change, not once per item ──────
+# load_yaml() has no cache — it opens and parses the file on every call. These
+# three maps are read-only reference data consulted PER ITEM: _pretty_item_name
+# -> _manual_brew_effects_for -> _load_manual_brew_effects -> load_yaml. On the
+# dashboard's 1,087 items that was 1,087 full parses of a 9.7 KB YAML per refresh,
+# which is what pinned the web thread's CPU. Keyed on the file's (mtime, size), so
+# editing the map still takes effect on the very next call.
+_BREW_MAP_CACHE: dict = {}
+
+
+def _brew_map_cached(key: str, path: str, builder):
+    try:
+        _st = os.stat(_resolve_data_file(path))
+        stamp = (_st.st_mtime_ns, _st.st_size)
+    except OSError:
+        stamp = None                      # missing file: still cache the empty result
+    hit = _BREW_MAP_CACHE.get(key)
+    if hit is not None and hit[0] == stamp:
+        return hit[1]
+    val = builder()
+    _BREW_MAP_CACHE[key] = (stamp, val)
+    return val
+
 
 def _load_brew_aliases() -> dict:
-    return load_yaml(BREW_ALIASES_FILE, {"aliases": {}}).get("aliases", {})
+    return _brew_map_cached(
+        "aliases", BREW_ALIASES_FILE,
+        lambda: load_yaml(BREW_ALIASES_FILE, {"aliases": {}}).get("aliases", {}))
 
 
 def _save_brew_aliases(aliases: dict) -> bool:
@@ -6891,6 +6916,10 @@ def _fold_brew_name(name) -> str:
 
 
 def _load_manual_brew_effects() -> dict:
+    return _brew_map_cached("effects", BREW_MANUAL_FILE, _build_manual_brew_effects)
+
+
+def _build_manual_brew_effects() -> dict:
     """Load the hand-curated brew→effect map as {folded_name: 'effects'}. Accepts
     either a top-level 'brews:' mapping or a flat name→effects mapping. Returns {}
     if the file is missing/empty."""
@@ -6916,6 +6945,10 @@ def _manual_brew_effects_for(name) -> str:
 
 
 def _load_manual_brew_names() -> dict:
+    return _brew_map_cached("names", BREW_MANUAL_FILE, _build_manual_brew_names)
+
+
+def _build_manual_brew_names() -> dict:
     """The brew map's `names:` section — {folded stored/scanned name: canonical brew
     name}. Same fuzzy folding as the effects map. This is how a barrel scanned under a
     lore-junk key ("Potion - [★★★★★], Gank or not to Gank…") resolves to the REAL brew
