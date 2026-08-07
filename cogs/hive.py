@@ -135,6 +135,7 @@ def build_hive_project_report(trigger: str = "startup") -> list:
 
     out = [f"🐝 **Hive project report** · {trigger} · harvester wage {pct:g}%"]
     g_value = g_paid_value = g_unpaid_value = g_unlinked = 0.0
+    g_wage_base = g_paid_wage_base = 0.0
     g_qty = 0
 
     for mid in mids:
@@ -150,10 +151,18 @@ def build_hive_project_report(trigger: str = "startup") -> list:
         value = sum(m.get("value", 0.0) for m in summary.values())
         paid_value = sum(m.get("paid_value", 0.0) for m in summary.values())
         unpaid_value = max(0.0, value - paid_value)
+        # Wages come off the wage basis, which is LOWER than the sale value. Deriving
+        # them from `value` here overstated every wage figure in this report.
+        wage_base = sum(m.get("wage_base", 0.0) or m.get("value", 0.0) for m in summary.values())
+        paid_wage_base = sum(m.get("paid_wage_base", 0.0) or m.get("paid_value", 0.0)
+                             for m in summary.values())
+        unpaid_wage_base = max(0.0, wage_base - paid_wage_base)
         g_qty += qty
         g_value += value
         g_paid_value += paid_value
         g_unpaid_value += unpaid_value
+        g_wage_base += wage_base
+        g_paid_wage_base += paid_wage_base
 
         owner_pct = core._hive_owner_pct(mid)
         autopay = "on" if core.hive_autopay_on(mid) else "**OFF**"
@@ -162,17 +171,18 @@ def build_hive_project_report(trigger: str = "startup") -> list:
         out.append(
             f"\n**{mname}** (`{mid}`) · autopay {autopay}"
             f"\n{_fmt(qty)} pcs harvested · worth **{_fmt(value)}** · "
-            f"wages paid {_fmt(paid_value * pct / 100.0)}"
+            f"wages paid {_fmt(paid_wage_base * pct / 100.0)}"
             + (f" · owner cut {owner_pct:g}%" if owner_pct else "")
             + (f"\n⚠️ **{_fmt(unpaid_value)}** of value still unpaid "
-               f"(≈{_fmt(unpaid_value * pct / 100.0)} in wages owed)" if unpaid_value > 0 else ""))
+               f"(≈{_fmt(unpaid_wage_base * pct / 100.0)} in wages owed)" if unpaid_value > 0 else ""))
 
         # who harvested, and what they earned
         by_ign, by_item = {}, {}
         for mo in summary.values():
             for ign, v in (mo.get("by_ign") or {}).items():
-                a = by_ign.setdefault(ign, {"qty": 0, "value": 0.0})
+                a = by_ign.setdefault(ign, {"qty": 0, "value": 0.0, "wage_base": 0.0})
                 a["qty"] += v.get("qty", 0); a["value"] += v.get("value", 0.0)
+                a["wage_base"] += v.get("wage_base", 0.0) or v.get("value", 0.0)
             for item, v in (mo.get("by_item") or {}).items():
                 a = by_item.setdefault(item, {"qty": 0, "value": 0.0})
                 a["qty"] += v.get("qty", 0); a["value"] += v.get("value", 0.0)
@@ -183,7 +193,7 @@ def build_hive_project_report(trigger: str = "startup") -> list:
                 for item, v in sorted(by_item.items(), key=lambda kv: -kv[1]["value"])))
 
         for ign, v in sorted(by_ign.items(), key=lambda kv: -kv[1]["value"]):
-            wage = v["value"] * pct / 100.0
+            wage = (v.get("wage_base") or v["value"]) * pct / 100.0
             linked = None
             try:
                 linked = _db.get_user_id_by_ign(ign)
@@ -198,10 +208,10 @@ def build_hive_project_report(trigger: str = "startup") -> list:
 
     out.append(
         f"\n**Total** · {_fmt(g_qty)} pcs · {_fmt(g_value)} value · "
-        f"{_fmt(g_paid_value * pct / 100.0)} wages paid")
+        f"{_fmt(g_paid_wage_base * pct / 100.0)} wages paid")
     if g_unpaid_value > 0:
         out.append(f"Unpaid backlog: {_fmt(g_unpaid_value)} value "
-                   f"(≈{_fmt(g_unpaid_value * pct / 100.0)} in wages)")
+                   f"(≈{_fmt(max(0.0, g_wage_base - g_paid_wage_base) * pct / 100.0)} in wages)")
     if g_unlinked > 0:
         out.append(f"Stuck on unlinked IGNs: **{_fmt(g_unlinked)}** — link them, or clear "
                    f"the ledger with the `settle_unlinked_harvests` tool.")
@@ -245,16 +255,23 @@ def build_harvester_statements() -> dict:
                 for r in conn.execute(
                         "SELECT ign, item, SUM(qty) q, SUM(qty*unit_value) v, "
                         "SUM(CASE WHEN paid=1 THEN qty*unit_value ELSE 0 END) pv, "
-                        "MAX(user_id) uid "
+                        "MAX(user_id) uid, "
+                        "SUM(qty*COALESCE(NULLIF(wage_value,0), unit_value)) wb, "
+                        "SUM(CASE WHEN paid=1 "
+                        "         THEN qty*COALESCE(NULLIF(wage_value,0), unit_value) "
+                        "         ELSE 0 END) pwb "
                         "FROM hive_harvests WHERE market_id=? GROUP BY ign, item",
                         (str(mid),)).fetchall():
                     a = people.setdefault(str(r[0]), {"qty": 0, "value": 0.0,
                                                       "sites": set(), "items": {},
                                                       "uid": None})
-                    it = a["items"].setdefault(str(r[1]), {"qty": 0, "value": 0.0, "paid": 0.0})
+                    it = a["items"].setdefault(str(r[1]), {"qty": 0, "value": 0.0, "paid": 0.0,
+                                                          "wage_base": 0.0, "paid_wage_base": 0.0})
                     it["qty"] += int(r[2] or 0)
                     it["value"] += float(r[3] or 0)
                     it["paid"] += float(r[4] or 0)
+                    it["wage_base"] += float(r[6] or 0)
+                    it["paid_wage_base"] += float(r[7] or 0)
                     # The harvest rows already carry the account they were attributed to;
                     # trust that first and only fall back to the IGN registry, so someone
                     # who was linked at payout time still gets their statement even if the
@@ -277,8 +294,13 @@ def build_harvester_statements() -> dict:
         value = sum(i["value"] for i in a["items"].values()) or a["value"]
         paid_value = sum(i["paid"] for i in a["items"].values())
         qty = sum(i["qty"] for i in a["items"].values()) or a["qty"]
-        earned = value * pct / 100.0
-        already = paid_value * pct / 100.0
+        # Earnings are a cut of the WAGE BASIS, not of the shop value the line above
+        # quotes. Using `value` here told people they had earned more than the settle
+        # path would ever pay them, and the "still to come" figure never reached zero.
+        wage_base = sum(i.get("wage_base", 0.0) for i in a["items"].values()) or value
+        paid_wage_base = sum(i.get("paid_wage_base", 0.0) for i in a["items"].values())
+        earned = wage_base * pct / 100.0
+        already = paid_wage_base * pct / 100.0
         owed = max(0.0, earned - already)
         breakdown = " · ".join(
             f"{_fmt(i['qty'])}× {item}"
@@ -294,6 +316,115 @@ def build_harvester_statements() -> dict:
             msg += "\nYou're fully paid up. Thanks for keeping the hives running."
         out[str(uid)] = msg
     return out
+
+
+# ── one-shot reprice: split sale value from wage basis (2026-08-07) ──────────
+# Before this, ONE price per item drove both the ledger value and the wage. The shop
+# actually sells comb at 350/stack and honey at 500/stack, while harvesters are paid a
+# cut of a lower basis (300 and 400/stack). This migration writes the new prices,
+# stamps the wage basis onto every existing row, restates unit_value to the true sale
+# value, and pays the difference to anyone whose ALREADY-SETTLED rows were underpaid.
+# Guarded by a config flag so it can never run twice — a second run would pay again.
+_REPRICE_FLAG = "hive_reprice_split_v1"
+_REPRICE_SALE = {"honeycomb block": 350.0 / 64.0, "honey block": 500.0 / 64.0}
+_REPRICE_WAGE = {"honeycomb block": 300.0 / 64.0, "honey block": 400.0 / 64.0}
+
+
+def _reprice_plan() -> dict:
+    """Work out the migration WITHOUT changing anything. Returns
+    {done, topups {uid: coins}, rows, unlinked {ign: coins}}. Safe to call any time."""
+    import Restocker_db as _db
+    plan = {"done": False, "topups": {}, "rows": 0, "unlinked": {}, "pct": 0.0}
+    try:
+        if str(_db.get_config(_REPRICE_FLAG) or "").strip():
+            plan["done"] = True
+            return plan
+    except Exception:
+        pass
+    pct = core._hive_harvester_pct()
+    plan["pct"] = pct
+    with _db.db() as conn:
+        rows = conn.execute(
+            "SELECT id, ign, user_id, item, qty, unit_value, paid FROM hive_harvests"
+        ).fetchall()
+    for r in rows:
+        key = str(r["item"] or "").strip().lower()
+        new_wage = _REPRICE_WAGE.get(key)
+        if new_wage is None:
+            continue                          # not a repriced item — leave it alone
+        plan["rows"] += 1
+        if not int(r["paid"] or 0):
+            continue                          # unpaid rows just settle at the new basis
+        # What they were paid on vs what they should have been paid on.
+        old_basis = float(r["unit_value"] or 0)
+        delta = (float(new_wage) - old_basis) * int(r["qty"] or 0) * pct / 100.0
+        if delta <= 0:
+            continue                          # never claw back; a lower basis is written off
+        uid = r["user_id"]
+        if uid:
+            plan["topups"][str(uid)] = plan["topups"].get(str(uid), 0.0) + delta
+        else:
+            plan["unlinked"][str(r["ign"])] = plan["unlinked"].get(str(r["ign"]), 0.0) + delta
+    plan["topups"] = {u: int(round(v)) for u, v in plan["topups"].items() if round(v) >= 1}
+    plan["unlinked"] = {i: int(round(v)) for i, v in plan["unlinked"].items() if round(v) >= 1}
+    return plan
+
+
+async def run_hive_reprice(dry_run: bool = False) -> dict:
+    """Apply the reprice. Order matters: read the plan off the OLD unit_value first,
+    pay from it, and only then restate the rows — otherwise the delta reads as zero."""
+    import Restocker_db as _db
+    import asyncio as _aio
+    plan = await _aio.to_thread(_reprice_plan)
+    if plan["done"] or dry_run:
+        return plan
+
+    paid_out, failed = 0, []
+    for uid, coins in sorted(plan["topups"].items(), key=lambda kv: -kv[1]):
+        try:
+            add_coins(int(uid), int(coins), counts_as_principal=True,
+                      reason="hive:reprice:wage-basis-correction")
+            paid_out += int(coins)
+        except Exception as e:
+            failed.append(uid)
+            log.error("[hive reprice] top-up for %s failed: %s", uid, e)
+    plan["paid_out"] = paid_out
+    plan["failed"] = failed
+
+    # Restate the ledger: wage basis onto every row, sale value corrected.
+    def _restate():
+        with _db.db() as conn:
+            for key in _REPRICE_WAGE:
+                conn.execute("UPDATE hive_harvests SET wage_value=? "
+                             "WHERE lower(trim(item))=?", (_REPRICE_WAGE[key], key))
+                conn.execute("UPDATE hive_harvests SET unit_value=? "
+                             "WHERE lower(trim(item))=?", (_REPRICE_SALE[key], key))
+            for key, v in _REPRICE_SALE.items():
+                conn.execute("INSERT OR REPLACE INTO bot_config(key,value) VALUES(?,?)",
+                             (f"hive_value:{key}", str(v)))
+            for key, v in _REPRICE_WAGE.items():
+                conn.execute("INSERT OR REPLACE INTO bot_config(key,value) VALUES(?,?)",
+                             (f"hive_wage_value:{key}", str(v)))
+    await _aio.to_thread(_restate)
+    # Flag LAST: if anything above threw, the migration is retried rather than half-done.
+    await _aio.to_thread(_db.set_config, _REPRICE_FLAG, "1")
+    log.info("[hive reprice] done — %d row(s) restated, %s coins topped up to %d "
+             "harvester(s), %d unlinked", plan["rows"], f"{paid_out:,}",
+             len(plan["topups"]), len(plan["unlinked"]))
+
+    for uid, coins in plan["topups"].items():
+        try:
+            user = bot.get_user(int(uid)) or await bot.fetch_user(int(uid))
+            if user:
+                await safe_dm(user, (
+                    "🐝 **Hive pay correction**\n"
+                    "Honey Block was being valued below what the shop actually sells it "
+                    f"for, so your past payouts were short. **+{coins:,}** coins have been "
+                    "added to your balance to make up the difference. Nothing you need to do."))
+        except Exception:
+            pass
+        await _aio.sleep(0.4)
+    return plan
 
 
 # A harvester gets at most one automatic statement DM per this many seconds.
@@ -438,7 +569,8 @@ def _ingest_lines(market_id: str, msg_id: str, lines: list, start_line: int = 0)
         val = core._hive_item_value(item)
         try:
             rid = _db.add_hive_harvest(market_id, ign, uid, item, qty, val, msg_id, next_no,
-                                       sale_ts=sale_ts)
+                                       sale_ts=sale_ts,
+                                       wage_value=core._hive_item_wage_value(item))
             if rid:
                 new_ids.append(rid)
                 next_no += 1
@@ -462,6 +594,14 @@ def _group_rows(rows: list):
             except Exception:
                 uid = None
         val = float(r.get("unit_value") or 0) or core._hive_item_value(r.get("item"))
+        # Wage basis is stored per row from 2026-08-07; rows written before that have
+        # 0 and fall back to the sale value, which is what they were paid on.
+        try:
+            wval = float(r.get("wage_value") or 0)
+        except Exception:
+            wval = 0.0
+        if wval <= 0:
+            wval = core._hive_item_wage_value(r.get("item")) or val
         if val <= 0:
             unvalued[str(r.get("item"))] = unvalued.get(str(r.get("item")), 0) + int(r.get("qty") or 0)
             continue
@@ -470,17 +610,20 @@ def _group_rows(rows: list):
             unregistered[str(r.get("ign"))] = unregistered.get(str(r.get("ign")), 0) + v
             continue
         g = groups.setdefault(str(uid), {"ign": r.get("ign"), "ids": [], "qty": 0,
-                                         "value": 0.0, "items": {}, "by_id": {}})
+                                         "value": 0.0, "wage_base": 0.0,
+                                         "items": {}, "by_id": {}})
         g["ids"].append(int(r["id"]))
         g["qty"] += int(r.get("qty") or 0)
         g["value"] += int(r.get("qty") or 0) * val
+        g["wage_base"] += int(r.get("qty") or 0) * wval
         # AUDIT FIX (high): keep each row's own qty/value so a settle run that only
         # wins PART of its snapshot can pay for exactly what it claimed instead of
         # releasing the whole group (which used to un-pay rows another run had
         # already moved coins for, and the next sweep paid them twice).
         g["by_id"][int(r["id"])] = {"item": str(r.get("item")),
                                     "qty": int(r.get("qty") or 0),
-                                    "value": int(r.get("qty") or 0) * val}
+                                    "value": int(r.get("qty") or 0) * val,
+                                    "wage_base": int(r.get("qty") or 0) * wval}
         # Per-item tally so the harvester's DM can say WHAT they delivered, not just a
         # lump "N pcs" — they sell honey and comb at different values and ask why.
         it = g["items"].setdefault(str(r.get("item")), {"qty": 0, "value": 0.0})
@@ -562,6 +705,16 @@ class HiveCog(commands.Cog):
             log.error("[hive report] startup task woke without a ready gateway — aborting")
             return
         log.info("[hive report] startup task firing (channel %s)", _hive_report_channel_id())
+        # Reprice BEFORE the report, so the first thing anyone reads already shows the
+        # corrected value and wage figures rather than one boot's worth of stale ones.
+        try:
+            r = await run_hive_reprice()
+            if not r.get("done"):
+                log.info("[hive reprice] %d row(s) restated, %s topped up to %d harvester(s)",
+                         r.get("rows", 0), f"{r.get('paid_out', 0):,}", len(r.get("topups") or {}))
+        except Exception as e:
+            log.error("[hive reprice] FAILED — prices unchanged, will retry next boot: %s",
+                      e, exc_info=True)
         try:
             self._reported_this_boot = True
             ok = await post_hive_project_report("bot started")
@@ -697,13 +850,16 @@ class HiveCog(commands.Cog):
                 g["ids"] = list(claimed_ids)
                 g["qty"] = sum(w["qty"] for w in won)
                 g["value"] = sum(w["value"] for w in won)
+                g["wage_base"] = sum(w.get("wage_base", w["value"]) for w in won)
                 items = {}
                 for w in won:
                     it = items.setdefault(w["item"], {"qty": 0, "value": 0.0})
                     it["qty"] += w["qty"]
                     it["value"] += w["value"]
                 g["items"] = items
-            pay = int(round(g["value"] * pct / 100.0))
+            # Paid on the WAGE BASIS, not the sale value. wage_base is absent only on a
+            # group built by older code, where value was the basis — hence the fallback.
+            pay = int(round(g.get("wage_base", g["value"]) * pct / 100.0))
             if pay <= 0:
                 settled_value += g["value"]    # produced value with a 0-coin wage still books
                 continue

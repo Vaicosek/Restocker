@@ -400,6 +400,7 @@ CREATE TABLE IF NOT EXISTS hive_harvests (
     item        TEXT NOT NULL,
     qty         INTEGER NOT NULL,
     unit_value  REAL NOT NULL DEFAULT 0,
+    wage_value  REAL NOT NULL DEFAULT 0,             -- per-piece WAGE basis; 0 = fall back to unit_value
     msg_id      TEXT NOT NULL,
     line_no     INTEGER NOT NULL DEFAULT 0,
     recorded_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -861,6 +862,12 @@ def _migrate(conn: sqlite3.Connection) -> None:
         # mod-side dedup — the old exact-sale_ts key drifted up to a minute per re-scan
         # and re-ingested the same sale as "new".
         "ALTER TABLE csn_transactions ADD COLUMN sale_uid TEXT",
+        # Hive wage basis, split from sale value (2026-08-07). The shop SELLS comb at
+        # 350/stack and honey at 500/stack, but harvesters are paid a percentage of a
+        # LOWER internal basis (300 and 400/stack) — the spread is the company's margin.
+        # One column served both jobs before, so raising a shop price also raised wages.
+        # 0 means "never set" and reads as unit_value, so old rows behave exactly as before.
+        "ALTER TABLE hive_harvests ADD COLUMN wage_value REAL NOT NULL DEFAULT 0",
     ]
     for sql in migrations:
         try:
@@ -3063,7 +3070,8 @@ def set_item_worker_cost(name: str, worker_cost) -> None:
 # ── Hive engine ──────────────────────────────────────────────────────────────
 
 def add_hive_harvest(market_id: str, ign: str, user_id, item: str, qty: int,
-                     unit_value: float, msg_id: str, line_no: int, sale_ts: str = None):
+                     unit_value: float, msg_id: str, line_no: int, sale_ts: str = None,
+                     wage_value: float = None):
     """Record one parsed harvest line. Returns the new row id if it was NEW, else None.
     Idempotent two ways: per message+line (re-ingesting the same Discord message never
     double-counts), and — when a sale timestamp is present — per real sale identity
@@ -3103,10 +3111,10 @@ def add_hive_harvest(market_id: str, ign: str, user_id, item: str, qty: int,
                         return None            # already ingested — never pay twice
         cur = conn.execute(
             "INSERT OR IGNORE INTO hive_harvests "
-            "(market_id, ign, user_id, item, qty, unit_value, msg_id, line_no, sale_ts) "
-            "VALUES (?,?,?,?,?,?,?,?,?)",
+            "(market_id, ign, user_id, item, qty, unit_value, wage_value, msg_id, line_no, sale_ts) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
             (str(market_id), str(ign), (str(user_id) if user_id else None), str(item),
-             int(qty), float(unit_value or 0), str(msg_id), int(line_no),
+             int(qty), float(unit_value or 0), float(wage_value or 0), str(msg_id), int(line_no),
              (str(sale_ts) if sale_ts else None)))
         return int(cur.lastrowid) if cur.rowcount > 0 else None
 
@@ -3304,7 +3312,13 @@ def get_hive_harvest_summary(market_id: str) -> dict:
                    ign, item,
                    SUM(qty)                                      AS qty,
                    SUM(qty * unit_value)                          AS value,
-                   SUM(CASE WHEN paid=1 THEN qty*unit_value ELSE 0 END) AS paid_value
+                   SUM(CASE WHEN paid=1 THEN qty*unit_value ELSE 0 END) AS paid_value,
+                   -- wage basis: 0 means the column predates the split, so read it as
+                   -- unit_value and the row behaves exactly as it did before.
+                   SUM(qty * COALESCE(NULLIF(wage_value,0), unit_value))  AS wage_base,
+                   SUM(CASE WHEN paid=1
+                            THEN qty*COALESCE(NULLIF(wage_value,0), unit_value)
+                            ELSE 0 END)                           AS paid_wage_base
             FROM hive_harvests
             WHERE market_id=?
             GROUP BY month, ign, item
@@ -3312,15 +3326,21 @@ def get_hive_harvest_summary(market_id: str) -> dict:
     for r in rows:
         mk = r["month"] or "unknown"
         m = out.setdefault(mk, {"qty": 0, "value": 0.0, "paid_value": 0.0,
+                                "wage_base": 0.0, "paid_wage_base": 0.0,
                                 "by_ign": {}, "by_item": {}})
         q, v = int(r["qty"] or 0), float(r["value"] or 0)
+        wb, pwb = float(r["wage_base"] or 0), float(r["paid_wage_base"] or 0)
         m["qty"] += q
         m["value"] += v
         m["paid_value"] += float(r["paid_value"] or 0)
-        g = m["by_ign"].setdefault(r["ign"], {"qty": 0, "value": 0.0})
-        g["qty"] += q; g["value"] += v
-        i = m["by_item"].setdefault(r["item"], {"qty": 0, "value": 0.0})
-        i["qty"] += q; i["value"] += v
+        m["wage_base"] += wb
+        m["paid_wage_base"] += pwb
+        g = m["by_ign"].setdefault(r["ign"], {"qty": 0, "value": 0.0,
+                                              "wage_base": 0.0, "paid_wage_base": 0.0})
+        g["qty"] += q; g["value"] += v; g["wage_base"] += wb; g["paid_wage_base"] += pwb
+        i = m["by_item"].setdefault(r["item"], {"qty": 0, "value": 0.0,
+                                                "wage_base": 0.0, "paid_wage_base": 0.0})
+        i["qty"] += q; i["value"] += v; i["wage_base"] += wb; i["paid_wage_base"] += pwb
     return out
 
 

@@ -410,6 +410,63 @@ if "777" in _st:
     check("statement reconciles: earned = paid + still to come",
           "984" in _txt and "703" in _txt and "281" in _txt, _txt)
 
+# ── H. sale value vs wage basis are SEPARATE prices (2026-08-07) ────────────
+# The shop sells comb at 350/stack and honey at 500/stack, but wages are a cut of a
+# lower basis (300 / 400 per stack). One price used to do both jobs, so raising a
+# shop price silently raised every wage. These lock the split in.
+_hcore._hive_item_value = lambda i: {"honeycomb block": 350/64,
+                                     "honey block": 500/64}.get(str(i).strip().lower(), 0.0)
+_hcore._hive_item_wage_value = lambda i: {"honeycomb block": 300/64,
+                                          "honey block": 400/64}.get(str(i).strip().lower(), 0.0)
+
+_w1 = db.add_hive_harvest("splitmkt", "Splitty", "888", "Honey Block", 640, 500/64,
+                          "msg:split", 0, sale_ts="2026-08-03T10:00:00Z",
+                          wage_value=400/64)
+_sum = db.get_hive_harvest_summary("splitmkt")
+_m = list(_sum.values())[0]
+check("summary reports sale value and wage basis separately",
+      abs(_m["value"] - 5000.0) < 0.01 and abs(_m["wage_base"] - 4000.0) < 0.01,
+      f"value={_m['value']} wage_base={_m['wage_base']}")
+
+# 640 pcs: worth 5000 at shop value, wage basis 4000, 15% of THAT = 600 (not 750).
+_rows = db.get_unpaid_hive_harvests("splitmkt")
+check("row carries its own wage basis",
+      abs(float(_rows[0]["wage_value"]) - 400/64) < 1e-9, str(dict(_rows[0])))
+check("wage comes off the basis, not the sale value",
+      round(_m["wage_base"] * 15 / 100.0) == 600, str(_m["wage_base"] * 0.15))
+
+# A row written before the split has wage_value=0 and must read as unit_value —
+# otherwise every legacy row would suddenly pay a 0 wage.
+_w2 = db.add_hive_harvest("legacymkt", "Oldy", "889", "Honey Block", 640, 350/64,
+                          "msg:legacy", 0, sale_ts="2026-08-03T11:00:00Z")
+with db.db() as _c:
+    _c.execute("UPDATE hive_harvests SET wage_value=0 WHERE id=?", (_w2,))
+_lm = list(db.get_hive_harvest_summary("legacymkt").values())[0]
+check("legacy row with no wage basis falls back to unit_value",
+      abs(_lm["wage_base"] - _lm["value"]) < 0.01,
+      f"wage_base={_lm['wage_base']} value={_lm['value']}")
+
+# The reprice must be a no-op the second time even if the guard flag is lost.
+def _plan_topups(conn, pct=15.0):
+    WAGE = {"honeycomb block": 300/64, "honey block": 400/64}
+    t = 0.0
+    for r in conn.execute("SELECT item,qty,unit_value,paid FROM hive_harvests"):
+        k = str(r[0]).strip().lower()
+        if k not in WAGE or not int(r[3] or 0):
+            continue
+        d = (WAGE[k] - float(r[2])) * int(r[1]) * pct / 100.0
+        if d > 0:
+            t += d
+    return t
+with db.db() as _c:
+    _c.execute("UPDATE hive_harvests SET unit_value=? WHERE lower(trim(item))=?",
+               (500/64, "honey block"))
+    _c.execute("UPDATE hive_harvests SET unit_value=? WHERE lower(trim(item))=?",
+               (350/64, "honeycomb block"))
+    _again = _plan_topups(_c)
+check("reprice pays nothing on a second run (idempotent without the flag)",
+      _again == 0.0, f"would pay {_again}")
+
 print()
 print("FAILURES:", FAIL)
 sys.exit(1 if FAIL else 0)

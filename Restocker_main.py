@@ -2759,18 +2759,26 @@ def _rollup_combined_months(parent_market_id) -> dict:
 
 # Prices are quoted PER STACK of 64 (350/stack honey, 300/stack comb — the owner's
 # numbers); feed lines count PIECES, so store per-piece: 350/64 and 300/64.
-_HIVE_DEFAULT_VALUES = {"honey block": 350.0 / 64.0, "honeycomb block": 300.0 / 64.0}
+# SALE value — what the shop sells the product for. Drives the report, the hive
+# ledger and the stock fundamentals. Quoted per stack of 64 in game.
+_HIVE_DEFAULT_VALUES = {"honey block": 500.0 / 64.0, "honeycomb block": 350.0 / 64.0}
+# WAGE basis — the lower internal price the harvester percentage is taken from.
+# The gap between the two IS the company's margin on harvesting; before 2026-08-07
+# a single table did both jobs, so raising a shop price silently raised every wage.
+_HIVE_DEFAULT_WAGE_VALUES = {"honey block": 400.0 / 64.0, "honeycomb block": 300.0 / 64.0}
 
 
 def _hive_item_value(item) -> float:
     """Per-piece value of a hive product. Config 'hive_value:<item>' (lowercased) wins;
     anything unknown = 0 (not a hive item, so it's never paid for).
 
+    This is the SALE value, not the wage basis — see _hive_item_wage_value.
+
     UNITS — the thing everyone gets wrong: shop prices are quoted PER STACK OF 64
-    (Honeycomb Block 300/stack, Honey Block 350/stack) but this function and the
+    (Honeycomb Block 350/stack, Honey Block 500/stack) but this function and the
     `hive_harvests.unit_value` column are PER PIECE. Hence the defaults are
-    300/64 = 4.6875 and 350/64 = 5.46875. If you ever set `hive_value:` to a
-    stack price by mistake, harvesters get paid 64x too much."""
+    350/64 = 5.46875 and 500/64 = 7.8125. If you ever set `hive_value:` to a
+    stack price by mistake, the ledger books 64x too much."""
     # Strip § colour codes FIRST: "§6Honey Block" used to normalize to a key that
     # matched nothing → value 0 → the harvester was paid NOTHING for real honey
     # (while the old substring-matching rate table happily matched the same name).
@@ -2786,6 +2794,30 @@ def _hive_item_value(item) -> float:
     except Exception:
         pass
     return float(_HIVE_DEFAULT_VALUES.get(key, 0.0))
+
+
+def _hive_item_wage_value(item) -> float:
+    """Per-piece WAGE BASIS of a hive product — the number the harvester percentage is
+    taken from. Config 'hive_wage_value:<item>' wins, then the default table, and
+    finally the sale value itself.
+
+    That last fallback matters: an item with no wage entry behaves exactly as it did
+    when one price did both jobs, so adding a new hive product never silently pays 0.
+    Like _hive_item_value this is PER PIECE (300/64 = 4.6875, 400/64 = 6.25)."""
+    key = re.sub(r"§.", "", str(item or ""))
+    key = re.sub(r"\s+", " ", key.strip().lower())
+    if not key:
+        return 0.0
+    try:
+        import Restocker_db as _db
+        raw = _db.get_config(f"hive_wage_value:{key}")
+        if raw is not None and str(raw).strip() != "":
+            return max(0.0, float(raw))
+    except Exception:
+        pass
+    if key in _HIVE_DEFAULT_WAGE_VALUES:
+        return float(_HIVE_DEFAULT_WAGE_VALUES[key])
+    return _hive_item_value(item)
 
 
 def _hive_harvester_pct() -> float:
@@ -3739,7 +3771,8 @@ async def _pay_honey_from_export(txns: list, market_id: str, report_channel):
             pass
         try:
             rid = _db.add_hive_harvest(market_id, actor, uid, item, qty,
-                                       _hive_item_value(item), msg_id, line_no, sale_ts=ts)
+                                       _hive_item_value(item), msg_id, line_no, sale_ts=ts,
+                                       wage_value=_hive_item_wage_value(item))
             if rid:
                 new_ids.append(rid)
         except Exception as e:
@@ -4699,8 +4732,14 @@ async def on_ready():
             except Exception:
                 pass
             return "|".join(parts)
+        # ADMIN_GUILD_ID and the public/private split are part of the signature: setting
+        # ADMIN_GUILD_ID in .env does not change a single command, so without this the
+        # signature matched, the sync was skipped, and the admin split silently never
+        # happened — the symptom being "Slash commands unchanged" forever.
         _sig = _hl_sync.md5(
             (str(getattr(bot.user, "id", "")) + "|" +
+             "admin:" + str(ADMIN_GUILD_ID) + "|" +
+             "public:" + ",".join(sorted(PUBLIC_COMMAND_NAMES)) + "|" +
              "|".join(sorted(_cmd_fingerprint(c) for c in bot.tree.walk_commands()))).encode()
         ).hexdigest()
         # The signature guard alone is NOT enough: if the bot is kicked and re-invited (or
