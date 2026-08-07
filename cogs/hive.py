@@ -296,27 +296,67 @@ def build_harvester_statements() -> dict:
     return out
 
 
-async def dm_harvester_statements() -> int:
+# A harvester gets at most one automatic statement DM per this many seconds.
+# Without it, ten restarts in an hour meant ten identical DMs to twelve people.
+HIVE_STMT_COOLDOWN_S = 6 * 3600
+_HIVE_STMT_KEY = "hive_stmt_dm:"
+
+
+async def dm_harvester_statements(force: bool = False) -> int:
     """DM every linked harvester their personal statement. Returns how many were sent.
+
+    Rate-limited per person: a harvester is skipped if they already got a statement
+    within HIVE_STMT_COOLDOWN_S. `force=True` bypasses that — used by the explicit
+    `/hive report dm_harvesters:True` command, where a human asked for it on purpose.
     Deliberately NOT run on the 6h sweep — that would be four DMs a day per person."""
     import asyncio as _aio
+    import time as _time
+    import Restocker_db as _db
     sent = 0
+    skipped = 0
     try:
         statements = build_harvester_statements()
     except Exception as e:
         log.warning("[hive report] could not build harvester statements: %s", e)
         return 0
+
+    now = int(_time.time())
+    last = {}
+    if not force:
+        try:
+            last = _db.get_config_prefix(_HIVE_STMT_KEY) or {}
+        except Exception:
+            last = {}                          # no history = everyone is due
+
     for uid, msg in statements.items():
+        key = _HIVE_STMT_KEY + str(uid)
+        if not force:
+            try:
+                prev = int(str(last.get(key) or last.get(str(uid)) or 0).strip() or 0)
+            except Exception:
+                prev = 0
+            if prev and 0 <= (now - prev) < HIVE_STMT_COOLDOWN_S:
+                skipped += 1
+                continue
         try:
             user = bot.get_user(int(uid)) or await bot.fetch_user(int(uid))
             if user is None:
                 continue
             await safe_dm(user, msg)
             sent += 1
+            # Stamp only on a delivered DM, so a failed send retries next boot.
+            try:
+                _db.set_config(key, str(now))
+            except Exception:
+                pass
         except Exception as e:
             log.info("[hive report] DM to %s failed: %s", uid, e)
         await _aio.sleep(0.4)                 # gentle on the DM rate limit
-    log.info("[hive report] sent %d harvester statement(s)", sent)
+    if skipped:
+        log.info("[hive report] sent %d harvester statement(s), %d on cooldown (<%dh)",
+                 sent, skipped, HIVE_STMT_COOLDOWN_S // 3600)
+    else:
+        log.info("[hive report] sent %d harvester statement(s)", sent)
     return sent
 
 
@@ -902,7 +942,7 @@ class HiveCog(commands.Cog):
         note = (f"{state}\n\n✅ Posted {len(msgs)} message(s) to "
                 f"{getattr(target, 'mention', cid)} (channel `{cid}`).")
         if dm_harvesters:
-            sent = await dm_harvester_statements()
+            sent = await dm_harvester_statements(force=True)
             note += f"\n📬 Sent {sent} harvester statement(s)."
         await interaction.followup.send(note, ephemeral=True)
 
