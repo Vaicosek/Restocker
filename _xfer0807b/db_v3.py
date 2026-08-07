@@ -1,0 +1,4105 @@
+"""
+db.py — SQLite database layer for Restocker bot.
+Replaces all YAML file I/O with a single restocker.db file.
+"""
+from __future__ import annotations
+
+import json
+import sqlite3
+import threading
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Optional
+
+DB_PATH = Path("restocker.db")
+
+_local = threading.local()
+
+
+def _get_conn() -> sqlite3.Connection:
+    if not hasattr(_local, "conn") or _local.conn is None:
+        conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("PRAGMA foreign_keys=ON")
+        _local.conn = conn
+    return _local.conn
+
+
+@contextmanager
+def db():
+    """Context manager — yields a connection, commits on success, rolls back on error."""
+    conn = _get_conn()
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+
+SCHEMA = """
+-- ── Balances ────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS balances (
+    user_id         TEXT PRIMARY KEY,
+    coins           REAL NOT NULL DEFAULT 0,
+    principal       REAL NOT NULL DEFAULT 0,
+    lp              REAL NOT NULL DEFAULT 0,
+    updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS balance_meta (
+    key     TEXT PRIMARY KEY,
+    value   TEXT NOT NULL
+);
+
+-- ── Items ────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS items (
+    name            TEXT PRIMARY KEY,
+    coin            REAL NOT NULL DEFAULT 0,
+    stock           INTEGER NOT NULL DEFAULT 0,
+    unit_type       TEXT NOT NULL DEFAULT 'pieces',
+    stackable       INTEGER NOT NULL DEFAULT 1,
+    stack_size      INTEGER NOT NULL DEFAULT 64,
+    barrel_slots    INTEGER NOT NULL DEFAULT 54,
+    market_id       TEXT NOT NULL DEFAULT 'main',
+    worker_cost     REAL                            -- break-even cost (consignment futures); NULL = unset
+);
+
+-- ── Markets ──────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS markets (
+    market_id           TEXT PRIMARY KEY,
+    name                TEXT NOT NULL,
+    owner_id            TEXT,
+    manager_ids         TEXT NOT NULL DEFAULT '[]',   -- JSON array
+    platform_fee_pct    REAL NOT NULL DEFAULT 3.0,
+    csn_history_file    TEXT,
+    active              INTEGER NOT NULL DEFAULT 1,
+    created_at          TEXT NOT NULL DEFAULT (datetime('now')),
+    discord_role_name   TEXT NOT NULL DEFAULT '',     -- role that identifies market leader
+    leader_discord_id   TEXT,                         -- Discord user ID of current leader
+    leader_code         TEXT,                         -- verification code for CSN mod
+    report_channel_id   TEXT                          -- Discord channel CSN webhook posts to (routes by channel, no code needed)
+);
+
+-- ── Orders ───────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS orders (
+    id                      INTEGER PRIMARY KEY,
+    shop                    TEXT NOT NULL DEFAULT '',
+    item                    TEXT NOT NULL,
+    market_id               TEXT,
+    requested               INTEGER NOT NULL DEFAULT 0,
+    produced                INTEGER NOT NULL DEFAULT 0,
+    status                  TEXT NOT NULL DEFAULT 'open',
+    claimed_by              TEXT,
+    unit_type               TEXT NOT NULL DEFAULT 'pieces',
+    amount                  INTEGER NOT NULL DEFAULT 0,
+    stackable               INTEGER NOT NULL DEFAULT 1,
+    stack_size              INTEGER NOT NULL DEFAULT 64,
+    barrel_slots            INTEGER NOT NULL DEFAULT 54,
+    coin_per_piece          REAL,
+    priority_role           TEXT,
+    priority_until          TEXT,
+    employee_announce_at    TEXT,
+    employee_announced      INTEGER NOT NULL DEFAULT 0,
+    worker_announced        INTEGER NOT NULL DEFAULT 0,
+    verification_ticket_id  INTEGER,
+    assist_ticket_id        INTEGER,
+    blocked_claimers        TEXT NOT NULL DEFAULT '[]',  -- JSON array
+    messages                TEXT NOT NULL DEFAULT '{}',  -- JSON object
+    assist_ticket_ids       TEXT NOT NULL DEFAULT '{}',  -- JSON object
+    created_at              TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at              TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
+
+CREATE TABLE IF NOT EXISTS order_claims (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_id    INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+    user_id     TEXT NOT NULL,
+    user_tag    TEXT NOT NULL,
+    qty         INTEGER NOT NULL DEFAULT 0,
+    claimed_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_order_claims_order ON order_claims(order_id);
+
+-- ── Investors ────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS investors (
+    user_id         TEXT PRIMARY KEY,
+    balance         REAL NOT NULL DEFAULT 0,
+    principal       REAL NOT NULL DEFAULT 0,
+    joined_at       TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS investor_payout_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     TEXT NOT NULL,
+    amount      REAL NOT NULL,
+    note        TEXT,
+    paid_at     TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- ── Hive Claims ──────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS hive_claims (
+    location    TEXT PRIMARY KEY,
+    user_id     TEXT NOT NULL,
+    user_tag    TEXT NOT NULL,
+    claimed_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- ── Hive Pickups ─────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS hive_batches (
+    batch_id    TEXT PRIMARY KEY,
+    data        TEXT NOT NULL DEFAULT '{}',  -- JSON
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS hive_active_batch (
+    id          INTEGER PRIMARY KEY CHECK (id = 1),  -- single row
+    batch_id    TEXT
+);
+
+-- ── CSN History ──────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS csn_history (
+    market_id   TEXT NOT NULL DEFAULT 'main',
+    month       TEXT NOT NULL,            -- e.g. '2026-04'
+    label       TEXT,
+    source      TEXT,
+    recorded_at TEXT,
+    income      REAL NOT NULL DEFAULT 0,
+    spent       REAL NOT NULL DEFAULT 0,
+    net         REAL NOT NULL DEFAULT 0,
+    PRIMARY KEY (market_id, month)
+);
+-- Per-SOURCE monthly contributions. One market can be scanned by several shops, each
+-- running its own CSN mod and uploading its own monthly file that covers ONLY its own
+-- sales. Treating each such file as authoritative for the month made the last upload
+-- win and silently discard the others — greyhames' August flip-flopped between 17,171
+-- and 2,867,935 depending on which alt posted most recently. Every uploader now keeps
+-- its own row here, and the month in csn_history is the SUM of them, so re-uploading a
+-- file replaces that source's slice (idempotent) instead of the whole month.
+CREATE TABLE IF NOT EXISTS csn_month_sources (
+    market_id   TEXT NOT NULL,
+    month       TEXT NOT NULL,
+    source_key  TEXT NOT NULL,            -- the uploading webhook/poster, one per shop
+    income      REAL NOT NULL DEFAULT 0,
+    spent       REAL NOT NULL DEFAULT 0,
+    items_json  TEXT,
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (market_id, month, source_key)
+);
+CREATE TABLE IF NOT EXISTS csn_history_items (
+    market_id     TEXT NOT NULL DEFAULT 'main',
+    month         TEXT NOT NULL,
+    item          TEXT NOT NULL,
+    sold_qty      INTEGER NOT NULL DEFAULT 0,
+    bought_qty    INTEGER NOT NULL DEFAULT 0,
+    net_coins     REAL NOT NULL DEFAULT 0,
+    -- CSN mod v1.2 detail: how many times an item transacted (velocity) and the
+    -- gross split of net_coins (income = sales revenue ≥0, expense = buy spend ≤0).
+    -- Enables per-item margin %, avg unit price and turnover on the ledger.
+    times_sold    INTEGER NOT NULL DEFAULT 0,
+    times_bought  INTEGER NOT NULL DEFAULT 0,
+    income_coins  REAL NOT NULL DEFAULT 0,
+    expense_coins REAL NOT NULL DEFAULT 0,
+    PRIMARY KEY (market_id, month, item)
+);
+CREATE INDEX IF NOT EXISTS idx_csn_items_market_month ON csn_history_items(market_id, month);
+
+-- ── Platform Balance ─────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS platform_balance (
+    id          INTEGER PRIMARY KEY CHECK (id = 1),  -- single row
+    balance     REAL NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS platform_balance_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    month       TEXT,
+    market_id   TEXT,
+    amount      REAL NOT NULL,
+    note        TEXT,
+    logged_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- ── Notes (note-to-self via AI agent) ───────────────────────────────────────
+CREATE TABLE IF NOT EXISTS notes (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    author_id   TEXT NOT NULL,
+    author_name TEXT NOT NULL,
+    text        TEXT NOT NULL,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- ── Loyalty System ──────────────────────────────────────────────────────────
+-- This is the shared "V Tech" pool: one balance per user, drives tiers/interest/payout
+-- bonus. Stage 4 (per-market loyalty) layers market_loyalty_ledger on TOP of this table
+-- rather than replacing it — every order still credits this pool (in full for V Tech-owned
+-- markets, a configurable slice otherwise), so existing tiers/interest/redemptions are
+-- untouched by the change.
+CREATE TABLE IF NOT EXISTS loyalty (
+    user_id         TEXT PRIMARY KEY,
+    points          REAL NOT NULL DEFAULT 0,
+    total_earned    REAL NOT NULL DEFAULT 0,
+    last_activity   TEXT,
+    updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Per-(user, market) loyalty ledger. Each market owner sets and pays their own rewards
+-- from their market's own balance — separate from the shared V Tech pool above. Two
+-- markets stocking via the same worker want independent point balances, same rationale
+-- as market_item_targets being per-market.
+CREATE TABLE IF NOT EXISTS market_loyalty_ledger (
+    user_id         TEXT NOT NULL,
+    market_id       TEXT NOT NULL,
+    points          REAL NOT NULL DEFAULT 0,
+    total_earned    REAL NOT NULL DEFAULT 0,
+    last_activity   TEXT,
+    updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (user_id, market_id)
+);
+CREATE INDEX IF NOT EXISTS idx_mll_market ON market_loyalty_ledger(market_id);
+CREATE INDEX IF NOT EXISTS idx_mll_user   ON market_loyalty_ledger(user_id);
+
+-- One Discord user may register MANY in-game names (a main + alt accounts) — several
+-- people run 8+ alts. So the row is keyed on `ign` (each in-game name belongs to exactly
+-- ONE user, case-insensitive), NOT on user_id. The "primary" IGN for display is simply the
+-- earliest-registered row for that user. CSN attribution keys off ign→user_id, so every alt
+-- an owner registers automatically pools its sales/loyalty into their one Discord account.
+CREATE TABLE IF NOT EXISTS ign_registry (
+    ign             TEXT PRIMARY KEY COLLATE NOCASE,
+    user_id         TEXT NOT NULL,
+    registered_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_ign_registry_user ON ign_registry(user_id);
+
+CREATE TABLE IF NOT EXISTS ign_pending (
+    user_id         TEXT PRIMARY KEY,
+    dm_channel_id   TEXT,
+    role_id         TEXT NOT NULL,
+    guild_id        TEXT NOT NULL,
+    deadline        TEXT NOT NULL,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- ── Web Orders (submitted via website) ───────────────────────────────────────
+CREATE TABLE IF NOT EXISTS web_orders (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    discord_username    TEXT NOT NULL,
+    discord_id          TEXT,
+    items_json          TEXT NOT NULL DEFAULT '[]',
+    notes               TEXT,
+    status              TEXT NOT NULL DEFAULT 'pending',
+    reviewed_by         TEXT,
+    reviewed_at         TEXT,
+    notify_msg_id       TEXT,
+    created_at          TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_web_orders_status ON web_orders(status);
+
+-- ── Futures Orders (custom item + enchant requests submitted via Discord) ───
+CREATE TABLE IF NOT EXISTS futures_orders (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id         TEXT NOT NULL,
+    username        TEXT NOT NULL,
+    item            TEXT NOT NULL,
+    quantity        INTEGER NOT NULL,
+    enchants        TEXT,                           -- e.g. "Fortune III, Unbreaking" or "Clean (no Silk Touch/Fortune)"
+    notes           TEXT,
+    status          TEXT NOT NULL DEFAULT 'pending', -- pending / approved / declined
+    reviewed_by     TEXT,
+    reviewed_at     TEXT,
+    notify_msg_id   TEXT,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_futures_orders_status ON futures_orders(status);
+CREATE INDEX IF NOT EXISTS idx_futures_orders_user ON futures_orders(user_id);
+
+-- Bulk / consignment futures — ONE order holding many line items (pasted as a text list).
+-- Consignment model: the customer pays worker_cost upfront and owes (full_price - worker_cost)
+-- per unit, billed as they RESELL the goods (tracked via their market's CSN sales). The price
+-- columns stay NULL until priced (Stage B); Stage A captures item+qty and turns each line into
+-- a real claimable work order on approval.
+CREATE TABLE IF NOT EXISTS futures_bulk (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    customer_id    TEXT NOT NULL,
+    customer_name  TEXT,
+    market_id      TEXT,                     -- the buyer's market (where resales are tracked)
+    created_by     TEXT,                     -- who set up the deal (the supplier/owner)
+    status         TEXT NOT NULL DEFAULT 'pending',  -- pending|fulfilled|declined|cancelled
+    notes          TEXT,
+    notify_msg_id  TEXT,
+    reviewed_by    TEXT,
+    reviewed_at    TEXT,
+    paid           REAL NOT NULL DEFAULT 0,   -- margin the customer has paid back so far (Stage B)
+    created_at     TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS futures_bulk_lines (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    bulk_id        INTEGER NOT NULL,
+    item           TEXT NOT NULL,
+    qty            INTEGER NOT NULL DEFAULT 1,
+    unit           TEXT NOT NULL DEFAULT 'pieces',   -- pieces|stacks|barrels
+    enchants       TEXT,
+    raw_line       TEXT,                     -- the original pasted text (for review/repair)
+    item_key       TEXT,                     -- linked catalog item (for CSN resale matching, Stage B)
+    worker_cost    REAL,                     -- per-unit break-even paid upfront (Stage B)
+    full_price     REAL,                     -- per-unit full price (Stage B)
+    sold_baseline  INTEGER NOT NULL DEFAULT 0,  -- customer's CSN cumulative sold at pricing time
+    sold_qty       INTEGER NOT NULL DEFAULT 0,  -- last-computed CSN resold (cache/info, Stage B)
+    sold_override  INTEGER,                  -- manual resold count; when set, overrides CSN auto
+    work_order_id  INTEGER                   -- claimable order created on fulfill
+);
+CREATE INDEX IF NOT EXISTS idx_futures_bulk_status ON futures_bulk(status);
+CREATE INDEX IF NOT EXISTS idx_futures_bulk_customer ON futures_bulk(customer_id);
+CREATE INDEX IF NOT EXISTS idx_fbl_bulk ON futures_bulk_lines(bulk_id);
+
+-- ── Per-transaction sales ledger (the CSN mod's "# PERIOD" export) ──────────
+-- csn_history stores MONTHLY aggregates per item; this stores the individual sales those
+-- aggregates are computed from — who bought it and exactly when. Enables daily/hourly
+-- reporting and per-customer analysis, neither of which an aggregate can answer.
+-- `verb` follows CSN's semantics: 'bought' = a customer bought FROM you (income, coins>0),
+-- 'sold' = you bought from them (expense, coins<0).
+CREATE TABLE IF NOT EXISTS csn_transactions (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    market_id   TEXT NOT NULL,
+    actor       TEXT NOT NULL,             -- the other party: your customer (or supplier)
+    seller      TEXT,                      -- shop owner as reported by CSN
+    verb        TEXT NOT NULL,             -- 'bought' | 'sold'
+    item        TEXT NOT NULL,
+    qty         INTEGER NOT NULL,
+    coins       REAL NOT NULL DEFAULT 0,
+    sale_ts     TEXT NOT NULL,             -- absolute ISO instant reconstructed by the mod
+    sale_day    TEXT NOT NULL,             -- YYYY-MM-DD, indexed for day rollups
+    recorded_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_csn_txn_day    ON csn_transactions(market_id, sale_day);
+CREATE INDEX IF NOT EXISTS idx_csn_txn_actor  ON csn_transactions(market_id, actor);
+-- Full sale identity. The mod already dedups per-run via its .seen file, but re-scans after
+-- a .seen wipe (and two operators scanning the same shop) must not create duplicates.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_csn_txn
+    ON csn_transactions(market_id, actor, item, qty, coins, sale_ts);
+
+-- ── Hive engine: per-player harvest feed + monthly value bookings ───────────
+-- hive_harvests: one row per parsed "X sold you Nx Item" feed line. The chest shops buy
+-- honey at 0 coins, so the REAL value is assigned here (unit_value snapshot) and paid out
+-- by /hive payout. UNIQUE(msg_id, line_no) makes re-ingesting a Discord message a no-op.
+CREATE TABLE IF NOT EXISTS hive_harvests (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    market_id   TEXT NOT NULL,
+    ign         TEXT NOT NULL,
+    user_id     TEXT,                                  -- resolved from ign_registry, NULL if unregistered
+    item        TEXT NOT NULL,
+    qty         INTEGER NOT NULL,
+    unit_value  REAL NOT NULL DEFAULT 0,
+    wage_value  REAL NOT NULL DEFAULT 0,             -- per-piece WAGE basis; 0 = fall back to unit_value
+    msg_id      TEXT NOT NULL,
+    line_no     INTEGER NOT NULL DEFAULT 0,
+    recorded_at TEXT NOT NULL DEFAULT (datetime('now')),
+    paid        INTEGER NOT NULL DEFAULT 0,
+    paid_at     TEXT,
+    sale_ts     TEXT,                                  -- absolute ISO time of the in-game sale (from the CSN mod), NULL on legacy/untimed lines
+    UNIQUE(msg_id, line_no)
+);
+CREATE INDEX IF NOT EXISTS idx_hive_unpaid ON hive_harvests(market_id, paid);
+-- hive_ledger: accumulated monthly hive economics per market. net = value − harvester pay
+-- − owner cut = V Tech's gain; the stock roll-up reads this on top of CSN months.
+CREATE TABLE IF NOT EXISTS hive_ledger (
+    market_id     TEXT NOT NULL,
+    month         TEXT NOT NULL,                       -- YYYY-MM
+    value         REAL NOT NULL DEFAULT 0,
+    harvester_pay REAL NOT NULL DEFAULT 0,
+    owner_pay     REAL NOT NULL DEFAULT 0,
+    net           REAL NOT NULL DEFAULT 0,
+    updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (market_id, month)
+);
+
+-- ── Lands (claims) ledger: entries forwarded by the CSN mod's LandTracker ──
+-- Every land-inbox entry (deposit/withdraw/taxes/membership) with the balance it
+-- left behind. Teleport fees never appear as entries — they are INFERRED as the
+-- unexplained gap between consecutive balances (see cogs/lands.py).
+CREATE TABLE IF NOT EXISTS land_ledger (
+    land        TEXT NOT NULL,
+    entry_no    INTEGER NOT NULL,
+    ts          TEXT NOT NULL,                          -- MM/DD/YYYY HH:MM as shown in-game
+    kind        TEXT NOT NULL,                          -- deposit / withdraw / taxes / other
+    amount      REAL NOT NULL DEFAULT 0,                -- signed effect on the balance
+    new_balance REAL,                                   -- balance after this entry (NULL if not shown)
+    body        TEXT,
+    recorded_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (land, entry_no, ts)
+);
+
+CREATE TABLE IF NOT EXISTS land_balances (
+    land       TEXT PRIMARY KEY,
+    balance    REAL NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Inferred teleport-fee income per land per month (recomputed idempotently from
+-- land_ledger + balance snapshots — safe to rebuild any time).
+CREATE TABLE IF NOT EXISTS land_fees (
+    land       TEXT NOT NULL,
+    month      TEXT NOT NULL,                           -- YYYY-MM
+    fees       REAL NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (land, month)
+);
+
+-- ── Stock Exchange (markets that go public, traded with server currency) ────
+CREATE TABLE IF NOT EXISTS market_shares (
+    market_id           TEXT PRIMARY KEY REFERENCES markets(market_id),
+    active              INTEGER NOT NULL DEFAULT 1,   -- 1 = publicly tradeable, 0 = delisted
+    shares_outstanding  REAL NOT NULL DEFAULT 1000,
+    pe_multiplier       REAL NOT NULL DEFAULT 12,
+    share_price         REAL NOT NULL DEFAULT 0,
+    listed_at           TEXT NOT NULL DEFAULT (datetime('now')),
+    last_priced_at      TEXT,
+    last_priced_month   TEXT                          -- last csn_history month used to price this stock
+);
+
+CREATE TABLE IF NOT EXISTS stock_holdings (
+    user_id     TEXT NOT NULL,
+    market_id   TEXT NOT NULL REFERENCES market_shares(market_id),
+    shares      REAL NOT NULL DEFAULT 0,
+    cost_basis  REAL NOT NULL DEFAULT 0,               -- total coins paid for current shares (for P/L)
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (user_id, market_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_stock_holdings_market ON stock_holdings(market_id);
+
+CREATE TABLE IF NOT EXISTS stock_trade_log (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id         TEXT NOT NULL,
+    market_id       TEXT NOT NULL,
+    side            TEXT NOT NULL,                     -- 'buy' or 'sell'
+    shares          REAL NOT NULL,
+    price_per_share REAL NOT NULL,
+    total_coins     REAL NOT NULL,
+    traded_at       TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_stock_trade_log_market ON stock_trade_log(market_id);
+CREATE INDEX IF NOT EXISTS idx_stock_trade_log_user ON stock_trade_log(user_id);
+
+CREATE TABLE IF NOT EXISTS stock_price_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    market_id   TEXT NOT NULL,
+    price       REAL NOT NULL,
+    reason      TEXT,
+    logged_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_stock_price_log_market ON stock_price_log(market_id);
+-- ── Limit / trigger orders ──────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS stock_limit_orders (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id         TEXT NOT NULL,
+    market_id       TEXT NOT NULL,
+    side            TEXT NOT NULL,
+    shares          INTEGER NOT NULL,
+    limit_price     REAL NOT NULL,
+    status          TEXT NOT NULL DEFAULT 'open',
+    fill_price      REAL,
+    fill_total      REAL,
+    note            TEXT,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    resolved_at     TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_limit_orders_market ON stock_limit_orders(market_id, status);
+CREATE INDEX IF NOT EXISTS idx_limit_orders_user ON stock_limit_orders(user_id, status);
+
+-- ── Corporate bonds (item-collateralized debt) ──────────────────────────────
+CREATE TABLE IF NOT EXISTS bonds (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    market_id         TEXT NOT NULL,
+    name              TEXT NOT NULL DEFAULT '',
+    face_total        REAL NOT NULL,
+    unit_price        REAL NOT NULL DEFAULT 100,
+    units_total       INTEGER NOT NULL,
+    units_sold        REAL NOT NULL DEFAULT 0,
+    coupon_pct        REAL NOT NULL,
+    term_months       INTEGER NOT NULL,
+    issued_at         TEXT NOT NULL DEFAULT (datetime('now')),
+    matures_at        TEXT,
+    status            TEXT NOT NULL DEFAULT 'open',
+    last_coupon_month TEXT,
+    missed_coupons    INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_bonds_market ON bonds(market_id, status);
+CREATE TABLE IF NOT EXISTS bond_holdings (
+    bond_id   INTEGER NOT NULL,
+    user_id   TEXT NOT NULL,
+    units     REAL NOT NULL DEFAULT 0,
+    invested  REAL NOT NULL DEFAULT 0,
+    name      TEXT,
+    PRIMARY KEY (bond_id, user_id)
+);
+
+-- ── Listing escrow (outside companies deposit collateral to list) ───────────
+CREATE TABLE IF NOT EXISTS escrow_deposits (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    party       TEXT NOT NULL,               -- who deposited (company / player name)
+    kind        TEXT NOT NULL DEFAULT 'coins',  -- coins / items
+    value       REAL NOT NULL,               -- coin value (items at agreed valuation)
+    note        TEXT,
+    status      TEXT NOT NULL DEFAULT 'held',   -- held / released / forfeited
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- ── Shareholder voting (weight = shares + GEX.PR register share) ────────────
+CREATE TABLE IF NOT EXISTS vote_proposals (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    market_id   TEXT NOT NULL,
+    question    TEXT NOT NULL,
+    options     TEXT NOT NULL,               -- JSON array of choice labels
+    created_by  TEXT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    closes_at   TEXT NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'open' -- open / closed
+);
+CREATE TABLE IF NOT EXISTS vote_casts (
+    proposal_id INTEGER NOT NULL,
+    user_id     TEXT NOT NULL,
+    choice_idx  INTEGER NOT NULL,
+    weight      REAL NOT NULL DEFAULT 0,
+    name        TEXT,
+    cast_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (proposal_id, user_id)
+);
+CREATE TABLE IF NOT EXISTS investor_suggestions (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     TEXT NOT NULL,
+    name        TEXT,
+    weight      REAL NOT NULL DEFAULT 0,     -- submitter's stake at submission time
+    text        TEXT NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'new', -- new / planned / done / declined
+    response    TEXT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- ── Dividend payout log ─────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS stock_dividend_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    market_id   TEXT NOT NULL,
+    month       TEXT NOT NULL,
+    total_paid  REAL NOT NULL,
+    per_share   REAL NOT NULL,
+    holders     INTEGER NOT NULL,
+    paid_at     TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_dividend_log_market ON stock_dividend_log(market_id);
+
+-- ── Runtime config overrides (channel/category/guild IDs, etc.) ───────────────
+CREATE TABLE IF NOT EXISTS bot_config (
+    key   TEXT PRIMARY KEY,
+    value TEXT
+);
+
+-- ── Manager teams (worker -> manager, for override commissions) ──────────────
+CREATE TABLE IF NOT EXISTS team_members (
+    worker_id   TEXT PRIMARY KEY,
+    manager_id  TEXT NOT NULL,
+    added_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_team_manager ON team_members(manager_id);
+
+CREATE TABLE IF NOT EXISTS team_settings (
+    manager_id   TEXT PRIMARY KEY,
+    webhook_url  TEXT,
+    channel_id   TEXT,
+    updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS team_perf_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    manager_id  TEXT NOT NULL,
+    worker_id   TEXT NOT NULL,
+    kind        TEXT NOT NULL,            -- order | sales | futures | override
+    coins       REAL NOT NULL DEFAULT 0,
+    points      REAL NOT NULL DEFAULT 0,
+    qty         INTEGER NOT NULL DEFAULT 0,
+    detail      TEXT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_team_perf_mgr ON team_perf_log(manager_id);
+CREATE INDEX IF NOT EXISTS idx_team_perf_created ON team_perf_log(created_at);
+
+CREATE TABLE IF NOT EXISTS coin_ledger (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id       TEXT NOT NULL,
+    delta         INTEGER NOT NULL,
+    balance_after INTEGER NOT NULL,
+    reason        TEXT,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_coin_ledger_user ON coin_ledger(user_id, id);
+
+CREATE TABLE IF NOT EXISTS etf_holdings (
+    user_id     TEXT PRIMARY KEY,
+    units       REAL NOT NULL DEFAULT 0,
+    cost_basis  REAL NOT NULL DEFAULT 0,
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS market_stock (
+    market_id   TEXT NOT NULL,
+    item        TEXT NOT NULL,
+    owner       TEXT,
+    stock       INTEGER NOT NULL DEFAULT 0,
+    capacity    INTEGER NOT NULL DEFAULT 0,
+    buy_price   REAL,
+    sell_price  REAL,
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (market_id, item)
+);
+
+-- market_stock keeps only the LATEST reading per item (ON CONFLICT DO UPDATE), so every
+-- scan destroyed the previous one and no trend could ever be computed. This keeps one row
+-- per item per scan-day: enough to see depletion and predict a restock, without a row per
+-- scan for people who press K several times an hour.
+CREATE TABLE IF NOT EXISTS market_stock_history (
+    market_id  TEXT NOT NULL,
+    item       TEXT NOT NULL,
+    day        TEXT NOT NULL,              -- YYYY-MM-DD of the reading
+    stock      INTEGER NOT NULL DEFAULT 0, -- last reading that day
+    capacity   INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (market_id, item, day)
+);
+CREATE INDEX IF NOT EXISTS idx_stock_hist ON market_stock_history(market_id, item, day);
+
+CREATE TABLE IF NOT EXISTS stock_alarms (
+    market_id   TEXT NOT NULL,
+    item        TEXT NOT NULL,          -- "*" = market-wide default
+    threshold   REAL NOT NULL,
+    mode        TEXT NOT NULL DEFAULT 'pct',  -- 'pct' (of capacity) or 'pieces'
+    PRIMARY KEY (market_id, item)
+);
+
+CREATE TABLE IF NOT EXISTS projects (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    title       TEXT NOT NULL,
+    funder_id   TEXT NOT NULL,
+    manager_id  TEXT NOT NULL,
+    budget      INTEGER NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'open',   -- open | submitted | approved | rejected | cancelled
+    proof       TEXT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_projects_status ON projects(status);
+
+CREATE TABLE IF NOT EXISTS project_members (
+    project_id  INTEGER NOT NULL,
+    worker_id   TEXT NOT NULL,
+    share       REAL NOT NULL DEFAULT 1,
+    PRIMARY KEY (project_id, worker_id)
+);
+
+-- ── Abexilas Market Index (composite of all public markets over time) ────────
+CREATE TABLE IF NOT EXISTS market_index_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts          TEXT NOT NULL DEFAULT (datetime('now')),
+    total_mcap  REAL NOT NULL DEFAULT 0,
+    index_value REAL NOT NULL DEFAULT 0,
+    markets     INTEGER NOT NULL DEFAULT 0
+);
+
+-- ── Per-market, per-item restock targets ─────────────────────────────────────
+-- How full a market owner wants to keep each item, as a % of barrel capacity, plus
+-- whether that item is "tracked" (ticked) in their restock builder. Per-market by design:
+-- two markets stocking the same item can want very different depths of it.
+-- No row = not tracked; the market's default target applies if it's ordered anyway.
+CREATE TABLE IF NOT EXISTS market_item_targets (
+    market_id   TEXT NOT NULL,
+    item        TEXT NOT NULL,
+    target_pct  REAL NOT NULL DEFAULT 80,
+    tracked     INTEGER NOT NULL DEFAULT 1,
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (market_id, item)
+);
+CREATE INDEX IF NOT EXISTS idx_mit_market ON market_item_targets(market_id);
+
+-- ── Land Exchange (Restocker Land Exchange — real-estate listings/auctions) ──
+-- A listing is a plot of land up for sale, either fixed-price ("buy_now") or a
+-- timed auction with a live current_bid/current_bidder. Escrow is NOT a separate
+-- ledger here: a bidder's coins are actually deducted (core.deduct_coins) the
+-- moment their bid is accepted and refunded (core.add_coins) the moment they're
+-- outbid or the listing is cancelled/expired — the bidder's own `balances` row
+-- IS the hold. See cogs/land_exchange.py.
+CREATE TABLE IF NOT EXISTS land_listings (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    seller_id           TEXT NOT NULL,
+    kind                TEXT NOT NULL DEFAULT 'item',  -- 'land' or 'item' (drives fields shown)
+    title               TEXT,               -- the listing name (item name or land name)
+    category            TEXT,               -- optional free-text tag (Tools / Books / Land Claims…)
+    photos              TEXT,               -- JSON list of image URLs (dragged-in attachments)
+    market_id           TEXT,               -- optional: company this plot backs on sale (land)
+    land                TEXT,               -- optional: ties to land_ledger/land_balances
+    chunks              REAL NOT NULL DEFAULT 0,
+    coords              TEXT,               -- optional — seller's choice to disclose
+    description         TEXT,
+    image_url           TEXT,               -- optional listing image (land sells on looks)
+    winner_message      TEXT,               -- seller's handover note, DM'd to the winner on close
+    mode                TEXT NOT NULL DEFAULT 'auction',  -- 'fixed' or 'auction'
+    quality             TEXT NOT NULL DEFAULT 'raw',
+    reserve             REAL NOT NULL DEFAULT 0,   -- AI-valued or seller-set starting/reserve price
+    buy_now             REAL,               -- instant-buy price (required for 'fixed')
+    current_bid         REAL,
+    current_bidder      TEXT,
+    min_increment_pct   REAL NOT NULL DEFAULT 5.0,
+    commission_pct      REAL NOT NULL DEFAULT 5.0,
+    listing_fee         REAL NOT NULL DEFAULT 0,
+    starts_at           TEXT NOT NULL DEFAULT (datetime('now')),
+    ends_at             TEXT,               -- NULL for fixed-price (no expiry)
+    anti_snipe_minutes  INTEGER NOT NULL DEFAULT 5,
+    status              TEXT NOT NULL DEFAULT 'active',  -- active / sold / cancelled / expired
+    channel_id          TEXT,
+    message_id          TEXT,
+    sold_price          REAL,
+    sold_to             TEXT,
+    created_at          TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at          TEXT NOT NULL DEFAULT (datetime('now')),
+    closed_at           TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_land_listings_status ON land_listings(status);
+CREATE INDEX IF NOT EXISTS idx_land_listings_seller ON land_listings(seller_id);
+
+CREATE TABLE IF NOT EXISTS land_bids (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    listing_id  INTEGER NOT NULL,
+    bidder_id   TEXT NOT NULL,
+    amount      REAL NOT NULL,
+    ts          TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_land_bids_listing ON land_bids(listing_id);
+"""
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Apply safe ALTER TABLE migrations for columns added after initial schema."""
+    migrations = [
+        "ALTER TABLE markets ADD COLUMN discord_role_name TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE markets ADD COLUMN leader_discord_id  TEXT",
+        "ALTER TABLE markets ADD COLUMN leader_code        TEXT",
+        "ALTER TABLE markets ADD COLUMN report_channel_id  TEXT",
+        "ALTER TABLE market_shares ADD COLUMN treasury_coins REAL NOT NULL DEFAULT 0",
+        "ALTER TABLE market_shares ADD COLUMN dividend_pct REAL",
+        "ALTER TABLE market_shares ADD COLUMN last_dividend_month TEXT",
+        # The shop-scan listing quantity ("Sell <qty> for <price>"). Stored so buy_price/
+        # sell_price can be kept per-unit (= price / qty). A NULL here marks a legacy row
+        # scanned before per-unit normalization existed (its price is still per-bulk and
+        # not trusted for display); it self-heals on the next stock scan.
+        "ALTER TABLE market_stock ADD COLUMN buy_qty  INTEGER",
+        "ALTER TABLE market_stock ADD COLUMN sell_qty INTEGER",
+        # Which market an order belongs to — drives per-market reward payouts and the
+        # website Orders board. Older orders (pre-column) stay NULL and read as 'main'.
+        "ALTER TABLE orders ADD COLUMN market_id TEXT",
+        # Item category (armor / tools / swords / brews / …) — groups the shop catalog so a
+        # market owner can browse and restock by section. NULL = uncategorised; the auto-
+        # classifier fills these in from the item name on demand.
+        "ALTER TABLE items ADD COLUMN category TEXT",
+        # Consignment futures (Stage B): item break-even, per-line pricing + resale tracking,
+        # and the running paid-back total on a bulk deal.
+        "ALTER TABLE items ADD COLUMN worker_cost REAL",
+        "ALTER TABLE futures_bulk ADD COLUMN paid REAL NOT NULL DEFAULT 0",
+        "ALTER TABLE futures_bulk_lines ADD COLUMN item_key TEXT",
+        "ALTER TABLE futures_bulk_lines ADD COLUMN sold_baseline INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE futures_bulk_lines ADD COLUMN sold_override INTEGER",
+        # A bulk is a TOOL for filing several orders, not a separate thing to approve.
+        # Each line becomes an ordinary futures order; this column is how that order
+        # finds its way back to the bulk line for consignment billing on approval.
+        "ALTER TABLE futures_orders ADD COLUMN bulk_line_id INTEGER",
+        # Consignment has a deadline: after it passes the customer owes the FULL margin
+        # whether or not the goods resold. Set on first approval, not at filing, because
+        # the clock should start when the work is actually commissioned.
+        "ALTER TABLE futures_bulk ADD COLUMN due_at TEXT",
+        # When the upfront for this line was charged to the customer's balance. Stops a
+        # re-fulfil (or a repair run) charging the same goods twice.
+        "ALTER TABLE futures_bulk_lines ADD COLUMN charged_at TEXT",
+        # Investors (GEX.PR preferred shareholders): display name + preferred-share count
+        # from the Crimson Banking cap-table export, share_pct derived from it, and a
+        # running total of profit-share coins paid out.
+        "ALTER TABLE investors ADD COLUMN name TEXT",
+        "ALTER TABLE investors ADD COLUMN pref_shares REAL NOT NULL DEFAULT 0",
+        "ALTER TABLE investors ADD COLUMN share_pct REAL NOT NULL DEFAULT 0",
+        "ALTER TABLE investors ADD COLUMN total_received REAL NOT NULL DEFAULT 0",
+        # Land Exchange: listing image + seller's winner-handover message (added after
+        # the table shipped, so ALTER for any DB that already created land_listings).
+        "ALTER TABLE land_listings ADD COLUMN image_url TEXT",
+        "ALTER TABLE land_listings ADD COLUMN winner_message TEXT",
+        # Auction House generalisation: the exchange now sells items too, one command
+        # (/sell) with dragged-in photos. kind/title/category/photos added after ship.
+        "ALTER TABLE land_listings ADD COLUMN kind TEXT NOT NULL DEFAULT 'item'",
+        "ALTER TABLE land_listings ADD COLUMN title TEXT",
+        "ALTER TABLE land_listings ADD COLUMN category TEXT",
+        "ALTER TABLE land_listings ADD COLUMN photos TEXT",
+        # CSN per-item detail (mod v1.2): transaction counts (velocity) and the gross
+        # income/expense split behind net_coins. Older rows stay 0 until re-scanned,
+        # which reads as "no detail" on the ledger (margin/velocity blank, net still shown).
+        "ALTER TABLE csn_history_items ADD COLUMN times_sold    INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE csn_history_items ADD COLUMN times_bought  INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE csn_history_items ADD COLUMN income_coins  REAL NOT NULL DEFAULT 0",
+        "ALTER TABLE csn_history_items ADD COLUMN expense_coins REAL NOT NULL DEFAULT 0",
+        # Hive harvests: absolute sale timestamp from the CSN mod, so the same sale can be
+        # posted/re-scanned any number of times and still pay ONCE (see the unique index below).
+        "ALTER TABLE hive_harvests ADD COLUMN sale_ts TEXT",
+        # CSN per-sale stable id (mod v2.1): the mod's OWN dedup identity, shipped in the
+        # export CSV's sale_uid column. Keying on it makes bot-side dedup exactly mirror
+        # mod-side dedup — the old exact-sale_ts key drifted up to a minute per re-scan
+        # and re-ingested the same sale as "new".
+        "ALTER TABLE csn_transactions ADD COLUMN sale_uid TEXT",
+        # Hive wage basis, split from sale value (2026-08-07). The shop SELLS comb at
+        # 350/stack and honey at 500/stack, but harvesters are paid a percentage of a
+        # LOWER internal basis (300 and 400/stack) — the spread is the company's margin.
+        # One column served both jobs before, so raising a shop price also raised wages.
+        # 0 means "never set" and reads as unit_value, so old rows behave exactly as before.
+        "ALTER TABLE hive_harvests ADD COLUMN wage_value REAL NOT NULL DEFAULT 0",
+    ]
+    for sql in migrations:
+        try:
+            conn.execute(sql)
+        except sqlite3.OperationalError:
+            pass
+
+    # Hive dedup by real sale identity: the same in-game sale (market+ign+item+qty+sale_ts)
+    # can only be stored once, so re-posting harvest lines, re-scanning after a .seen wipe,
+    # or two instances reporting the same shop can NEVER double-pay. Partial index (only
+    # timed rows) so legacy/untimed lines still fall back to the msg_id+line_no dedup.
+    try:
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_hive_sale "
+                     "ON hive_harvests(market_id, ign, item, qty, sale_ts) "
+                     "WHERE sale_ts IS NOT NULL")
+    except sqlite3.OperationalError:
+        pass
+
+    # CSN transactions: one row per (market, sale_uid) when the mod supplied its stable
+    # per-sale id. Partial index so legacy rows (no uid) keep using the identity index.
+    try:
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_csn_txn_uid "
+                     "ON csn_transactions(market_id, sale_uid) "
+                     "WHERE sale_uid IS NOT NULL")
+    except sqlite3.OperationalError:
+        pass
+
+    # CSN history: upgrade the legacy single-market table (month PRIMARY KEY,
+    # no market_id) to the market-aware schema, preserving any rows as 'main'.
+    try:
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(csn_history)").fetchall()]
+        if cols and "market_id" not in cols:
+            conn.execute("ALTER TABLE csn_history RENAME TO _csn_history_legacy")
+            conn.execute(
+                "CREATE TABLE csn_history ("
+                "market_id TEXT NOT NULL DEFAULT 'main', month TEXT NOT NULL, label TEXT, "
+                "source TEXT, recorded_at TEXT, income REAL NOT NULL DEFAULT 0, "
+                "spent REAL NOT NULL DEFAULT 0, net REAL NOT NULL DEFAULT 0, "
+                "PRIMARY KEY (market_id, month))"
+            )
+            conn.execute(
+                "INSERT INTO csn_history (market_id, month, label, income, spent, net) "
+                "SELECT 'main', month, label, income, spent, net FROM _csn_history_legacy"
+            )
+            conn.execute("DROP TABLE _csn_history_legacy")
+    except sqlite3.OperationalError:
+        pass
+
+    # IGN registry: upgrade the legacy one-IGN-per-user table (user_id PRIMARY KEY) to the
+    # multi-IGN shape (ign PRIMARY KEY, user_id a plain indexed column) so one Discord user
+    # can own several in-game names (main + alts). Each old row — a user's single IGN —
+    # carries over unchanged and stays that user's primary (earliest-registered).
+    try:
+        info = conn.execute("PRAGMA table_info(ign_registry)").fetchall()
+        user_id_is_pk = any(r[1] == "user_id" and r[5] == 1 for r in info)
+        if info and user_id_is_pk:
+            conn.execute("ALTER TABLE ign_registry RENAME TO _ign_registry_legacy")
+            conn.execute(
+                "CREATE TABLE ign_registry ("
+                "ign TEXT PRIMARY KEY COLLATE NOCASE, user_id TEXT NOT NULL, "
+                "registered_at TEXT NOT NULL DEFAULT (datetime('now')))"
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO ign_registry (ign, user_id, registered_at) "
+                "SELECT ign, user_id, registered_at FROM _ign_registry_legacy"
+            )
+            conn.execute("DROP TABLE _ign_registry_legacy")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_ign_registry_user ON ign_registry(user_id)")
+    except sqlite3.OperationalError:
+        pass
+
+
+def init_db():
+    """Create all tables if they don't exist, then run migrations."""
+    with db() as conn:
+        conn.executescript(SCHEMA)
+        _migrate(conn)
+        conn.execute("INSERT OR IGNORE INTO platform_balance (id, balance) VALUES (1, 0)")
+        conn.execute("INSERT OR IGNORE INTO hive_active_batch (id, batch_id) VALUES (1, NULL)")
+    print("✅ Database initialised.")
+
+
+
+def get_balance(user_id: str) -> dict:
+    with db() as conn:
+        row = conn.execute("SELECT * FROM balances WHERE user_id=?", (str(user_id),)).fetchone()
+        if row:
+            return dict(row)
+        return {"user_id": str(user_id), "coins": 0, "principal": 0, "lp": 0}
+
+
+def set_balance(user_id: str, coins: float, principal: float = None, lp: float = None):
+    with db() as conn:
+        existing = conn.execute("SELECT * FROM balances WHERE user_id=?", (str(user_id),)).fetchone()
+        if existing:
+            p = principal if principal is not None else existing["principal"]
+            l = lp if lp is not None else existing["lp"]
+        else:
+            p = principal if principal is not None else 0
+            l = lp if lp is not None else 0
+        conn.execute("""
+            INSERT INTO balances (user_id, coins, principal, lp, updated_at)
+            VALUES (?, ?, ?, ?, datetime('now'))
+            ON CONFLICT(user_id) DO UPDATE SET
+                coins=excluded.coins,
+                principal=excluded.principal,
+                lp=excluded.lp,
+                updated_at=excluded.updated_at
+        """, (str(user_id), coins, p, l))
+
+
+def adjust_balance(user_id: str, delta: int, *, counts_as_principal: bool = True,
+                   reduce_principal: bool = True) -> tuple[int, int, int]:
+    """Atomically apply an integer coin delta in a single transaction (no
+    read-modify-write race between concurrent coin operations).
+
+    delta > 0 adds coins (and grows principal iff counts_as_principal).
+    delta < 0 deducts, clamped at 0 (and reduces principal by the amount actually
+    removed iff reduce_principal).
+
+    Returns (coins_after, principal_after, applied_delta) where applied_delta is the
+    real change to coins (may be smaller in magnitude than `delta` when clamped)."""
+    uid = str(user_id)
+    d = int(delta or 0)
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO balances (user_id, coins, principal, lp) VALUES (?, 0, 0, 0) "
+            "ON CONFLICT(user_id) DO NOTHING", (uid,))
+        before = conn.execute("SELECT coins FROM balances WHERE user_id=?", (uid,)).fetchone()
+        old_coins = int(before["coins"]) if before else 0
+        if d > 0:
+            conn.execute(
+                "UPDATE balances SET coins = coins + ?, principal = principal + ?, "
+                "updated_at = datetime('now') WHERE user_id = ?",
+                (d, d if counts_as_principal else 0, uid))
+        elif d < 0:
+            amt = -d
+            # RHS expressions are evaluated against the pre-update row, so `coins`
+            # here is the balance before deduction -> MIN(amt, coins) is the amount
+            # actually removed, matching the old read-modify-write semantics exactly.
+            conn.execute(
+                "UPDATE balances SET "
+                "principal = CASE WHEN ? THEN MAX(0, principal - MIN(principal, MIN(?, coins))) "
+                "ELSE principal END, "
+                "coins = MAX(0, coins - ?), "
+                "updated_at = datetime('now') WHERE user_id = ?",
+                (1 if reduce_principal else 0, amt, amt, uid))
+        row = conn.execute("SELECT coins, principal FROM balances WHERE user_id=?", (uid,)).fetchone()
+        coins = int(row["coins"])
+        principal = int(row["principal"])
+    return coins, principal, coins - old_coins
+
+
+def get_all_balances() -> dict:
+    """Return {user_id: coins} dict for backward compatibility."""
+    with db() as conn:
+        rows = conn.execute("SELECT user_id, coins FROM balances").fetchall()
+        return {row["user_id"]: row["coins"] for row in rows}
+
+
+def record_coin_ledger(user_id: str, delta: int, balance_after: int, reason: str = "") -> None:
+    """Append one coin movement to the audit ledger. Best-effort: never raises."""
+    try:
+        with db() as conn:
+            conn.execute(
+                "INSERT INTO coin_ledger (user_id, delta, balance_after, reason) VALUES (?,?,?,?)",
+                (str(user_id), int(delta), int(balance_after), (reason or "")[:200]))
+    except Exception:
+        pass
+
+
+def coin_ledger_has(user_id: str, reason: str) -> bool:
+    """True if this exact (user, reason) coin movement is already on record.
+
+    Used to make retroactive repairs idempotent: a repair tags its payout with
+    `repair:order#N`, so re-running the repair can look here and refuse to pay twice.
+    Fails CLOSED (returns True) on error — if we can't verify, we must not pay again."""
+    try:
+        with db() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM coin_ledger WHERE user_id=? AND reason=? LIMIT 1",
+                (str(user_id), str(reason))).fetchone()
+            return row is not None
+    except Exception:
+        return True
+
+
+def get_coin_ledger(user_id: str, limit: int = 20) -> list:
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT delta, balance_after, reason, created_at FROM coin_ledger "
+            "WHERE user_id=? ORDER BY id DESC LIMIT ?", (str(user_id), int(limit))).fetchall()
+        return [dict(r) for r in rows]
+
+
+def backup_database(dest_path) -> str:
+    """Make a consistent online snapshot of the live DB (safe with WAL) to dest_path.
+    Returns the destination path. Uses sqlite3's backup API."""
+    import sqlite3 as _sq
+    src = _get_conn()
+    dest = _sq.connect(str(dest_path))
+    try:
+        with dest:
+            src.backup(dest)
+    finally:
+        dest.close()
+    return str(dest_path)
+
+
+def get_balance_meta() -> dict:
+    with db() as conn:
+        rows = conn.execute("SELECT key, value FROM balance_meta").fetchall()
+        return {row["key"]: row["value"] for row in rows}
+
+
+def set_balance_meta(key: str, value: str):
+    with db() as conn:
+        conn.execute("INSERT OR REPLACE INTO balance_meta (key, value) VALUES (?,?)", (key, value))
+
+
+
+def get_items(market_id: str = None) -> dict:
+    with db() as conn:
+        if market_id:
+            rows = conn.execute("SELECT * FROM items WHERE market_id=?", (market_id,)).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM items").fetchall()
+        return {row["name"]: dict(row) for row in rows}
+
+
+def get_item(name: str) -> Optional[dict]:
+    with db() as conn:
+        row = conn.execute("SELECT * FROM items WHERE name=?", (name,)).fetchone()
+        return dict(row) if row else None
+
+
+def set_item_category(name: str, category: str) -> None:
+    """Tag an item with a category (armor / tools / swords / …)."""
+    with db() as conn:
+        conn.execute("UPDATE items SET category=? WHERE name=?",
+                     ((category or "").strip() or None, str(name)))
+
+
+def get_market_item_targets(market_id: str) -> dict:
+    """{item: {'target_pct': float, 'tracked': bool}} for one market. Empty = nothing set up."""
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT item, target_pct, tracked FROM market_item_targets WHERE market_id=?",
+            (str(market_id),)).fetchall()
+        return {r["item"]: {"target_pct": float(r["target_pct"] or 0),
+                            "tracked": bool(r["tracked"])} for r in rows}
+
+
+def set_market_item_target(market_id: str, item: str, target_pct: float = None,
+                           tracked: bool = None) -> None:
+    """Upsert one item's restock target for a market. Either field may be omitted to leave
+    it untouched — ticking a box shouldn't silently reset a % the owner already tuned."""
+    with db() as conn:
+        cur = conn.execute(
+            "SELECT target_pct, tracked FROM market_item_targets WHERE market_id=? AND item=?",
+            (str(market_id), str(item))).fetchone()
+        old_pct = float(cur["target_pct"]) if cur else 80.0
+        old_trk = bool(cur["tracked"]) if cur else True
+        new_pct = old_pct if target_pct is None else max(0.0, min(100.0, float(target_pct)))
+        new_trk = old_trk if tracked is None else bool(tracked)
+        conn.execute("""
+            INSERT INTO market_item_targets (market_id, item, target_pct, tracked, updated_at)
+            VALUES (?,?,?,?, datetime('now'))
+            ON CONFLICT(market_id, item) DO UPDATE SET
+                target_pct=excluded.target_pct, tracked=excluded.tracked,
+                updated_at=datetime('now')
+        """, (str(market_id), str(item), new_pct, int(new_trk)))
+
+
+def clear_market_item_target(market_id: str, item: str) -> None:
+    with db() as conn:
+        conn.execute("DELETE FROM market_item_targets WHERE market_id=? AND item=?",
+                     (str(market_id), str(item)))
+
+
+def upsert_item(name: str, coin: float, stock: int, **kwargs):
+    with db() as conn:
+        conn.execute("""
+            INSERT INTO items (name, coin, stock, unit_type, stackable, stack_size, barrel_slots, market_id)
+            VALUES (:name, :coin, :stock, :unit_type, :stackable, :stack_size, :barrel_slots, :market_id)
+            ON CONFLICT(name) DO UPDATE SET
+                coin=excluded.coin, stock=excluded.stock,
+                unit_type=excluded.unit_type, stackable=excluded.stackable,
+                stack_size=excluded.stack_size, barrel_slots=excluded.barrel_slots
+        """, {
+            "name": name, "coin": coin, "stock": stock,
+            "unit_type": kwargs.get("unit_type", "pieces"),
+            "stackable": int(kwargs.get("stackable", True)),
+            "stack_size": kwargs.get("stack_size", 64),
+            "barrel_slots": kwargs.get("barrel_slots", 54),
+            "market_id": kwargs.get("market_id", "main"),
+        })
+
+
+def update_item_stock(name: str, stock: int):
+    with db() as conn:
+        conn.execute("UPDATE items SET stock=? WHERE name=?", (stock, name))
+
+
+def delete_item(name: str) -> bool:
+    """Remove an item from the catalog. Returns True if a row was deleted."""
+    with db() as conn:
+        cur = conn.execute("DELETE FROM items WHERE name=?", (name,))
+        return cur.rowcount > 0
+
+
+def rename_item(old_name: str, new_name: str):
+    with db() as conn:
+        conn.execute("UPDATE items SET name=? WHERE name=?", (new_name, old_name))
+        conn.execute("UPDATE orders SET item=? WHERE item=?", (new_name, old_name))
+
+
+
+def get_markets() -> dict:
+    with db() as conn:
+        rows = conn.execute("SELECT * FROM markets").fetchall()
+        result = {}
+        for row in rows:
+            d = dict(row)
+            d["manager_ids"] = json.loads(d["manager_ids"])
+            result[d["market_id"]] = d
+        return result
+
+
+def upsert_market(market_id: str, name: str, **kwargs):
+    with db() as conn:
+        conn.execute("""
+            INSERT INTO markets (
+                market_id, name, owner_id, manager_ids, platform_fee_pct,
+                csn_history_file, active, created_at,
+                discord_role_name, leader_discord_id, leader_code, report_channel_id
+            )
+            VALUES (
+                :mid, :name, :owner, :mgrs, :fee,
+                :csn, :active, :created,
+                :role_name, :leader_id, :leader_code, :report_channel_id
+            )
+            ON CONFLICT(market_id) DO UPDATE SET
+                name=excluded.name, owner_id=excluded.owner_id,
+                manager_ids=excluded.manager_ids, platform_fee_pct=excluded.platform_fee_pct,
+                active=excluded.active,
+                discord_role_name=excluded.discord_role_name,
+                -- only overwrite leader / channel fields when a new value is supplied,
+                -- so unrelated market edits never wipe an existing value
+                leader_discord_id=COALESCE(excluded.leader_discord_id, markets.leader_discord_id),
+                leader_code=COALESCE(excluded.leader_code, markets.leader_code),
+                report_channel_id=COALESCE(excluded.report_channel_id, markets.report_channel_id)
+        """, {
+            "mid":         market_id,
+            "name":        name,
+            "owner":       kwargs.get("owner_id"),
+            "mgrs":        json.dumps(kwargs.get("manager_ids", [])),
+            "fee":         kwargs.get("platform_fee_pct", 3.0),
+            "csn":         kwargs.get("csn_history_file"),
+            "active":      int(kwargs.get("active", True)),
+            "created":     kwargs.get("created_at", datetime.now(timezone.utc).isoformat()),
+            "role_name":   kwargs.get("discord_role_name", ""),
+            "leader_id":   kwargs.get("leader_discord_id"),
+            "leader_code": kwargs.get("leader_code"),
+            "report_channel_id": (
+                str(kwargs["report_channel_id"])
+                if kwargs.get("report_channel_id") else None
+            ),
+        })
+
+
+def delete_market(market_id: str) -> dict:
+    """Delete a market and its per-market stock, stock alarms, and share listing. Sales
+    history and orders are intentionally left intact (audit trail). Returns a dict of how
+    many rows were removed from each table, e.g. {'markets':1,'market_stock':0,...}."""
+    counts = {}
+    with db() as conn:
+        # AUDIT FIX: stock_holdings and stock_limit_orders used to survive deletion —
+        # stale holders inherited free shares of any future market reusing the id, and
+        # old limit orders stayed armed. (The delete COMMAND refuses to run while real
+        # holders exist — delist first — so by the time this runs these are remnants.)
+        for tbl in ("market_stock", "stock_alarms", "market_shares",
+                    "stock_holdings", "stock_limit_orders"):
+            try:
+                cur = conn.execute(f"DELETE FROM {tbl} WHERE market_id=?", (str(market_id),))
+                counts[tbl] = cur.rowcount
+            except Exception:
+                counts[tbl] = 0
+        cur = conn.execute("DELETE FROM markets WHERE market_id=?", (str(market_id),))
+        counts["markets"] = cur.rowcount
+    return counts
+
+
+def set_market_report_channel(market_id: str, channel_id) -> None:
+    """Bind (or clear, with channel_id=None) a market's CSN report channel WITHOUT
+    touching any other market field. upsert_market overwrites owner/managers/fee on
+    conflict, so it must NOT be used just to set the channel binding."""
+    with db() as conn:
+        conn.execute(
+            "UPDATE markets SET report_channel_id=? WHERE market_id=?",
+            (str(channel_id) if channel_id else None, str(market_id)),
+        )
+
+
+def get_market_by_channel(channel_id) -> Optional[dict]:
+    """Return the market dict bound to this Discord channel, or None.
+
+    Channel binding lets CSN webhook reports route to the right market by the
+    channel they post in — no in-game verification code required.
+    """
+    if not channel_id:
+        return None
+    with db() as conn:
+        row = conn.execute(
+            "SELECT * FROM markets WHERE report_channel_id = ?",
+            (str(channel_id),),
+        ).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        try:
+            d["manager_ids"] = json.loads(d["manager_ids"])
+        except Exception:
+            d["manager_ids"] = []
+        return d
+
+
+
+def load_orders() -> list[dict]:
+    with db() as conn:
+        rows = conn.execute("SELECT * FROM orders ORDER BY id").fetchall()
+        orders = []
+        for row in rows:
+            o = dict(row)
+            o["messages"] = json.loads(o["messages"])
+            o["blocked_claimers"] = json.loads(o["blocked_claimers"])
+            o["assist_ticket_ids"] = json.loads(o["assist_ticket_ids"])
+            claims = conn.execute(
+                "SELECT * FROM order_claims WHERE order_id=? ORDER BY claimed_at", (o["id"],)
+            ).fetchall()
+            o["claims"] = [dict(c) for c in claims]
+            orders.append(o)
+        return orders
+
+
+def get_order(order_id: int) -> Optional[dict]:
+    with db() as conn:
+        row = conn.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()
+        if not row:
+            return None
+        o = dict(row)
+        o["messages"] = json.loads(o["messages"])
+        o["blocked_claimers"] = json.loads(o["blocked_claimers"])
+        o["assist_ticket_ids"] = json.loads(o["assist_ticket_ids"])
+        claims = conn.execute(
+            "SELECT * FROM order_claims WHERE order_id=? ORDER BY claimed_at", (order_id,)
+        ).fetchall()
+        o["claims"] = [dict(c) for c in claims]
+        return o
+
+
+def save_order(order: dict):
+    """Insert or update an order dict (same shape as the old YAML format)."""
+    with db() as conn:
+        conn.execute("""
+            INSERT INTO orders (
+                id, shop, item, market_id, requested, produced, status, claimed_by,
+                unit_type, amount, stackable, stack_size, barrel_slots,
+                coin_per_piece, priority_role, priority_until,
+                employee_announce_at, employee_announced, worker_announced,
+                verification_ticket_id, assist_ticket_id,
+                blocked_claimers, messages, assist_ticket_ids,
+                created_at, updated_at
+            ) VALUES (
+                :id, :shop, :item, :market_id, :requested, :produced, :status, :claimed_by,
+                :unit_type, :amount, :stackable, :stack_size, :barrel_slots,
+                :coin_per_piece, :priority_role, :priority_until,
+                :employee_announce_at, :employee_announced, :worker_announced,
+                :verification_ticket_id, :assist_ticket_id,
+                :blocked_claimers, :messages, :assist_ticket_ids,
+                :created_at, :updated_at
+            )
+            ON CONFLICT(id) DO UPDATE SET
+                shop=excluded.shop, item=excluded.item, market_id=excluded.market_id,
+                requested=excluded.requested, produced=excluded.produced,
+                status=excluded.status, claimed_by=excluded.claimed_by,
+                unit_type=excluded.unit_type, amount=excluded.amount,
+                stackable=excluded.stackable, stack_size=excluded.stack_size,
+                barrel_slots=excluded.barrel_slots,
+                coin_per_piece=excluded.coin_per_piece,
+                priority_role=excluded.priority_role,
+                priority_until=excluded.priority_until,
+                employee_announce_at=excluded.employee_announce_at,
+                employee_announced=excluded.employee_announced,
+                worker_announced=excluded.worker_announced,
+                verification_ticket_id=excluded.verification_ticket_id,
+                assist_ticket_id=excluded.assist_ticket_id,
+                blocked_claimers=excluded.blocked_claimers,
+                messages=excluded.messages,
+                assist_ticket_ids=excluded.assist_ticket_ids,
+                updated_at=datetime('now')
+        """, {
+            "id": order.get("id"),
+            "shop": order.get("shop", ""),
+            "item": order.get("item", ""),
+            "market_id": order.get("market_id"),
+            "requested": order.get("requested", 0),
+            "produced": order.get("produced", 0),
+            "status": order.get("status", "open"),
+            "claimed_by": order.get("claimed_by"),
+            "unit_type": order.get("unit_type", "pieces"),
+            "amount": order.get("amount", 0),
+            "stackable": int(order.get("stackable", True)),
+            "stack_size": order.get("stack_size", 64),
+            "barrel_slots": order.get("barrel_slots", 54),
+            "coin_per_piece": order.get("coin_per_piece"),
+            "priority_role": order.get("priority_role"),
+            "priority_until": order.get("priority_until"),
+            "employee_announce_at": order.get("employee_announce_at"),
+            "employee_announced": int(order.get("employee_announced", False)),
+            "worker_announced": int(order.get("worker_announced", False)),
+            "verification_ticket_id": order.get("verification_ticket_id"),
+            "assist_ticket_id": order.get("assist_ticket_id"),
+            "blocked_claimers": json.dumps(order.get("blocked_claimers", [])),
+            "messages": json.dumps(order.get("messages", {})),
+            "assist_ticket_ids": json.dumps(order.get("assist_ticket_ids", {})),
+            "created_at": order.get("created_at", datetime.now(timezone.utc).isoformat()),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        })
+
+        if "claims" in order:
+            conn.execute("DELETE FROM order_claims WHERE order_id=?", (order["id"],))
+            for c in order["claims"]:
+                conn.execute("""
+                    INSERT INTO order_claims (order_id, user_id, user_tag, qty, claimed_at)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (order["id"], str(c.get("user_id", "")), c.get("user_tag", ""),
+                      c.get("qty", 0), c.get("claimed_at", datetime.now(timezone.utc).isoformat())))
+
+
+def next_order_id() -> int:
+    with db() as conn:
+        row = conn.execute("SELECT COALESCE(MAX(id), 0) + 1 AS nid FROM orders").fetchone()
+        return row["nid"]
+
+
+
+def get_investors() -> dict:
+    with db() as conn:
+        rows = conn.execute("SELECT * FROM investors").fetchall()
+        return {row["user_id"]: dict(row) for row in rows}
+
+
+def get_investor(user_id: str) -> Optional[dict]:
+    with db() as conn:
+        row = conn.execute("SELECT * FROM investors WHERE user_id=?", (str(user_id),)).fetchone()
+        return dict(row) if row else None
+
+
+def upsert_investor(user_id: str, balance: float, principal: float, joined_at: str = None):
+    with db() as conn:
+        conn.execute("""
+            INSERT INTO investors (user_id, balance, principal, joined_at, updated_at)
+            VALUES (?, ?, ?, COALESCE(?, datetime('now')), datetime('now'))
+            ON CONFLICT(user_id) DO UPDATE SET
+                balance=excluded.balance, principal=excluded.principal, updated_at=datetime('now')
+        """, (str(user_id), balance, principal, joined_at))
+
+
+def add_investor_payout(user_id: str, amount: float, note: str = None):
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO investor_payout_log (user_id, amount, note) VALUES (?,?,?)",
+            (str(user_id), amount, note)
+        )
+        conn.execute("UPDATE investors SET total_received = total_received + ?, "
+                     "updated_at = datetime('now') WHERE user_id=?",
+                     (float(amount), str(user_id)))
+
+
+def get_investor_payout_log(limit: int = 50) -> list[dict]:
+    with db() as conn:
+        rows = conn.execute("SELECT * FROM investor_payout_log ORDER BY paid_at DESC LIMIT ?",
+                            (int(limit),)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def investor_payout_exists(note: str) -> bool:
+    """True if a distribution with this note tag already ran — makes the monthly V Tech
+    profit share idempotent per (market, month) even if a CSN month is re-ingested."""
+    with db() as conn:
+        return conn.execute("SELECT 1 FROM investor_payout_log WHERE note=? LIMIT 1",
+                            (str(note),)).fetchone() is not None
+
+
+def replace_investors(rows: list, total_shares: float = None) -> int:
+    """Replace the investor register from a Crimson cap-table export: rows are
+    (user_id, name, pref_shares). share_pct is derived from the total so it always sums
+    to 100. Existing total_received/joined_at are preserved for returning investors;
+    holders no longer on the cap table are removed. Returns how many investors are set.
+
+    total_shares: derive share_pct against THIS total instead of the rows' sum — used when
+    liquidated investors are dropped but the company keeps their slice, so the pcts sum
+    to <100 and the payout loop simply never pays the liquidated portion out."""
+    total = float(total_shares) if total_shares else (sum(float(r[2]) for r in rows) or 1.0)
+    with db() as conn:
+        keep_ids = [str(r[0]) for r in rows]
+        for uid, name, shares in rows:
+            conn.execute("""
+                INSERT INTO investors (user_id, balance, principal, name, pref_shares, share_pct)
+                VALUES (?, 0, 0, ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    name=excluded.name, pref_shares=excluded.pref_shares,
+                    share_pct=excluded.share_pct, updated_at=datetime('now')
+            """, (str(uid), str(name or ""), float(shares), round(100.0 * float(shares) / total, 4)))
+        if keep_ids:
+            q = ",".join("?" * len(keep_ids))
+            conn.execute(f"DELETE FROM investors WHERE user_id NOT IN ({q})", keep_ids)
+        return len(rows)
+
+
+
+def get_hive_claims() -> dict:
+    with db() as conn:
+        rows = conn.execute("SELECT * FROM hive_claims").fetchall()
+        return {row["location"]: dict(row) for row in rows}
+
+
+def set_hive_claim(location: str, user_id: str, user_tag: str, claimed_at: str = None):
+    with db() as conn:
+        conn.execute("""
+            INSERT INTO hive_claims (location, user_id, user_tag, claimed_at)
+            VALUES (?, ?, ?, COALESCE(?, datetime('now')))
+            ON CONFLICT(location) DO UPDATE SET
+                user_id=excluded.user_id, user_tag=excluded.user_tag, claimed_at=excluded.claimed_at
+        """, (location, str(user_id), user_tag, claimed_at))
+
+
+
+def get_hive_batches() -> dict:
+    with db() as conn:
+        rows = conn.execute("SELECT * FROM hive_batches").fetchall()
+        return {row["batch_id"]: json.loads(row["data"]) for row in rows}
+
+
+def save_hive_batch(batch_id: str, data: dict):
+    with db() as conn:
+        conn.execute("""
+            INSERT INTO hive_batches (batch_id, data)
+            VALUES (?, ?)
+            ON CONFLICT(batch_id) DO UPDATE SET data=excluded.data
+        """, (batch_id, json.dumps(data)))
+
+
+def get_active_batch_id() -> Optional[str]:
+    with db() as conn:
+        row = conn.execute("SELECT batch_id FROM hive_active_batch WHERE id=1").fetchone()
+        return row["batch_id"] if row else None
+
+
+def set_active_batch_id(batch_id: Optional[str]):
+    with db() as conn:
+        conn.execute("UPDATE hive_active_batch SET batch_id=? WHERE id=1", (batch_id,))
+
+
+
+def csn_get_market(market_id: str) -> dict:
+    """Return {"months": {month: {label, source, recorded_at, income, spent, net,
+    items: {item: {sold_qty, bought_qty, net_coins, times_sold, times_bought,
+    income_coins, expense_coins}}}}} for one market."""
+    mid = market_id or "main"
+    with db() as conn:
+        mrows = conn.execute(
+            "SELECT * FROM csn_history WHERE market_id=? ORDER BY month", (mid,)).fetchall()
+        irows = conn.execute(
+            "SELECT * FROM csn_history_items WHERE market_id=?", (mid,)).fetchall()
+    items_by_month: dict = {}
+    ikeys = set(irows[0].keys()) if irows else set()  # tolerate pre-migration rows
+    for r in irows:
+        items_by_month.setdefault(r["month"], {})[r["item"]] = {
+            "sold_qty":      int(r["sold_qty"] or 0),
+            "bought_qty":    int(r["bought_qty"] or 0),
+            "net_coins":     float(r["net_coins"] or 0),
+            "times_sold":    int(r["times_sold"] or 0) if "times_sold" in ikeys else 0,
+            "times_bought":  int(r["times_bought"] or 0) if "times_bought" in ikeys else 0,
+            "income_coins":  float(r["income_coins"] or 0) if "income_coins" in ikeys else 0.0,
+            "expense_coins": float(r["expense_coins"] or 0) if "expense_coins" in ikeys else 0.0,
+        }
+    months: dict = {}
+    for r in mrows:
+        months[r["month"]] = {
+            "label":       r["label"] or r["month"],
+            "source":      r["source"] or "",
+            "recorded_at": r["recorded_at"] or "",
+            "income":      float(r["income"] or 0),
+            "spent":       float(r["spent"] or 0),
+            "net":         float(r["net"] or 0),
+            "items":       items_by_month.get(r["month"], {}),
+        }
+    return {"months": months}
+
+
+def csn_save_market(market_id: str, data: dict) -> None:
+    """Replace all stored months for a market with the given {"months": {...}}
+    payload (mirrors the old save-whole-file semantics, atomically)."""
+    mid = market_id or "main"
+    months = (data or {}).get("months", {}) or {}
+    with db() as conn:
+        conn.execute("DELETE FROM csn_history WHERE market_id=?", (mid,))
+        conn.execute("DELETE FROM csn_history_items WHERE market_id=?", (mid,))
+        for mk, md in months.items():
+            if not isinstance(md, dict):
+                continue
+            conn.execute(
+                "INSERT INTO csn_history (market_id, month, label, source, recorded_at, income, spent, net)"
+                " VALUES (?,?,?,?,?,?,?,?)",
+                (mid, mk, md.get("label", ""), md.get("source", ""), md.get("recorded_at", ""),
+                 float(md.get("income", 0) or 0), float(md.get("spent", 0) or 0), float(md.get("net", 0) or 0)),
+            )
+            for item, iv in (md.get("items") or {}).items():
+                if not isinstance(iv, dict):
+                    continue
+                conn.execute(
+                    "INSERT INTO csn_history_items (market_id, month, item, sold_qty, bought_qty, net_coins,"
+                    " times_sold, times_bought, income_coins, expense_coins)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (mid, mk, item, int(iv.get("sold_qty", 0) or 0),
+                     int(iv.get("bought_qty", 0) or 0), float(iv.get("net_coins", 0) or 0),
+                     int(iv.get("times_sold", 0) or 0), int(iv.get("times_bought", 0) or 0),
+                     float(iv.get("income_coins", 0) or 0), float(iv.get("expense_coins", 0) or 0)),
+                )
+
+
+def csn_set_month_source(market_id: str, month: str, source_key: str,
+                         income: float, spent: float, items: dict) -> None:
+    """Record ONE uploader's contribution to a market-month. Replaces that uploader's
+    previous figures for the same month, so re-uploading its file is idempotent and
+    never double-counts.
+
+    AUDIT FIX (high, 2026-08-06): source_key used to be pure TRANSPORT identity (the
+    Discord poster id, or the filename). The same physical file arriving by a second
+    route — a manager re-uploading it by hand, a webhook rotated to another bot user —
+    looked like a brand-new shop and its figures were ADDED to the month, multiplying
+    the total. Before inserting a new source we now check whether some other source row
+    for this market-month holds byte-identical item figures; if so that is the same
+    file, and we update THAT row instead of adding a second one."""
+    conn_items = json.dumps(items or {}, ensure_ascii=False)
+    now = datetime.now(timezone.utc).isoformat()
+    with db() as conn:
+        try:
+            mine = conn.execute(
+                "SELECT 1 FROM csn_month_sources WHERE market_id=? AND month=? AND source_key=?",
+                (str(market_id), str(month), str(source_key))).fetchone()
+            if not mine and conn_items not in ("{}", "null"):
+                twin = conn.execute(
+                    "SELECT source_key FROM csn_month_sources "
+                    "WHERE market_id=? AND month=? AND items_json=? "
+                    "AND income=? AND spent=?",
+                    (str(market_id), str(month), conn_items,
+                     float(income or 0), float(spent or 0))).fetchone()
+                if twin:
+                    # Same file, different transport. Keep the original row; just
+                    # refresh its timestamp so it doesn't look stale.
+                    conn.execute(
+                        "UPDATE csn_month_sources SET updated_at=? "
+                        "WHERE market_id=? AND month=? AND source_key=?",
+                        (now, str(market_id), str(month), str(twin[0])))
+                    return
+        except Exception:
+            pass       # never let the dedup probe block the real write
+        conn.execute(
+            "INSERT INTO csn_month_sources (market_id, month, source_key, income, spent,"
+            " items_json, updated_at) VALUES (?,?,?,?,?,?,?) "
+            "ON CONFLICT(market_id, month, source_key) DO UPDATE SET "
+            "income=excluded.income, spent=excluded.spent, items_json=excluded.items_json,"
+            " updated_at=excluded.updated_at",
+            (str(market_id), str(month), str(source_key), float(income or 0),
+             float(spent or 0), conn_items, now))
+
+
+def csn_month_totals(market_id: str, month: str) -> dict:
+    """The market-month rolled up across EVERY uploader: {income, spent, items, sources}.
+    This is the real total for a market scanned by several shops."""
+    income = spent = 0.0
+    items: dict = {}
+    n = 0
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT income, spent, items_json FROM csn_month_sources "
+            "WHERE market_id=? AND month=?", (str(market_id), str(month))).fetchall()
+    for r in rows:
+        n += 1
+        income += float(r["income"] or 0)
+        spent += float(r["spent"] or 0)
+        try:
+            part = json.loads(r["items_json"] or "{}")
+        except Exception:
+            part = {}
+        for item, v in (part or {}).items():
+            if not isinstance(v, dict):
+                continue
+            e = items.setdefault(item, {"sold_qty": 0, "bought_qty": 0, "net_coins": 0.0})
+            e["sold_qty"] += int(v.get("sold_qty", 0) or 0)
+            e["bought_qty"] += int(v.get("bought_qty", 0) or 0)
+            e["net_coins"] = round(float(e["net_coins"]) + float(v.get("net_coins", 0) or 0), 2)
+    return {"income": round(income, 2), "spent": round(spent, 2),
+            "items": items, "sources": n}
+
+
+def csn_all_market_ids() -> list:
+    with db() as conn:
+        return [r[0] for r in conn.execute(
+            "SELECT DISTINCT market_id FROM csn_history").fetchall()]
+
+
+
+def get_config(key, default=None):
+    with db() as conn:
+        row = conn.execute("SELECT value FROM bot_config WHERE key=?", (str(key),)).fetchone()
+        return row["value"] if row and row["value"] is not None else default
+
+
+# ── Shareholder voting ──────────────────────────────────────────────────────
+
+def create_proposal(market_id: str, question: str, options: list, created_by: str,
+                    closes_at: str) -> int:
+    import json as _json
+    with db() as conn:
+        cur = conn.execute(
+            "INSERT INTO vote_proposals (market_id, question, options, created_by, closes_at) "
+            "VALUES (?,?,?,?,?)",
+            (str(market_id), str(question), _json.dumps(list(options)),
+             str(created_by), str(closes_at)))
+        return int(cur.lastrowid)
+
+
+def get_proposal(pid: int):
+    import json as _json
+    with db() as conn:
+        row = conn.execute("SELECT * FROM vote_proposals WHERE id=?", (int(pid),)).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        try:
+            d["options"] = _json.loads(d["options"])
+        except Exception:
+            d["options"] = []
+        return d
+
+
+def list_proposals(status: str = None) -> list[dict]:
+    import json as _json
+    q, args = "SELECT * FROM vote_proposals", []
+    if status:
+        q += " WHERE status=?"; args.append(str(status))
+    q += " ORDER BY id DESC"
+    with db() as conn:
+        out = []
+        for row in conn.execute(q, args).fetchall():
+            d = dict(row)
+            try:
+                d["options"] = _json.loads(d["options"])
+            except Exception:
+                d["options"] = []
+            out.append(d)
+        return out
+
+
+def cast_vote(pid: int, user_id: str, choice_idx: int, weight: float, name: str = None) -> None:
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO vote_casts (proposal_id, user_id, choice_idx, weight, name) "
+            "VALUES (?,?,?,?,?) "
+            "ON CONFLICT(proposal_id, user_id) DO UPDATE SET "
+            "choice_idx=excluded.choice_idx, weight=excluded.weight, "
+            "name=COALESCE(excluded.name, vote_casts.name), cast_at=datetime('now')",
+            (int(pid), str(user_id), int(choice_idx), float(weight), name))
+
+
+def get_votes(pid: int) -> list[dict]:
+    with db() as conn:
+        return [dict(r) for r in conn.execute(
+            "SELECT * FROM vote_casts WHERE proposal_id=?", (int(pid),)).fetchall()]
+
+
+def close_proposal(pid: int) -> None:
+    with db() as conn:
+        conn.execute("UPDATE vote_proposals SET status='closed' WHERE id=?", (int(pid),))
+
+
+def create_suggestion(user_id: str, name: str, weight: float, text: str) -> int:
+    with db() as conn:
+        cur = conn.execute(
+            "INSERT INTO investor_suggestions (user_id, name, weight, text) VALUES (?,?,?,?)",
+            (str(user_id), name, float(weight or 0), str(text)))
+        return int(cur.lastrowid)
+
+
+def get_suggestion(sid: int):
+    with db() as conn:
+        row = conn.execute("SELECT * FROM investor_suggestions WHERE id=?", (int(sid),)).fetchone()
+        return dict(row) if row else None
+
+
+def list_suggestions(status: str = None, limit: int = 30) -> list[dict]:
+    q, args = "SELECT * FROM investor_suggestions", []
+    if status:
+        q += " WHERE status=?"; args.append(str(status))
+    q += " ORDER BY id DESC LIMIT ?"; args.append(int(limit))
+    with db() as conn:
+        return [dict(r) for r in conn.execute(q, args).fetchall()]
+
+
+def update_suggestion(sid: int, status: str, response: str = None) -> None:
+    with db() as conn:
+        conn.execute(
+            "UPDATE investor_suggestions SET status=?, response=COALESCE(?, response), "
+            "updated_at=datetime('now') WHERE id=?",
+            (str(status), response, int(sid)))
+
+
+# ── Listing escrow ──────────────────────────────────────────────────────────
+
+def create_escrow(party: str, kind: str, value: float, note: str = None) -> int:
+    with db() as conn:
+        cur = conn.execute(
+            "INSERT INTO escrow_deposits (party, kind, value, note) VALUES (?,?,?,?)",
+            (str(party), str(kind), float(value), note))
+        return int(cur.lastrowid)
+
+
+def get_escrow(eid: int):
+    with db() as conn:
+        row = conn.execute("SELECT * FROM escrow_deposits WHERE id=?", (int(eid),)).fetchone()
+        return dict(row) if row else None
+
+
+def list_escrows(status: str = None) -> list[dict]:
+    q, args = "SELECT * FROM escrow_deposits", []
+    if status:
+        q += " WHERE status=?"; args.append(str(status))
+    q += " ORDER BY id DESC"
+    with db() as conn:
+        return [dict(r) for r in conn.execute(q, args).fetchall()]
+
+
+def update_escrow(eid: int, status: str, note: str = None) -> None:
+    with db() as conn:
+        conn.execute(
+            "UPDATE escrow_deposits SET status=?, note=COALESCE(?, note), "
+            "updated_at=datetime('now') WHERE id=?",
+            (str(status), note, int(eid)))
+
+
+# ── Bonds ────────────────────────────────────────────────────────────────────
+
+def create_bond(market_id: str, name: str, face_total: float, unit_price: float,
+                coupon_pct: float, term_months: int, matures_at: str) -> int:
+    units_total = int(face_total // unit_price)
+    with db() as conn:
+        cur = conn.execute(
+            "INSERT INTO bonds (market_id, name, face_total, unit_price, units_total, "
+            "coupon_pct, term_months, matures_at) VALUES (?,?,?,?,?,?,?,?)",
+            (str(market_id), str(name or ""), float(face_total), float(unit_price),
+             units_total, float(coupon_pct), int(term_months), str(matures_at)))
+        return int(cur.lastrowid)
+
+
+def get_bond(bond_id: int):
+    with db() as conn:
+        row = conn.execute("SELECT * FROM bonds WHERE id=?", (int(bond_id),)).fetchone()
+        return dict(row) if row else None
+
+
+def list_bonds(market_id: str = None, status: str = None) -> list[dict]:
+    q, args = "SELECT * FROM bonds", []
+    conds = []
+    if market_id:
+        conds.append("market_id=?"); args.append(str(market_id))
+    if status:
+        conds.append("status=?"); args.append(str(status))
+    if conds:
+        q += " WHERE " + " AND ".join(conds)
+    q += " ORDER BY id DESC"
+    with db() as conn:
+        return [dict(r) for r in conn.execute(q, args).fetchall()]
+
+
+def update_bond(bond_id: int, **fields) -> None:
+    if not fields:
+        return
+    cols = ", ".join(f"{k}=?" for k in fields)
+    with db() as conn:
+        conn.execute(f"UPDATE bonds SET {cols} WHERE id=?",
+                     (*fields.values(), int(bond_id)))
+
+
+def adjust_bond_holding(bond_id: int, user_id: str, d_units: float, d_invested: float,
+                        name: str = None) -> None:
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO bond_holdings (bond_id, user_id, units, invested, name) "
+            "VALUES (?,?,?,?,?) "
+            "ON CONFLICT(bond_id, user_id) DO UPDATE SET "
+            "units=units+excluded.units, invested=invested+excluded.invested, "
+            "name=COALESCE(excluded.name, bond_holdings.name)",
+            (int(bond_id), str(user_id), float(d_units), float(d_invested), name))
+        conn.execute("UPDATE bonds SET units_sold=units_sold+? WHERE id=?",
+                     (float(d_units), int(bond_id)))
+
+
+def get_bond_holders(bond_id: int) -> list[dict]:
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM bond_holdings WHERE bond_id=? AND units > 0",
+            (int(bond_id),)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_user_bonds(user_id: str) -> list[dict]:
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT h.*, b.market_id, b.name AS bond_name, b.coupon_pct, b.unit_price, "
+            "b.status, b.matures_at FROM bond_holdings h JOIN bonds b ON b.id=h.bond_id "
+            "WHERE h.user_id=? AND h.units > 0", (str(user_id),)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_config_prefix(prefix: str) -> dict:
+    """All bot_config rows whose key starts with prefix → {key: value}."""
+    with db() as conn:
+        rows = conn.execute("SELECT key, value FROM bot_config WHERE key LIKE ?",
+                            (str(prefix) + "%",)).fetchall()
+        return {r["key"]: r["value"] for r in rows}
+
+
+def set_config(key, value) -> None:
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO bot_config (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (str(key), None if value is None else str(value)),
+        )
+
+
+def delete_config(key) -> None:
+    with db() as conn:
+        conn.execute("DELETE FROM bot_config WHERE key=?", (str(key),))
+
+
+def get_all_config() -> dict:
+    with db() as conn:
+        return {r["key"]: r["value"] for r in conn.execute("SELECT key, value FROM bot_config").fetchall()}
+
+
+def set_team_member(worker_id: str, manager_id: str) -> None:
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO team_members (worker_id, manager_id) VALUES (?, ?) "
+            "ON CONFLICT(worker_id) DO UPDATE SET manager_id=excluded.manager_id",
+            (str(worker_id), str(manager_id)))
+
+
+def remove_team_member(worker_id: str) -> None:
+    with db() as conn:
+        conn.execute("DELETE FROM team_members WHERE worker_id=?", (str(worker_id),))
+
+
+def get_manager_of(worker_id: str) -> Optional[str]:
+    with db() as conn:
+        row = conn.execute("SELECT manager_id FROM team_members WHERE worker_id=?",
+                           (str(worker_id),)).fetchone()
+        return row["manager_id"] if row else None
+
+
+def get_team(manager_id: str) -> list:
+    with db() as conn:
+        return [r["worker_id"] for r in conn.execute(
+            "SELECT worker_id FROM team_members WHERE manager_id=? ORDER BY added_at",
+            (str(manager_id),)).fetchall()]
+
+
+def get_all_team_managers() -> list:
+    """Every manager who has at least one worker on their team (for the dashboard roster)."""
+    with db() as conn:
+        return [r["manager_id"] for r in conn.execute(
+            "SELECT DISTINCT manager_id FROM team_members").fetchall()]
+
+
+def set_team_settings(manager_id: str, *, webhook_url: str = "__keep__", channel_id: str = "__keep__") -> None:
+    """Upsert a team's delivery binding. Pass webhook_url/channel_id to set (or "" to clear);
+    omit a field to leave it unchanged."""
+    now = datetime.now(timezone.utc).isoformat()
+    with db() as conn:
+        row = conn.execute("SELECT webhook_url, channel_id FROM team_settings WHERE manager_id=?",
+                           (str(manager_id),)).fetchone()
+        cur_wh = row["webhook_url"] if row else None
+        cur_ch = row["channel_id"] if row else None
+        wh = cur_wh if webhook_url == "__keep__" else (webhook_url or None)
+        ch = cur_ch if channel_id == "__keep__" else (channel_id or None)
+        conn.execute(
+            "INSERT INTO team_settings (manager_id, webhook_url, channel_id, updated_at) VALUES (?,?,?,?) "
+            "ON CONFLICT(manager_id) DO UPDATE SET webhook_url=excluded.webhook_url, "
+            "channel_id=excluded.channel_id, updated_at=excluded.updated_at",
+            (str(manager_id), wh, ch, now))
+
+
+def get_team_settings(manager_id: str) -> Optional[dict]:
+    with db() as conn:
+        row = conn.execute("SELECT * FROM team_settings WHERE manager_id=?",
+                           (str(manager_id),)).fetchone()
+        return dict(row) if row else None
+
+
+def record_team_perf(manager_id: str, worker_id: str, kind: str,
+                     coins: float = 0.0, points: float = 0.0, qty: int = 0, detail: str = "") -> None:
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO team_perf_log (manager_id, worker_id, kind, coins, points, qty, detail) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (str(manager_id), str(worker_id), str(kind),
+             float(coins or 0), float(points or 0), int(qty or 0), detail or ""))
+
+
+def reassign_team_perf(manager_id: str, detail: str, splits: list) -> int:
+    """Re-attribute one already-logged order to the people who actually did the work.
+
+    A manager claims and fulfils on their team's behalf — that is the intended workflow —
+    so every perf row lands with worker_id == manager_id and the team looks idle. This
+    replaces that single row with one row per worker, splitting coins/qty by share.
+
+    `splits` is [(worker_id, qty), ...]. Coins are apportioned by qty so the total is
+    preserved exactly: the last worker absorbs the rounding remainder, otherwise repeated
+    splits would slowly leak coins out of the ledger.
+    """
+    if not splits:
+        return 0
+    with db() as conn:
+        row = conn.execute(
+            "SELECT * FROM team_perf_log WHERE manager_id=? AND detail=? LIMIT 1",
+            (str(manager_id), str(detail))).fetchone()
+        if row is None:
+            return 0
+        src = dict(row)
+        total_qty = sum(int(q or 0) for _, q in splits) or 1
+        coins = float(src.get("coins") or 0)
+        points = float(src.get("points") or 0)
+        conn.execute("DELETE FROM team_perf_log WHERE id=?", (src["id"],))
+        assigned_c = assigned_p = 0.0
+        for n, (wid, q) in enumerate(splits):
+            q = int(q or 0)
+            last = (n == len(splits) - 1)
+            c = round(coins - assigned_c, 4) if last else round(coins * q / total_qty, 4)
+            pt = round(points - assigned_p, 4) if last else round(points * q / total_qty, 4)
+            assigned_c += c
+            assigned_p += pt
+            conn.execute(
+                "INSERT INTO team_perf_log (manager_id, worker_id, kind, coins, points, qty, detail, created_at) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (str(manager_id), str(wid), src["kind"], c, pt, q, src["detail"],
+                 src.get("created_at")))
+        return len(splits)
+
+
+def team_perf_exists(manager_id: str, detail: str, kind: str = "order") -> bool:
+    """True if a perf-ledger row already exists for this manager+detail+kind.
+    Used by the backfill to stay idempotent (never double-credit an order)."""
+    with db() as conn:
+        return conn.execute(
+            "SELECT 1 FROM team_perf_log WHERE manager_id=? AND detail=? AND kind=? LIMIT 1",
+            (str(manager_id), str(detail), str(kind))).fetchone() is not None
+
+
+def get_team_perf(manager_id: str, since_iso: str = None) -> list:
+    with db() as conn:
+        if since_iso:
+            rows = conn.execute(
+                "SELECT * FROM team_perf_log WHERE manager_id=? AND created_at>=? ORDER BY created_at",
+                (str(manager_id), since_iso)).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM team_perf_log WHERE manager_id=? ORDER BY created_at",
+                (str(manager_id),)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_all_team_perf(since_iso: str = None) -> list:
+    """Every perf row (optionally since a cutoff) across all teams - for leaderboards."""
+    with db() as conn:
+        if since_iso:
+            rows = conn.execute(
+                "SELECT * FROM team_perf_log WHERE created_at>=? ORDER BY created_at", (since_iso,)).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM team_perf_log ORDER BY created_at").fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_etf_holding(user_id: str) -> Optional[dict]:
+    with db() as conn:
+        row = conn.execute("SELECT * FROM etf_holdings WHERE user_id=?", (str(user_id),)).fetchone()
+        return dict(row) if row else None
+
+
+def get_etf_units(user_id: str) -> float:
+    with db() as conn:
+        row = conn.execute("SELECT units FROM etf_holdings WHERE user_id=?", (str(user_id),)).fetchone()
+        return float(row["units"]) if row else 0.0
+
+
+def get_etf_total_units() -> float:
+    with db() as conn:
+        row = conn.execute("SELECT COALESCE(SUM(units),0) AS u FROM etf_holdings").fetchone()
+        return float(row["u"]) if row else 0.0
+
+
+def get_etf_holders() -> list:
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM etf_holdings WHERE units > 0.0000001 ORDER BY units DESC").fetchall()
+        return [dict(r) for r in rows]
+
+
+def adjust_etf_units(user_id: str, delta_units: float, delta_cost: float) -> float:
+    """Apply +/- units & cost to a holder; clamps tiny/negative remainders to 0.
+    Returns the new unit total."""
+    now = datetime.now(timezone.utc).isoformat()
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO etf_holdings (user_id, units, cost_basis, updated_at) VALUES (?,?,?,?) "
+            "ON CONFLICT(user_id) DO UPDATE SET units=units+excluded.units, "
+            "cost_basis=cost_basis+excluded.cost_basis, updated_at=excluded.updated_at",
+            (str(user_id), float(delta_units), float(delta_cost), now))
+        row = conn.execute("SELECT units, cost_basis FROM etf_holdings WHERE user_id=?",
+                           (str(user_id),)).fetchone()
+        u = float(row["units"]) if row else 0.0
+        if u <= 0.0000001:
+            conn.execute("UPDATE etf_holdings SET units=0, cost_basis=0 WHERE user_id=?", (str(user_id),))
+            u = 0.0
+        return u
+
+
+def upsert_market_stock(market_id: str, item: str, owner: str = None, stock: int = 0,
+                        buy_price: float = None, sell_price: float = None,
+                        capacity: int = None, buy_qty: int = None,
+                        sell_qty: int = None, scan_ts: str = None) -> None:
+    """Record a live shop-stock snapshot for one item. When `capacity` is given
+    (computed as barrels × slots × stack size) it is stored as-is; otherwise
+    capacity falls back to the legacy high-water mark (max stock ever seen).
+
+    buy_price/sell_price are stored PER UNIT. buy_qty/sell_qty are the shop's listed
+    bulk quantity ("Sell <qty> for <price>") — kept so we can tell a per-unit row from a
+    legacy per-bulk one (NULL qty = legacy, not trusted for display)."""
+    now = datetime.now(timezone.utc).isoformat()
+    mid = market_id or "main"
+    with db() as conn:
+        row = conn.execute("SELECT capacity FROM market_stock WHERE market_id=? AND item=?",
+                           (mid, item)).fetchone()
+        cur_cap = int(row["capacity"]) if row else 0
+        cap = int(capacity) if capacity is not None else max(cur_cap, int(stock or 0))
+        conn.execute(
+            "INSERT INTO market_stock (market_id, item, owner, stock, capacity, buy_price, sell_price, buy_qty, sell_qty, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(market_id, item) DO UPDATE SET owner=excluded.owner, stock=excluded.stock, "
+            "capacity=excluded.capacity, buy_price=excluded.buy_price, sell_price=excluded.sell_price, "
+            "buy_qty=excluded.buy_qty, sell_qty=excluded.sell_qty, updated_at=excluded.updated_at",
+            (mid, item, owner, int(stock or 0), cap,
+             (float(buy_price) if buy_price is not None else None),
+             (float(sell_price) if sell_price is not None else None),
+             (int(buy_qty) if buy_qty is not None else None),
+             (int(sell_qty) if sell_qty is not None else None), now))
+        # Snapshot the reading so history survives the overwrite above. One row per day —
+        # a second scan the same day replaces it, so the day reflects the latest count.
+        # Keyed on the SCAN's own timestamp when the CSV provides one (timestamp_iso),
+        # not the ingest instant — a scan uploaded after midnight lands on the right day.
+        day = (str(scan_ts)[:10] if scan_ts and len(str(scan_ts)) >= 10 else now[:10])
+        try:
+            conn.execute(
+                "INSERT INTO market_stock_history (market_id, item, day, stock, capacity, updated_at) "
+                "VALUES (?,?,?,?,?,?) "
+                "ON CONFLICT(market_id, item, day) DO UPDATE SET stock=excluded.stock, "
+                "capacity=excluded.capacity, updated_at=excluded.updated_at",
+                (mid, item, day, int(stock or 0), cap, now))
+        except Exception as e:
+            # Never break a live stock write over history — but a silently-swallowed
+            # insert made the trend charts quietly incomplete, so at least say it.
+            print(f"[db] market_stock_history insert failed for {mid}/{item}: {e}")
+
+
+def get_market_stock(market_id: str) -> dict:
+    mid = market_id or "main"
+    with db() as conn:
+        rows = conn.execute("SELECT * FROM market_stock WHERE market_id=? ORDER BY item", (mid,)).fetchall()
+        return {r["item"]: dict(r) for r in rows}
+
+
+def get_all_market_stock() -> list:
+    with db() as conn:
+        return [dict(r) for r in conn.execute("SELECT * FROM market_stock ORDER BY market_id, item").fetchall()]
+
+
+def migrate_market_stock(from_market: str, to_market: str, since_iso: str | None = None) -> int:
+    """Move live stock rows from one market to another — used to rescue scans that got
+    mis-routed to the default market (e.g. a typo'd Market ID). If since_iso is given,
+    only rows updated at/after it move (so you can limit it to the last hour). On a
+    (market_id, item) collision the moved source row wins. Returns rows moved."""
+    src = from_market or "main"
+    dst = to_market or "main"
+    if src == dst:
+        return 0
+    where = "market_id = ?"
+    params = [src]
+    if since_iso:
+        where += " AND updated_at >= ?"
+        params.append(since_iso)
+    with db() as conn:
+        n = conn.execute(f"SELECT COUNT(*) AS c FROM market_stock WHERE {where}", params).fetchone()["c"]
+        if not n:
+            return 0
+        # source wins on PK conflict: drop any clashing dest rows first, then move.
+        conn.execute(
+            f"DELETE FROM market_stock WHERE market_id = ? AND item IN "
+            f"(SELECT item FROM market_stock WHERE {where})",
+            [dst] + params)
+        conn.execute(f"UPDATE market_stock SET market_id = ? WHERE {where}", [dst] + params)
+        return int(n)
+
+
+def clear_market_stock(market_id: str, since_iso: str | None = None) -> int:
+    """Delete live-stock rows for a market (optionally only rows updated at/after
+    since_iso). Used to flush stale/mis-routed scans out of a market. Returns the
+    number of rows deleted."""
+    mid = market_id or "main"
+    where = "market_id = ?"
+    params = [mid]
+    if since_iso:
+        where += " AND updated_at >= ?"
+        params.append(since_iso)
+    with db() as conn:
+        n = conn.execute(f"SELECT COUNT(*) AS c FROM market_stock WHERE {where}", params).fetchone()["c"]
+        if not n:
+            return 0
+        conn.execute(f"DELETE FROM market_stock WHERE {where}", params)
+        return int(n)
+
+
+def delete_market_stock_item(market_id: str, item: str) -> bool:
+    """Delete ONE item's live-stock row from a market (the dashboard shop list).
+    Returns True if a row was removed. Used by the owner 'remove item' flow so a
+    deletion actually clears the shop entry, not just the CSN history + catalog."""
+    mid = market_id or "main"
+    with db() as conn:
+        cur = conn.execute("DELETE FROM market_stock WHERE market_id=? AND item=?", (mid, item))
+        return cur.rowcount > 0
+
+
+def set_stock_capacity(market_id: str, item: str, capacity: int) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    mid = market_id or "main"
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO market_stock (market_id, item, stock, capacity, updated_at) VALUES (?,?,0,?,?) "
+            "ON CONFLICT(market_id, item) DO UPDATE SET capacity=excluded.capacity, updated_at=excluded.updated_at",
+            (mid, item, int(capacity), now))
+
+
+def set_stock_alarm(market_id: str, item: str, threshold: float, mode: str = "pct") -> None:
+    mid = market_id or "main"
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO stock_alarms (market_id, item, threshold, mode) VALUES (?,?,?,?) "
+            "ON CONFLICT(market_id, item) DO UPDATE SET threshold=excluded.threshold, mode=excluded.mode",
+            (mid, item, float(threshold), mode if mode in ("pct", "pieces") else "pct"))
+
+
+def delete_stock_alarm(market_id: str, item: str) -> None:
+    with db() as conn:
+        conn.execute("DELETE FROM stock_alarms WHERE market_id=? AND item=?", (market_id or "main", item))
+
+
+def get_stock_alarms(market_id: str) -> dict:
+    with db() as conn:
+        rows = conn.execute("SELECT item, threshold, mode FROM stock_alarms WHERE market_id=?",
+                           (market_id or "main",)).fetchall()
+        return {r["item"]: {"threshold": float(r["threshold"]), "mode": r["mode"]} for r in rows}
+
+
+def create_project(title: str, funder_id: str, manager_id: str, budget: int) -> int:
+    now = datetime.now(timezone.utc).isoformat()
+    with db() as conn:
+        cur = conn.execute(
+            "INSERT INTO projects (title, funder_id, manager_id, budget, status, created_at, updated_at) "
+            "VALUES (?,?,?,?, 'open', ?, ?)",
+            (title, str(funder_id), str(manager_id), int(budget), now, now))
+        return int(cur.lastrowid)
+
+
+def get_project(project_id: int) -> Optional[dict]:
+    with db() as conn:
+        row = conn.execute("SELECT * FROM projects WHERE id=?", (int(project_id),)).fetchone()
+        return dict(row) if row else None
+
+
+def set_project_status(project_id: int, status: str, proof: str = None) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    with db() as conn:
+        if proof is None:
+            conn.execute("UPDATE projects SET status=?, updated_at=? WHERE id=?",
+                         (status, now, int(project_id)))
+        else:
+            conn.execute("UPDATE projects SET status=?, proof=?, updated_at=? WHERE id=?",
+                         (status, proof, now, int(project_id)))
+
+
+def list_projects(status: str = None, manager_id: str = None, funder_id: str = None, limit: int = 50) -> list:
+    q = "SELECT * FROM projects WHERE 1=1"
+    args = []
+    if status:
+        q += " AND status=?"; args.append(status)
+    if manager_id:
+        q += " AND manager_id=?"; args.append(str(manager_id))
+    if funder_id:
+        q += " AND funder_id=?"; args.append(str(funder_id))
+    q += " ORDER BY id DESC LIMIT ?"; args.append(int(limit))
+    with db() as conn:
+        return [dict(r) for r in conn.execute(q, args).fetchall()]
+
+
+def add_project_member(project_id: int, worker_id: str, share: float = 1.0) -> None:
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO project_members (project_id, worker_id, share) VALUES (?,?,?) "
+            "ON CONFLICT(project_id, worker_id) DO UPDATE SET share=excluded.share",
+            (int(project_id), str(worker_id), float(share)))
+
+
+def remove_project_member(project_id: int, worker_id: str) -> None:
+    with db() as conn:
+        conn.execute("DELETE FROM project_members WHERE project_id=? AND worker_id=?",
+                     (int(project_id), str(worker_id)))
+
+
+def get_project_members(project_id: int) -> list:
+    with db() as conn:
+        rows = conn.execute("SELECT worker_id, share FROM project_members WHERE project_id=?",
+                           (int(project_id),)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def record_market_index(total_mcap: float, index_value: float, markets: int) -> None:
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO market_index_log (total_mcap, index_value, markets) VALUES (?, ?, ?)",
+            (float(total_mcap), float(index_value), int(markets)),
+        )
+
+
+def get_market_index_base() -> Optional[float]:
+    with db() as conn:
+        row = conn.execute(
+            "SELECT total_mcap FROM market_index_log ORDER BY id ASC LIMIT 1").fetchone()
+        return float(row["total_mcap"]) if row else None
+
+
+def get_market_index_history(limit: int = 200) -> list:
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT ts, total_mcap, index_value, markets FROM market_index_log "
+            "ORDER BY id DESC LIMIT ?", (int(limit),)).fetchall()
+    return [dict(r) for r in reversed(rows)]
+
+
+def get_platform_balance() -> float:
+    with db() as conn:
+        row = conn.execute("SELECT balance FROM platform_balance WHERE id=1").fetchone()
+        return row["balance"] if row else 0.0
+
+
+def set_platform_balance(balance: float):
+    with db() as conn:
+        conn.execute("UPDATE platform_balance SET balance=? WHERE id=1", (balance,))
+
+
+def add_platform_balance_log(month: str, market_id: str, amount: float, note: str = None):
+    with db() as conn:
+        conn.execute("""
+            INSERT INTO platform_balance_log (month, market_id, amount, note)
+            VALUES (?,?,?,?)
+        """, (month, market_id, amount, note))
+
+
+def platform_fee_exists(month: str, market_id: str, note: str) -> bool:
+    """True if a fee with this exact (month, market, note) is already on the platform log.
+    Makes recurring charges idempotent — e.g. re-ingesting a CSN month must not re-charge
+    that month's platform fee."""
+    with db() as conn:
+        return conn.execute(
+            "SELECT 1 FROM platform_balance_log WHERE month=? AND market_id=? AND note=? LIMIT 1",
+            (str(month), str(market_id), str(note))).fetchone() is not None
+
+
+def get_platform_balance_log(limit: int = 10) -> list[dict]:
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM platform_balance_log ORDER BY logged_at DESC LIMIT ?", (limit,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def delete_order(order_id: int):
+    """Delete an order and its claims from the database."""
+    with db() as conn:
+        conn.execute("DELETE FROM order_claims WHERE order_id=?", (order_id,))
+        conn.execute("DELETE FROM orders WHERE id=?", (order_id,))
+
+
+def clear_hive_batches():
+    """Delete all hive batches and reset the active batch."""
+    with db() as conn:
+        conn.execute("DELETE FROM hive_batches")
+        conn.execute("UPDATE hive_active_batch SET batch_id=NULL WHERE id=1")
+
+
+
+def get_loyalty(user_id: str) -> dict:
+    with db() as conn:
+        row = conn.execute("SELECT * FROM loyalty WHERE user_id=?", (str(user_id),)).fetchone()
+        if row:
+            return dict(row)
+        return {"user_id": str(user_id), "points": 0.0, "total_earned": 0.0, "last_activity": None}
+
+
+def add_loyalty_points(user_id: str, points: float, *, update_activity: bool = True) -> float:
+    """Add points to a user. Returns new point total.
+    total_earned only ever GROWS: negative deltas (redemption deductions) reduce the balance
+    but must not shrink the all-time-earned stat shown in /loyalty stats."""
+    now = datetime.now(timezone.utc).isoformat()
+    with db() as conn:
+        conn.execute("""
+            INSERT INTO loyalty (user_id, points, total_earned, last_activity, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                points       = points + excluded.points,
+                total_earned = total_earned + CASE WHEN excluded.points > 0 THEN excluded.points ELSE 0 END,
+                last_activity = CASE WHEN ? THEN excluded.last_activity ELSE last_activity END,
+                updated_at   = excluded.updated_at
+        """, (str(user_id), points, max(0.0, points), now if update_activity else None, now, int(update_activity)))
+        row = conn.execute("SELECT points FROM loyalty WHERE user_id=?", (str(user_id),)).fetchone()
+        return row["points"] if row else points
+
+
+def set_loyalty_points(user_id: str, points: float) -> float:
+    now = datetime.now(timezone.utc).isoformat()
+    with db() as conn:
+        conn.execute("""
+            INSERT INTO loyalty (user_id, points, total_earned, last_activity, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                points=excluded.points, updated_at=excluded.updated_at
+        """, (str(user_id), max(0.0, points), max(0.0, points), now, now))
+        return max(0.0, points)
+
+
+def get_loyalty_leaderboard(limit: int = 20) -> list:
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT user_id, points, total_earned, last_activity FROM loyalty ORDER BY points DESC LIMIT ?",
+            (limit,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_all_loyalty() -> list:
+    with db() as conn:
+        rows = conn.execute("SELECT * FROM loyalty").fetchall()
+        return [dict(r) for r in rows]
+
+
+def update_loyalty_points_bulk(updates: list[tuple]):
+    """updates = [(new_points, user_id), ...]"""
+    with db() as conn:
+        conn.executemany("UPDATE loyalty SET points=?, updated_at=datetime('now') WHERE user_id=?", updates)
+
+
+# ── Per-market loyalty ledger (Stage 4) ───────────────────────────────────────────────
+def get_market_loyalty(user_id: str, market_id: str) -> dict:
+    with db() as conn:
+        row = conn.execute(
+            "SELECT * FROM market_loyalty_ledger WHERE user_id=? AND market_id=?",
+            (str(user_id), str(market_id))).fetchone()
+        if row:
+            return dict(row)
+        return {"user_id": str(user_id), "market_id": str(market_id),
+                "points": 0.0, "total_earned": 0.0, "last_activity": None}
+
+
+def add_market_loyalty_points(user_id: str, market_id: str, points: float,
+                              *, update_activity: bool = True) -> float:
+    """Add points to a user's ledger for ONE market — each market owner's own reward
+    currency, independent of every other market and of the shared V Tech pool (the
+    `loyalty` table). Returns the new point total for that (user, market) pair."""
+    now = datetime.now(timezone.utc).isoformat()
+    with db() as conn:
+        conn.execute("""
+            INSERT INTO market_loyalty_ledger (user_id, market_id, points, total_earned, last_activity, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, market_id) DO UPDATE SET
+                points        = points + excluded.points,
+                total_earned  = total_earned + CASE WHEN excluded.points > 0 THEN excluded.points ELSE 0 END,
+                last_activity = CASE WHEN ? THEN excluded.last_activity ELSE last_activity END,
+                updated_at    = excluded.updated_at
+        """, (str(user_id), str(market_id), points, max(0.0, points),
+              now if update_activity else None, now, int(update_activity)))
+        row = conn.execute(
+            "SELECT points FROM market_loyalty_ledger WHERE user_id=? AND market_id=?",
+            (str(user_id), str(market_id))).fetchone()
+        return row["points"] if row else points
+
+
+def set_market_loyalty_points(user_id: str, market_id: str, points: float) -> float:
+    now = datetime.now(timezone.utc).isoformat()
+    with db() as conn:
+        conn.execute("""
+            INSERT INTO market_loyalty_ledger (user_id, market_id, points, total_earned, last_activity, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, market_id) DO UPDATE SET
+                points=excluded.points, updated_at=excluded.updated_at
+        """, (str(user_id), str(market_id), max(0.0, points), max(0.0, points), now, now))
+        return max(0.0, points)
+
+
+def get_market_loyalty_leaderboard(market_id: str, limit: int = 20) -> list:
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT user_id, points, total_earned, last_activity FROM market_loyalty_ledger "
+            "WHERE market_id=? ORDER BY points DESC LIMIT ?", (str(market_id), int(limit))).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_all_market_loyalty_for_user(user_id: str) -> list:
+    """Every market ledger this user has a nonzero balance or history in, richest first —
+    powers the per-market breakdown on /loyalty stats."""
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM market_loyalty_ledger WHERE user_id=? AND (points > 0 OR total_earned > 0) "
+            "ORDER BY points DESC", (str(user_id),)).fetchall()
+        return [dict(r) for r in rows]
+
+
+
+def get_ign(user_id: str) -> Optional[str]:
+    """The user's PRIMARY in-game name (earliest registered) — what displays everywhere a
+    single IGN is shown. Use get_igns() for the full main+alts list."""
+    with db() as conn:
+        row = conn.execute(
+            "SELECT ign FROM ign_registry WHERE user_id=? ORDER BY registered_at ASC, ign ASC LIMIT 1",
+            (str(user_id),)).fetchone()
+        return row["ign"] if row else None
+
+
+def get_igns(user_id: str) -> list:
+    """Every in-game name this user has registered (main + alts), primary/earliest first."""
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT ign FROM ign_registry WHERE user_id=? ORDER BY registered_at ASC, ign ASC",
+            (str(user_id),)).fetchall()
+        return [r["ign"] for r in rows]
+
+
+def count_igns(user_id: str) -> int:
+    with db() as conn:
+        row = conn.execute("SELECT COUNT(*) AS c FROM ign_registry WHERE user_id=?",
+                           (str(user_id),)).fetchone()
+        return int(row["c"] if row else 0)
+
+
+def get_user_id_by_ign(ign: str) -> Optional[str]:
+    with db() as conn:
+        row = conn.execute("SELECT user_id FROM ign_registry WHERE ign=? COLLATE NOCASE", (str(ign).strip(),)).fetchone()
+        return row["user_id"] if row else None
+
+
+def add_ign(user_id: str, ign: str) -> str:
+    """Register one in-game name for a user (main or alt). Returns:
+      'added'  — newly linked to this user
+      'exists' — this user already had that IGN (idempotent no-op)
+      'taken'  — the IGN belongs to a DIFFERENT user (caller should refuse)
+    Does NOT enforce the per-user count cap — that's a command-layer policy check."""
+    ign = str(ign).strip()
+    owner = get_user_id_by_ign(ign)
+    if owner is not None:
+        return "exists" if str(owner) == str(user_id) else "taken"
+    now = datetime.now(timezone.utc).isoformat()
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO ign_registry (ign, user_id, registered_at) VALUES (?, ?, ?)",
+            (ign, str(user_id), now))
+    return "added"
+
+
+def set_ign(user_id: str, ign: str) -> str:
+    """Back-compat shim: registration paths call this to link an IGN. Now ADDS (alts are
+    allowed) rather than replacing the user's single IGN. Returns add_ign()'s status."""
+    return add_ign(user_id, ign)
+
+
+def remove_ign(user_id: str, ign: str) -> bool:
+    """Remove ONE specific IGN from a user (e.g. a mistyped alt). Returns True if a row was
+    deleted. The user keeps their other IGNs; primary falls through to the next-earliest."""
+    with db() as conn:
+        cur = conn.execute(
+            "DELETE FROM ign_registry WHERE user_id=? AND ign=? COLLATE NOCASE",
+            (str(user_id), str(ign).strip()))
+        return cur.rowcount > 0
+
+
+def delete_ign(user_id: str):
+    """Remove ALL of a user's IGNs (full unlink)."""
+    with db() as conn:
+        conn.execute("DELETE FROM ign_registry WHERE user_id=?", (str(user_id),))
+
+
+
+def set_ign_pending(user_id: str, dm_channel_id: str, role_id: str, guild_id: str, deadline: str):
+    with db() as conn:
+        conn.execute("""
+            INSERT INTO ign_pending (user_id, dm_channel_id, role_id, guild_id, deadline)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                dm_channel_id=excluded.dm_channel_id,
+                role_id=excluded.role_id,
+                guild_id=excluded.guild_id,
+                deadline=excluded.deadline
+        """, (str(user_id), str(dm_channel_id), str(role_id), str(guild_id), deadline))
+
+
+def get_ign_pending(user_id: str) -> Optional[dict]:
+    with db() as conn:
+        row = conn.execute("SELECT * FROM ign_pending WHERE user_id=?", (str(user_id),)).fetchone()
+        return dict(row) if row else None
+
+
+def get_all_ign_pending() -> list:
+    with db() as conn:
+        rows = conn.execute("SELECT * FROM ign_pending").fetchall()
+        return [dict(r) for r in rows]
+
+
+def delete_ign_pending(user_id: str):
+    with db() as conn:
+        conn.execute("DELETE FROM ign_pending WHERE user_id=?", (str(user_id),))
+
+
+
+def save_note(text: str, author_id: str, author_name: str) -> int:
+    """Save a note; returns the new note ID."""
+    with db() as conn:
+        cur = conn.execute(
+            "INSERT INTO notes (author_id, author_name, text) VALUES (?, ?, ?)",
+            (str(author_id), author_name, text),
+        )
+        return cur.lastrowid
+
+
+def list_notes(author_id: str | None = None, limit: int = 10) -> list[dict]:
+    """Return recent notes, optionally filtered by author."""
+    with db() as conn:
+        if author_id:
+            rows = conn.execute(
+                "SELECT id, author_name, text, created_at FROM notes "
+                "WHERE author_id=? ORDER BY created_at DESC LIMIT ?",
+                (str(author_id), limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT id, author_name, text, created_at FROM notes "
+                "ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+    return [dict(r) for r in rows]
+
+
+
+# ── Enchant-area roster ──────────────────────────────────────────────────────
+# Which employees (by IGN) operate which enchant-table AREA (a /la land area).
+# For now managers supply the IGNs manually; onboarding will auto-bind later.
+def _ensure_enchant_area_table(conn):
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS enchant_area_members ("
+        "  area      TEXT NOT NULL,"
+        "  ign       TEXT NOT NULL,"
+        "  user_id   TEXT,"                # resolved from ign_registry if known, else NULL
+        "  added_by  TEXT,"
+        "  added_at  TEXT NOT NULL DEFAULT (datetime('now')),"
+        "  PRIMARY KEY (area, ign)"
+        ")")
+
+
+def enchant_area_add(area: str, ign: str, added_by: str = "") -> str:
+    """Bind one IGN to an enchant area. Returns 'added' or 'exists'."""
+    area = str(area).strip()
+    ign = str(ign).strip()
+    if not area or not ign:
+        return "skip"
+    uid = get_user_id_by_ign(ign)
+    with db() as conn:
+        _ensure_enchant_area_table(conn)
+        row = conn.execute(
+            "SELECT 1 FROM enchant_area_members WHERE area=? COLLATE NOCASE AND ign=? COLLATE NOCASE",
+            (area, ign)).fetchone()
+        if row:
+            # refresh the resolved user_id in case they registered since
+            conn.execute(
+                "UPDATE enchant_area_members SET user_id=COALESCE(?, user_id) "
+                "WHERE area=? COLLATE NOCASE AND ign=? COLLATE NOCASE", (uid, area, ign))
+            return "exists"
+        conn.execute(
+            "INSERT INTO enchant_area_members (area, ign, user_id, added_by) VALUES (?,?,?,?)",
+            (area, ign, uid, str(added_by) or None))
+        return "added"
+
+
+def enchant_area_list(area: str | None = None) -> list[dict]:
+    """All roster rows, or just one area's. Ordered by area then ign."""
+    with db() as conn:
+        _ensure_enchant_area_table(conn)
+        if area:
+            rows = conn.execute(
+                "SELECT area, ign, user_id, added_by, added_at FROM enchant_area_members "
+                "WHERE area=? COLLATE NOCASE ORDER BY ign COLLATE NOCASE", (str(area).strip(),)).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT area, ign, user_id, added_by, added_at FROM enchant_area_members "
+                "ORDER BY area COLLATE NOCASE, ign COLLATE NOCASE").fetchall()
+    return [dict(r) for r in rows]
+
+
+def enchant_area_remove(area: str, ign: str) -> bool:
+    with db() as conn:
+        _ensure_enchant_area_table(conn)
+        cur = conn.execute(
+            "DELETE FROM enchant_area_members WHERE area=? COLLATE NOCASE AND ign=? COLLATE NOCASE",
+            (str(area).strip(), str(ign).strip()))
+        return cur.rowcount > 0
+
+
+def enchant_area_clear(area: str) -> int:
+    with db() as conn:
+        _ensure_enchant_area_table(conn)
+        cur = conn.execute(
+            "DELETE FROM enchant_area_members WHERE area=? COLLATE NOCASE", (str(area).strip(),))
+        return cur.rowcount
+
+
+def save_web_order(discord_username: str, discord_id: str, items: list, notes: str = "") -> int:
+    with db() as conn:
+        cur = conn.execute(
+            """INSERT INTO web_orders (discord_username, discord_id, items_json, notes)
+               VALUES (?, ?, ?, ?)""",
+            (discord_username, discord_id or "", json.dumps(items), notes or "")
+        )
+        return cur.lastrowid
+
+
+def get_web_order(order_id: int) -> Optional[dict]:
+    with db() as conn:
+        row = conn.execute("SELECT * FROM web_orders WHERE id=?", (order_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def update_web_order_status(order_id: int, status: str, reviewed_by: str = "", notify_msg_id: str = "") -> None:
+    with db() as conn:
+        conn.execute(
+            """UPDATE web_orders SET status=?, reviewed_by=?, reviewed_at=datetime('now'), notify_msg_id=?
+               WHERE id=?""",
+            (status, reviewed_by, notify_msg_id, order_id)
+        )
+
+
+def list_web_orders(status: str = None, limit: int = 50) -> list:
+    with db() as conn:
+        if status:
+            rows = conn.execute(
+                "SELECT * FROM web_orders WHERE status=? ORDER BY created_at DESC LIMIT ?",
+                (status, limit)
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM web_orders ORDER BY created_at DESC LIMIT ?", (limit,)
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+
+
+def save_futures_order(user_id: str, username: str, item: str, quantity: int,
+                        enchants: str = "", notes: str = "") -> int:
+    with db() as conn:
+        cur = conn.execute(
+            """INSERT INTO futures_orders (user_id, username, item, quantity, enchants, notes)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (str(user_id), username, item, int(quantity), enchants or "", notes or "")
+        )
+        return cur.lastrowid
+
+
+def get_futures_order(order_id: int) -> Optional[dict]:
+    with db() as conn:
+        row = conn.execute("SELECT * FROM futures_orders WHERE id=?", (order_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def get_futures_order_by_msg(notify_msg_id) -> Optional[dict]:
+    """Recover a futures order from the message its buttons live on.
+
+    Persistent views are registered as FuturesOrderView(0), so after a restart the view
+    has NO order id — every button reported "Order not found" on any message posted
+    before that restart. This is the same recovery the bulk view already used.
+    """
+    if not notify_msg_id:
+        return None
+    with db() as conn:
+        row = conn.execute(
+            "SELECT * FROM futures_orders WHERE notify_msg_id=? LIMIT 1",
+            (str(notify_msg_id),)).fetchone()
+        return dict(row) if row else None
+
+
+def get_web_order_by_msg(notify_msg_id) -> Optional[dict]:
+    """Same recovery for web orders — WebOrderView(0) has the identical flaw."""
+    if not notify_msg_id:
+        return None
+    with db() as conn:
+        row = conn.execute(
+            "SELECT * FROM web_orders WHERE notify_msg_id=? LIMIT 1",
+            (str(notify_msg_id),)).fetchone()
+        return dict(row) if row else None
+
+
+def update_futures_order_status(order_id: int, status: str, reviewed_by: str = "", notify_msg_id: str = "") -> None:
+    with db() as conn:
+        conn.execute(
+            """UPDATE futures_orders SET status=?, reviewed_by=?, reviewed_at=datetime('now'), notify_msg_id=?
+               WHERE id=?""",
+            (status, reviewed_by, notify_msg_id, order_id)
+        )
+
+
+def list_futures_orders(status: str = None, user_id: str = None, limit: int = 50) -> list:
+    with db() as conn:
+        if status and user_id:
+            rows = conn.execute(
+                "SELECT * FROM futures_orders WHERE status=? AND user_id=? ORDER BY created_at DESC LIMIT ?",
+                (status, str(user_id), limit)
+            ).fetchall()
+        elif status:
+            rows = conn.execute(
+                "SELECT * FROM futures_orders WHERE status=? ORDER BY created_at DESC LIMIT ?",
+                (status, limit)
+            ).fetchall()
+        elif user_id:
+            rows = conn.execute(
+                "SELECT * FROM futures_orders WHERE user_id=? ORDER BY created_at DESC LIMIT ?",
+                (str(user_id), limit)
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM futures_orders ORDER BY created_at DESC LIMIT ?", (limit,)
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+
+# ── Bulk / consignment futures ────────────────────────────────────────────────────────
+def create_futures_bulk(customer_id: str, customer_name: str, market_id: str,
+                        created_by: str, notes: str = "") -> int:
+    with db() as conn:
+        cur = conn.execute(
+            "INSERT INTO futures_bulk (customer_id, customer_name, market_id, created_by, notes) "
+            "VALUES (?,?,?,?,?)",
+            (str(customer_id), str(customer_name or ""), str(market_id or ""),
+             str(created_by or ""), str(notes or "")))
+        return int(cur.lastrowid)
+
+
+def add_futures_bulk_line(bulk_id: int, item: str, qty: int, unit: str = "pieces",
+                          enchants: str = "", raw_line: str = "", item_key: str = None,
+                          worker_cost: float = None, full_price: float = None) -> int:
+    """item_key: when the line was picked from the catalog (web builder), link it immediately
+    so consignment pricing/CSN matching doesn't need a manual /futures price item match."""
+    with db() as conn:
+        cur = conn.execute(
+            "INSERT INTO futures_bulk_lines (bulk_id, item, qty, unit, enchants, raw_line, "
+            "item_key, worker_cost, full_price) VALUES (?,?,?,?,?,?,?,?,?)",
+            (int(bulk_id), str(item), int(qty), str(unit or "pieces"),
+             str(enchants or ""), str(raw_line or ""), (str(item_key) if item_key else None),
+             (float(worker_cost) if worker_cost is not None else None),
+             (float(full_price) if full_price is not None else None)))
+        return int(cur.lastrowid)
+
+
+def get_futures_bulk_lines(bulk_id: int) -> list:
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM futures_bulk_lines WHERE bulk_id=? ORDER BY id ASC", (int(bulk_id),)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_futures_bulk(bulk_id: int) -> Optional[dict]:
+    with db() as conn:
+        row = conn.execute("SELECT * FROM futures_bulk WHERE id=?", (int(bulk_id),)).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        d["lines"] = get_futures_bulk_lines(bulk_id)
+        return d
+
+
+def get_futures_bulk_by_msg(notify_msg_id) -> Optional[dict]:
+    """Recover a bulk order from the review message its buttons live on — lets the persistent
+    view work after a restart without carrying the id on the view instance."""
+    if not notify_msg_id:
+        return None
+    with db() as conn:
+        row = conn.execute("SELECT id FROM futures_bulk WHERE notify_msg_id=?",
+                           (str(notify_msg_id),)).fetchone()
+    return get_futures_bulk(int(row["id"])) if row else None
+
+
+def list_futures_bulk(status: str = None, customer_id: str = None, limit: int = 25) -> list:
+    with db() as conn:
+        if status and customer_id:
+            rows = conn.execute("SELECT * FROM futures_bulk WHERE status=? AND customer_id=? "
+                                "ORDER BY created_at DESC LIMIT ?", (status, str(customer_id), limit)).fetchall()
+        elif status:
+            rows = conn.execute("SELECT * FROM futures_bulk WHERE status=? ORDER BY created_at DESC LIMIT ?",
+                                (status, limit)).fetchall()
+        elif customer_id:
+            rows = conn.execute("SELECT * FROM futures_bulk WHERE customer_id=? ORDER BY created_at DESC LIMIT ?",
+                                (str(customer_id), limit)).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM futures_bulk ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def update_futures_bulk_status(bulk_id: int, status: str, reviewed_by: str = None,
+                               notify_msg_id: str = None) -> None:
+    with db() as conn:
+        conn.execute(
+            "UPDATE futures_bulk SET status=?, "
+            "reviewed_by=COALESCE(?, reviewed_by), "
+            "reviewed_at=CASE WHEN ? IN ('fulfilled','declined','cancelled') THEN datetime('now') ELSE reviewed_at END, "
+            "notify_msg_id=COALESCE(?, notify_msg_id) WHERE id=?",
+            (status, reviewed_by, status, notify_msg_id, int(bulk_id)))
+
+
+def set_futures_order_bulk_line(order_id: int, line_id: int) -> None:
+    """Tie a futures order to the bulk line it came from."""
+    with db() as conn:
+        conn.execute("UPDATE futures_orders SET bulk_line_id=? WHERE id=?",
+                     (int(line_id), int(order_id)))
+
+
+def get_futures_bulk_line(line_id: int) -> Optional[dict]:
+    with db() as conn:
+        row = conn.execute("SELECT * FROM futures_bulk_lines WHERE id=?",
+                           (int(line_id),)).fetchone()
+        return dict(row) if row else None
+
+
+def list_futures_orders(status: str = None) -> list:
+    with db() as conn:
+        if status:
+            rows = conn.execute("SELECT * FROM futures_orders WHERE status=? ORDER BY id",
+                                (str(status),)).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM futures_orders ORDER BY id").fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_futures_bulk_lines_all() -> list:
+    """Every bulk line with its bulk's status — for backfills that must know whether the
+    deal is live before touching its pricing."""
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT l.*, b.status AS bulk_status, b.due_at AS bulk_due_at, "
+            "       b.customer_name AS customer_name "
+            "FROM futures_bulk_lines l JOIN futures_bulk b ON b.id = l.bulk_id "
+            "ORDER BY l.bulk_id, l.id").fetchall()
+        return [dict(r) for r in rows]
+
+
+def claim_futures_line_charge(line_id: int) -> bool:
+    """Atomically mark a line as charged. True means THIS caller won the race and must do
+    the debit; False means it was already charged. Claim-first, exactly like the hive
+    payout path — never debit and then mark, or a crash between the two double-charges."""
+    with db() as conn:
+        cur = conn.execute(
+            "UPDATE futures_bulk_lines SET charged_at=datetime('now') "
+            "WHERE id=? AND (charged_at IS NULL OR charged_at='')", (int(line_id),))
+        return cur.rowcount > 0
+
+
+def unclaim_futures_line_charge(line_id: int) -> None:
+    """Release the claim if the debit itself failed, so it can be retried."""
+    with db() as conn:
+        conn.execute("UPDATE futures_bulk_lines SET charged_at=NULL WHERE id=?", (int(line_id),))
+
+
+def get_futures_line_by_work_order(work_order_id: int):
+    with db() as conn:
+        row = conn.execute(
+            "SELECT l.*, b.customer_id, b.customer_name FROM futures_bulk_lines l "
+            "JOIN futures_bulk b ON b.id=l.bulk_id WHERE l.work_order_id=?",
+            (int(work_order_id),)).fetchone()
+        return dict(row) if row else None
+
+
+def set_futures_bulk_line_pricing(line_id: int, worker_cost: float, full_price: float) -> None:
+    with db() as conn:
+        conn.execute("UPDATE futures_bulk_lines SET worker_cost=?, full_price=? WHERE id=?",
+                     (float(worker_cost), float(full_price), int(line_id)))
+
+
+def set_futures_bulk_due(bulk_id: int, due_at_iso: str) -> bool:
+    """Start the consignment clock. No-op if already set, so re-approving another line
+    of the same bulk can't quietly extend the deadline."""
+    with db() as conn:
+        row = conn.execute("SELECT due_at FROM futures_bulk WHERE id=?", (int(bulk_id),)).fetchone()
+        if row is None or (row["due_at"] or "").strip():
+            return False
+        conn.execute("UPDATE futures_bulk SET due_at=? WHERE id=?", (str(due_at_iso), int(bulk_id)))
+        return True
+
+
+def set_futures_bulk_line_baseline(line_id: int, sold_baseline: int) -> None:
+    """Freeze the customer's CURRENT sold count for this item at approval time, so the
+    consignment invoice only charges margin on units resold AFTER the deal — not on
+    everything they had ever sold before it."""
+    with db() as conn:
+        conn.execute("UPDATE futures_bulk_lines SET sold_baseline=? WHERE id=?",
+                     (int(sold_baseline), int(line_id)))
+
+
+def set_futures_bulk_line_order(line_id: int, work_order_id: int) -> None:
+    with db() as conn:
+        conn.execute("UPDATE futures_bulk_lines SET work_order_id=? WHERE id=?",
+                     (int(work_order_id), int(line_id)))
+
+
+def set_futures_bulk_line_prices(line_id: int, worker_cost: float = None,
+                                 full_price: float = None) -> None:
+    """Stage B: set a line's per-unit break-even (worker_cost) and full price. Either may be
+    omitted to leave it unchanged."""
+    with db() as conn:
+        conn.execute(
+            "UPDATE futures_bulk_lines SET "
+            "worker_cost=COALESCE(?, worker_cost), full_price=COALESCE(?, full_price) WHERE id=?",
+            (worker_cost, full_price, int(line_id)))
+
+
+def price_futures_bulk_line(line_id: int, item_key: str, worker_cost: float,
+                            full_price: float, sold_baseline: int) -> None:
+    """Stage B: lock a line's consignment pricing — link it to a catalog item (for CSN resale
+    matching), snapshot the per-unit break-even + full price, and record the customer's current
+    CSN cumulative sold as the baseline (only resales AFTER this count toward the bill)."""
+    with db() as conn:
+        conn.execute(
+            "UPDATE futures_bulk_lines SET item_key=?, worker_cost=?, full_price=?, "
+            "sold_baseline=? WHERE id=?",
+            (str(item_key or ""), float(worker_cost or 0), float(full_price or 0),
+             int(sold_baseline or 0), int(line_id)))
+
+
+def set_futures_bulk_line_sold(line_id: int, sold_override, sold_qty: int = None) -> None:
+    """Set a line's manual resold override (pass None to clear it and fall back to CSN auto),
+    and optionally cache the last-computed CSN resold count."""
+    with db() as conn:
+        conn.execute(
+            "UPDATE futures_bulk_lines SET sold_override=?, "
+            "sold_qty=COALESCE(?, sold_qty) WHERE id=?",
+            (None if sold_override is None else int(sold_override),
+             None if sold_qty is None else int(sold_qty), int(line_id)))
+
+
+def record_futures_bulk_payment(bulk_id: int, amount: float) -> float:
+    """Add a customer payment against a bulk deal's owed margin. Returns the new paid total."""
+    with db() as conn:
+        conn.execute("UPDATE futures_bulk SET paid = paid + ? WHERE id=?",
+                     (float(amount), int(bulk_id)))
+        row = conn.execute("SELECT paid FROM futures_bulk WHERE id=?", (int(bulk_id),)).fetchone()
+        return float(row["paid"]) if row else 0.0
+
+
+def set_item_worker_cost(name: str, worker_cost) -> None:
+    """Set an item's break-even cost (used as the default when pricing a consignment line).
+    Pass None to clear it."""
+    with db() as conn:
+        conn.execute("UPDATE items SET worker_cost=? WHERE name=?",
+                     (None if worker_cost is None else float(worker_cost), str(name)))
+
+
+# ── Hive engine ──────────────────────────────────────────────────────────────
+
+def add_hive_harvest(market_id: str, ign: str, user_id, item: str, qty: int,
+                     unit_value: float, msg_id: str, line_no: int, sale_ts: str = None,
+                     wage_value: float = None):
+    """Record one parsed harvest line. Returns the new row id if it was NEW, else None.
+    Idempotent two ways: per message+line (re-ingesting the same Discord message never
+    double-counts), and — when a sale timestamp is present — per real sale identity
+    (market+ign+item+qty+sale_ts via the uq_hive_sale index), so the same sale posted or
+    re-scanned any number of times still pays exactly once. The id lets auto-payout settle
+    exactly the rows it just created."""
+    with db() as conn:
+        # NEAR-DUPLICATE GUARD. uq_hive_sale keys on the EXACT sale_ts, but the mod
+        # reconstructs that timestamp from "Xh Ym ago" — minute precision — so the SAME
+        # sale gets a slightly different absolute time on every run (observed: 14:18:21
+        # vs 14:18:47 for one sale, and three rows spanning 48s for another). Each new
+        # timestamp slipped past the unique index as a "new" sale and was PAID AGAIN.
+        # Measured damage before this guard: 76 duplicate rows, 63,211 coins overpaid.
+        # Two ingest paths make it worse — the csn-hive webhook lines and the export CSV
+        # both describe the same sales with independently-drifting timestamps.
+        # So: same market+ign+item+qty within ±120s is the same sale, full stop.
+        #
+        # AUDIT FIX (high, 2026-08-06): the guard below no longer filters on market_id.
+        # A sale is a physical event — the same honey leaving the same barrel — and the
+        # market id is just how the exporter happened to be configured at the time. When
+        # the mod's market id changes between two runs (or an export CSV is bound to one
+        # market while the hive webhook feed is bound to another), the identical sale
+        # landed once per market and EACH market settled it independently. That is live
+        # in the database right now: JesseNapoleon's four Honey Block sales exist under
+        # both 'greyhames' and 'vtech' with byte-identical timestamps. Harvester+item+qty
+        # within ±120s is one sale no matter which market claims it; the first market to
+        # record it owns it.
+        if sale_ts:
+            mine = _csn_ts_seconds(sale_ts)
+            if mine is not None:
+                for row in conn.execute(
+                        "SELECT sale_ts FROM hive_harvests WHERE ign=? COLLATE NOCASE "
+                        "AND item=? AND qty=? AND sale_ts IS NOT NULL",
+                        (str(ign), str(item), int(qty))).fetchall():
+                    other = _csn_ts_seconds(row[0])
+                    if other is not None and abs(other - mine) <= 120:
+                        return None            # already ingested — never pay twice
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO hive_harvests "
+            "(market_id, ign, user_id, item, qty, unit_value, wage_value, msg_id, line_no, sale_ts) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (str(market_id), str(ign), (str(user_id) if user_id else None), str(item),
+             int(qty), float(unit_value or 0), float(wage_value or 0), str(msg_id), int(line_no),
+             (str(sale_ts) if sale_ts else None)))
+        return int(cur.lastrowid) if cur.rowcount > 0 else None
+
+
+def get_hive_harvests_by_ids(ids: list) -> list:
+    if not ids:
+        return []
+    with db() as conn:
+        q = ",".join("?" * len(ids))
+        rows = conn.execute(f"SELECT * FROM hive_harvests WHERE id IN ({q}) ORDER BY id",
+                            [int(i) for i in ids]).fetchall()
+        return [dict(r) for r in rows]
+
+
+def ign_unpaid_value(ign: str) -> float:
+    """Coins of UNPAID, UNLINKED harvest value waiting on an IGN. Anti-squatting:
+    an IGN with money attached can't be self-claimed — a manager must link it."""
+    with db() as conn:
+        row = conn.execute(
+            "SELECT COALESCE(SUM(qty*unit_value),0) AS v FROM hive_harvests "
+            "WHERE lower(ign)=lower(?) AND paid=0 AND user_id IS NULL", (str(ign),)).fetchone()
+        return float(row["v"] or 0)
+
+
+def get_hive_msg_lines(msg_id: str) -> list:
+    """(ign, qty, item) for every row already ingested from one message —
+    content-multiset dedup for cumulative feeds that prepend or rewrite."""
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT ign, qty, item FROM hive_harvests WHERE msg_id=?",
+            (str(msg_id),)).fetchall()
+        return [(str(r["ign"]), int(r["qty"]), str(r["item"])) for r in rows]
+
+
+def hive_lines_for_msg(msg_id: str) -> int:
+    """How many lines of a message are already ingested (edit-reingest support)."""
+    with db() as conn:
+        row = conn.execute("SELECT COUNT(*) AS c FROM hive_harvests WHERE msg_id=?",
+                           (str(msg_id),)).fetchone()
+        return int(row["c"] if row else 0)
+
+
+def get_unpaid_hive_harvests(market_id: str) -> list:
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM hive_harvests WHERE market_id=? AND paid=0 ORDER BY id",
+            (str(market_id),)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def hive_markets_with_unpaid() -> list:
+    """Every market that currently has unpaid harvest rows. The 6-hourly autopay sweep
+    used to discover markets ONLY from bound `hive_feed:` channels, so a market whose
+    harvests arrive through the CSN export path (no webhook feed channel bound) was
+    never swept — its stragglers sat unpaid forever."""
+    with db() as conn:
+        return [r[0] for r in conn.execute(
+            "SELECT DISTINCT market_id FROM hive_harvests WHERE paid=0").fetchall()]
+
+
+def mark_hive_harvests_paid(ids: list) -> int:
+    if not ids:
+        return 0
+    with db() as conn:
+        q = ",".join("?" * len(ids))
+        cur = conn.execute(
+            f"UPDATE hive_harvests SET paid=1, paid_at=datetime('now') "
+            f"WHERE id IN ({q}) AND paid=0", [int(i) for i in ids])
+        return cur.rowcount
+
+
+def claim_hive_harvests(ids: list) -> list:
+    """Claim rows for payment and return the ids THIS call actually flipped.
+
+    mark_hive_harvests_paid only reports HOW MANY it claimed, which is not enough when
+    two settle runs overlap: on a partial claim the caller released its whole id list
+    and un-paid rows the other run had already moved coins for, so the next sweep paid
+    them a second time. Callers must release exactly what this returned, never the
+    list they asked for."""
+    if not ids:
+        return []
+    want = [int(i) for i in ids]
+    q = ",".join("?" * len(want))
+    with db() as conn:
+        try:
+            rows = conn.execute(
+                f"UPDATE hive_harvests SET paid=1, paid_at=datetime('now') "
+                f"WHERE id IN ({q}) AND paid=0 RETURNING id", want).fetchall()
+            return [int(r[0]) for r in rows]
+        except Exception:
+            # RETURNING needs SQLite 3.35+. The read and the write share one connection
+            # and one transaction, so no other writer can slip between them.
+            claimable = [int(r[0]) for r in conn.execute(
+                f"SELECT id FROM hive_harvests WHERE id IN ({q}) AND paid=0",
+                want).fetchall()]
+            if claimable:
+                q2 = ",".join("?" * len(claimable))
+                conn.execute(
+                    f"UPDATE hive_harvests SET paid=1, paid_at=datetime('now') "
+                    f"WHERE id IN ({q2}) AND paid=0", claimable)
+            return claimable
+
+
+def unmark_hive_harvests_paid(ids: list) -> int:
+    """Release a claim taken by claim_hive_harvests — used when the payment that
+    followed the claim failed, so the rows go back to payable. Pass ONLY the ids
+    claim_hive_harvests returned; releasing rows another run claimed double-pays them."""
+    if not ids:
+        return 0
+    with db() as conn:
+        q = ",".join("?" * len(ids))
+        cur = conn.execute(
+            f"UPDATE hive_harvests SET paid=0, paid_at=NULL "
+            f"WHERE id IN ({q}) AND paid=1", [int(i) for i in ids])
+        return cur.rowcount
+
+
+def set_hive_harvest_user(ign: str, user_id: str) -> int:
+    """Attach a user to any UNPAID rows for an IGN that was unregistered at ingest time —
+    run when someone registers late so their back-harvests become payable."""
+    with db() as conn:
+        cur = conn.execute(
+            "UPDATE hive_harvests SET user_id=? WHERE ign=? COLLATE NOCASE "
+            "AND user_id IS NULL AND paid=0", (str(user_id), str(ign).strip()))
+        return cur.rowcount
+
+
+def add_hive_booking(market_id: str, month: str, value: float,
+                     harvester_pay: float, owner_pay: float) -> dict:
+    """Accumulate one payout run's economics into the market's monthly hive ledger.
+    net (V Tech's gain) = value − harvester pay − owner cut."""
+    net = float(value) - float(harvester_pay) - float(owner_pay)
+    with db() as conn:
+        conn.execute("""
+            INSERT INTO hive_ledger (market_id, month, value, harvester_pay, owner_pay, net)
+            VALUES (?,?,?,?,?,?)
+            ON CONFLICT(market_id, month) DO UPDATE SET
+                value=value+excluded.value, harvester_pay=harvester_pay+excluded.harvester_pay,
+                owner_pay=owner_pay+excluded.owner_pay, net=net+excluded.net,
+                updated_at=datetime('now')
+        """, (str(market_id), str(month), float(value), float(harvester_pay),
+              float(owner_pay), net))
+        row = conn.execute("SELECT * FROM hive_ledger WHERE market_id=? AND month=?",
+                           (str(market_id), str(month))).fetchone()
+        return dict(row) if row else {}
+
+
+def get_hive_ledger_months(market_id: str) -> dict:
+    """{month: {value, harvester_pay, owner_pay, net}} — full hive economics for the
+    website ledger (CSN shows 0 for hive shops, so the money view merges this in)."""
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT month, value, harvester_pay, owner_pay, net FROM hive_ledger "
+            "WHERE market_id=?", (str(market_id),)).fetchall()
+        return {r["month"]: {"value": float(r["value"] or 0),
+                             "harvester_pay": float(r["harvester_pay"] or 0),
+                             "owner_pay": float(r["owner_pay"] or 0),
+                             "net": float(r["net"] or 0)} for r in rows}
+
+
+def get_hive_months(market_id: str) -> dict:
+    """{month: net} — the hive engine's monthly V Tech gain, added on top of CSN months
+    by the stock roll-up."""
+    with db() as conn:
+        rows = conn.execute("SELECT month, net FROM hive_ledger WHERE market_id=?",
+                            (str(market_id),)).fetchall()
+        return {r["month"]: float(r["net"] or 0) for r in rows}
+
+
+def get_config_prefix(prefix: str) -> dict:
+    """Every bot_config row whose key starts with `prefix` → {key: value}.
+
+    Used to enumerate bindings that are stored as one key per channel, e.g.
+    `hive_feed:<channel_id>` → market_id.
+    """
+    with db() as conn:
+        rows = conn.execute("SELECT key, value FROM bot_config WHERE key LIKE ?",
+                            (f"{prefix}%",)).fetchall()
+        return {r["key"]: r["value"] for r in rows}
+
+
+def get_hive_harvest_summary(market_id: str) -> dict:
+    """Per-month harvest rollup for one hive site.
+
+    {month: {"qty", "value", "paid_value", "by_ign": {ign: {"qty","value"}},
+             "by_item": {item: {"qty","value"}}}}
+
+    Month comes from the in-game sale timestamp when the CSN mod supplied one,
+    else from when the line was recorded.
+    """
+    out = {}
+    with db() as conn:
+        rows = conn.execute("""
+            SELECT COALESCE(substr(sale_ts,1,7), substr(recorded_at,1,7)) AS month,
+                   ign, item,
+                   SUM(qty)                                      AS qty,
+                   SUM(qty * unit_value)                          AS value,
+                   SUM(CASE WHEN paid=1 THEN qty*unit_value ELSE 0 END) AS paid_value,
+                   -- wage basis: 0 means the column predates the split, so read it as
+                   -- unit_value and the row behaves exactly as it did before.
+                   SUM(qty * COALESCE(NULLIF(wage_value,0), unit_value))  AS wage_base,
+                   SUM(CASE WHEN paid=1
+                            THEN qty*COALESCE(NULLIF(wage_value,0), unit_value)
+                            ELSE 0 END)                           AS paid_wage_base
+            FROM hive_harvests
+            WHERE market_id=?
+            GROUP BY month, ign, item
+        """, (str(market_id),)).fetchall()
+    for r in rows:
+        mk = r["month"] or "unknown"
+        m = out.setdefault(mk, {"qty": 0, "value": 0.0, "paid_value": 0.0,
+                                "wage_base": 0.0, "paid_wage_base": 0.0,
+                                "by_ign": {}, "by_item": {}})
+        q, v = int(r["qty"] or 0), float(r["value"] or 0)
+        wb, pwb = float(r["wage_base"] or 0), float(r["paid_wage_base"] or 0)
+        m["qty"] += q
+        m["value"] += v
+        m["paid_value"] += float(r["paid_value"] or 0)
+        m["wage_base"] += wb
+        m["paid_wage_base"] += pwb
+        g = m["by_ign"].setdefault(r["ign"], {"qty": 0, "value": 0.0,
+                                              "wage_base": 0.0, "paid_wage_base": 0.0})
+        g["qty"] += q; g["value"] += v; g["wage_base"] += wb; g["paid_wage_base"] += pwb
+        i = m["by_item"].setdefault(r["item"], {"qty": 0, "value": 0.0,
+                                                "wage_base": 0.0, "paid_wage_base": 0.0})
+        i["qty"] += q; i["value"] += v; i["wage_base"] += wb; i["paid_wage_base"] += pwb
+    return out
+
+
+def _csn_ts_seconds(ts: str):
+    """ISO timestamp → epoch seconds, or None. Tolerates the mod's trailing 'Z'."""
+    try:
+        from datetime import datetime as _dt
+        s = str(ts).strip().replace("Z", "+00:00")
+        return _dt.fromisoformat(s).timestamp()
+    except Exception:
+        return None
+
+
+def add_csn_transactions_detailed(market_id: str, rows: list) -> tuple:
+    """Bulk-insert per-transaction sales. Returns (new_count, new_rows).
+
+    `rows` are dicts with actor/seller/verb/item/qty/coins/sale_ts and (mod v2.1+)
+    sale_uid. Dedup, in order of strength:
+      1. sale_uid — the mod's own stable per-sale identity (uq_csn_txn_uid);
+      2. near-duplicate window — same (actor, seller, verb, item, qty, coins) within
+         ±90s. The mod reconstructs sale_ts from "Xm ago" with minute precision, so the
+         SAME sale re-scanned lands up to a minute away; the old exact-sale_ts key
+         called that a new sale and double-counted it;
+      3. uq_csn_txn (exact identity) as the final index-level backstop.
+
+    Returning the rows that were actually NEW lets the caller book earnings from
+    exactly what entered the ledger — a re-uploaded file books nothing twice."""
+    if not rows:
+        return 0, []
+    new = 0
+    new_rows = []
+    with db() as conn:
+        for r in rows:
+            ts = str(r.get("sale_ts") or "").strip()
+            if not ts:
+                continue                       # a sale with no time is useless here
+            uid = (str(r.get("sale_uid") or "").strip() or None)
+            actor = str(r.get("actor") or "?")
+            seller = str(r.get("seller") or "")
+            verb = str(r.get("verb") or "").lower()
+            item = str(r.get("item") or "")
+            qty = int(r.get("qty") or 0)
+            coins = float(r.get("coins") or 0)
+            try:
+                if uid:
+                    dup = conn.execute(
+                        "SELECT 1 FROM csn_transactions WHERE market_id=? AND sale_uid=?",
+                        (str(market_id), uid)).fetchone()
+                    if dup:
+                        continue
+                # AUDIT FIX (high, 2026-08-06): the ±90s window now runs for EVERY row,
+                # not only rows without a sale_uid. A uid MISS used to fall straight
+                # through to INSERT, which defeated the whole point of the window: the
+                # mod derives sale_ts from a minute-granularity "Xm ago" string, so a
+                # re-read of the same sale can land in the next minute bucket and hash
+                # to a DIFFERENT uid (measured: ~1 re-read in 3). Two alts scanning the
+                # same market did it constantly, and 182 of the live rows have no uid at
+                # all so a re-export with a uid could never match them. Verified: the
+                # same production sale replayed 60s later inserted a second time and its
+                # coins were booked as fresh earnings.
+                mine = _csn_ts_seconds(ts)
+                if mine is not None:
+                    cands = conn.execute(
+                        "SELECT id, sale_ts, sale_uid FROM csn_transactions "
+                        "WHERE market_id=? AND actor=? "
+                        "AND COALESCE(seller,'')=? AND verb=? AND item=? AND qty=? AND coins=?",
+                        (str(market_id), actor, seller, verb, item, qty, coins)).fetchall()
+                    near_id = None
+                    near_uid = None
+                    for c in cands:
+                        other = _csn_ts_seconds(c[1])
+                        if other is not None and abs(other - mine) <= 90:
+                            near_id, near_uid = c[0], c[2]
+                            break
+                    if near_id is not None:
+                        # Backfill the uid onto the legacy row so the cheap fast path
+                        # catches this sale next time instead of re-scanning.
+                        if uid and not near_uid:
+                            try:
+                                conn.execute(
+                                    "UPDATE csn_transactions SET sale_uid=? WHERE id=?",
+                                    (uid, int(near_id)))
+                            except Exception:
+                                pass       # a uid collision here just means no fast path
+                        continue
+                cur = conn.execute("""
+                    INSERT OR IGNORE INTO csn_transactions
+                        (market_id, actor, seller, verb, item, qty, coins, sale_ts, sale_day, sale_uid)
+                    VALUES (?,?,?,?,?,?,?,?,?,?)
+                """, (str(market_id), actor, seller, verb, item, qty, coins, ts, ts[:10], uid))
+                if cur.rowcount:
+                    new += 1
+                    new_rows.append(dict(r))
+            except Exception:
+                continue
+    return new, new_rows
+
+
+def add_csn_transactions(market_id: str, rows: list) -> int:
+    """Back-compat wrapper: insert and return only the NEW count."""
+    n, _ = add_csn_transactions_detailed(market_id, rows)
+    return n
+
+
+def get_csn_daily_sales(market_id: str, days: int = 30) -> list:
+    """[{day, income, spent, net, units, txns, customers}] newest first."""
+    with db() as conn:
+        rows = conn.execute("""
+            SELECT sale_day AS day,
+                   SUM(CASE WHEN verb='bought' THEN coins ELSE 0 END)      AS income,
+                   SUM(CASE WHEN verb='sold'   THEN ABS(coins) ELSE 0 END) AS spent,
+                   SUM(CASE WHEN verb='bought' THEN qty ELSE 0 END)        AS units,
+                   COUNT(*)                                                AS txns,
+                   COUNT(DISTINCT actor)                                   AS customers
+            FROM csn_transactions
+            WHERE market_id=?
+            GROUP BY sale_day
+            ORDER BY sale_day DESC
+            LIMIT ?
+        """, (str(market_id), int(days))).fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["net"] = float(d["income"] or 0) - float(d["spent"] or 0)
+        out.append(d)
+    return out
+
+
+def get_csn_day_detail(market_id: str, day: str) -> list:
+    """What sold on ONE day: [{item, units, coins, txns}] best-selling first."""
+    with db() as conn:
+        rows = conn.execute("""
+            SELECT item,
+                   SUM(CASE WHEN verb='bought' THEN qty ELSE 0 END)   AS units,
+                   SUM(CASE WHEN verb='bought' THEN coins ELSE 0 END) AS coins,
+                   COUNT(*)                                           AS txns
+            FROM csn_transactions
+            WHERE market_id=? AND sale_day=?
+            GROUP BY item
+            ORDER BY coins DESC
+        """, (str(market_id), str(day))).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_csn_top_customers(market_id: str, days: int = 30, limit: int = 15) -> list:
+    """Who actually spends money here: [{actor, spent, units, txns, last_seen}]."""
+    with db() as conn:
+        rows = conn.execute("""
+            SELECT actor,
+                   SUM(coins) AS spent,
+                   SUM(qty)   AS units,
+                   COUNT(*)   AS txns,
+                   MAX(sale_ts) AS last_seen
+            FROM csn_transactions
+            WHERE market_id=? AND verb='bought'
+              AND sale_day >= date('now', ?)
+            GROUP BY actor
+            ORDER BY spent DESC
+            LIMIT ?
+        """, (str(market_id), f"-{int(days)} days", int(limit))).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_stock_history(market_id: str, item: str = None, days: int = 60) -> list:
+    """Raw stock readings: [{item, day, stock, capacity}] oldest first."""
+    q = ("SELECT item, day, stock, capacity FROM market_stock_history "
+         "WHERE market_id=? AND day >= date('now', ?)")
+    args = [str(market_id), f"-{int(days)} days"]
+    if item:
+        q += " AND item=?"
+        args.append(str(item))
+    q += " ORDER BY day"
+    with db() as conn:
+        return [dict(r) for r in conn.execute(q, args).fetchall()]
+
+
+def get_stock_depletion(market_id: str, days: int = 30) -> list:
+    """Per item: how fast stock is falling and when it runs out.
+
+    [{item, stock, capacity, per_day, days_left, readings, first_day, last_day}]
+    sorted by urgency (soonest to empty first). `per_day` is average units lost per
+    day across the window — negative means it's being restocked faster than it sells,
+    in which case days_left is None. Needs >= 2 readings on different days.
+    """
+    rows = {}
+    with db() as conn:
+        for r in conn.execute(
+                "SELECT item, day, stock, capacity FROM market_stock_history "
+                "WHERE market_id=? AND day >= date('now', ?) ORDER BY item, day",
+                (str(market_id), f"-{int(days)} days")).fetchall():
+            rows.setdefault(r["item"], []).append(dict(r))
+    out = []
+    for item, hist in rows.items():
+        if len(hist) < 2:
+            continue
+        first, last = hist[0], hist[-1]
+        try:
+            from datetime import date as _d
+            d0 = _d.fromisoformat(first["day"]); d1 = _d.fromisoformat(last["day"])
+            span = (d1 - d0).days
+        except Exception:
+            span = 0
+        if span <= 0:
+            continue
+        drop = float(first["stock"] or 0) - float(last["stock"] or 0)
+        per_day = drop / span
+        days_left = (float(last["stock"] or 0) / per_day) if per_day > 0 else None
+        out.append({
+            "item": item, "stock": int(last["stock"] or 0),
+            "capacity": int(last["capacity"] or 0),
+            "per_day": round(per_day, 1),
+            "days_left": (round(days_left, 1) if days_left is not None else None),
+            "readings": len(hist), "first_day": first["day"], "last_day": last["day"],
+        })
+    out.sort(key=lambda x: (x["days_left"] is None, x["days_left"] if x["days_left"] is not None else 1e9))
+    return out
+
+
+def get_hive_harvester_detail(market_id: str, ign: str) -> dict:
+    """Item-level breakdown for ONE harvester on one hive site.
+
+    Answers "how many comb blocks / honey blocks did this person actually deliver",
+    which the aggregate unpaid-value figure can't. Returns:
+
+    {"ign", "qty", "value", "paid_value", "unpaid_value", "first_sale", "last_sale",
+     "items": {item: {"qty","unit_value","value","paid_qty","unpaid_qty",
+                      "paid_value","unpaid_value"}}}
+    """
+    out = {"ign": str(ign), "qty": 0, "value": 0.0, "paid_value": 0.0,
+           "unpaid_value": 0.0, "first_sale": None, "last_sale": None,
+           "last_paid_at": None, "items": {}}
+    with db() as conn:
+        rows = conn.execute("""
+            SELECT item,
+                   SUM(qty)                                             AS qty,
+                   MAX(unit_value)                                      AS unit_value,
+                   SUM(qty * unit_value)                                AS value,
+                   SUM(CASE WHEN paid=1 THEN qty ELSE 0 END)            AS paid_qty,
+                   SUM(CASE WHEN paid=1 THEN qty*unit_value ELSE 0 END) AS paid_value,
+                   MIN(COALESCE(sale_ts, recorded_at))                  AS first_sale,
+                   MAX(COALESCE(sale_ts, recorded_at))                  AS last_sale,
+                   MAX(paid_at)                                         AS last_paid_at
+            FROM hive_harvests
+            WHERE market_id=? AND ign=? COLLATE NOCASE
+            GROUP BY item
+            ORDER BY value DESC
+        """, (str(market_id), str(ign))).fetchall()
+    for r in rows:
+        q = int(r["qty"] or 0)
+        v = float(r["value"] or 0)
+        pq = int(r["paid_qty"] or 0)
+        pv = float(r["paid_value"] or 0)
+        out["items"][r["item"]] = {
+            "qty": q, "unit_value": float(r["unit_value"] or 0), "value": v,
+            "paid_qty": pq, "unpaid_qty": q - pq,
+            "paid_value": pv, "unpaid_value": v - pv,
+        }
+        out["qty"] += q
+        out["value"] += v
+        out["paid_value"] += pv
+        out["unpaid_value"] += (v - pv)
+        for key, val in (("first_sale", r["first_sale"]), ("last_sale", r["last_sale"]),
+                         ("last_paid_at", r["last_paid_at"])):
+            cur = out[key]
+            if val and (cur is None or (val < cur if key == "first_sale" else val > cur)):
+                out[key] = val
+    return out
+
+
+def add_land_entry(land: str, entry_no: int, ts: str, kind: str,
+                   amount: float, new_balance, body: str) -> bool:
+    """Store one land-inbox entry. Returns True if it was NEW (dedup by PK)."""
+    with db() as conn:
+        cur = conn.execute("""
+            INSERT OR IGNORE INTO land_ledger (land, entry_no, ts, kind, amount, new_balance, body)
+            VALUES (?,?,?,?,?,?,?)
+        """, (str(land), int(entry_no), str(ts), str(kind), float(amount),
+              None if new_balance is None else float(new_balance), str(body or "")[:300]))
+        return cur.rowcount > 0
+
+
+def get_land_entries(land: str) -> list[dict]:
+    with db() as conn:
+        rows = conn.execute("SELECT * FROM land_ledger WHERE land=? ORDER BY entry_no",
+                            (str(land),)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def set_land_balance(land: str, balance: float) -> None:
+    with db() as conn:
+        conn.execute("""
+            INSERT INTO land_balances (land, balance, updated_at) VALUES (?,?,datetime('now'))
+            ON CONFLICT(land) DO UPDATE SET balance=excluded.balance, updated_at=datetime('now')
+        """, (str(land), float(balance)))
+
+
+def get_all_config_prefixed(prefix: str) -> dict:
+    """Every bot_config row whose key starts with prefix, as {key: value}. Used to answer
+    reverse questions the schema can't — e.g. "which land maps to this market?", where the
+    mapping is stored land-first (land_map:<land> -> market_id)."""
+    with db() as conn:
+        rows = conn.execute("SELECT key, value FROM bot_config WHERE key LIKE ?",
+                            (f"{prefix}%",)).fetchall()
+        return {r["key"]: r["value"] for r in rows}
+
+
+def get_land_balance(land: str):
+    with db() as conn:
+        row = conn.execute("SELECT * FROM land_balances WHERE land=?", (str(land),)).fetchone()
+        return dict(row) if row else None
+
+
+def replace_land_fees(land: str, by_month: dict) -> None:
+    """Replace the land's whole inferred-fee table (recomputed from scratch each
+    ingest — idempotent, so re-scans and backfills can never double-count)."""
+    with db() as conn:
+        conn.execute("DELETE FROM land_fees WHERE land=?", (str(land),))
+        for month, fees in (by_month or {}).items():
+            conn.execute("INSERT INTO land_fees (land, month, fees) VALUES (?,?,?)",
+                         (str(land), str(month), float(fees)))
+
+
+def get_land_fees(land: str) -> dict:
+    with db() as conn:
+        rows = conn.execute("SELECT month, fees FROM land_fees WHERE land=?",
+                            (str(land),)).fetchall()
+        return {r["month"]: float(r["fees"] or 0) for r in rows}
+
+
+def get_all_land_fees() -> list[dict]:
+    with db() as conn:
+        rows = conn.execute("SELECT land, month, fees FROM land_fees").fetchall()
+        return [dict(r) for r in rows]
+
+
+# ── Land Exchange (listings/auctions) ────────────────────────────────────────
+_LAND_LISTING_FIELDS = (
+    "seller_id", "kind", "title", "category", "photos",
+    "market_id", "land", "chunks", "coords", "description",
+    "image_url", "winner_message", "mode",
+    "quality", "reserve", "buy_now", "current_bid", "current_bidder",
+    "min_increment_pct", "commission_pct", "listing_fee", "starts_at", "ends_at",
+    "anti_snipe_minutes", "status", "channel_id", "message_id", "sold_price",
+    "sold_to", "closed_at",
+)
+
+
+def create_land_listing(**kwargs) -> int:
+    """Insert a new listing. Recognised kwargs are any column in _LAND_LISTING_FIELDS
+    (unset ones take the schema default). Returns the new listing's id."""
+    cols = [k for k in kwargs if k in _LAND_LISTING_FIELDS]
+    with db() as conn:
+        cur = conn.execute(
+            f"INSERT INTO land_listings ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
+            [kwargs[k] for k in cols],
+        )
+        return int(cur.lastrowid)
+
+
+def get_land_listing(listing_id: int) -> Optional[dict]:
+    with db() as conn:
+        row = conn.execute("SELECT * FROM land_listings WHERE id=?", (int(listing_id),)).fetchone()
+        return dict(row) if row else None
+
+
+def update_land_listing(listing_id: int, **kwargs) -> None:
+    """Partial update — only columns passed are touched. Always bumps updated_at."""
+    cols = [k for k in kwargs if k in _LAND_LISTING_FIELDS]
+    if not cols:
+        return
+    set_clause = ", ".join(f"{c}=?" for c in cols) + ", updated_at=datetime('now')"
+    with db() as conn:
+        conn.execute(
+            f"UPDATE land_listings SET {set_clause} WHERE id=?",
+            [kwargs[k] for k in cols] + [int(listing_id)],
+        )
+
+
+def get_active_land_listings(mode: str = None) -> list[dict]:
+    with db() as conn:
+        if mode:
+            rows = conn.execute(
+                "SELECT * FROM land_listings WHERE status='active' AND mode=? ORDER BY "
+                "(ends_at IS NULL), ends_at ASC, created_at DESC", (mode,)).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM land_listings WHERE status='active' ORDER BY "
+                "(ends_at IS NULL), ends_at ASC, created_at DESC").fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_land_listings_by_seller(seller_id: str, include_closed: bool = True) -> list[dict]:
+    with db() as conn:
+        if include_closed:
+            rows = conn.execute(
+                "SELECT * FROM land_listings WHERE seller_id=? ORDER BY created_at DESC",
+                (str(seller_id),)).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM land_listings WHERE seller_id=? AND status='active' "
+                "ORDER BY created_at DESC", (str(seller_id),)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_expired_active_listings() -> list[dict]:
+    """Active auctions whose ends_at has passed — due for automatic settlement."""
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM land_listings WHERE status='active' AND ends_at IS NOT NULL "
+            "AND ends_at <= datetime('now')").fetchall()
+        return [dict(r) for r in rows]
+
+
+def add_land_bid(listing_id: int, bidder_id: str, amount: float) -> int:
+    with db() as conn:
+        cur = conn.execute(
+            "INSERT INTO land_bids (listing_id, bidder_id, amount) VALUES (?,?,?)",
+            (int(listing_id), str(bidder_id), float(amount)))
+        return int(cur.lastrowid)
+
+
+def get_land_bids(listing_id: int, limit: int = 20) -> list[dict]:
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM land_bids WHERE listing_id=? ORDER BY ts DESC LIMIT ?",
+            (int(listing_id), limit)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def delete_note(note_id: int):
+    """Delete a note by ID."""
+    with db() as conn:
+        conn.execute("DELETE FROM notes WHERE id=?", (note_id,))
+
+
+
+def get_market_shares(market_id: str) -> Optional[dict]:
+    """Return the stock-listing row for a market (public or delisted), or None
+    if it has never gone public."""
+    with db() as conn:
+        row = conn.execute("SELECT * FROM market_shares WHERE market_id=?", (market_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def get_public_markets() -> dict:
+    """Return {market_id: dict} for markets currently listed (active=1)."""
+    with db() as conn:
+        rows = conn.execute("SELECT * FROM market_shares WHERE active=1").fetchall()
+        return {row["market_id"]: dict(row) for row in rows}
+
+
+def get_all_market_shares() -> dict:
+    """Return {market_id: dict} for every market that has ever gone public,
+    public or delisted."""
+    with db() as conn:
+        rows = conn.execute("SELECT * FROM market_shares").fetchall()
+        return {row["market_id"]: dict(row) for row in rows}
+
+
+def upsert_market_shares(market_id: str, **kwargs) -> dict:
+    """Create or update a market's stock listing. Any field not passed (or
+    passed as None) keeps its current value — or the schema default if this
+    is a brand-new listing. Returns the resulting row.
+
+    Recognised kwargs: active, shares_outstanding, pe_multiplier, share_price,
+    last_priced_at, last_priced_month.
+    """
+    with db() as conn:
+        existing_row = conn.execute(
+            "SELECT * FROM market_shares WHERE market_id=?", (market_id,)
+        ).fetchone()
+        existing = dict(existing_row) if existing_row else {}
+
+        def field(key, default):
+            if key in kwargs and kwargs[key] is not None:
+                return kwargs[key]
+            return existing.get(key, default)
+
+        values = {
+            "mid": market_id,
+            "active": int(field("active", 1)),
+            "shares": float(field("shares_outstanding", 1000.0)),
+            "pe": float(field("pe_multiplier", 12.0)),
+            "price": float(field("share_price", 0.0)),
+            "listed_at": existing.get("listed_at") or datetime.now(timezone.utc).isoformat(),
+            "last_priced_at": field("last_priced_at", None),
+            "last_priced_month": field("last_priced_month", None),
+            "treasury": float(field("treasury_coins", 0.0)),
+            "div_pct": field("dividend_pct", None),
+            "last_div_month": field("last_dividend_month", None),
+        }
+        conn.execute("""
+            INSERT INTO market_shares (
+                market_id, active, shares_outstanding, pe_multiplier, share_price,
+                listed_at, last_priced_at, last_priced_month,
+                treasury_coins, dividend_pct, last_dividend_month
+            )
+            VALUES (
+                :mid, :active, :shares, :pe, :price,
+                :listed_at, :last_priced_at, :last_priced_month,
+                :treasury, :div_pct, :last_div_month
+            )
+            ON CONFLICT(market_id) DO UPDATE SET
+                active=excluded.active,
+                shares_outstanding=excluded.shares_outstanding,
+                pe_multiplier=excluded.pe_multiplier,
+                share_price=excluded.share_price,
+                last_priced_at=excluded.last_priced_at,
+                last_priced_month=excluded.last_priced_month,
+                treasury_coins=excluded.treasury_coins,
+                dividend_pct=excluded.dividend_pct,
+                last_dividend_month=excluded.last_dividend_month
+        """, values)
+        row = conn.execute("SELECT * FROM market_shares WHERE market_id=?", (market_id,)).fetchone()
+        return dict(row)
+
+
+def get_holding(user_id: str, market_id: str) -> Optional[dict]:
+    with db() as conn:
+        row = conn.execute(
+            "SELECT * FROM stock_holdings WHERE user_id=? AND market_id=?",
+            (str(user_id), market_id),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def get_portfolio(user_id: str) -> list[dict]:
+    """All of a user's holdings (shares > 0), across every market."""
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM stock_holdings WHERE user_id=? AND shares > 0 ORDER BY market_id",
+            (str(user_id),),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_holders(market_id: str) -> list[dict]:
+    """All current holders (shares > 0) of a given market's stock."""
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM stock_holdings WHERE market_id=? AND shares > 0 ORDER BY shares DESC",
+            (market_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def adjust_holding(user_id: str, market_id: str, delta_shares: float, delta_cost_basis: float):
+    """Apply a buy (+shares/+cost) or sell (-shares/-cost) to a user's holding,
+    creating the row if needed. Caller is responsible for checking that a sell
+    doesn't take shares negative."""
+    now = datetime.now(timezone.utc).isoformat()
+    with db() as conn:
+        conn.execute("""
+            INSERT INTO stock_holdings (user_id, market_id, shares, cost_basis, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, market_id) DO UPDATE SET
+                shares=shares + excluded.shares,
+                cost_basis=cost_basis + excluded.cost_basis,
+                updated_at=excluded.updated_at
+        """, (str(user_id), market_id, delta_shares, delta_cost_basis, now))
+
+
+def log_stock_trade(user_id: str, market_id: str, side: str, shares: float,
+                     price_per_share: float, total_coins: float):
+    with db() as conn:
+        conn.execute("""
+            INSERT INTO stock_trade_log (user_id, market_id, side, shares, price_per_share, total_coins)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (str(user_id), market_id, side, shares, price_per_share, total_coins))
+
+
+def get_trade_log(market_id: str = None, user_id: str = None, limit: int = 20) -> list[dict]:
+    with db() as conn:
+        if market_id and user_id:
+            rows = conn.execute(
+                "SELECT * FROM stock_trade_log WHERE market_id=? AND user_id=? "
+                "ORDER BY traded_at DESC LIMIT ?",
+                (market_id, str(user_id), limit),
+            ).fetchall()
+        elif market_id:
+            rows = conn.execute(
+                "SELECT * FROM stock_trade_log WHERE market_id=? ORDER BY traded_at DESC LIMIT ?",
+                (market_id, limit),
+            ).fetchall()
+        elif user_id:
+            rows = conn.execute(
+                "SELECT * FROM stock_trade_log WHERE user_id=? ORDER BY traded_at DESC LIMIT ?",
+                (str(user_id), limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM stock_trade_log ORDER BY traded_at DESC LIMIT ?", (limit,)
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def log_stock_price(market_id: str, price: float, reason: str = None):
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO stock_price_log (market_id, price, reason) VALUES (?, ?, ?)",
+            (market_id, price, reason),
+        )
+
+
+def get_price_history(market_id: str, limit: int = 30) -> list[dict]:
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM stock_price_log WHERE market_id=? ORDER BY logged_at DESC LIMIT ?",
+            (market_id, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+
+def get_treasury(market_id: str) -> float:
+    with db() as conn:
+        row = conn.execute(
+            "SELECT treasury_coins FROM market_shares WHERE market_id=?", (market_id,)
+        ).fetchone()
+        return float(row["treasury_coins"] or 0.0) if row else 0.0
+
+
+def adjust_treasury(market_id: str, delta: float, allow_negative: bool = True) -> float:
+    """Add (delta>0, e.g. a buy paying in) or remove (delta<0, e.g. funding a
+    sell) coins from a market's treasury. When allow_negative is False the
+    treasury is only drawn down to zero and the actually-applied delta is
+    returned, so the caller can detect (and mint) any shortfall."""
+    with db() as conn:
+        row = conn.execute(
+            "SELECT treasury_coins FROM market_shares WHERE market_id=?", (market_id,)
+        ).fetchone()
+        if not row:
+            return 0.0
+        cur = float(row["treasury_coins"] or 0.0)
+        applied = float(delta)
+        if not allow_negative and (cur + applied) < 0:
+            applied = -cur
+        conn.execute(
+            "UPDATE market_shares SET treasury_coins=? WHERE market_id=?", (cur + applied, market_id)
+        )
+        return applied
+
+
+
+def add_limit_order(user_id: str, market_id: str, side: str, shares: int,
+                    limit_price: float, note: str = None) -> int:
+    with db() as conn:
+        cur = conn.execute(
+            "INSERT INTO stock_limit_orders (user_id, market_id, side, shares, limit_price, note) "
+            "VALUES (?,?,?,?,?,?)",
+            (str(user_id), market_id, side, int(shares), float(limit_price), note),
+        )
+        return int(cur.lastrowid)
+
+
+def get_limit_order(order_id: int):
+    with db() as conn:
+        row = conn.execute(
+            "SELECT * FROM stock_limit_orders WHERE id=?", (int(order_id),)
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def get_open_limit_orders(market_id: str) -> list[dict]:
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM stock_limit_orders WHERE market_id=? AND status='open' ORDER BY id",
+            (market_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_user_limit_orders(user_id: str, include_resolved: bool = False) -> list[dict]:
+    with db() as conn:
+        if include_resolved:
+            rows = conn.execute(
+                "SELECT * FROM stock_limit_orders WHERE user_id=? ORDER BY id DESC LIMIT 50",
+                (str(user_id),),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM stock_limit_orders WHERE user_id=? AND status='open' ORDER BY id DESC",
+                (str(user_id),),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def mark_limit_order_filled(order_id: int, fill_price: float, fill_total: float) -> None:
+    with db() as conn:
+        conn.execute(
+            "UPDATE stock_limit_orders SET status='filled', fill_price=?, fill_total=?, "
+            "resolved_at=datetime('now') WHERE id=? AND status='open'",
+            (float(fill_price), float(fill_total), int(order_id)),
+        )
+
+
+def cancel_limit_order(order_id: int, user_id: str = None, reason: str = None) -> bool:
+    """Cancel an OPEN order. If user_id is given, only cancel the order when it
+    belongs to that user. Returns True if a row was changed."""
+    with db() as conn:
+        if user_id is not None:
+            cur = conn.execute(
+                "UPDATE stock_limit_orders SET status='cancelled', note=COALESCE(?, note), "
+                "resolved_at=datetime('now') WHERE id=? AND status='open' AND user_id=?",
+                (reason, int(order_id), str(user_id)),
+            )
+        else:
+            cur = conn.execute(
+                "UPDATE stock_limit_orders SET status='cancelled', note=COALESCE(?, note), "
+                "resolved_at=datetime('now') WHERE id=? AND status='open'",
+                (reason, int(order_id)),
+            )
+        return cur.rowcount > 0
+
+
+
+def log_dividend(market_id: str, month: str, total_paid: float,
+                 per_share: float, holders: int) -> None:
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO stock_dividend_log (market_id, month, total_paid, per_share, holders) "
+            "VALUES (?,?,?,?,?)",
+            (market_id, month, float(total_paid), float(per_share), int(holders)),
+        )
+
+
+def dividend_paid(market_id: str, month: str) -> bool:
+    """PERMANENT per-month idempotency for share dividends. The old guard was a
+    single last_dividend_month slot, so re-importing any OLD month (a routine
+    earnings-correction workflow) double-paid every shareholder. The dividend
+    log keeps one row per (market, month) forever — this is the authoritative
+    'was it paid' check."""
+    with db() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM stock_dividend_log WHERE market_id=? AND month=? LIMIT 1",
+            (str(market_id), str(month))).fetchone()
+        return row is not None
+
+
+def get_dividend_history(market_id: str = None, limit: int = 36) -> list:
+    """Dividend rows, newest first. market_id=None returns every market's — the investor
+    page needs the whole series to show what a holding actually paid over time, which
+    get_last_dividend (one row) could never answer."""
+    with db() as conn:
+        if market_id:
+            rows = conn.execute(
+                "SELECT * FROM stock_dividend_log WHERE market_id=? ORDER BY month DESC, id DESC "
+                "LIMIT ?", (str(market_id), int(limit))).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM stock_dividend_log ORDER BY month DESC, id DESC LIMIT ?",
+                (int(limit),)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_last_dividend(market_id: str):
+    with db() as conn:
+        row = conn.execute(
+            "SELECT * FROM stock_dividend_log WHERE market_id=? ORDER BY id DESC LIMIT 1",
+            (market_id,),
+        ).fetchone()
+        return dict(row) if row else None
