@@ -3993,6 +3993,106 @@ _ACQ_VALUE_PER_PIECE = {
 }
 
 
+# ── site split: GreyHames moves out, Dragons Mart takes over the location ────
+# The PHYSICAL shop site is changing hands, not the company. GreyHames keeps
+# everything that already happened there — 28 months of CSN history, its 100,000
+# shares, the 21 shareholders, treasury, vault, grade and index weight — because
+# that revenue was genuinely earned. Dragons Mart is a NEW market that starts at
+# zero and takes over the live plumbing: the scanner channel, the allowed poster,
+# and the item catalogue (so 70 prices don't have to be retyped).
+#
+# Deliberately NOT moved: csn_history, csn_transactions, market_shares,
+# stock_holdings, vault_*, orders, loyalty. "What happened happened."
+_SITE_SPLIT_FLAG = "site_split_dragons_mart_v1"
+_SITE_SPLIT_FROM = "greyhames"
+_SITE_SPLIT_TO   = "dragons_mart"
+_SITE_SPLIT_NAME = "Dragons Mart"
+
+
+def _run_site_split_20260807() -> dict:
+    """One-shot, flag-guarded. Returns a summary dict; never raises."""
+    import Restocker_db as _db
+    out = {"done": False, "created": False, "items": 0, "stock": 0,
+           "channel": None, "note": ""}
+    try:
+        if str(_db.get_config(_SITE_SPLIT_FLAG) or "").strip():
+            out["done"] = True
+            return out
+        old = _get_market(_SITE_SPLIT_FROM)
+        if not old:
+            out["note"] = f"{_SITE_SPLIT_FROM} not found — nothing to split"
+            _db.set_config(_SITE_SPLIT_FLAG, "1")
+            return out
+        if _get_market(_SITE_SPLIT_TO):
+            out["note"] = f"{_SITE_SPLIT_TO} already exists — left untouched"
+            _db.set_config(_SITE_SPLIT_FLAG, "1")
+            return out
+
+        chan = old.get("report_channel_id")
+        # The scanner keeps posting into the same channel, so the binding has to move
+        # or every upload is rejected as a declared-market mismatch. Two markets must
+        # never share a report_channel_id — get_market_by_channel would pick arbitrarily.
+        _db.upsert_market(_SITE_SPLIT_TO, _SITE_SPLIT_NAME,
+                          owner_id=old.get("owner_id"),
+                          manager_ids=old.get("manager_ids") or [],
+                          platform_fee_pct=old.get("platform_fee_pct", 0.0),
+                          csn_history_file=f"csn_history_{_SITE_SPLIT_TO}.yml",
+                          active=True,
+                          report_channel_id=str(chan) if chan else None)
+        out["created"] = True
+        out["channel"] = chan
+        with _db.db() as conn:
+            if chan:
+                conn.execute("UPDATE markets SET report_channel_id=NULL WHERE market_id=?",
+                             (_SITE_SPLIT_FROM,))
+            # The catalogue MOVES, it cannot be copied: items.name is a GLOBAL primary
+            # key, so one product name belongs to exactly one market. That matches
+            # reality anyway — the barrels and their price list are physically
+            # relocating, and a duplicated catalogue would be two rows fighting over
+            # one name. Current barrel contents move with them; leaving 117 stale rows
+            # on greyhames would show phantom inventory on the dashboard forever.
+            cur = conn.execute("UPDATE items SET market_id=? WHERE market_id=?",
+                               (_SITE_SPLIT_TO, _SITE_SPLIT_FROM))
+            out["items"] = cur.rowcount or 0
+            cur = conn.execute("UPDATE market_stock SET market_id=? WHERE market_id=?",
+                               (_SITE_SPLIT_TO, _SITE_SPLIT_FROM))
+            out["stock"] = cur.rowcount or 0
+            # market_stock_history stays: those readings happened at the old site.
+
+        # The new site is a V Tech location, so its profit prices the V Tech stock —
+        # which still lives on greyhames. Same shape as the other group markets.
+        for k, v in (("rollup_parent:" + _SITE_SPLIT_TO, _SITE_SPLIT_FROM),
+                     ("rollup_share:" + _SITE_SPLIT_TO, "100.0"),
+                     ("stock_label:" + _SITE_SPLIT_TO, "V Tech")):
+            try:
+                _db.set_config(k, v)
+            except Exception:
+                pass
+        try:
+            _posters = _db.get_config("csn_allowed_posters:" + _SITE_SPLIT_FROM)
+            if _posters:
+                _db.set_config("csn_allowed_posters:" + _SITE_SPLIT_TO, _posters)
+        except Exception:
+            pass
+        try:
+            _grp = set(_vtech_group_markets())
+            _grp.update({_SITE_SPLIT_TO, _SITE_SPLIT_FROM})
+            _set_vtech_group_markets(_grp)
+        except Exception:
+            pass
+        _db.set_config(_SITE_SPLIT_FLAG, "1")
+        log.info("[site split] %s -> %s: market created, %d item(s) and %d barrel row(s) "
+                 "moved, channel %s re-bound. CSN history, shares, treasury, vault and "
+                 "orders stayed with %s.",
+                 _SITE_SPLIT_FROM, _SITE_SPLIT_TO, out["items"], out.get("stock", 0),
+                 chan, _SITE_SPLIT_FROM)
+    except Exception as e:
+        out["note"] = f"failed: {e}"
+        log.error("[site split] FAILED — nothing flagged, will retry next boot: %s",
+                  e, exc_info=True)
+    return out
+
+
 async def _process_csn_attachment(attachment: discord.Attachment, report_channel, source_channel_id=None,
                                   txn_only: bool = False, source_key=None):
     filename = attachment.filename
@@ -16782,6 +16882,10 @@ async def _main():
         _repair_june_20260728()
     except Exception as e:
         log.warning("[june repair] skipped: %s", e)
+    try:
+        _run_site_split_20260807()
+    except Exception as e:
+        log.warning("[site split] skipped: %s", e)
     import Restocker_web as _web
     web_port = _env_int("WEB_PORT", 8080)
     try:
