@@ -870,6 +870,58 @@ class LoopsCog(commands.Cog):
     async def _wait_ready_instance_hb(self, ):
         await bot.wait_until_ready()
 
+    # ── Crimson Bank monthly statement ───────────────────────────────────────
+    @tasks.loop(hours=6)
+    async def bank_report_loop(self):
+        """Once a month, post the closed month's earnings statement to Crimson Bank.
+
+        Guarded per month in bot_config so restarts and a second instance can never
+        double-post to someone else's server. On the very first run after deploy it
+        marks the already-closed month as sent WITHOUT posting — otherwise enabling
+        this would fire an unannounced statement into a third party's channel for a
+        month nobody agreed to report."""
+        try:
+            import Restocker_db as _db
+            now = datetime.now(timezone.utc)
+            first = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            closed = (first - timedelta(days=1)).strftime("%Y-%m")
+            if (now - first) < timedelta(hours=6):
+                return                      # let late final-day scans land first
+            flag = f"bank_report:{closed}"
+            if str(_db.get_config(flag) or "") == "done":
+                return
+            if not str(_db.get_config("bank_report_bootstrapped") or "").strip():
+                # First deploy: adopt the current backlog silently, start next month.
+                _db.set_config(flag, "done")
+                _db.set_config("bank_report_bootstrapped", "1")
+                log.info("[bank report] first run — %s marked as already reported, "
+                         "statements begin with the next closed month", closed)
+                return
+            cid = core._bank_report_channel_id()
+            if not cid:
+                return
+            body = core.build_bank_earnings_report(closed)
+            chan = bot.get_channel(cid)
+            if chan is None:
+                try:
+                    chan = await bot.fetch_channel(cid)
+                except Exception as e:
+                    # Loud: this posts to a server we do not own, so a silent failure
+                    # would look like the statement was filed when it never was.
+                    log.error("[bank report] CANNOT REACH CHANNEL %s (%s). Statement for "
+                              "%s was NOT sent. Check the bot is in that server and has "
+                              "View Channel + Send Messages.", cid, e, closed)
+                    return
+            await chan.send(body, allowed_mentions=discord.AllowedMentions.none())
+            _db.set_config(flag, "done")
+            log.info("[bank report] %s statement posted to #%s", closed, cid)
+        except Exception as e:
+            log.error("[bank report] failed: %s", e, exc_info=True)
+
+    @bank_report_loop.before_loop
+    async def _wait_ready_bank_report(self):
+        await bot.wait_until_ready()
+
     @tasks.loop(hours=6)
     async def month_close_report_loop(self):
         """Month-end closing post: once per market per month, after a month ends, post the
@@ -934,7 +986,7 @@ class LoopsCog(commands.Cog):
                 self.weekly_interest_loop, self.weekly_funds_report_loop, self.loyalty_decay_loop,
                 self.ign_deadline_loop, self.stock_reversion_loop, self.stock_dashboard_loop,
                 self.team_digest_loop, self.db_backup_loop, self.instance_heartbeat_loop,
-                self.month_close_report_loop)
+                self.month_close_report_loop, self.bank_report_loop)
 
     def _start_loops(self):
         for _lp in self._all_loops():

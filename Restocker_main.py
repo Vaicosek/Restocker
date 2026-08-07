@@ -3993,6 +3993,77 @@ _ACQ_VALUE_PER_PIECE = {
 }
 
 
+
+# ── Crimson Bank monthly earnings statement ─────────────────────────────────
+# A lender gets ONE statement a month for the month that just closed. Two headline
+# figures are published, not one, because they are genuinely different measures and
+# picking silently would misrepresent the company either way:
+#   CSN income     — what the shops took, honey counted once via chest-shop purchases
+#   Rolled-up net  — what prices the V Tech stock; also carries each site's hive ledger
+# On 2026-08 those are 4,043,850 and 4,982,304. The gap is the hive ledger, which on a
+# hive site overlaps the chest-shop purchases already recorded in CSN.
+BANK_REPORT_CHANNEL_DEFAULT = 1353276935094009927     # Crimson Bank
+BANK_REPORT_GUILD_DEFAULT = 940349403598823524
+BANK_REPORT_MARKET_DEFAULT = "greyhames"              # carries the V Tech stock
+
+
+def _bank_report_channel_id() -> int:
+    try:
+        import Restocker_db as _db
+        raw = str(_db.get_config("bank_report_channel") or "").strip()
+        if raw:
+            return int(raw)
+    except Exception:
+        pass
+    return int(BANK_REPORT_CHANNEL_DEFAULT)
+
+
+def build_bank_earnings_report(month: str, market_id: str = None) -> str:
+    """The statement text for one closed month. Read-only; never raises."""
+    mid = str(market_id or BANK_REPORT_MARKET_DEFAULT)
+    label = _market_stock_label(mid)
+    members = [mid] + [c for c, _ in _rollup_children(mid)]
+
+    per_site, inc_total, net_total = [], 0.0, 0.0
+    for mm in members:
+        months = (_load_csn_for_market(mm) or {}).get("months", {}) or {}
+        md = months.get(month) or {}
+        inc = float(md.get("income", 0) or 0) if isinstance(md, dict) else 0.0
+        net = float(md.get("net", 0) or 0) if isinstance(md, dict) else 0.0
+        hive = 0.0
+        try:
+            import Restocker_db as _db
+            hive = float((_db.get_hive_months(mm) or {}).get(month, 0) or 0)
+        except Exception:
+            hive = 0.0
+        if not (inc or net or hive):
+            continue
+        name = (_get_market(mm) or {}).get("name", mm)
+        line = f"• **{name}** (`{mm}`) — CSN income {inc:,.0f} · net {net:,.0f}"
+        if hive:
+            line += f" · hive ledger {hive:,.0f}"
+        per_site.append(line)
+        inc_total += inc
+        net_total += net + hive
+
+    combined = _rollup_combined_months(mid) or {}
+    rolled = float(combined.get(month, net_total) or 0)
+
+    out = [f"🏦 **{label} — monthly earnings statement**",
+           f"Month: **{month}** (closed)", ""]
+    out += per_site or ["• no recorded activity this month"]
+    out += ["",
+            f"**CSN income:** {inc_total:,.0f}",
+            f"**Rolled-up net:** {rolled:,.0f}",
+            "",
+            "_Both figures are given because they measure different things. CSN income is "
+            "what the shops took, with harvested honey counted once via the chest-shop "
+            "purchases. The rolled-up net is the figure that prices the stock and also "
+            "carries each site's hive ledger, which overlaps those purchases on a hive "
+            "site. Neither is wrong; they answer different questions._"]
+    return "\n".join(out)
+
+
 # ── one-shot: undo the shop-stamp double count, and point V Tech's rollup at a
 # market that actually exists ────────────────────────────────────────────────
 # Month earnings used to be keyed by the Discord channel a scan arrived in. The
