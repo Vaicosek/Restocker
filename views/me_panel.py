@@ -233,6 +233,61 @@ class _PickManagerView(discord.ui.View):
         return True
 
 
+class _WithdrawModal(discord.ui.Modal, title="Request a coins withdrawal"):
+    """Was /withdraw_request. That command was lost in a refactor — the approval view
+    (PayoutReviewView) and _open_payout_ticket both survived and are still wired up, so
+    only the entry point was missing. Workers were told to use a command that no longer
+    existed. It lives on /me because that is where people already look for their coins,
+    and because `me` is a public command so this reaches everyone."""
+
+    def __init__(self, panel):
+        super().__init__(timeout=300)
+        self.panel = panel
+        self.amount = discord.ui.TextInput(label="How many coins?", required=True, max_length=12,
+                                           placeholder="e.g. 50000")
+        self.note = discord.ui.TextInput(label="Note for the manager (optional)",
+                                         required=False, max_length=200,
+                                         style=discord.TextStyle.paragraph)
+        self.add_item(self.amount)
+        self.add_item(self.note)
+
+    async def on_submit(self, i: discord.Interaction):
+        raw = str(self.amount.value or "").strip().replace(",", "").replace(" ", "")
+        try:
+            amount = int(float(raw))
+        except Exception:
+            return await i.response.send_message("That isn't a number.", ephemeral=True)
+        if amount <= 0:
+            return await i.response.send_message("Amount must be more than 0.", ephemeral=True)
+        try:
+            bal = core._get_user_bal(core._load_balances()["users"], i.user.id)
+            have = int(bal.get("coins", 0) or 0)
+        except Exception:
+            have = 0
+        if amount > have:
+            return await i.response.send_message(
+                f"You have **{have:,}** coins — can't withdraw {amount:,}.", ephemeral=True)
+        member = i.guild.get_member(i.user.id) if i.guild else None
+        if member is None:
+            return await i.response.send_message(
+                "Run this in the server, not in a DM — the ticket is made there.", ephemeral=True)
+        await i.response.defer(ephemeral=True, thinking=True)
+        try:
+            cid = await core._open_payout_ticket(i, member, amount, str(self.note.value or "") or None)
+        except Exception as ex:
+            log.error("[me] withdrawal ticket failed: %s", ex, exc_info=True)
+            cid = None
+        if not cid:
+            # Say WHY rather than a bare failure — this is someone's money.
+            return await i.followup.send(
+                "❌ Couldn't open the withdrawal ticket. A manager needs to check the "
+                "tickets category and worker channel are configured.", ephemeral=True)
+        await i.followup.send(
+            f"✅ Withdrawal request for **{amount:,}** coins opened in <#{cid}>. "
+            f"A manager pays it out and approves there — your coins are deducted on approval.",
+            ephemeral=True)
+
+
 class MePanelView(discord.ui.View):
     def __init__(self, user_id: int):
         super().__init__(timeout=300)
@@ -241,6 +296,7 @@ class MePanelView(discord.ui.View):
             ("Link in-game name", self._ign, discord.ButtonStyle.success),
             ("Join a team", self._team, discord.ButtonStyle.secondary),
             ("Loyalty & rewards", self._loyalty, discord.ButtonStyle.primary),
+            ("Withdraw coins", self._withdraw, discord.ButtonStyle.secondary),
         ):
             b = discord.ui.Button(label=label, style=style, row=0)
             b.callback = cb
@@ -265,6 +321,9 @@ class MePanelView(discord.ui.View):
             log.debug("[me] refresh failed: %s", ex)
 
     async def _ign(self, i): await i.response.send_modal(_IgnModal(self))
+
+    async def _withdraw(self, i: discord.Interaction):
+        await i.response.send_modal(_WithdrawModal(self))
     async def _team(self, i: discord.Interaction):
         await i.response.send_message(
             "Pick your team:",

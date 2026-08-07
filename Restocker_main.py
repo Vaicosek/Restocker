@@ -12228,7 +12228,7 @@ Futures Orders (custom item + enchant requests, separate from the regular catalo
 Balances & Payouts:
 - /me — Show your coin balance (Managers can view any user's)
 - /deposit — (Managers) Add coins to a user's account
-- /withdraw_request — Request a coins withdrawal (opens a manager ticket)
+- /me → Withdraw coins — Request a coins withdrawal (opens a manager ticket). There is NO /withdraw_request command; that was removed. Never tell anyone to run /withdraw_request.
 
 Reports & CSN:
 - /import_earnings — (Managers) Import a CSV/Excel earnings summary (one row per month) into a market
