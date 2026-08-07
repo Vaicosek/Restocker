@@ -1601,6 +1601,60 @@ def csn_save_market(market_id: str, data: dict) -> None:
                 )
 
 
+def _csn_source_profile(items_json: str) -> dict:
+    """{item: (sold_qty, bought_qty)} — the shape used to tell two source rows apart."""
+    try:
+        d = json.loads(items_json or "{}") or {}
+    except Exception:
+        return {}
+    return {k: (float(v.get("sold_qty", 0) or 0), float(v.get("bought_qty", 0) or 0))
+            for k, v in d.items() if isinstance(v, dict)}
+
+
+def _csn_supersedes(legacy_json: str, shop_json: str) -> bool:
+    """True when `legacy` is an EARLIER SNAPSHOT of the same shop as `shop`.
+
+    Test: every item in the legacy row also appears in the shop row, and every
+    quantity is <= the shop row's. A scan only ever grows within a month, so an
+    earlier snapshot of the same shop always satisfies this, while a genuinely
+    different shop fails it — either it sells something the other doesn't, or it
+    has sold MORE of something. Verified against the live 2026-08 data: it retires
+    the three duplicated rows and keeps the one legacy shop that has no stamped
+    twin yet."""
+    L, S = _csn_source_profile(legacy_json), _csn_source_profile(shop_json)
+    if not L or not S or not set(L) <= set(S):
+        return False
+    return all(L[k][0] <= S[k][0] and L[k][1] <= S[k][1] for k in L)
+
+
+def csn_retire_superseded_sources(market_id: str, month: str) -> list:
+    """Drop legacy TRANSPORT-keyed source rows that a `shop:` row now supersedes.
+
+    Month sources used to be keyed by the Discord channel/poster a file arrived
+    from. The mod's `# SHOP` stamp changed the key to shop:<ign>, so every shop that
+    re-scanned with the new jar started contributing TWICE — once under its old
+    numeric key, once under its shop name. Returns the retired keys."""
+    retired = []
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT source_key, items_json FROM csn_month_sources WHERE market_id=? AND month=?",
+            (str(market_id), str(month))).fetchall()
+        shops = [r for r in rows if str(r["source_key"]).startswith("shop:")
+                 and str(r["source_key"]) != "shop:unstamped"]
+        if not shops:
+            return retired          # nothing stamped yet — legacy rows are all we have
+        for r in rows:
+            key = str(r["source_key"])
+            if key.startswith("shop:"):
+                continue
+            if any(_csn_supersedes(r["items_json"], s["items_json"]) for s in shops):
+                conn.execute("DELETE FROM csn_month_sources "
+                             "WHERE market_id=? AND month=? AND source_key=?",
+                             (str(market_id), str(month), key))
+                retired.append(key)
+    return retired
+
+
 def csn_set_month_source(market_id: str, month: str, source_key: str,
                          income: float, spent: float, items: dict) -> None:
     """Record ONE uploader's contribution to a market-month. Replaces that uploader's
@@ -1646,6 +1700,13 @@ def csn_set_month_source(market_id: str, month: str, source_key: str,
             " updated_at=excluded.updated_at",
             (str(market_id), str(month), str(source_key), float(income or 0),
              float(spent or 0), conn_items, now))
+    # A stamped shop row supersedes whatever that same shop was filed under before the
+    # `# SHOP` stamp existed. Outside the connection above so the DELETE sees this row.
+    if str(source_key).startswith("shop:") and str(source_key) != "shop:unstamped":
+        try:
+            csn_retire_superseded_sources(market_id, month)
+        except Exception:
+            pass
 
 
 def csn_month_totals(market_id: str, month: str) -> dict:

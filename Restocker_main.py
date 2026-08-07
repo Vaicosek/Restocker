@@ -3993,6 +3993,71 @@ _ACQ_VALUE_PER_PIECE = {
 }
 
 
+# ── one-shot: undo the shop-stamp double count, and point V Tech's rollup at a
+# market that actually exists ────────────────────────────────────────────────
+# Month earnings used to be keyed by the Discord channel a scan arrived in. The
+# mod's `# SHOP` stamp changed the key to shop:<ign> and the old rows were never
+# retired, so every shop that re-scanned with the new jar counted TWICE. Live on
+# 2026-08 that inflated V Tech from 4,043,850 to 7,431,900.
+#
+# Separately: rollup_parent:vtech pointed at "main", which is not a market at all
+# (just an orphan csn_history row), so hive profit never reached the V Tech stock —
+# which lives on greyhames.
+_CSN_DEDUP_FLAG = "csn_source_key_dedup_v1"
+
+
+def _run_csn_source_dedup_20260807() -> dict:
+    out = {"done": False, "retired": 0, "months": 0, "rollup": None, "note": ""}
+    try:
+        import Restocker_db as _db
+        if str(_db.get_config(_CSN_DEDUP_FLAG) or "").strip():
+            out["done"] = True
+            return out
+        with _db.db() as conn:
+            pairs = conn.execute(
+                "SELECT DISTINCT market_id, month FROM csn_month_sources").fetchall()
+        for mid, month in [(r[0], r[1]) for r in pairs]:
+            retired = _db.csn_retire_superseded_sources(mid, month)
+            if not retired:
+                continue
+            out["retired"] += len(retired)
+            out["months"] += 1
+            # Restate the month from the sources that survived.
+            roll = _db.csn_month_totals(mid, month)
+            with _db.db() as conn:
+                conn.execute("UPDATE csn_history SET income=?, spent=?, net=? "
+                             "WHERE market_id=? AND month=?",
+                             (roll["income"], roll["spent"],
+                              roll["income"] - roll["spent"], str(mid), str(month)))
+            try:
+                _db.set_config(f"mgr_sales_paid:{mid}:{month}",
+                               roll["income"] - roll["spent"])
+            except Exception:
+                pass
+            log.info("[csn dedup] %s %s: retired %s -> income %.0f",
+                     mid, month, ",".join(retired), roll["income"])
+
+        # V Tech's hives must roll into the market that carries the V Tech stock.
+        try:
+            cur = _db.get_config("rollup_parent:vtech")
+            if str(cur or "") == "main" and _get_market("greyhames"):
+                _db.set_config("rollup_parent:vtech", "greyhames")
+                out["rollup"] = "vtech -> greyhames"
+                log.info("[csn dedup] rollup_parent:vtech was 'main' (not a market) "
+                         "-> greyhames, which carries the V Tech stock")
+        except Exception:
+            pass
+        _db.set_config(_CSN_DEDUP_FLAG, "1")
+        log.info("[csn dedup] done — %d row(s) retired across %d month(s)%s",
+                 out["retired"], out["months"],
+                 f", rollup {out['rollup']}" if out["rollup"] else "")
+    except Exception as e:
+        out["note"] = f"failed: {e}"
+        log.error("[csn dedup] FAILED — nothing flagged, retries next boot: %s",
+                  e, exc_info=True)
+    return out
+
+
 # ── site split: GreyHames moves out, Dragons Mart takes over the location ────
 # The PHYSICAL shop site is changing hands, not the company. GreyHames keeps
 # everything that already happened there — 28 months of CSN history, its 100,000
@@ -16919,6 +16984,10 @@ async def _main():
         _run_site_split_20260807()
     except Exception as e:
         log.warning("[site split] skipped: %s", e)
+    try:
+        _run_csn_source_dedup_20260807()
+    except Exception as e:
+        log.warning("[csn dedup] skipped: %s", e)
     import Restocker_web as _web
     web_port = _env_int("WEB_PORT", 8080)
     try:
