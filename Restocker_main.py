@@ -4711,11 +4711,12 @@ async def _process_csn_attachment(attachment: discord.Attachment, report_channel
         log.warning("[csn] item auto-tag failed: %s", _e)
 
     try:
-        for item_name, v in items.items():
+        _cat_once = _load_items()          # hoisted: this builds the WHOLE item table,
+        for item_name, v in items.items():  # and it was being rebuilt once per item
             bought_qty = v.get("bought_qty", 0)
             if bought_qty <= 0:
                 continue
-            item_price = _get_coin_price(_load_items(), item_name) or 0
+            item_price = _get_coin_price(_cat_once, item_name) or 0
             if item_price <= 0:
                 continue
     except Exception as _e:
@@ -6791,25 +6792,25 @@ BREW_ALIASES_FILE = "brew_aliases.yml"
 # dashboard's 1,087 items that was 1,087 full parses of a 9.7 KB YAML per refresh,
 # which is what pinned the web thread's CPU. Keyed on the file's (mtime, size), so
 # editing the map still takes effect on the very next call.
-_BREW_MAP_CACHE: dict = {}
+_YAML_MAP_CACHE: dict = {}
 
 
-def _brew_map_cached(key: str, path: str, builder):
+def _yaml_map_cached(key: str, path: str, builder):
     try:
         _st = os.stat(_resolve_data_file(path))
         stamp = (_st.st_mtime_ns, _st.st_size)
     except OSError:
         stamp = None                      # missing file: still cache the empty result
-    hit = _BREW_MAP_CACHE.get(key)
+    hit = _YAML_MAP_CACHE.get(key)
     if hit is not None and hit[0] == stamp:
         return hit[1]
     val = builder()
-    _BREW_MAP_CACHE[key] = (stamp, val)
+    _YAML_MAP_CACHE[key] = (stamp, val)
     return val
 
 
 def _load_brew_aliases() -> dict:
-    return _brew_map_cached(
+    return _yaml_map_cached(
         "aliases", BREW_ALIASES_FILE,
         lambda: load_yaml(BREW_ALIASES_FILE, {"aliases": {}}).get("aliases", {}))
 
@@ -6916,7 +6917,7 @@ def _fold_brew_name(name) -> str:
 
 
 def _load_manual_brew_effects() -> dict:
-    return _brew_map_cached("effects", BREW_MANUAL_FILE, _build_manual_brew_effects)
+    return _yaml_map_cached("effects", BREW_MANUAL_FILE, _build_manual_brew_effects)
 
 
 def _build_manual_brew_effects() -> dict:
@@ -6945,7 +6946,7 @@ def _manual_brew_effects_for(name) -> str:
 
 
 def _load_manual_brew_names() -> dict:
-    return _brew_map_cached("names", BREW_MANUAL_FILE, _build_manual_brew_names)
+    return _yaml_map_cached("names", BREW_MANUAL_FILE, _build_manual_brew_names)
 
 
 def _build_manual_brew_names() -> dict:
@@ -12119,7 +12120,9 @@ def _market_ticker(market_id: str) -> str:
     """Short stock-ticker symbol for a market (e.g. GEX). Falls back to the first
     few letters of the market id when none is set."""
     try:
-        tickers = load_yaml("market_tickers.yml", {}) or {}
+        tickers = _yaml_map_cached(
+            "tickers", "market_tickers.yml",
+            lambda: load_yaml("market_tickers.yml", {}) or {})
         t = tickers.get(market_id)
         if t:
             return str(t).upper()
