@@ -21,6 +21,7 @@ WorkerView = core.WorkerView
 _coin_rates_for_order = core._coin_rates_for_order
 _coins_for_pieces = core._coins_for_pieces
 _load_items = core._load_items
+_load_markets = core._load_markets
 _order_is_claimed_closed = core._order_is_claimed_closed
 _priority_active = core._priority_active
 any_item_autocomplete = core.any_item_autocomplete
@@ -537,20 +538,22 @@ class OrdersCog(commands.Cog):
         item_key="Pick an existing catalog item (type to search)",
         amount="How many (in the unit you choose)",
         unit_type="Choose pieces, stacks, or barrels",
-        worker="Optional: assign directly to ONE worker (DMs only them, no mass ping). Blank = ask all workers."
+        worker="Optional: assign directly to ONE worker (DMs only them, no mass ping). Blank = ask all workers.",
+        market="Optional: which market this order is for. Blank = the item's own market."
     )
     @app_commands.choices(unit_type=[
         app_commands.Choice(name="Pieces", value="pieces"),
         app_commands.Choice(name="Stacks", value="stacks"),
         app_commands.Choice(name="Barrels", value="barrels"),
     ])
-    @app_commands.autocomplete(item_key=_order_item_autocomplete)
+    @app_commands.autocomplete(item_key=_order_item_autocomplete, market=_market_autocomplete)
     async def order(self,
         interaction: discord.Interaction,
         item_key: str,
         amount: int,
         unit_type: str,
         worker: Optional[discord.Member] = None,
+        market: Optional[str] = None,
     ):
         # Managers can order anything; a market owner/leader can order for their own
         # market(s) too (no more manager bottleneck). We know the final permission only
@@ -621,6 +624,18 @@ class OrdersCog(commands.Cog):
         # own. Managers may order anything. Tag the order with the item's market so
         # per-market loyalty rewards can key off it.
         item_mid = str(info.get("market_id", "main") or "main")
+        # An explicit `market` wins over the catalogue tag. The tag is only ever a guess:
+        # CSN auto-tags a new item to whichever market happened to scan it first, and
+        # items.name is a GLOBAL primary key, so a generic item like Diamond can only
+        # carry one market ever — which is why every Diamond order came out `freezone`.
+        if market:
+            _chosen = str(market).strip()
+            _known = set((_load_markets() or {}).get("markets", {}) or {})
+            if _chosen not in _known:
+                return await interaction.followup.send(
+                    f"⛔ `{_chosen}` isn't a market. Pick one from the list.",
+                    **ephemeral_kwargs(interaction))
+            item_mid = _chosen
         if not _is_mgr and item_mid not in _owned_markets:
             _own_str = ", ".join(f"`{m}`" for m in sorted(_owned_markets)) or "—"
             return await interaction.followup.send(
