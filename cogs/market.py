@@ -50,6 +50,66 @@ class MarketCog(commands.Cog):
 
     market = app_commands.Group(name="market", description="Manage multiple markets — register, track earnings, and configure per-market settings")
 
+    @market.command(
+        name="bank_report",
+        description="(Managers) Send the V Tech earnings statement for a month to the bank")
+    @app_commands.describe(
+        month="Which month, as YYYY-MM (blank = the month that just closed)",
+        preview="Show it here without sending (default: preview)")
+    async def bank_report(self, interaction: discord.Interaction,
+                          month: Optional[str] = None, preview: bool = True):
+        """Manual counterpart to the monthly loop, for catching up a late statement.
+        Defaults to PREVIEW because the destination is a third party's channel — sending
+        should be a deliberate second step, not the thing that happens if you mistype."""
+        import re as _re
+        from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+        if not is_manager(interaction):
+            return await interaction.response.send_message("⛔ Managers only.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
+
+        if month:
+            month = str(month).strip()
+            if not _re.fullmatch(r"\d{4}-\d{2}", month):
+                return await interaction.followup.send(
+                    "Month must look like `2026-07`.", ephemeral=True)
+        else:
+            _first = _dt.now(_tz.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            month = (_first - _td(days=1)).strftime("%Y-%m")
+
+        try:
+            body = core.build_bank_earnings_report(month)
+        except Exception as e:
+            return await interaction.followup.send(f"❌ Couldn't build it: `{e}`", ephemeral=True)
+
+        if preview:
+            return await interaction.followup.send(
+                f"**Preview — nothing sent.** Re-run with `preview:False` to send.\n\n{body}",
+                ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+
+        _wh = core._bank_report_webhook()
+        if not _wh:
+            return await interaction.followup.send(
+                "❌ No bank webhook configured. Set `BANK_REPORT_WEBHOOK` in .env "
+                "(preferred — keeps it out of git) and restart.", ephemeral=True)
+        import aiohttp as _ah
+        try:
+            async with _ah.ClientSession() as _s:
+                async with _s.post(_wh, json={"content": body[:1900],
+                                              "allowed_mentions": {"parse": []}}) as _r:
+                    if _r.status not in (200, 204):
+                        return await interaction.followup.send(
+                            f"❌ Webhook returned `{_r.status}` — nothing was sent.", ephemeral=True)
+        except Exception as e:
+            return await interaction.followup.send(f"❌ Send failed: `{e}`", ephemeral=True)
+
+        try:
+            import Restocker_db as _db
+            _db.set_config(f"bank_report:{month}", "done")   # stop the loop re-sending it
+        except Exception:
+            pass
+        await interaction.followup.send(f"✅ Sent the **{month}** statement to the bank.",
+                                        ephemeral=True)
+
     @market.command(name="sales",
                     description="A month's sales for a market — full item breakdown + dashboard link")
     @app_commands.describe(market_id="Which market", month="YYYY-MM (blank = latest month on record)")

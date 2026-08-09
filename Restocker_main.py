@@ -4014,6 +4014,21 @@ BANK_REPORT_GUILD_DEFAULT = 940349403598823524
 BANK_REPORT_MARKET_DEFAULT = "greyhames"              # carries the V Tech stock
 
 
+def _bank_report_webhook() -> str:
+    """Webhook the statement is posted through, if any. Preferred over a channel send:
+    a webhook needs no bot invite into the lender's server, which is otherwise the only
+    reason they'd have to add a foreign bot. Read from BANK_REPORT_WEBHOOK in .env first
+    so the URL — a credential that lets anyone post to that channel — stays out of git."""
+    try:
+        v = os.getenv("BANK_REPORT_WEBHOOK", "").strip()
+        if v:
+            return v
+        import Restocker_db as _db
+        return str(_db.get_config("bank_report_webhook") or "").strip()
+    except Exception:
+        return ""
+
+
 def _bank_report_channel_id() -> int:
     try:
         import Restocker_db as _db

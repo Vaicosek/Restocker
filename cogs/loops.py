@@ -901,6 +901,28 @@ class LoopsCog(commands.Cog):
             if not cid:
                 return
             body = core.build_bank_earnings_report(closed)
+
+            # Webhook first: it needs no bot invite into the lender's server. Only fall
+            # back to a channel send when no webhook is configured.
+            _wh = core._bank_report_webhook()
+            if _wh:
+                import aiohttp as _ah
+                try:
+                    async with _ah.ClientSession() as _s:
+                        async with _s.post(_wh, json={"content": body[:1900],
+                                                      "allowed_mentions": {"parse": []}}) as _r:
+                            if _r.status not in (200, 204):
+                                log.error("[bank report] webhook returned %s — statement for %s "
+                                          "was NOT sent.", _r.status, closed)
+                                return
+                except Exception as e:
+                    log.error("[bank report] webhook post failed (%s) — statement for %s was "
+                              "NOT sent, will retry.", e, closed)
+                    return
+                _db.set_config(flag, "done")
+                log.info("[bank report] %s statement posted via webhook", closed)
+                return
+
             chan = bot.get_channel(cid)
             if chan is None:
                 try:
