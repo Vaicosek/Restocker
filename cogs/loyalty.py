@@ -133,6 +133,57 @@ class LoyaltyCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
+    @app_commands.command(
+        name="ign",
+        description="Look up a player's in-game name(s), or find who owns an IGN")
+    @app_commands.describe(
+        user="Discord user → show their linked in-game name(s)",
+        name="In-game name → show which Discord account owns it")
+    async def ign_lookup(self, interaction: discord.Interaction,
+                         user: Optional[discord.Member] = None,
+                         name: Optional[str] = None):
+        """Both blank = your own. Ephemeral on purpose: the IGN↔Discord mapping already
+        appears in payout lines, so this reveals nothing new, but there's no reason to
+        repeat it into a channel."""
+        import Restocker_db as _db
+        await interaction.response.defer(ephemeral=True)
+
+        if name:
+            ign = str(name).strip()
+            uid = None
+            try:
+                uid = _db.get_user_id_by_ign(ign)
+            except Exception:
+                uid = None
+            if not uid:
+                return await interaction.followup.send(
+                    f"`{ign}` isn't linked to any Discord account. Wages for it are held "
+                    f"until whoever owns it runs `/me → Link in-game name`.", ephemeral=True)
+            try:
+                alts = [g for g in (_db.get_igns(str(uid)) or []) if g.lower() != ign.lower()]
+            except Exception:
+                alts = []
+            msg = f"`{ign}` → <@{uid}>"
+            if alts:
+                msg += "\nAlso plays as: " + ", ".join(f"`{a}`" for a in alts)
+            return await interaction.followup.send(msg, ephemeral=True,
+                                                   allowed_mentions=discord.AllowedMentions.none())
+
+        target = user or interaction.user
+        try:
+            igns = _db.get_igns(str(target.id)) or []
+        except Exception:
+            igns = []
+        if not igns:
+            who = "You have" if target.id == interaction.user.id else f"<@{target.id}> has"
+            return await interaction.followup.send(
+                f"{who} no in-game name linked — wages can't be paid until "
+                f"`/me → Link in-game name` is run.", ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none())
+        return await interaction.followup.send(
+            f"<@{target.id}> → " + ", ".join(f"`{g}`" for g in igns), ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none())
+
     @app_commands.command(name="me",
                           description="Your stuff — coins, in-game names, team, loyalty points")
     async def me_panel(self, interaction: discord.Interaction):

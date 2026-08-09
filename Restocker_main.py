@@ -327,6 +327,7 @@ PUBLIC_COMMAND_NAMES = {
     # to run it. This set controls slash-command SCOPE only; it has nothing to do with
     # the AI tool gating, so this costs zero tokens.
     "manager_panel",  # manager tools — permission-gated twice over
+    "ign",            # look up a player's in-game name (ephemeral, no new exposure)
 }
 MANAGER_ROLE_ALT  = _env_str("MANAGER_ROLE_ALT", "Admin")
 OWNER_ROLE_NAME   = _env_str("OWNER_ROLE_NAME", "Owner")   # pinged for futures-order review
