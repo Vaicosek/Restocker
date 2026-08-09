@@ -321,6 +321,12 @@ PUBLIC_COMMAND_NAMES = {
     "market",         # market info + /market sales (its own manager checks still apply)
     "item",           # look up an item and its price
     "website_login",  # dashboard access
+    # Registered globally, NOT because it is public — because Discord already hides it
+    # (default_permissions manage_guild) and manager_panel re-checks is_manager before
+    # doing anything. Keeping it admin-guild-only just meant walking to another server
+    # to run it. This set controls slash-command SCOPE only; it has nothing to do with
+    # the AI tool gating, so this costs zero tokens.
+    "manager_panel",  # manager tools — permission-gated twice over
 }
 MANAGER_ROLE_ALT  = _env_str("MANAGER_ROLE_ALT", "Admin")
 OWNER_ROLE_NAME   = _env_str("OWNER_ROLE_NAME", "Owner")   # pinged for futures-order review
