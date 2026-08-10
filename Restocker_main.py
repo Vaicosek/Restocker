@@ -4191,6 +4191,160 @@ def _run_csn_source_dedup_20260807() -> dict:
     return out
 
 
+# ── month mis-bucketing + duplicated shop scans ──────────────────────────────
+# Two faults, same root: a monthly export is filed under the month in its FILENAME,
+# and `/csn history` hands back whatever is recent — so a scan run on 5 August
+# returned sales dated 21–27 July and the whole file was booked as August.
+#
+# Fault 1 — GreyHames' 2026-08 row (2,896,628) contains July. csn_transactions
+# gives the split to the cent: July-dated rows are 2,236,476.88 income / 5,780
+# spent, August-dated rows 642,979.00, and those sum to the `shop:Vaicos` source
+# total exactly. So July read as empty (the bank statement showed 127,991 for the
+# whole company) while August was inflated by the same 2.23M. The largest single
+# item is 25x Beehive for 2,222,222 on 2026-07-24.
+#
+# Fault 2 — the SAME Vaicos scan was booked under several markets as the channel
+# binding changed: freezone 2026-08 (Aug 1) holds a byte-for-byte subset of
+# GreyHames' transactions, and freezone belongs to someone else entirely — its ONLY
+# earnings row was a copy of these sales.
+#
+# GUARDS, all learned from dry-running this against the live snapshot, where a
+# looser version corrupted three markets:
+#   * Spill goes ONLY into the immediately preceding month. vtech's 2026-07 row
+#     decomposes into "2025-07", "2025-08" and "2026-05" transactions, which are
+#     not spillover at all — they are dates the history parser guessed a year wrong.
+#     `/csn history` returns RECENT sales, so genuine spillover is one month at most;
+#     a 12-month gap is a parse artifact and moving it would invent history.
+#   * The month must reconcile on income AND spent. An earlier draft used `and`
+#     between two mismatch tests, so a row passed if either side happened to line
+#     up, which zeroed vtech's July income.
+#   * Duplicates are matched on TRANSACTION FINGERPRINTS (actor/item/qty/coins/day),
+#     never on totals. Matching totals retired nether_market's manual -250,000 row
+#     because its income of 0 equalled another market's source income of 0.
+#   * Nothing is deleted unless the duplicate's transactions are a strict subset of
+#     the survivor's, so a market that merely traded similarly is never touched.
+_CSN_MONTH_REBUCKET_FLAG = "csn_month_rebucket_v1"
+
+
+def _prev_month(month: str) -> str:
+    y, m = int(month[:4]), int(month[5:7])
+    return f"{y-1:04d}-12" if m == 1 else f"{y:04d}-{m-1:02d}"
+
+
+def _run_csn_month_rebucket_20260810() -> dict:
+    """Move sales into the month they were made, and drop scans booked under two markets."""
+    out = {"split": [], "retired": [], "skipped": [], "note": ""}
+    import Restocker_db as _db
+    try:
+        if str(_db.get_config(_CSN_MONTH_REBUCKET_FLAG) or "").strip():
+            return out
+
+        # ── Fault 1: a month row holding the previous month's sales ──────────
+        with _db.db() as conn:
+            rows = [tuple(r) for r in conn.execute(
+                "SELECT market_id, month, income, spent FROM csn_history").fetchall()]
+        for mid, month, income, spent in rows:
+            mid, month, income, spent = str(mid), str(month), float(income or 0), float(spent or 0)
+            prev = _prev_month(month)
+            with _db.db() as conn:
+                agg = {str(r[0]): (float(r[1] or 0), float(r[2] or 0)) for r in conn.execute(
+                    "SELECT substr(sale_day,1,7) AS m, "
+                    "       SUM(CASE WHEN coins > 0 THEN coins ELSE 0 END), "
+                    "       SUM(CASE WHEN coins < 0 THEN -coins ELSE 0 END) "
+                    "FROM csn_transactions WHERE market_id=? AND sale_day IS NOT NULL "
+                    "GROUP BY m", (mid,)).fetchall()}
+            if prev not in agg:
+                continue
+            pi, ps = agg[prev]
+            ci, cs = agg.get(month, (0.0, 0.0))
+            # Reconcile against ONE UPLOADER'S SCAN, not the whole month row. A month
+            # can hold several sources (GreyHames' August has shop:Vaicos plus a
+            # channel-keyed 17,172 from someone else), and demanding that the
+            # transactions explain the entire row skipped exactly the case this
+            # migration exists for. Requiring an exact match to a single source proves
+            # the transactions ARE that scan, so the dated split is that scan's split;
+            # every other source stays where it is, since nothing dates it.
+            with _db.db() as conn:
+                srcs = [float(r[0] or 0) for r in conn.execute(
+                    "SELECT income FROM csn_month_sources WHERE market_id=? AND month=?",
+                    (mid, month)).fetchall()]
+            if not any(abs((pi + ci) - v) <= 1.0 for v in srcs):
+                out["skipped"].append(f"{mid} {month} (txns {pi+ci:,.0f} match no source)")
+                log.warning("[csn rebucket] %s %s holds %s-dated sales but its %.0f of "
+                            "transactions match no single source (%s) — left alone; "
+                            "splitting on partial evidence would move the wrong amount.",
+                            mid, month, prev, pi + ci,
+                            ", ".join(f"{v:,.0f}" for v in srcs) or "none")
+                continue
+            # Everything the dated transactions do NOT explain belongs to the other
+            # sources and stays with the later month.
+            ci += income - (pi + ci)
+            cs += spent - (ps + cs)
+            with _db.db() as conn:
+                if conn.execute("SELECT 1 FROM csn_history WHERE market_id=? AND month=?",
+                                (mid, prev)).fetchone():
+                    out["skipped"].append(f"{mid} {prev} already exists")
+                    continue
+                try:
+                    from datetime import date as _d
+                    label = _d(int(prev[:4]), int(prev[5:7]), 1).strftime("%B %Y")
+                except Exception:
+                    label = prev
+                conn.execute(
+                    "INSERT INTO csn_history (market_id, month, label, source, "
+                    "recorded_at, income, spent, net) VALUES (?,?,?,?,?,?,?,?)",
+                    (mid, prev, str(label), "rebucket:sale_day", utcnow_iso(),
+                     pi, ps, pi - ps))
+                conn.execute("UPDATE csn_history SET income=?, spent=?, net=? "
+                             "WHERE market_id=? AND month=?",
+                             (ci, cs, ci - cs, mid, month))
+            out["split"].append(f"{mid} {month}->{prev} {pi:,.0f}")
+            log.info("[csn rebucket] %s: moved %.0f income / %.0f spent from %s into %s",
+                     mid, pi, ps, month, prev)
+
+        # ── Fault 2: the same scan booked under a second market ──────────────
+        with _db.db() as conn:
+            sourceless = [tuple(r) for r in conn.execute(
+                "SELECT h.market_id, h.month, h.income FROM csn_history h "
+                "WHERE NOT EXISTS (SELECT 1 FROM csn_month_sources s "
+                "                  WHERE s.market_id=h.market_id AND s.month=h.month)"
+            ).fetchall()]
+            fingerprints = {}
+            for r in conn.execute(
+                    "SELECT market_id, actor, item, qty, coins, sale_day "
+                    "FROM csn_transactions WHERE sale_day IS NOT NULL").fetchall():
+                fingerprints.setdefault(str(r[0]), set()).add(tuple(r[1:]))
+        for mid, month, income in sourceless:
+            mid, month = str(mid), str(month)
+            mine = fingerprints.get(mid) or set()
+            if len(mine) < 5:
+                continue          # too little evidence to call anything a copy
+            for other, theirs in fingerprints.items():
+                if other == mid or not mine <= theirs:
+                    continue      # only a STRICT subset counts as a copy
+                with _db.db() as conn:
+                    conn.execute("DELETE FROM csn_history WHERE market_id=? AND month=?",
+                                 (mid, month))
+                    conn.execute("DELETE FROM csn_history_items WHERE market_id=? AND month=?",
+                                 (mid, month))
+                    conn.execute("DELETE FROM csn_transactions WHERE market_id=?", (mid,))
+                out["retired"].append(f"{mid} {month} ({float(income or 0):,.0f}) "
+                                      f"— {len(mine)} txns all belong to {other}")
+                log.info("[csn rebucket] retired %s %s (%.0f): every one of its %d "
+                         "transactions is also %s's", mid, month, float(income or 0),
+                         len(mine), other)
+                break
+
+        _db.set_config(_CSN_MONTH_REBUCKET_FLAG, "1")
+        log.info("[csn rebucket] done — %d split, %d retired, %d left alone",
+                 len(out["split"]), len(out["retired"]), len(out["skipped"]))
+    except Exception as e:
+        out["note"] = f"failed: {e}"
+        log.error("[csn rebucket] FAILED — nothing flagged, retries next boot: %s",
+                  e, exc_info=True)
+    return out
+
+
 # ── site split: GreyHames moves out, Dragons Mart takes over the location ────
 # The PHYSICAL shop site is changing hands, not the company. GreyHames keeps
 # everything that already happened there — 28 months of CSN history, its 100,000
@@ -17248,6 +17402,10 @@ async def _main():
         _run_csn_source_dedup_20260807()
     except Exception as e:
         log.warning("[csn dedup] skipped: %s", e)
+    try:
+        _run_csn_month_rebucket_20260810()
+    except Exception as e:
+        log.warning("[csn rebucket] skipped: %s", e)
     import Restocker_web as _web
     web_port = _env_int("WEB_PORT", 8080)
     try:
