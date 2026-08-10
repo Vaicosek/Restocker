@@ -3867,6 +3867,40 @@ def _stock_rows_to_csv(rows: list) -> bytes:
     return buf.getvalue().encode("utf-8")
 
 
+async def _market_dest_channel(market_id, fallback, source_channel_id=None):
+    """Where a scan's reply belongs: the channel it ARRIVED in, else the market's bound
+    channel, else `fallback`.
+
+    Everything used to route to the single central CSN_REPORT_CHANNEL_ID. So a scan could
+    be ingested in full, its raw upload deleted from the channel it was posted to, and the
+    card announcing it posted somewhere else entirely — leaving the uploader staring at a
+    channel where their file had silently vanished. Falrija hit exactly this: 72 items
+    recorded at 10:33, nothing visible in #falrija, and its registered report channel is a
+    third channel again.
+
+    Source channel first, because that is where the person who ran the scan is looking and
+    where the file they just watched disappear used to be.
+    """
+    if source_channel_id:
+        try:
+            ch = (bot.get_channel(int(source_channel_id))
+                  or await bot.fetch_channel(int(source_channel_id)))
+            if ch is not None:
+                return ch
+        except Exception as _e:
+            log.debug("[csn] source-channel routing failed for %s: %s", source_channel_id, _e)
+    try:
+        if market_id and str(market_id) != str(DEFAULT_MARKET_ID):
+            _rc = (_get_market(market_id) or {}).get("report_channel_id")
+            if _rc:
+                return (bot.get_channel(int(_rc))
+                        or await bot.fetch_channel(int(_rc))
+                        or fallback)
+    except Exception as _e:
+        log.debug("[csn] market-channel routing fell back for %s: %s", market_id, _e)
+    return fallback
+
+
 async def _record_stock_report(rows: list, market_id: str, report_channel, filename: str):
     """Store a live shop-stock snapshot, post a fullness summary, and alert on low stock."""
     import Restocker_db as _db
@@ -4658,7 +4692,11 @@ async def _process_csn_attachment(attachment: discord.Attachment, report_channel
                         allowed_mentions=discord.AllowedMentions.none())
                 except Exception:
                     pass
-        await _record_stock_report(rows, mid, report_channel, filename)
+        # Send the snapshot to the market's OWN channel when it has one, so the person
+        # who ran the scan sees the result where they ran it.
+        _stock_dest = await _market_dest_channel(mid, report_channel,
+                                                 source_channel_id=source_channel_id)
+        await _record_stock_report(rows, mid, _stock_dest, filename)
         _mark_processed()
         return
 
