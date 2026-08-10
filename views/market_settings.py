@@ -89,7 +89,22 @@ async def build_embed(mid: str, user=None) -> discord.Embed:
     e.add_field(name="Market ID", value=f"`{mid}`", inline=True)
     e.add_field(name="Code", value=f"`{m.get('leader_code') or '—'}`", inline=True)
     rc = m.get("report_channel_id")
-    e.add_field(name="Channel", value=(f"<#{rc}>" if rc else "*unbound*"), inline=True)
+    # A bare <#id> renders as "#unknown" whenever Discord can't resolve the channel —
+    # deleted, or in a server the viewer/bot isn't in — which reads as "nothing is bound"
+    # and sends people off configuring a webhook they already have. Say which of the two
+    # it is, and always show the raw id so it can be checked.
+    if not rc:
+        _chan_val = "*unbound*"
+    else:
+        _resolved = None
+        try:
+            _resolved = core.bot.get_channel(int(rc))
+        except Exception:
+            _resolved = None
+        _chan_val = (f"<#{rc}>" if _resolved is not None
+                     else f"`{rc}` ⚠️ bound, but I can't see that channel "
+                          f"(deleted, or I'm not in that server)")
+    e.add_field(name="Channel", value=_chan_val, inline=True)
     # Bound land — stored as land_map:<land> -> market id, so it has to be found by
     # scanning. Shown because the land's balance IS this market's treasury, and there was
     # no way to see which land that was without reading the config by hand.
@@ -165,10 +180,22 @@ async def build_embed(mid: str, user=None) -> discord.Embed:
     # cogs/events.py already ingests human-posted csn_* CSVs. Say so here, or owners will
     # look for a command that no longer exists.
     if rc:
+        _where = f"<#{rc}>" if _resolved is not None else f"the bound channel (`{rc}`)"
         e.add_field(name="📥 Sending CSN data",
-                    value=(f"Drop `csn_monthly_*.csv` / `csn_export_*.csv` straight into <#{rc}> "
+                    value=(f"Drop `csn_monthly_*.csv` / `csn_export_*.csv` straight into {_where} "
                            f"— it's ingested automatically. The mod's webhook does this for you.\n"
                            f"Restocking from a shortfall: ask the bot (it previews first)."),
+                    inline=False)
+    else:
+        # Nothing bound at all: this is the state that genuinely needs setting up, and it
+        # used to look identical to a bound-but-unresolvable channel.
+        e.add_field(name="📥 Sending CSN data",
+                    value=("No channel is bound yet. Make a channel, add a webhook to it "
+                           "(Channel Settings → Integrations → Webhooks), put that URL in the "
+                           "mod, then run this panel **in that channel** and hit "
+                           "**Bind/unbind channel**.\n"
+                           "Until then uploads are only accepted if the mod carries this "
+                           "market's code."),
                     inline=False)
 
     if user is not None and _may_manage(user, mid):
