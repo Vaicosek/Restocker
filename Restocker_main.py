@@ -4335,6 +4335,52 @@ def _run_csn_month_rebucket_20260810() -> dict:
                          len(mine), other)
                 break
 
+        # ── Fault 3: an UNREGISTERED market holding one anomalous month ─────
+        # "main" is the legacy default market id; greyhames superseded it, and main
+        # is not in the markets table at all. Its 27 historical rows mirror greyhames
+        # month for month — except 2026-08, which is a stale copy of the same Vaicos
+        # scan booked before the channel binding moved. The fingerprint rule cannot
+        # see it (main has no transactions), so the test is structural instead: an
+        # unregistered market whose every OTHER month matches a real market exactly,
+        # and which disagrees on exactly this one, is holding a stale copy — its own
+        # history proves what it is supposed to look like. The historical mirror rows
+        # are left alone; only the anomaly goes.
+        with _db.db() as conn:
+            registered = {str(r[0]) for r in conn.execute(
+                "SELECT market_id FROM markets").fetchall()}
+            ghosts = {str(r[0]) for r in conn.execute(
+                "SELECT DISTINCT market_id FROM csn_history").fetchall()} - registered
+        for ghost in sorted(ghosts):
+            with _db.db() as conn:
+                gm = {str(r[0]): (round(float(r[1] or 0), 2), round(float(r[2] or 0), 2))
+                      for r in conn.execute(
+                          "SELECT month, income, net FROM csn_history WHERE market_id=?",
+                          (ghost,)).fetchall()}
+            for real in sorted(registered):
+                with _db.db() as conn:
+                    rm = {str(r[0]): (round(float(r[1] or 0), 2), round(float(r[2] or 0), 2))
+                          for r in conn.execute(
+                              "SELECT month, income, net FROM csn_history WHERE market_id=?",
+                              (real,)).fetchall()}
+                shared = set(gm) & set(rm)
+                if len(shared) < 6:
+                    continue                      # too little overlap to call it a mirror
+                differ = [m for m in shared if gm[m] != rm[m]]
+                if len(differ) != 1:
+                    continue                      # not "a mirror with one anomaly"
+                bad = differ[0]
+                with _db.db() as conn:
+                    conn.execute("DELETE FROM csn_history WHERE market_id=? AND month=?",
+                                 (ghost, bad))
+                    conn.execute("DELETE FROM csn_history_items WHERE market_id=? AND month=?",
+                                 (ghost, bad))
+                out["retired"].append(f"{ghost} {bad} (unregistered; mirrors {real} "
+                                      f"on {len(shared)-1} other month(s))")
+                log.info("[csn rebucket] retired %s %s — %s is not a registered market "
+                         "and mirrors %s on every other one of %d shared month(s)",
+                         ghost, bad, ghost, real, len(shared))
+                break
+
         _db.set_config(_CSN_MONTH_REBUCKET_FLAG, "1")
         log.info("[csn rebucket] done — %d split, %d retired, %d left alone",
                  len(out["split"]), len(out["retired"]), len(out["skipped"]))
