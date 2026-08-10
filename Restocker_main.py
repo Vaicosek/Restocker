@@ -3870,6 +3870,18 @@ def _stock_rows_to_csv(rows: list) -> bytes:
 async def _record_stock_report(rows: list, market_id: str, report_channel, filename: str):
     """Store a live shop-stock snapshot, post a fullness summary, and alert on low stock."""
     import Restocker_db as _db
+    # A stock scan left NO log line unless it happened to prune a stale item, so
+    # "the mod says posted, the channel is empty" had nothing to reason from.
+    log.info("[stock] %s: %d row(s) from %s -> #%s", market_id, len(rows or []), filename,
+             getattr(report_channel, "name", getattr(report_channel, "id", "?")))
+    if not rows:
+        try:
+            await report_channel.send(
+                f"⚠️ Stock scan for `{market_id}` parsed **0 rows** from `{filename}` — "
+                f"nothing recorded. The file arrived but no shop rows could be read from it.",
+                allowed_mentions=discord.AllowedMentions.none())
+        except Exception as _e:
+            log.warning("[stock] could not report the empty scan: %s", _e)
     try:
         _learn_brew_aliases_from_stock(rows)   # readable brew names from captured lore
     except Exception:
@@ -3928,6 +3940,12 @@ async def _record_stock_report(rows: list, market_id: str, report_channel, filen
         log.warning("[stock] stale-row prune skipped: %s", _e)
     st = _db.get_market_stock(market_id)
     if not st:
+        # THIS is how a scan vanishes: the upload is ingested and then DELETED by the
+        # caller, but with no stored stock there is no card to post, so the channel ends
+        # up empty and the log says nothing. Never return from here quietly again.
+        log.warning("[stock] %s: scan accepted but no stored stock afterwards — no "
+                    "snapshot card posted, and the raw upload has been deleted. %d row(s) "
+                    "came in from %s.", market_id, len(rows or []), filename)
         return
     def _pct(x):
         cap = int(x.get("capacity") or 0)
@@ -3959,8 +3977,23 @@ async def _record_stock_report(rows: list, market_id: str, report_channel, filen
     try:
         await report_channel.send(content="\U0001F4E6 **Shop stock snapshot received:**",
                                   embed=embed, files=_snap_files)
+    except discord.Forbidden as e:
+        # The card needs Embed Links + Attach Files; deleting the raw upload only needs
+        # Manage Messages. With one granted and not the other, a scan disappears silently.
+        log.error("[stock] %s: NO PERMISSION to post the snapshot in #%s (%s) — the scan "
+                  "was recorded but nothing is visible. Grant Embed Links and Attach "
+                  "Files there.", market_id,
+                  getattr(report_channel, "name", getattr(report_channel, "id", "?")), e)
+        try:
+            await report_channel.send(
+                f"📦 Stock recorded for `{market_id}` ({len(st)} item(s)) — I could not "
+                f"post the full card here; I need **Embed Links** and **Attach Files**.",
+                allowed_mentions=discord.AllowedMentions.none())
+        except Exception:
+            pass
     except Exception as e:
-        log.warning("[stock] report send failed: %s", e)
+        log.error("[stock] %s: snapshot card FAILED to post in #%s: %s", market_id,
+                  getattr(report_channel, "name", getattr(report_channel, "id", "?")), e)
     low = [x for x in st.values() if int(x.get("capacity") or 0) > 0 and _pct(x) <= STOCK_LOW_PCT]
     if low:
         low.sort(key=_pct)

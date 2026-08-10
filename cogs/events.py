@@ -378,6 +378,8 @@ class EventsCog(commands.Cog):
                 # source_key identifies WHICH shop uploaded this. A market scanned by
                 # several alts gets one monthly file per alt, each covering only its own
                 # sales — keyed this way they sum instead of overwriting each other.
+                log.info("[csn] ingesting %s from poster %s in #%s", att.filename,
+                         _poster_id, getattr(message.channel, "name", message.channel.id))
                 await _process_csn_attachment(
                     att, report_channel, source_channel_id=message.channel.id,
                     txn_only=("csn_export" in name and _has_monthly),
