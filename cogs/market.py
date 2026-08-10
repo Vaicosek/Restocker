@@ -44,6 +44,40 @@ save_yaml = core.save_yaml
 utcnow_iso = core.utcnow_iso
 
 
+
+async def _bank_month_autocomplete(interaction: discord.Interaction, current: str):
+    """Offer the last 12 closed months as a picker — nobody should be typing "2026-07"
+    into a field that only ever accepts twelve sensible values. Label is the readable
+    form ("July 2026"), value stays YYYY-MM so build_bank_earnings_report is unchanged.
+    Months already sent are marked, because sending one twice is the mistake this
+    command makes easy."""
+    from datetime import datetime as _dt, timezone as _tz
+    out = []
+    try:
+        import Restocker_db as _db
+    except Exception:
+        _db = None
+    now = _dt.now(_tz.utc)
+    y, m = now.year, now.month
+    cur = (current or "").strip().lower()
+    for _ in range(12):
+        m -= 1
+        if m == 0:
+            y, m = y - 1, 12
+        key = f"{y:04d}-{m:02d}"
+        label = f"{_dt(y, m, 1).strftime('%B')} {y}"
+        if _db is not None:
+            try:
+                if str(_db.get_config(f"bank_report:{key}") or "").strip():
+                    label += " · already sent"
+            except Exception:
+                pass
+        if cur and cur not in label.lower() and cur not in key:
+            continue
+        out.append(app_commands.Choice(name=label[:100], value=key))
+    return out[:25]
+
+
 class MarketCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -54,8 +88,9 @@ class MarketCog(commands.Cog):
         name="bank_report",
         description="(Managers) Send the V Tech earnings statement for a month to the bank")
     @app_commands.describe(
-        month="Which month, as YYYY-MM (blank = the month that just closed)",
+        month="Which month (blank = the month that just closed)",
         preview="Show it here without sending (default: preview)")
+    @app_commands.autocomplete(month=_bank_month_autocomplete)
     async def bank_report(self, interaction: discord.Interaction,
                           month: Optional[str] = None, preview: bool = True):
         """Manual counterpart to the monthly loop, for catching up a late statement.
