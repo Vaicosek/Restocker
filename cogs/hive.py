@@ -719,8 +719,13 @@ class HiveCog(commands.Cog):
             self._reported_this_boot = True
             ok = await post_hive_project_report("bot started")
             if ok:
-                sent = await dm_harvester_statements()
-                log.info("[hive report] startup report done, %d statement(s) DM'd", sent)
+                # NO personal DMs here. A restart is not news to a harvester — the owner
+                # restarts the bot for reasons that have nothing to do with their honey,
+                # and a 6h cooldown still meant a DM every time a restart landed outside
+                # the window. Statements now go out only when a CSN export actually
+                # brings new harvest data in (cogs/events.py), or on demand via
+                # /hive report dm_harvesters:True.
+                log.info("[hive report] startup report done (no DMs — those follow CSN imports)")
             else:
                 log.error("[hive report] startup report did NOT post — see the error above. "
                           "Run /hive report in Discord to see the reason interactively.")

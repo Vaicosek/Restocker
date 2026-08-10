@@ -391,6 +391,19 @@ class EventsCog(commands.Cog):
         # owners should read — once every attachment ingested cleanly, delete the upload so
         # only the bot's report card remains. Human uploads are handled (and kept) above.
         # Opt out with config csn_keep_uploads=1. Needs Manage Messages in the channel.
+        # New CSN history landed — that IS the harvester-facing event, so send the
+        # personal statements now instead of on every bot restart. dm_harvester_statements
+        # is per-person rate-limited (6h), so several markets importing back-to-back
+        # still produce at most one DM each.
+        if _processed_any:
+            try:
+                from cogs.hive import dm_harvester_statements as _dm_stmts
+                _n = await _dm_stmts()
+                if _n:
+                    log.info("[hive report] %d harvester statement(s) DM'd after CSN import", _n)
+            except Exception as _de:
+                log.warning("[hive report] post-import statements failed: %s", _de)
+
         if _processed_any and _all_transport:
             try:
                 import Restocker_db as _db_keep
