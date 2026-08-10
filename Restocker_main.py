@@ -4011,7 +4011,10 @@ _ACQ_VALUE_PER_PIECE = {
 # hive site overlaps the chest-shop purchases already recorded in CSN.
 BANK_REPORT_CHANNEL_DEFAULT = 1353276935094009927     # Crimson Bank
 BANK_REPORT_GUILD_DEFAULT = 940349403598823524
-BANK_REPORT_MARKET_DEFAULT = "greyhames"              # carries the V Tech stock
+# The statement is V Tech's: V Tech owns GreyHames, Dragons Mart and BrewShop. The stock
+# happens to be LISTED on greyhames (see _market_stock_label), which is a separate fact and
+# no longer decides who the statement is about — _bank_report_members walks the whole group.
+BANK_REPORT_MARKET_DEFAULT = "vtech"                  # the company
 
 
 def _bank_report_webhook() -> str:
@@ -4040,11 +4043,46 @@ def _bank_report_channel_id() -> int:
     return int(BANK_REPORT_CHANNEL_DEFAULT)
 
 
+def _bank_report_members(mid) -> list:
+    """Every market in the same company as `mid`, however the rollup edges happen to point.
+
+    The statement is about a COMPANY, and the company here is V Tech: it owns GreyHames,
+    Dragons Mart and BrewShop. The rollup graph does not say that cleanly, because it
+    exists for a different purpose — pricing the tradeable stock, which is listed on
+    greyhames, so greyhames is recorded as the parent. Reading the statement's membership
+    off parent→child links therefore got it wrong twice: it took the shape from whichever
+    node happened to be named root, and it only ever looked ONE level down, so BrewShop
+    (a child of vtech, itself a child of greyhames) was silently left out of every
+    statement.
+
+    So walk the whole connected component instead — follow the edges in both directions
+    until nothing new appears. Which node you start from stops mattering, and a market
+    added to the group later is picked up without touching this code.
+    """
+    seen = {str(mid)}
+    frontier = [str(mid)]
+    while frontier:
+        cur = frontier.pop()
+        # upward: the market this one rolls into
+        par = _market_rollup_parent(cur)
+        if par and str(par) not in seen:
+            seen.add(str(par))
+            frontier.append(str(par))
+        # downward: everything that rolls into this one
+        for child, _share in _rollup_children(cur):
+            if str(child) not in seen:
+                seen.add(str(child))
+                frontier.append(str(child))
+    # `mid` first so the company's own line leads the statement, rest alphabetical.
+    rest = sorted(m for m in seen if m != str(mid))
+    return [str(mid)] + rest
+
+
 def build_bank_earnings_report(month: str, market_id: str = None) -> str:
     """The statement text for one closed month. Read-only; never raises."""
     mid = str(market_id or BANK_REPORT_MARKET_DEFAULT)
     label = _market_stock_label(mid)
-    members = [mid] + [c for c, _ in _rollup_children(mid)]
+    members = _bank_report_members(mid)
 
     per_site, inc_total, net_total = [], 0.0, 0.0
     for mm in members:
@@ -4068,8 +4106,10 @@ def build_bank_earnings_report(month: str, market_id: str = None) -> str:
         inc_total += inc
         net_total += net + hive
 
-    combined = _rollup_combined_months(mid) or {}
-    rolled = float(combined.get(month, net_total) or 0)
+    # Total over the SAME members the statement lists. _rollup_combined_months walks
+    # parent→child from one node, which is the stock-pricing view and would silently
+    # disagree with the lines printed above the moment the two shapes differ.
+    rolled = net_total
 
     out = [f"🏦 **{label} — monthly earnings statement**",
            f"Month: **{month}** (closed)", ""]
