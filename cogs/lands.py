@@ -62,6 +62,27 @@ def _month_of(ts: str) -> str:
     return f"{m.group(3)}-{m.group(1)}" if m else "unknown"
 
 
+def _lands_feed_channels() -> set:
+    """The channel ids LANDS FEED posts are accepted from, as a set.
+
+    Config `lands_feed_channel` holds a comma-separated list. A bare single id still
+    parses (it is just a one-element list), so existing setups keep working untouched.
+    An empty value means UNLOCKED — any webhook anywhere is accepted, which is flagged
+    loudly at the call site because land balances drive market treasuries.
+    """
+    import Restocker_db as _db
+    out = set()
+    try:
+        raw = str(_db.get_config("lands_feed_channel") or "")
+    except Exception:
+        return out
+    for part in raw.replace(";", ",").split(","):
+        part = part.strip().strip("<#>")
+        if part.isdigit():
+            out.add(int(part))
+    return out
+
+
 def _land_market(land: str) -> str:
     import Restocker_db as _db
     return str(_db.get_config(f"land_map:{land.lower()}") or "").strip()
@@ -123,20 +144,23 @@ class LandsCog(commands.Cog):
                             getattr(message.channel, "name", "?"))
                 return
             import Restocker_db as _db
-            try:
-                _ch = int(_db.get_config("lands_feed_channel") or 0)
-            except Exception:
-                _ch = 0
-            if _ch and message.channel.id != _ch:
-                log.warning("[lands] REJECTED LANDS FEED in unauthorized channel %s",
-                            message.channel.id)
+            # One lock value, but a SET of channels. Each market's owner runs their own
+            # copy of the mod and posts into their own CSN channel, so a single-channel
+            # lock meant exactly one market could ever be tracked — every other feed was
+            # rejected, left undeleted (nothing ingests it, so nothing cleans it up), and
+            # that market's treasury silently never updated. Stored comma-separated.
+            _allowed = _lands_feed_channels()
+            if _allowed and message.channel.id not in _allowed:
+                log.warning("[lands] REJECTED LANDS FEED in unauthorized channel %s "
+                            "(allowed: %s)", message.channel.id,
+                            ",".join(str(c) for c in sorted(_allowed)) or "none")
                 return
             # SECURITY: no channel lock configured means ANY webhook in ANY channel can
             # post LANDS-BAL/LANDS-ENTRY lines that overwrite a bound market's treasury —
             # this is exactly how another market's CSN-mod client (misconfigured land name)
             # can corrupt YOUR treasury unnoticed. Still ingest (don't break a currently
             # working setup) but flag it loudly every time so it can't go unnoticed.
-            unlocked = not _ch
+            unlocked = not _allowed
             await self._ingest(message, content, unlocked=unlocked)
         except Exception as e:
             log.warning("[lands] feed ingest failed: %s", e)

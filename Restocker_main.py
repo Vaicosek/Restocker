@@ -13034,10 +13034,14 @@ _AI_TOOLS = [
     },
     {
         "name": "set_lands_feed_channel",
-        "description": "Lock LANDS FEED ingest to ONE channel — webhook posts anywhere else are rejected and logged. Managers only. This is spoof protection: land balances drive market treasuries, so an unlocked feed lets anyone forge one.",
+        "description": "Allow LANDS FEED ingest from a channel — webhook posts anywhere else are rejected and logged. Managers only. This is spoof protection: land balances drive market treasuries, so an unlocked feed lets anyone forge one. Several channels can be allowed at once (each market owner posts into their own), so this ADDS by default; pass mode=replace to make this the only one, or mode=remove to revoke.",
         "input_schema": {
             "type": "object",
-            "properties": {"channel_id": {"type": "string", "description": "Channel id to accept the feed from."}},
+            "properties": {
+                "channel_id": {"type": "string", "description": "Channel id to accept the feed from."},
+                "mode": {"type": "string", "enum": ["add", "replace", "remove"],
+                          "description": "add (default) keeps the existing channels; replace makes this the only one; remove revokes it."}
+            },
             "required": ["channel_id"]
         }
     },
@@ -15882,9 +15886,37 @@ async def _ai_tool_set_lands_feed_channel(guild, channel, user, args):
     cid = str(args.get("channel_id") or "").strip().strip("<#>")
     if not cid.isdigit():
         return "❌ channel_id must be numeric."
-    _db.set_config("lands_feed_channel", cid)
-    return (f"LANDS FEED locked to <#{cid}> — webhook posts from anywhere else are now "
-            f"rejected and logged.")
+    mode = str(args.get("mode") or "add").strip().lower()
+    if mode not in ("add", "replace", "remove"):
+        return "❌ mode must be add, replace or remove."
+    # The lock is a SET, not a single channel: every market owner runs their own copy of
+    # the mod and posts into their own channel. A replace-only tool meant allowing the
+    # second market silently un-allowed the first, whose feed then piled up unread.
+    cur = []
+    try:
+        for part in str(_db.get_config("lands_feed_channel") or "").replace(";", ",").split(","):
+            part = part.strip().strip("<#>")
+            if part.isdigit() and part not in cur:
+                cur.append(part)
+    except Exception:
+        cur = []
+    if mode == "replace":
+        cur = [cid]
+    elif mode == "remove":
+        if cid not in cur:
+            return f"<#{cid}> was not on the list — nothing changed."
+        cur = [c for c in cur if c != cid]
+    else:
+        if cid in cur:
+            return f"<#{cid}> is already allowed. Currently: {', '.join('<#%s>' % c for c in cur)}."
+        cur.append(cid)
+    _db.set_config("lands_feed_channel", ",".join(cur))
+    if not cur:
+        return ("⚠️ No channels are allowed any more, which means the feed is UNLOCKED — "
+                "any webhook in any channel can now write land balances, and those drive "
+                "market treasuries. Add a channel back.")
+    return ("LANDS FEED accepted from " + ", ".join(f"<#{c}>" for c in cur) +
+            " — webhook posts from anywhere else are rejected and logged.")
 
 
 async def _ai_tool_get_land_status(guild, channel, user, args):
