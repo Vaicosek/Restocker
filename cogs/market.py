@@ -83,6 +83,9 @@ class MarketCog(commands.Cog):
         self.bot = bot
 
     market = app_commands.Group(name="market", description="Manage multiple markets — register, track earnings, and configure per-market settings")
+    # Owners kept looking for their own shop under something that sounded like theirs,
+    # not under the registry of every market on the server. Same panel, findable name.
+    my = app_commands.Group(name="my", description="Your own market — settings, staff, treasury, listing")
 
     @market.command(
         name="bank_report",
@@ -217,8 +220,8 @@ class MarketCog(commands.Cog):
                 url=f"{url}/report/{mid}/{mk}"))
         await interaction.followup.send(embed=e, view=view)
 
-    @market.command(name="settings",
-                    description="(Owner/Manager) MarketSettings — one panel for everything about a market")
+    @my.command(name="market",
+                description="(Owner/Manager) One panel for everything about your market")
     @app_commands.describe(market_id="Market to open on (blank = the first you can manage)")
     @app_commands.autocomplete(market_id=_market_autocomplete)
     async def market_settings(self, interaction: discord.Interaction, market_id: str = None):

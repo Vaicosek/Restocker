@@ -215,7 +215,7 @@ class LandsCog(commands.Cog):
                     core._recompute_share_price(mid, reason="land_treasury")
                     line += f" → treasury of `{mid}` updated"
             else:
-                line += " · *(unbound — `/market settings` → Edit links it)*"
+                line += " · *(unbound — `/my market` → Edit links it)*"
             report.append(line)
             # Human digest of what this batch actually contained — the raw pipe lines
             # are deleted below, so the story ("18 withdrawals −1,644,550") lives here.
@@ -235,7 +235,7 @@ class LandsCog(commands.Cog):
         # SILENT BY DEFAULT: the feed is machine transport — the bot ingests it, the
         # treasury/fee numbers update, the raw dump is deleted below, and NOTHING is
         # posted. The channel stays clean; the data lives on the dashboard and in
-        # /market settings. Set config lands_feed_verbose=1 if you ever want the
+        # /my market. Set config lands_feed_verbose=1 if you ever want the
         # per-ingest summary card back.
         verbose = False
         try:

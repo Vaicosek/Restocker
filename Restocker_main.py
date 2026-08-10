@@ -319,6 +319,7 @@ PUBLIC_COMMAND_NAMES = {
     "me",             # own balance, loyalty, IGN link, join a team
     "orders",         # browse and claim open work
     "market",         # market info + /market sales (its own manager checks still apply)
+    "my",             # /my market — a market owner's own panel; the panel re-checks ownership
     "item",           # look up an item and its price
     "website_login",  # dashboard access
     # Registered globally, NOT because it is public — because Discord already hides it
@@ -2632,7 +2633,7 @@ def _set_market_loyalty(market_id, pts_mult: float, coin_bonus: int, pct_bonus: 
 # ── V Tech group (Stage 4) ────────────────────────────────────────────────────────────
 def _vtech_group_markets() -> set:
     """Market IDs V Tech itself owns (Greyhames, Bank, Dragonmart, ...) — configurable via
-    /market settings instead of hardcoded, since the group can grow. These markets'
+    /my market instead of hardcoded, since the group can grow. These markets'
     workers get the FULL point award credited to the shared V Tech pool (today's global
     `loyalty` table), because working a V Tech market IS working for V Tech."""
     try:
@@ -4594,7 +4595,7 @@ async def _process_csn_attachment(attachment: discord.Attachment, report_channel
                         await report_channel.send(
                             f"⚠️ Stock CSV declared unknown market `{csv_mid}` — recording to the `{mid}` "
                             f"(fallback) market instead of a real one. "
-                            f"Register it in `/market settings` first, or check for typos.",
+                            f"Register it in `/my market` first, or check for typos.",
                             allowed_mentions=discord.AllowedMentions.none())
                     except Exception:
                         pass
@@ -4604,7 +4605,7 @@ async def _process_csn_attachment(attachment: discord.Attachment, report_channel
                 try:
                     await report_channel.send(
                         f"⛔ Stock report for `{csv_mid}` rejected: missing/invalid market code.\n"
-                        f"A manager can bind this channel on `/market settings` (Bind/unbind channel) "
+                        f"A manager can bind this channel on `/my market` (Bind/unbind channel) "
                         f"for `{csv_mid}` — no code needed afterwards — or issue a fresh code there.",
                         allowed_mentions=discord.AllowedMentions.none())
                 except Exception:
@@ -4615,11 +4616,11 @@ async def _process_csn_attachment(attachment: discord.Attachment, report_channel
                 # Code verified on an unbound channel → accept, but NO auto-bind. The old
                 # auto-bind let a lifted code re-route a market's future report delivery
                 # to an attacker-chosen channel (report exfiltration + denial of delivery)
-                # — binding is a deliberate manager action in /market settings.
+                # — binding is a deliberate manager action in /my market.
                 try:
                     await report_channel.send(
                         f"✅ Stock CSV for `{csv_mid}` accepted (code verified). Tip: a manager "
-                        f"can bind a channel to `{csv_mid}` in `/market settings` so uploads "
+                        f"can bind a channel to `{csv_mid}` in `/my market` so uploads "
                         f"there need no code.",
                         allowed_mentions=discord.AllowedMentions.none())
                 except Exception:
@@ -4698,7 +4699,7 @@ async def _process_csn_attachment(attachment: discord.Attachment, report_channel
                         f"that market's own channel (or any unbound channel).\n"
                         f"• If this machine scans `{_bound_id}`: open the CSN mod's settings "
                         f"screen in-game (Mod Menu → CSN Export), set **Market ID** to "
-                        f"`{_bound_id}` and **Market Code** to its code from `/market settings`, "
+                        f"`{_bound_id}` and **Market Code** to its code from `/my market`, "
                         f"then press F6 to re-scan.",
                         allowed_mentions=discord.AllowedMentions.none())
                 else:
@@ -4733,7 +4734,7 @@ async def _process_csn_attachment(attachment: discord.Attachment, report_channel
                 try:
                     await report_channel.send(
                         f"⛔ CSN report for `{csv_market_id}` rejected: missing/invalid market code.\n"
-                        f"A manager can bind this channel on `/market settings` (Bind/unbind channel) "
+                        f"A manager can bind this channel on `/my market` (Bind/unbind channel) "
                         f"for `{csv_market_id}` — no code needed afterwards — or issue a fresh code there.",
                         allowed_mentions=discord.AllowedMentions.none())
                 except Exception:
@@ -4743,19 +4744,19 @@ async def _process_csn_attachment(attachment: discord.Attachment, report_channel
             # Accepted on a code-verified file — but NO auto-bind. Auto-binding let a
             # lifted code re-route a market's report delivery to an attacker-chosen
             # channel (exfiltration + denial of delivery). Binding stays a deliberate
-            # manager action in /market settings.
+            # manager action in /my market.
             # SILENT: a valid code being accepted is the NORMAL case. Announcing it (with
             # a bind tip) on every single upload was pure channel noise — every export
             # from every market posted the same paragraph. It goes to the log instead.
             if source_channel_id:
                 log.info("[csn] %s accepted on unbound channel %s (code verified); "
-                         "bind it in /market settings to skip the code.",
+                         "bind it in /my market to skip the code.",
                          csv_market_id, source_channel_id)
         else:
             market_warning = (
                 f"⚠️ CSV declared unknown market `{csv_market_id}` — no such market in the database. "
                 f"Recorded to the `{effective_market_id}` (fallback) market instead of a real one. "
-                f"Register it in `/market settings` first, or check for typos."
+                f"Register it in `/my market` first, or check for typos."
             )
 
     # ── Per-transaction ledger ───────────────────────────────────────────────
@@ -10262,7 +10263,7 @@ def _fundamental_for_market(market_id):
         pass
     fundamental = max(MIN_SHARE_PRICE, (avg_net / shares_out) * pe)
     # Book-value floor: a company is worth at least its productive assets plus cash on
-    # hand (config asset_value:<mid>, set in /market settings -> Tune params). V Tech's hive
+    # hand (config asset_value:<mid>, set in /my market -> Tune params). V Tech's hive
     # fleet is real infrastructure with a build cost — earnings can price the stock
     # ABOVE book value, but a slow earnings month can't price the company below the
     # replacement value of what it owns.
@@ -11080,7 +11081,7 @@ def _market_backing(market_id) -> dict:
     cash = float(_db.get_treasury(market_id) or 0)
     assets = _market_asset_value(market_id)
     # Off-market assets currently FOR SALE (hive batches, land claims) — liquid backing,
-    # set in /market settings -> Tune params. Deliberately separate from asset_value:<mid>
+    # set in /my market -> Tune params. Deliberately separate from asset_value:<mid>
     # (the book-value price floor): the fleet's book value is a VALUATION, not backing —
     # only things that can actually be turned into coins back the shares.
     try:
@@ -12399,7 +12400,7 @@ def _build_market_dashboard_embed() -> discord.Embed:
     public = _db.get_public_markets()
     embed = discord.Embed(title="📈 Market Exchange — Live", color=0x3FB950)
     if not public:
-        embed.description = "No public markets yet. A market owner can list one from `/market settings`."
+        embed.description = "No public markets yet. A market owner can list one from `/my market`."
         embed.set_footer(text="Auto-updates every few minutes")
         embed.timestamp = discord.utils.utcnow()
         return embed
@@ -12569,7 +12570,7 @@ hand-editing it is not the supported path and not what owners should be told to 
 What a new market owner needs, and where each value goes IN THAT SCREEN:
   • Discord Webhook URL — the webhook for their bound report channel
   • Market ID — e.g. `lulachmarket`
-  • Market Code — the verification code from /market settings
+  • Market Code — the verification code from /my market
   • Your Land Claim Name(s) — comma-separated, exactly as `/la` shows them
 Then F6 exports sales, and the stock-scan key captures shop fullness.
 If a webhook other than the bot's auto-generated one should be used, say so plainly and give
@@ -12931,7 +12932,7 @@ _AI_TOOLS = [
     },
     {
         "name": "propose_code_change",
-        "description": "Draft a change to the bot's OWN source code and open a GitHub Pull Request for review. OWNER ONLY — only Vaicos (ID 1203738126850461738) may use this; refuse for anyone else. Use when the owner asks to add, change, or fix a command or behavior in the bot's code (e.g. 'let MarketOwners open /market settings', 'add a /ping2 command'). Name the ONE file to edit (commands live in cogs/, e.g. cogs/market.py, cogs/misc.py) and describe the change. This NEVER deploys — it only opens a PR the owner must review, merge, and restart to apply.",
+        "description": "Draft a change to the bot's OWN source code and open a GitHub Pull Request for review. OWNER ONLY — only Vaicos (ID 1203738126850461738) may use this; refuse for anyone else. Use when the owner asks to add, change, or fix a command or behavior in the bot's code (e.g. 'let MarketOwners open /my market', 'add a /ping2 command'). Name the ONE file to edit (commands live in cogs/, e.g. cogs/market.py, cogs/misc.py) and describe the change. This NEVER deploys — it only opens a PR the owner must review, merge, and restart to apply.",
         "input_schema": {
             "type": "object",
             "properties": {

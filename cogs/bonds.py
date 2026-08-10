@@ -57,7 +57,7 @@ class BondsCog(commands.Cog):
 
 
 class VaultCog(commands.Cog):
-    """Vault state now lives on the /market settings panel (Vault button + embed line);
+    """Vault state now lives on the /my market panel (Vault button + embed line);
     this cog is kept only as the home for the vault constants and future loops.
 
     V Tech vault — mandatory 10% retained-earnings deposits + item pledges at a
