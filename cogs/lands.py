@@ -197,6 +197,16 @@ class LandsCog(commands.Cog):
 
         report = []
         oneline = []          # the compact replacement for the raw dump
+        # Capture the balance BEFORE this ingest overwrites it. The mod sweeps on a timer
+        # and resends its whole inbox every time, so most ingests carry no news at all —
+        # and a line per land per sweep is the same clutter as the dump, only shorter.
+        prev_bal = {}
+        for land in touched:
+            try:
+                _snap = _db.get_land_balance(land)
+                prev_bal[land] = float(_snap["balance"]) if _snap else None
+            except Exception:
+                prev_bal[land] = None
         for land, bal in balances.items():
             _db.set_land_balance(land, bal)
         for land in sorted(touched):
@@ -239,16 +249,27 @@ class LandsCog(commands.Cog):
             # summarised, so a feed that re-sends its whole history (the inbox numbers
             # shift on every event, so the mod cannot tell) collapses to a balance line
             # rather than repeating itself.
-            _bal = f"{float(snap['balance']):,.0f}" if snap else "?"
-            _delta = " · ".join(bits) if bits else None
-            _o = f"🏦 **{land}** `{_bal}`"
-            if _delta:
-                _o += f" · {_delta}"
-            if fees:
-                _o += f" · fees `{sum(fees.values()):,.0f}`"
-            if not mid:
-                _o += " · *unbound*"
-            oneline.append(_o)
+            # Say something only when something HAPPENED: a new ledger entry, or a
+            # balance that actually moved. A re-sent history with an unchanged balance
+            # is the common case and is worth exactly no words.
+            _now_bal = float(snap["balance"]) if snap else None
+            _was = prev_bal.get(land)
+            _moved = (_was is None and _now_bal is not None) or (
+                _was is not None and _now_bal is not None and abs(_now_bal - _was) >= 0.005)
+            if bits or _moved:
+                _bal = f"{_now_bal:,.0f}" if _now_bal is not None else "?"
+                _o = f"🏦 **{land}** `{_bal}`"
+                # Show the movement, but not "(+0)" — a sub-coin change is real enough
+                # to report the new balance and too small to render at this precision.
+                if _was is not None and _moved and abs(_now_bal - _was) >= 0.5:
+                    _o += f" (`{_now_bal - _was:+,.0f}`)"
+                if bits:
+                    _o += " · " + " · ".join(bits)
+                if fees:
+                    _o += f" · fees `{sum(fees.values()):,.0f}`"
+                if not mid:
+                    _o += " · *unbound*"
+                oneline.append(_o)
         # SILENT BY DEFAULT: the feed is machine transport — the bot ingests it, the
         # treasury/fee numbers update, the raw dump is deleted below, and NOTHING is
         # posted. The channel stays clean; the data lives on the dashboard and in
