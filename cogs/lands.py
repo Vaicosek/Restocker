@@ -196,6 +196,7 @@ class LandsCog(commands.Cog):
             return
 
         report = []
+        oneline = []          # the compact replacement for the raw dump
         for land, bal in balances.items():
             _db.set_land_balance(land, bal)
         for land in sorted(touched):
@@ -232,6 +233,22 @@ class LandsCog(commands.Cog):
                         bits.append(f"{cnt} {label} `{tot:+,.0f}`")
             if bits:
                 report.append("   ↳ " + " · ".join(bits))
+            # ONE LINE per land — this is what the channel actually sees. The raw pipe
+            # dump can be 27 entries of transport nobody reads; the story is "balance is
+            # X, and this batch moved it by Y". Only genuinely NEW ledger rows are
+            # summarised, so a feed that re-sends its whole history (the inbox numbers
+            # shift on every event, so the mod cannot tell) collapses to a balance line
+            # rather than repeating itself.
+            _bal = f"{float(snap['balance']):,.0f}" if snap else "?"
+            _delta = " · ".join(bits) if bits else None
+            _o = f"🏦 **{land}** `{_bal}`"
+            if _delta:
+                _o += f" · {_delta}"
+            if fees:
+                _o += f" · fees `{sum(fees.values()):,.0f}`"
+            if not mid:
+                _o += " · *unbound*"
+            oneline.append(_o)
         # SILENT BY DEFAULT: the feed is machine transport — the bot ingests it, the
         # treasury/fee numbers update, the raw dump is deleted below, and NOTHING is
         # posted. The channel stays clean; the data lives on the dashboard and in
@@ -247,6 +264,21 @@ class LandsCog(commands.Cog):
             # webhook anywhere can write treasuries.
             log.warning("[lands] feed ingested from an UNLOCKED channel (%s) — ask the "
                         "bot to lock the lands feed channel.", message.channel.id)
+        # Default output: ONE line, replacing the dump that gets deleted below. Silence
+        # was the old default, which meant a land could go months without anyone noticing
+        # it had stopped reporting. A single line is cheap enough to keep and enough to
+        # notice. lands_feed_quiet=1 restores the fully silent behaviour.
+        _quiet = False
+        try:
+            _quiet = str(_db.get_config("lands_feed_quiet") or "") == "1"
+        except Exception:
+            pass
+        if oneline and not verbose and not _quiet:
+            try:
+                await message.channel.send(" | ".join(oneline)[:1900],
+                                           allowed_mentions=discord.AllowedMentions.none())
+            except Exception as _e:
+                log.warning("[lands] one-line summary failed: %s", _e)
         if new_entries and verbose:
             try:
                 warn = ("⚠️ **No lands-feed channel is locked** — this was accepted from "
