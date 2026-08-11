@@ -327,6 +327,22 @@ class EventsCog(commands.Cog):
                             "for its market. Add the id to CSN_WEBHOOK_IDS or "
                             "csn_allowed_posters if this is a legitimate relay.",
                             _a.filename, _poster_id)
+                try:
+                    # _txt / _mid are already read above by the vouch check — reuse them
+                    # rather than re-downloading the attachment.
+                    await core.report_csn_setup_problem(
+                        "CSN report rejected — market code missing or wrong",
+                        market_id=(_mid or _bound_mid), channel=message.channel,
+                        filename=_a.filename, csv_text=_txt, poster_id=_poster_id,
+                        detail=("The file arrived but this channel isn't bound to the market "
+                                "and the file carries no valid market code, so it can't be "
+                                "trusted as that market's earnings. Nothing was recorded."),
+                        fix=("Either bind this channel to the market in `/my market` → "
+                             "**Bind/unbind channel** (best — then no code is needed), or send "
+                             "them a fresh code from **Get CSN code** to put in the mod's "
+                             "Market Code field."))
+                except Exception:
+                    pass
                 return False
         else:
             async def _csn_attachment_allowed(_a) -> bool:
@@ -357,6 +373,18 @@ class EventsCog(commands.Cog):
                     log.warning("[csn] REJECTED csn_profiles.json from unvouched poster %s "
                                 "in unbound channel #%s.", _poster_id,
                                 getattr(message.channel, "name", message.channel.id))
+                    try:
+                        await core.report_csn_setup_problem(
+                            "Item-name data rejected — channel not bound",
+                            market_id=_bound_mid, channel=message.channel,
+                            filename=att.filename, poster_id=_poster_id,
+                            detail=("`csn_profiles.json` carries the readable item and potion "
+                                    "names. A market code inside a CSV can't vouch for a JSON "
+                                    "file, so this needs a bound channel. Their sales still "
+                                    "import; item names will keep showing raw `#codes`."),
+                            fix=("Run `/my market` in this channel → **Bind/unbind channel**."))
+                    except Exception:
+                        pass
                     _all_transport = False
                     continue
                 try:

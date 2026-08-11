@@ -4259,6 +4259,84 @@ def _run_csn_source_dedup_20260807() -> dict:
     return out
 
 
+# ── setup problems, reported somewhere you will actually see them ────────────
+# A misconfigured shop fails silently: the mod says "posted", Discord accepts it, and
+# the bot rejects it into a log line nobody reads. The owner never finds out, and the
+# first sign is a month of missing earnings. These go to a channel instead, and name
+# the person to chase — by IGN, since that is who you talk to in game.
+CSN_ERROR_CHANNEL_KEY = "csn_error_channel"
+_CSN_ERROR_LAST = {}          # dedup: (kind, market, poster) -> last posted timestamp
+CSN_ERROR_REPEAT_S = 6 * 3600
+
+
+def _csn_error_channel_id() -> int:
+    try:
+        import Restocker_db as _db
+        return int(str(_db.get_config(CSN_ERROR_CHANNEL_KEY) or "0").strip() or 0)
+    except Exception:
+        return 0
+
+
+def _ign_for_market(market_id, csv_text: str = "") -> str:
+    """Who to go and talk to. The file's own `# SHOP` stamp first — that IS the in-game
+    seller — then the market owner's registered IGN, then their Discord mention."""
+    try:
+        shop = _extract_shop_name(csv_text or "")
+        if shop:
+            return f"`{shop}`"
+    except Exception:
+        pass
+    try:
+        import Restocker_db as _db
+        owner = (_get_market(market_id) or {}).get("owner_id")
+        if owner:
+            ign = _db.get_ign(str(owner))
+            return f"`{ign}` (<@{owner}>)" if ign else f"<@{owner}> (no IGN registered)"
+    except Exception:
+        pass
+    return "unknown — nobody is registered as this market's owner"
+
+
+async def report_csn_setup_problem(kind: str, *, market_id=None, channel=None,
+                                   filename: str = "", detail: str = "",
+                                   fix: str = "", csv_text: str = "",
+                                   poster_id=None) -> None:
+    """Post one setup problem to the errors channel. Never raises, never spams."""
+    cid = _csn_error_channel_id()
+    if not cid:
+        return
+    import time as _t
+    key = (kind, str(market_id), str(poster_id))
+    now = _t.time()
+    # The mod retries every 30 minutes, so an unfixed problem would otherwise repeat
+    # forever. Once per 6h per (problem, market, poster) is enough to stay visible.
+    if now - float(_CSN_ERROR_LAST.get(key, 0)) < CSN_ERROR_REPEAT_S:
+        return
+    _CSN_ERROR_LAST[key] = now
+    try:
+        ch = bot.get_channel(int(cid)) or await bot.fetch_channel(int(cid))
+        if ch is None:
+            return
+        who = _ign_for_market(market_id, csv_text)
+        name = (_get_market(market_id) or {}).get("name", market_id) if market_id else "unknown market"
+        e = discord.Embed(title=f"⚠️ {kind}", colour=0xE8A33D)
+        e.add_field(name="Market", value=f"**{name}** (`{market_id or '—'}`)", inline=True)
+        e.add_field(name="Who to ask", value=who, inline=True)
+        if channel is not None:
+            e.add_field(name="Arrived in",
+                        value=getattr(channel, "mention", f"`{channel}`"), inline=True)
+        if filename:
+            e.add_field(name="File", value=f"`{filename}`", inline=False)
+        if detail:
+            e.add_field(name="What happened", value=detail[:1000], inline=False)
+        if fix:
+            e.add_field(name="How to fix it", value=fix[:1000], inline=False)
+        e.set_footer(text="Repeats at most once every 6h per market while unfixed.")
+        await ch.send(embed=e, allowed_mentions=discord.AllowedMentions.none())
+    except Exception as _e:
+        log.warning("[csn] could not report the setup problem: %s", _e)
+
+
 # ── land ledger: the same event stored under several inbox numbers ───────────
 # The land inbox is a rolling list — #30 is always the newest — so every new event
 # shifts every older one down by one. The ledger's PRIMARY KEY was
@@ -13414,6 +13492,15 @@ _AI_TOOLS = [
         }
     },
     {
+        "name": "set_csn_error_channel",
+        "description": "Choose the channel where CSN setup problems are reported — a shop whose reports are being rejected, whose channel isn't bound, or whose market code is wrong. Each report names the market and the IGN of the person to chase. Managers only. Pass channel_id 0 to turn the reporting off.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"channel_id": {"type": "string", "description": "Channel id to post setup problems to, or 0 to disable."}},
+            "required": ["channel_id"]
+        }
+    },
+    {
         "name": "get_investor_status",
         "description": "V Tech investor register (GEX.PR): who holds preferred shares, each holder's %, what they've received, the profit-pool rate, and recent distributions. Managers only.",
         "input_schema": {"type": "object", "properties": {}, "required": []}
@@ -16287,6 +16374,23 @@ async def _ai_tool_set_lands_feed_channel(guild, channel, user, args):
             " — webhook posts from anywhere else are rejected and logged.")
 
 
+async def _ai_tool_set_csn_error_channel(guild, channel, user, args):
+    if not _ai_is_manager(user):
+        return "❌ Managers only."
+    import Restocker_db as _db
+    cid = str(args.get("channel_id") or "").strip().strip("<#>")
+    if not cid.isdigit():
+        return "❌ channel_id must be numeric (or 0 to turn it off)."
+    if cid == "0":
+        _db.set_config(CSN_ERROR_CHANNEL_KEY, "")
+        return ("CSN setup problems will no longer be reported to a channel — they only go "
+                "to the log now, where nobody reads them.")
+    _db.set_config(CSN_ERROR_CHANNEL_KEY, cid)
+    return (f"CSN setup problems will be reported in <#{cid}> — a rejected report, an unbound "
+            f"channel, a wrong market code. Each one names the market and the IGN to chase. "
+            f"Repeats at most once every 6h per market while a problem is unfixed.")
+
+
 async def _ai_tool_get_land_status(guild, channel, user, args):
     if not _ai_is_manager(user):
         return "❌ Managers only."
@@ -16926,6 +17030,7 @@ _AI_TOOL_MAP = {
     "get_land_status":      _ai_tool_get_land_status,
     "get_investor_status":  _ai_tool_get_investor_status,
     "set_lands_feed_channel": _ai_tool_set_lands_feed_channel,
+    "set_csn_error_channel": _ai_tool_set_csn_error_channel,
     "log_manual_restock":   _ai_tool_log_manual_restock,
     "get_channel_config":   _ai_tool_get_channel_config,
     "set_channel_config":   _ai_tool_set_channel_config,
@@ -16963,7 +17068,7 @@ _AI_SENSITIVE_TOOLS = {
     "delete_messages", "create_role", "setup_market_owner", "send_dm", "dm_role",
     "send_channel_message", "ping_user", "propose_code_change", "set_item_price",
     "run_hive_payout", "rebuild_market_channel", "rebuild_hive_channel",
-    "purge_channel", "csn_cleanup", "fix_month_close", "admin_wipe", "set_channel_config", "set_hive_autopay", "set_team_feed", "set_lands_feed_channel", "stock_buyback", "stock_dividends",
+    "purge_channel", "csn_cleanup", "fix_month_close", "admin_wipe", "set_channel_config", "set_hive_autopay", "set_team_feed", "set_lands_feed_channel", "set_csn_error_channel", "stock_buyback", "stock_dividends",
     "liquidate_holdings",   # force-sells someone else's shares and can move the coins
     "settle_unlinked_harvests",   # clears a real wage debt off the books
     "create_restock_orders", "log_manual_restock",
