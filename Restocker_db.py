@@ -3673,20 +3673,49 @@ def get_hive_harvester_detail(market_id: str, ign: str) -> dict:
 
 def add_land_entry(land: str, entry_no: int, ts: str, kind: str,
                    amount: float, new_balance, body: str) -> bool:
-    """Store one land-inbox entry. Returns True if it was NEW (dedup by PK)."""
+    """Store one land-inbox entry. Returns True if it was NEW.
+
+    Dedup is by CONTENT — (land, timestamp, body) — not by the inbox position number.
+    The land inbox is a rolling list where #30 is always the newest, so every new event
+    shifts every older event's number down by one: the withdrawal that was #29 yesterday
+    is #28 today. Keyed on entry_no (the old PRIMARY KEY (land, entry_no, ts)) every
+    entry therefore looked new on every scan, so the whole backlog was re-stored under
+    fresh numbers on each pass and the same $35,000 withdrawal could be counted several
+    times over — which also fed the teleport-fee inference, since that walks the balance
+    chain between consecutive entries.
+
+    entry_no is still recorded, but only as "where it sat when we last saw it". It is
+    deliberately not part of the identity of an entry.
+    """
     with db() as conn:
-        cur = conn.execute("""
+        row = conn.execute(
+            "SELECT entry_no FROM land_ledger WHERE land=? AND ts=? AND body=?",
+            (str(land), str(ts), str(body or "")[:300])).fetchone()
+        if row is not None:
+            # Same event, new position in the list — keep the row, refresh the position.
+            if int(row[0] or 0) != int(entry_no):
+                conn.execute(
+                    "UPDATE land_ledger SET entry_no=? WHERE land=? AND ts=? AND body=?",
+                    (int(entry_no), str(land), str(ts), str(body or "")[:300]))
+            return False
+        conn.execute("""
             INSERT OR IGNORE INTO land_ledger (land, entry_no, ts, kind, amount, new_balance, body)
             VALUES (?,?,?,?,?,?,?)
         """, (str(land), int(entry_no), str(ts), str(kind), float(amount),
               None if new_balance is None else float(new_balance), str(body or "")[:300]))
-        return cur.rowcount > 0
+        return True
 
 
 def get_land_entries(land: str) -> list[dict]:
     with db() as conn:
-        rows = conn.execute("SELECT * FROM land_ledger WHERE land=? ORDER BY entry_no",
-                            (str(land),)).fetchall()
+        # Order by the entry's own timestamp. entry_no shifts as the inbox rolls, so
+        # ordering by it interleaves old and new events and corrupts the balance chain
+        # that _recompute_fees walks. ts is "MM/DD/YYYY HH:MM" — rearrange to sort.
+        rows = conn.execute(
+            "SELECT * FROM land_ledger WHERE land=? "
+            "ORDER BY substr(ts,7,4) || substr(ts,1,2) || substr(ts,4,2) "
+            "         || substr(ts,12,5), entry_no",
+            (str(land),)).fetchall()
         return [dict(r) for r in rows]
 
 

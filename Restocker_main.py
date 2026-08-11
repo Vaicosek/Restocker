@@ -4259,6 +4259,62 @@ def _run_csn_source_dedup_20260807() -> dict:
     return out
 
 
+# ── land ledger: the same event stored under several inbox numbers ───────────
+# The land inbox is a rolling list — #30 is always the newest — so every new event
+# shifts every older one down by one. The ledger's PRIMARY KEY was
+# (land, entry_no, ts), which makes the inbox POSITION part of an entry's identity.
+# Result: on every scan the entire backlog looked new and was stored again under
+# fresh numbers, so one $35,000 withdrawal could sit in the ledger several times.
+# That also skews _recompute_fees, which infers teleport fees from the gaps in the
+# balance chain between consecutive entries.
+#
+# add_land_entry now dedups on (land, ts, body) and only refreshes entry_no. This
+# collapses what the old key already let through, keeping the earliest-recorded copy
+# of each distinct event.
+_LAND_DEDUP_FLAG = "land_ledger_content_dedup_v1"
+
+
+def _run_land_ledger_dedup_20260811() -> dict:
+    out = {"removed": 0, "lands": 0}
+    import Restocker_db as _db
+    try:
+        if str(_db.get_config(_LAND_DEDUP_FLAG) or "").strip():
+            return out
+        with _db.db() as conn:
+            dupes = conn.execute(
+                "SELECT land, ts, body, COUNT(*) c FROM land_ledger "
+                "GROUP BY land, ts, body HAVING c > 1").fetchall()
+            lands = set()
+            for land, ts, body, c in [tuple(r) for r in dupes]:
+                keep = conn.execute(
+                    "SELECT rowid FROM land_ledger WHERE land=? AND ts=? AND body=? "
+                    "ORDER BY recorded_at, rowid LIMIT 1", (land, ts, body)).fetchone()
+                if not keep:
+                    continue
+                cur = conn.execute(
+                    "DELETE FROM land_ledger WHERE land=? AND ts=? AND body=? AND rowid<>?",
+                    (land, ts, body, keep[0]))
+                out["removed"] += cur.rowcount or 0
+                lands.add(str(land))
+            out["lands"] = len(lands)
+        if out["removed"]:
+            # The fee inference reads the whole chain, so it has to be rebuilt from the
+            # collapsed ledger rather than left on numbers derived from duplicates.
+            try:
+                from cogs.lands import _recompute_fees as _rf
+                for land in sorted(lands):
+                    _rf(land)
+            except Exception as _fe:
+                log.warning("[lands dedup] fee recompute skipped: %s", _fe)
+        _db.set_config(_LAND_DEDUP_FLAG, "1")
+        log.info("[lands dedup] removed %d duplicate ledger row(s) across %d land(s)",
+                 out["removed"], out["lands"])
+    except Exception as e:
+        log.error("[lands dedup] FAILED — nothing flagged, retries next boot: %s",
+                  e, exc_info=True)
+    return out
+
+
 # ── month mis-bucketing + duplicated shop scans ──────────────────────────────
 # Two faults, same root: a monthly export is filed under the month in its FILENAME,
 # and `/csn history` hands back whatever is recent — so a scan run on 5 August
@@ -17524,6 +17580,10 @@ async def _main():
         _run_csn_month_rebucket_20260810()
     except Exception as e:
         log.warning("[csn rebucket] skipped: %s", e)
+    try:
+        _run_land_ledger_dedup_20260811()
+    except Exception as e:
+        log.warning("[lands dedup] skipped: %s", e)
     import Restocker_web as _web
     web_port = _env_int("WEB_PORT", 8080)
     try:
