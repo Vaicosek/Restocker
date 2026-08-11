@@ -4259,22 +4259,90 @@ def _run_csn_source_dedup_20260807() -> dict:
     return out
 
 
+# ── one-shot: Vaicos' shop scan delivered to Goblin Mart ─────────────────────
+# While recording that shop, the Vaicos instance was pointed at Goblin Mart's webhook.
+# On 2026-08-10 17:02 it posted a full scan there and it was accepted: goblin_mart
+# 2026-08 = 2,909,451 income, source_key `shop:Vaicos`, carrying the 25x Beehive sale
+# of 2,222,222 dated 2026-07-24 — GreyHames' July, filed as another owner's August.
+# Third instance of the same fault after freezone and main.
+#
+# Deliberately NOT a heuristic. The obvious rule — "a shop stamp belongs to one market,
+# retire it elsewhere" — breaks the site split, where shop:Vaicos legitimately moves
+# from greyhames to dragons_mart. And the ownership check is unusable because no
+# scanning IGN is in ign_registry, so every source reads as unattributable, including
+# the honest ones. So this names exactly what it removes and verifies every fact before
+# touching anything; if the data no longer matches, it does nothing and says so.
+_GOBLIN_MISDELIVERY_FLAG = "goblin_mart_vaicos_misdelivery_v1"
+
+
+def _run_goblin_misdelivery_20260811() -> dict:
+    out = {"removed": False, "note": ""}
+    import Restocker_db as _db
+    try:
+        if str(_db.get_config(_GOBLIN_MISDELIVERY_FLAG) or "").strip():
+            return out
+        MID, MONTH, KEY = "goblin_mart", "2026-08", "shop:Vaicos"
+        with _db.db() as conn:
+            src = conn.execute(
+                "SELECT income FROM csn_month_sources WHERE market_id=? AND month=? "
+                "AND source_key=?", (MID, MONTH, KEY)).fetchone()
+            n_src = conn.execute(
+                "SELECT COUNT(*) FROM csn_month_sources WHERE market_id=? AND month=?",
+                (MID, MONTH)).fetchone()
+        if not src:
+            out["note"] = "no shop:Vaicos source on goblin_mart 2026-08 — nothing to undo"
+            log.info("[goblin fix] %s", out["note"])
+            _db.set_config(_GOBLIN_MISDELIVERY_FLAG, "1")
+            return out
+        if int(n_src[0] or 0) != 1:
+            # Goblin Mart has since filed its OWN sales for that month. Removing the
+            # whole row would delete real earnings, so stop and let a human decide.
+            out["note"] = (f"goblin_mart {MONTH} now has {n_src[0]} sources — not only the "
+                           f"misdelivered one. Left alone; remove shop:Vaicos by hand.")
+            log.warning("[goblin fix] %s", out["note"])
+            return out
+        with _db.db() as conn:
+            conn.execute("DELETE FROM csn_history WHERE market_id=? AND month=?", (MID, MONTH))
+            conn.execute("DELETE FROM csn_history_items WHERE market_id=? AND month=?", (MID, MONTH))
+            conn.execute("DELETE FROM csn_month_sources WHERE market_id=? AND month=? "
+                         "AND source_key=?", (MID, MONTH, KEY))
+            # Its transactions came from the same delivery — every one is a Vaicos sale.
+            conn.execute("DELETE FROM csn_transactions WHERE market_id=?", (MID,))
+        out["removed"] = True
+        _db.set_config(_GOBLIN_MISDELIVERY_FLAG, "1")
+        log.info("[goblin fix] removed goblin_mart %s (%.0f income, source %s) — it was "
+                 "Vaicos' shop scan delivered to their webhook.", MONTH,
+                 float(src[0] or 0), KEY)
+    except Exception as e:
+        out["note"] = f"failed: {e}"
+        log.error("[goblin fix] FAILED — nothing flagged, retries next boot: %s", e,
+                  exc_info=True)
+    return out
+
+
 # ── setup problems, reported somewhere you will actually see them ────────────
 # A misconfigured shop fails silently: the mod says "posted", Discord accepts it, and
 # the bot rejects it into a log line nobody reads. The owner never finds out, and the
 # first sign is a month of missing earnings. These go to a channel instead, and name
 # the person to chase — by IGN, since that is who you talk to in game.
 CSN_ERROR_CHANNEL_KEY = "csn_error_channel"
+CSN_ERROR_CHANNEL_DEFAULT = 1525241251967012874     # the owner's alert channel
 _CSN_ERROR_LAST = {}          # dedup: (kind, market, poster) -> last posted timestamp
 CSN_ERROR_REPEAT_S = 6 * 3600
 
 
 def _csn_error_channel_id() -> int:
+    """Config first, then the default. Reporting is ON out of the box — a silent default
+    is how these problems went unnoticed for a month in the first place. Explicitly
+    setting the channel to 0 still turns it off."""
     try:
         import Restocker_db as _db
-        return int(str(_db.get_config(CSN_ERROR_CHANNEL_KEY) or "0").strip() or 0)
+        raw = str(_db.get_config(CSN_ERROR_CHANNEL_KEY) or "").strip()
+        if raw:
+            return int(raw or 0)
     except Exception:
-        return 0
+        pass
+    return int(CSN_ERROR_CHANNEL_DEFAULT)
 
 
 def _ign_for_market(market_id, csv_text: str = "") -> str:
@@ -16382,7 +16450,9 @@ async def _ai_tool_set_csn_error_channel(guild, channel, user, args):
     if not cid.isdigit():
         return "❌ channel_id must be numeric (or 0 to turn it off)."
     if cid == "0":
-        _db.set_config(CSN_ERROR_CHANNEL_KEY, "")
+        # Store "0", not "" — an empty value now falls through to the default channel,
+        # so writing "" would silently re-enable what the user just switched off.
+        _db.set_config(CSN_ERROR_CHANNEL_KEY, "0")
         return ("CSN setup problems will no longer be reported to a channel — they only go "
                 "to the log now, where nobody reads them.")
     _db.set_config(CSN_ERROR_CHANNEL_KEY, cid)
@@ -17689,6 +17759,10 @@ async def _main():
         _run_land_ledger_dedup_20260811()
     except Exception as e:
         log.warning("[lands dedup] skipped: %s", e)
+    try:
+        _run_goblin_misdelivery_20260811()
+    except Exception as e:
+        log.warning("[goblin fix] skipped: %s", e)
     import Restocker_web as _web
     web_port = _env_int("WEB_PORT", 8080)
     try:
