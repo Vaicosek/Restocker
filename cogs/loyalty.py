@@ -129,6 +129,33 @@ async def submit_redemption(interaction, points: int, reward: str, market=None) 
             f"for *{reward}*.\n{payer} pays it out and approves here; points are deducted on approval.")
 
 
+
+async def _ign_autocomplete(interaction: discord.Interaction, current: str):
+    """Every in-game name the bot knows about.
+
+    Minecraft IGNs are case-sensitive and full of underscores and lookalike
+    characters, so a near-miss used to come back as "isn't linked to any Discord
+    account" — which reads as "this player is unregistered" rather than "you typed it
+    wrong". Picking from the list makes that class of answer impossible.
+    """
+    out = []
+    try:
+        import Restocker_db as _db
+        cur = (current or "").strip().lower()
+        with _db.db() as conn:
+            rows = conn.execute("SELECT DISTINCT ign FROM ign_registry ORDER BY ign").fetchall()
+        for r in rows:
+            ign = str(r[0] or "").strip()
+            if not ign or (cur and cur not in ign.lower()):
+                continue
+            out.append(app_commands.Choice(name=ign[:100], value=ign))
+            if len(out) >= 25:
+                break
+    except Exception:
+        pass
+    return out
+
+
 class LoyaltyCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -139,6 +166,7 @@ class LoyaltyCog(commands.Cog):
     @app_commands.describe(
         user="Discord user → show their linked in-game name(s)",
         name="In-game name → show which Discord account owns it")
+    @app_commands.autocomplete(name=_ign_autocomplete)
     async def ign_lookup(self, interaction: discord.Interaction,
                          user: Optional[discord.Member] = None,
                          name: Optional[str] = None):

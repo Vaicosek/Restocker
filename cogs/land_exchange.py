@@ -259,6 +259,51 @@ async def _listing_autocomplete(interaction: discord.Interaction, current: str):
     return out
 
 
+
+async def _land_autocomplete(interaction: discord.Interaction, current: str):
+    """Land claims the bot has actually seen — from balances, fee history and bindings.
+
+    The land name on a listing is passed straight through to create_land_listing with
+    NO validation, so a typo produces a listing tied to nothing while looking perfectly
+    correct. The sibling market_id on this same command has had a picker all along,
+    which made the inconsistency visible without fixing it.
+    """
+    names = {}
+    try:
+        import Restocker_db as _db
+        with _db.db() as conn:
+            for q in ("SELECT land FROM land_balances",
+                      "SELECT DISTINCT land FROM land_fees",
+                      "SELECT DISTINCT land FROM land_ledger"):
+                try:
+                    for r in conn.execute(q).fetchall():
+                        nm = str(r[0] or "").strip()
+                        if nm:
+                            names.setdefault(nm.lower(), nm)
+                except Exception:
+                    continue
+        # Bound lands too: land_map:<lowername> -> market id. A land can be bound before
+        # its first balance ever arrives, and that is exactly when someone lists it.
+        try:
+            for k in (_db.get_config_prefix("land_map:") or {}):
+                nm = str(k).split(":", 1)[1].strip()
+                if nm:
+                    names.setdefault(nm.lower(), nm)
+        except Exception:
+            pass
+    except Exception:
+        return []
+    cur = (current or "").strip().lower()
+    out = []
+    for key in sorted(names):
+        if cur and cur not in key:
+            continue
+        out.append(app_commands.Choice(name=names[key][:100], value=names[key]))
+        if len(out) >= 25:
+            break
+    return out
+
+
 # ── Headless core (NO Discord I/O) — the single code path for both slash commands and
 #    the /api/network/land/* endpoints the satellite calls. Money moves here; the callers
 #    only handle presentation (a slash reply, or the satellite's board + the home embed
@@ -934,7 +979,12 @@ class LandExchangeCog(commands.Cog):
         duration_days="(Optional) auction length in days — default from config",
     )
     @app_commands.choices(category=_CATEGORIES)
-    @app_commands.autocomplete(backs_company=_market_autocomplete)
+    # `title` becomes the listing headline AND the notify-role ping text, so a typo here
+    # produces a listing that matches nothing anyone searches for. Autocomplete suggests
+    # real catalog/stock items but does not constrain: a one-off land title still types
+    # through fine, which is why this is safe on a field that is not always an item.
+    @app_commands.autocomplete(backs_company=_market_autocomplete,
+                               title=core.any_item_autocomplete)
     async def sell(self, interaction: discord.Interaction,
                    title: str, starting_price: float,
                    buy_now: Optional[float] = None,
@@ -1032,7 +1082,7 @@ class LandExchangeCog(commands.Cog):
         duration_days="(Auction) how many days it runs — default is set by /realestate config",
         min_increment_pct="(Auction) override the minimum bid raise, as a % of the current bid",
     )
-    @app_commands.autocomplete(market_id=_market_autocomplete)
+    @app_commands.autocomplete(market_id=_market_autocomplete, land=_land_autocomplete)
     async def list_(self, interaction: discord.Interaction, chunks: float, mode: _MODE,
                     quality: _QUALITY = "raw", reserve: Optional[float] = None,
                     buy_now: Optional[float] = None, comps: Optional[str] = None,
