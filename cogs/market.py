@@ -78,6 +78,51 @@ async def _bank_month_autocomplete(interaction: discord.Interaction, current: st
     return out[:25]
 
 
+
+async def _sales_month_autocomplete(interaction: discord.Interaction, current: str):
+    """Months this market actually has on record, newest first.
+
+    Better than a generic last-12 list: a market that started in July has no June, and
+    offering one only produces an empty report. Reads the market_id the user already
+    picked in the same command via interaction.namespace, so the two options stay in
+    step. Falls back to recent months when nothing is on record yet — a market whose
+    first upload has not landed still needs a usable field.
+    """
+    from datetime import datetime as _dt, timezone as _tz
+    cur = (current or "").strip().lower()
+    mid = ""
+    try:
+        mid = str(getattr(interaction.namespace, "market_id", "") or "").strip()
+    except Exception:
+        mid = ""
+    months = []
+    try:
+        data = _load_csn_for_market(mid or DEFAULT_MARKET_ID) or {}
+        months = sorted((data.get("months") or {}).keys(), reverse=True)
+    except Exception:
+        months = []
+    if not months:
+        now = _dt.now(_tz.utc)
+        y, m = now.year, now.month
+        for _ in range(12):
+            months.append(f"{y:04d}-{m:02d}")
+            m -= 1
+            if m == 0:
+                y, m = y - 1, 12
+    out = []
+    for key in months:
+        try:
+            label = _dt(int(key[:4]), int(key[5:7]), 1).strftime("%B %Y")
+        except Exception:
+            label = str(key)
+        if cur and cur not in label.lower() and cur not in str(key).lower():
+            continue
+        out.append(app_commands.Choice(name=label[:100], value=str(key)))
+        if len(out) >= 25:
+            break
+    return out
+
+
 class MarketCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -150,8 +195,8 @@ class MarketCog(commands.Cog):
 
     @market.command(name="sales",
                     description="A month's sales for a market — full item breakdown + dashboard link")
-    @app_commands.describe(market_id="Which market", month="YYYY-MM (blank = latest month on record)")
-    @app_commands.autocomplete(market_id=_market_autocomplete)
+    @app_commands.describe(market_id="Which market", month="Which month (blank = latest on record)")
+    @app_commands.autocomplete(market_id=_market_autocomplete, month=_sales_month_autocomplete)
     async def market_sales(self, interaction: discord.Interaction,
                            market_id: str = None, month: str = None):
         """Replaces /csn_history, which could only ever read the MAIN market's history
