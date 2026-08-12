@@ -12523,7 +12523,30 @@ def _check_limit_orders(market_id):
         _LIMIT_INFLIGHT.discard(market_id)
 
 
-def _pay_dividend_now(market_id: str, pool: float, month_key: str, apply: bool) -> dict:
+def _group_net_for_month(market_id: str, month: str) -> float:
+    """The month's rolled-up net for a market's whole company — the same figure the bank
+    statement quotes, so "10% of earnings" means 10% of the number the lender was shown
+    rather than some other net computed a different way. CSN net plus each member's hive
+    ledger, across every market in the group."""
+    total = 0.0
+    try:
+        import Restocker_db as _db
+        for mm in _bank_report_members(market_id):
+            months = (_load_csn_for_market(mm) or {}).get("months", {}) or {}
+            md = months.get(month) or {}
+            if isinstance(md, dict):
+                total += float(md.get("net", 0) or 0)
+            try:
+                total += float((_db.get_hive_months(mm) or {}).get(month, 0) or 0)
+            except Exception:
+                pass
+    except Exception as e:
+        log.warning("[dividend] group net for %s %s failed: %s", market_id, month, e)
+    return total
+
+
+def _pay_dividend_now(market_id: str, pool: float, month_key: str, apply: bool,
+                      charge_treasury: bool = True) -> dict:
     """Declare a dividend by hand, instead of waiting for the month-close hook.
 
     Same money rules as the automatic path — pro-rata across HELD shares, capped by the
@@ -12533,6 +12556,14 @@ def _pay_dividend_now(market_id: str, pool: float, month_key: str, apply: bool) 
       * it previews before it moves anything
       * it stamps the month as paid, so the automatic hook cannot pay the same month
         again on top of it
+
+    charge_treasury=False pays WITHOUT debiting the treasury. The owner's reasoning is
+    that the treasury is collateral backing the share price, so spending it to pay a
+    dividend eats the very thing the shares are worth. The cost is that those coins are
+    created rather than moved. That is bounded, not unbounded: this path is only reached
+    when the pool was derived as a percentage of the month's net, so nothing can be
+    minted beyond what the company actually earned that month — and the figure is
+    written to the dividend log and every ledger row either way.
 
     Returns a dict describing what happened (or would happen); never raises.
     """
@@ -12554,7 +12585,7 @@ def _pay_dividend_now(market_id: str, pool: float, month_key: str, apply: bool) 
     if pool <= 0:
         out["note"] = "the pool has to be a positive number of coins"
         return out
-    if STOCK_TREASURY_ENABLED and pool > treasury:
+    if charge_treasury and STOCK_TREASURY_ENABLED and pool > treasury:
         # Cap rather than refuse: the owner asked to distribute, and paying what exists
         # is more useful than an error. Say so loudly in the preview.
         out["lines"].append(f"⚠️ Capped to the treasury — asked for {pool:,.0f}, "
@@ -12575,7 +12606,7 @@ def _pay_dividend_now(market_id: str, pool: float, month_key: str, apply: bool) 
         out["lines"].append(f"• …and {len(plan) - 20} more")
     if not apply:
         out["ok"] = True
-        out["treasury_after"] = treasury - pool
+        out["treasury_after"] = (treasury - pool) if charge_treasury else treasury
         return out
     if _db.dividend_paid(market_id, month_key):
         out["note"] = f"{month_key} has already had a dividend — refusing to pay it twice"
@@ -12592,11 +12623,15 @@ def _pay_dividend_now(market_id: str, pool: float, month_key: str, apply: bool) 
                 pass
         except Exception as e:
             log.warning("[dividend] credit failed for %s: %s", uid, e)
-    if STOCK_TREASURY_ENABLED and paid > 0:
+    if charge_treasury and STOCK_TREASURY_ENABLED and paid > 0:
         try:
             _db.adjust_treasury(market_id, -float(paid), allow_negative=False)
         except Exception as e:
             log.warning("[dividend] treasury deduct failed for %s: %s", market_id, e)
+    elif paid > 0:
+        log.info("[dividend] %s %s: %s paid WITHOUT debiting the treasury — these coins "
+                 "were created, bounded by the month's net. Backing left intact on "
+                 "purpose.", market_id, month_key, f"{paid:,}")
     # Claim the month so the automatic hook cannot pay it a second time.
     try:
         _db.upsert_market_shares(market_id, last_dividend_month=month_key)
@@ -13602,13 +13637,14 @@ _AI_TOOLS = [
     },
     {
         "name": "pay_dividend",
-        "description": "Pay a dividend to a listed market's shareholders NOW, by hand, instead of waiting for the month-close hook. Managers or that market's owner. PREVIEWS by default — show who gets what and the treasury before/after, then ask the user to confirm. Give either pool_coins (an exact number of coins to distribute) or pct_of_treasury. Capped by the treasury so nothing is minted; stamps the month as paid so the automatic hook cannot pay it again.",
+        "description": "Pay a dividend to a listed market's shareholders NOW, by hand, instead of waiting for the month-close hook. Managers or that market's owner. PREVIEWS by default — show who gets what and the treasury before/after, then ask the user to confirm. Give one of pct_of_earnings (% of the month's rolled-up net — the usual choice), pct_of_treasury, or pool_coins (an exact figure). Capped by the treasury so nothing is minted; stamps the month as paid so the automatic hook cannot pay it again.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "market": {"type": "string", "description": "Listed market id, e.g. greyhames."},
                 "pool_coins": {"type": "number", "description": "Exact coins to distribute across all held shares."},
                 "pct_of_treasury": {"type": "number", "description": "Alternative to pool_coins: distribute this % of the market's treasury."},
+                "pct_of_earnings": {"type": "number", "description": "Alternative: distribute this % of the MONTH'S rolled-up net for the whole company — the same figure the bank statement quotes. This is the usual one."},
                 "month": {"type": "string", "description": "Month to book it against as YYYY-MM. Defaults to the current month."},
                 "confirm": {"type": "boolean", "description": "false (default) = preview only. true = actually pay."}
             },
@@ -16404,6 +16440,25 @@ async def _ai_tool_pay_dividend(guild, channel, user, args):
             pool = float(args.get("pool_coins"))
         except Exception:
             return "❌ pool_coins must be a number."
+        basis_note = "a fixed amount"
+        charge = True
+    elif args.get("pct_of_earnings") is not None:
+        try:
+            pct = float(args.get("pct_of_earnings"))
+        except Exception:
+            return "❌ pct_of_earnings must be a number."
+        if not (0 < pct <= 100):
+            return "❌ pct_of_earnings must be between 0 and 100."
+        net = await run_on_bot_loop(_group_net_for_month, mid, month)
+        if net <= 0:
+            return (f"❌ {month} has no positive net recorded for that company yet — "
+                    f"nothing to take a share of. Use `pool_coins` if you want to pay "
+                    f"a figure anyway.")
+        pool = net * pct / 100.0
+        basis_note = f"{pct:g}% of {month} net `{net:,.0f}`"
+        # Paid from earnings, so the treasury — which is the collateral behind the share
+        # price — is deliberately left alone.
+        charge = False
     elif args.get("pct_of_treasury") is not None:
         try:
             pct = float(args.get("pct_of_treasury"))
@@ -16412,11 +16467,14 @@ async def _ai_tool_pay_dividend(guild, channel, user, args):
         if not (0 < pct <= 100):
             return "❌ pct_of_treasury must be between 0 and 100."
         pool = float(_db.get_treasury(mid) or 0.0) * pct / 100.0
+        basis_note = f"{pct:g}% of the treasury"
+        charge = True
     else:
-        return ("❌ Say how much: either `pool_coins` (exact coins) or `pct_of_treasury`.")
+        return ("❌ Say how much: `pct_of_earnings` (% of the month's net — the usual one), "
+                "`pct_of_treasury`, or `pool_coins`.")
     apply = bool(args.get("confirm"))
     try:
-        res = await run_on_bot_loop(_pay_dividend_now, mid, pool, month, apply)
+        res = await run_on_bot_loop(_pay_dividend_now, mid, pool, month, apply, charge)
     except Exception as e:
         log.warning("[dividend] manual payout failed: %s", e)
         return f"❌ Dividend failed: {e}"
@@ -16426,17 +16484,23 @@ async def _ai_tool_pay_dividend(guild, channel, user, args):
     body = "\n".join(res.get("lines") or []) or "_No holder would receive anything._"
     if not apply:
         return (f"**Preview — {label} dividend for {month}** *(nothing has moved)*\n"
+                f"Basis: {basis_note}.\n"
                 f"Pool `{res['pool']:,.0f}` 🪙 across {res['holders']} holder(s) — "
                 f"`{res['per_share']:,.4f}` per share.\n"
-                f"Treasury `{res['treasury_before']:,.0f}` → `{res['treasury_after']:,.0f}`.\n\n"
-                f"{body}\n\n"
+                + (f"Treasury `{res['treasury_before']:,.0f}` → `{res['treasury_after']:,.0f}`.\n\n"
+                   if charge else
+                   f"Treasury untouched at `{res['treasury_before']:,.0f}` — paid from "
+                   f"earnings, so the backing stays intact.\n\n")
+                + f"{body}\n\n"
                 f"Tell the user these numbers and ask them to confirm before re-running "
                 f"with confirm=true. Booking it against {month} also stops the automatic "
                 f"month-close dividend paying that month a second time.")
     return (f"**{label} dividend paid — {month}**\n"
             f"`{res['paid']:,}` 🪙 to {res['holders']} holder(s) at "
             f"`{res['per_share']:,.4f}` per share.\n"
-            f"Treasury `{res['treasury_before']:,.0f}` → `{res['treasury_after']:,.0f}`.")
+            + (f"Treasury `{res['treasury_before']:,.0f}` → `{res['treasury_after']:,.0f}`."
+               if charge else
+               f"Treasury untouched at `{res['treasury_before']:,.0f}` — paid from earnings."))
 
 
 async def _ai_tool_stock_buyback(guild, channel, user, args):
