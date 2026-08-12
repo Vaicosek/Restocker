@@ -13468,6 +13468,18 @@ _AI_TOOLS = [
         }
     },
     {
+        "name": "lands_cleanup",
+        "description": "Delete the raw LANDS FEED pipe dumps already sitting in the current channel. Managers only. PREVIEWS by default — report the count and let the user confirm before apply=true. Only touches webhook/bot messages whose text is a LANDS-BAL / LANDS-ENTRY dump; the bot's own report cards and every human message are left alone. Use to clear the backlog that accumulated while the channel was not an allowed lands-feed channel.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "confirm": {"type": "boolean", "description": "false (default) = count them only. true = delete."},
+                "limit": {"type": "integer", "description": "How many recent messages to scan (default 300, max 2000)."}
+            },
+            "required": []
+        }
+    },
+    {
         "name": "csn_cleanup",
         "description": "Delete leftover CSN webhook noise in the current channel (empty stock CSVs, {} profile files, raw uploads that were already ingested). Managers only. Previews by default.",
         "input_schema": {
@@ -15953,6 +15965,61 @@ async def _ai_tool_purge_channel(guild, channel, user, args):
             + (f" Rebound market(s): {', '.join(rebound)}." if rebound else ""))
 
 
+async def _ai_tool_lands_cleanup(guild, channel, user, args):
+    """Remove the raw LANDS FEED dumps a channel accumulated before ingest was allowed."""
+    if not _ai_is_manager(user):
+        return "❌ Only Managers can clean up the lands feed."
+    if channel is None:
+        return "❌ Can't do that here."
+    confirm = bool(args.get("confirm"))
+    try:
+        limit = max(20, min(int(args.get("limit") or 300), 2000))
+    except Exception:
+        limit = 300
+    victims = []
+    try:
+        async for msg in channel.history(limit=limit):
+            # Only machine transport: a webhook/bot message whose FIRST line announces a
+            # LANDS FEED, or a continuation chunk of one. Never a human message, and never
+            # the bot's own summary cards — those are the readable replacement.
+            if not (msg.webhook_id or (msg.author and getattr(msg.author, "bot", False))):
+                continue
+            txt = (msg.content or "").strip()
+            if not txt:
+                continue
+            head = txt.split("\n", 1)[0]
+            if "LANDS FEED" in head or head.startswith(("LANDS-BAL|", "LANDS-ENTRY|")):
+                victims.append(msg)
+    except discord.Forbidden:
+        return "❌ I can't read this channel's history."
+    except Exception as ex:
+        return f"❌ Couldn't read history: {ex}"
+    if not victims:
+        return (f"No LANDS FEED dumps in the last {limit} message(s) of "
+                f"#{getattr(channel,'name','?')}.")
+    if not confirm:
+        return (f"PREVIEW: {len(victims)} LANDS FEED dump(s) in the last {limit} message(s) of "
+                f"#{getattr(channel,'name','?')}. Report cards and human messages are not "
+                f"included. Nothing has been deleted — tell the user the count and ask them "
+                f"to confirm before re-running with confirm=true.")
+    deleted = failed = 0
+    for m in victims:
+        try:
+            await m.delete()
+            deleted += 1
+            await asyncio.sleep(0.4)      # gentle on the delete rate limit
+        except discord.Forbidden:
+            failed += 1
+            break                          # no Manage Messages — the rest will fail too
+        except Exception:
+            failed += 1
+    out = f"Deleted {deleted} LANDS FEED dump(s) in #{getattr(channel,'name','?')}."
+    if failed:
+        out += (f" {failed} could not be removed — I need Manage Messages here, and Discord "
+                f"refuses to bulk-delete anything older than 14 days.")
+    return out
+
+
 async def _ai_tool_csn_cleanup(guild, channel, user, args):
     if not _ai_is_manager(user):
         return "❌ Only Managers can clean up CSN noise."
@@ -17116,6 +17183,7 @@ _AI_TOOL_MAP = {
     "get_investor_status":  _ai_tool_get_investor_status,
     "set_lands_feed_channel": _ai_tool_set_lands_feed_channel,
     "set_csn_error_channel": _ai_tool_set_csn_error_channel,
+    "lands_cleanup":        _ai_tool_lands_cleanup,
     "log_manual_restock":   _ai_tool_log_manual_restock,
     "get_channel_config":   _ai_tool_get_channel_config,
     "set_channel_config":   _ai_tool_set_channel_config,
@@ -17153,7 +17221,7 @@ _AI_SENSITIVE_TOOLS = {
     "delete_messages", "create_role", "setup_market_owner", "send_dm", "dm_role",
     "send_channel_message", "ping_user", "propose_code_change", "set_item_price",
     "run_hive_payout", "rebuild_market_channel", "rebuild_hive_channel",
-    "purge_channel", "csn_cleanup", "fix_month_close", "admin_wipe", "set_channel_config", "set_hive_autopay", "set_team_feed", "set_lands_feed_channel", "set_csn_error_channel", "stock_buyback", "stock_dividends",
+    "purge_channel", "csn_cleanup", "lands_cleanup", "fix_month_close", "admin_wipe", "set_channel_config", "set_hive_autopay", "set_team_feed", "set_lands_feed_channel", "set_csn_error_channel", "stock_buyback", "stock_dividends",
     "liquidate_holdings",   # force-sells someone else's shares and can move the coins
     "settle_unlinked_harvests",   # clears a real wage debt off the books
     "create_restock_orders", "log_manual_restock",
