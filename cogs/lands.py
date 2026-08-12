@@ -170,6 +170,7 @@ class LandsCog(commands.Cog):
         touched = set()
         balances = {}
         new_entries = 0
+        _unknown = 0
         batch = {}          # land → kind → [count, signed_total] for THIS ingest's new rows
         for line in content.split("\n"):
             line = line.strip()
@@ -183,6 +184,16 @@ class LandsCog(commands.Cog):
             if me:
                 land, no, ts, body = (me.group(1).strip(), int(me.group(2)),
                                       me.group(3).strip(), me.group(4).strip())
+                # The mod attributes inbox entries to the last land screen title it saw.
+                # Rename a claim in-game and it loses the thread, emitting the whole inbox
+                # as land "unknown" — seen when ErunDaNogaak became GunMart. Storing those
+                # would create a phantom land that maps to no market, and its entries would
+                # be absent from the real land's balance chain, which is what the teleport
+                # fee inference walks. Drop them; the next sweep re-sends them correctly
+                # attributed, and nothing is lost because the mod resends its whole inbox.
+                if land.lower() in ("unknown", "", "?"):
+                    _unknown += 1
+                    continue
                 kind, amt = _classify(body)
                 nb_m = _NEWBAL_RX.search(body)
                 nb = _money(nb_m.group(1)) if nb_m else None
@@ -192,6 +203,25 @@ class LandsCog(commands.Cog):
                     b[0] += 1
                     b[1] += amt
                 touched.add(land)
+        if _unknown:
+            log.warning("[lands] skipped %d entrie(s) with an unattributable land name — "
+                        "the claim was probably renamed in game, so the mod could not tell "
+                        "which land they belong to. They will be re-sent next sweep.",
+                        _unknown)
+            try:
+                await core.report_csn_setup_problem(
+                    "Land entries arrived without a claim name",
+                    channel=message.channel,
+                    detail=(f"{_unknown} ledger entrie(s) came through as land `unknown`. "
+                            f"This happens right after a claim is renamed in game — the mod "
+                            f"attributes entries to the last land screen it saw and loses "
+                            f"track. They were NOT stored, to keep them out of the balance "
+                            f"chain that infers teleport fees."),
+                    fix=("Usually self-healing: the next sweep re-sends the whole inbox with "
+                         "the new name. If it keeps happening, reopen the land inbox in game "
+                         "so the mod sees the title again."))
+            except Exception:
+                pass
         if not touched:
             return
 
