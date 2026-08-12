@@ -314,6 +314,19 @@ def build_harvester_statements() -> dict:
             msg += f"\n**{_fmt(owed)}** is still to come — it pays out automatically."
         else:
             msg += "\nYou're fully paid up. Thanks for keeping the hives running."
+        # SAY WHAT THEY CAN ACTUALLY WITHDRAW. Everything above is lifetime earnings, and
+        # a harvester who read "15,476 earned, 15,476 already paid to you" reasonably tried
+        # to withdraw 15,476 — and was told they had 3,598, because they had already
+        # withdrawn the rest weeks earlier. Both numbers were right; the statement just
+        # never mentioned the one that governs a withdrawal.
+        try:
+            import Restocker_db as _dbb
+            _bal = float((_dbb.get_balance(str(uid)) or {}).get("coins", 0) or 0)
+            msg += (f"\n\n💰 Your balance right now is **{_fmt(_bal)}** coins — that is what "
+                    f"you can withdraw. It is lower than the total above once you have "
+                    f"withdrawn before.")
+        except Exception as _be:
+            log.debug("[hive report] balance line skipped for %s: %s", uid, _be)
         out[str(uid)] = msg
     return out
 

@@ -2269,10 +2269,25 @@ def add_coins(uid: int, amount: int, *, counts_as_principal: bool = True, reason
         if amt == 0:
             cur = _db.get_balance(str(uid))
             return int(cur.get("coins") or 0), int(cur.get("principal") or 0)
+        # NEVER write an unlabelled ledger row. `reason` defaults to "", so any caller that
+        # forgets it silently produces money movement nobody can explain later: 31 such rows
+        # exist, 15 of them withdrawals totalling 855,605 coins, and a harvester asking
+        # "where did my 11,886 go" could not be answered from the ledger alone. When the
+        # caller says nothing, record WHERE the call came from — an imperfect label beats
+        # an empty one, and it names the code path that needs fixing.
+        _why = str(reason or "").strip()
+        if not _why:
+            try:
+                import sys as _sys, os as _os
+                _f = _sys._getframe(1)
+                _why = (f"unlabelled: {_os.path.basename(_f.f_code.co_filename)}"
+                        f":{_f.f_lineno} {_f.f_code.co_name}")
+            except Exception:
+                _why = "unlabelled"
         # Atomic single-transaction delta — no read-modify-write race.
         coins, principal, applied = _db.adjust_balance(
             uid, amt, counts_as_principal=counts_as_principal)
-        _db.record_coin_ledger(str(uid), applied, coins, reason)
+        _db.record_coin_ledger(str(uid), applied, coins, _why)
         return coins, principal
     except Exception as e:
         log.warning("[add_coins] single-row path failed, using whole-table: %s", e)
