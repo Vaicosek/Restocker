@@ -581,7 +581,20 @@ def _load_liabilities_data() -> dict:
                                (mid,)).fetchall()]
                 held_owner = sum(h["shares"] for h in holders if h["is_owner"])
                 held_other = sum(h["shares"] for h in holders if not h["is_owner"])
+                # Show the COMPANY the stock represents, not the shop it is listed on.
+                # greyhames carries the V Tech listing (stock_label:greyhames = "V Tech"),
+                # and a page about what V Tech owes should say V Tech.
                 nm = str((mkts.get(mid) or {}).get("name") or mid)
+                try:
+                    nm = core._market_stock_label(mid) or nm
+                except Exception:
+                    pass
+                # A share register with nobody in it says nothing about what the company
+                # owes — Amazonia is listed with 1,000 shares and a 5,000,000 treasury but
+                # no holders, so every column would read zero. Skip it rather than print a
+                # row that only invites the question again.
+                if not holders:
+                    continue
                 out["markets"].append({
                     "market_id": mid, "name": nm, "issued": issued,
                     "price": float(m[2] or 0), "treasury": float(m[3] or 0),
@@ -2033,8 +2046,6 @@ document.getElementById('tbHold').innerHTML=(L.markets||[]).flatMap(m=>{
  const rows=(m.holders||[]).map(h=>'<tr class="'+(h.is_owner?'self':'')+'"><td class="l">'+esc(m.name)+
   '</td><td class="l">'+who(h)+(h.is_owner?'<span class="tag">in-house</span>':'')+
   '</td><td>'+f2(h.shares)+'</td><td>'+(m.issued?f2(100*h.shares/m.issued):'0.00')+'%</td></tr>');
- if(!rows.length)rows.push('<tr><td class="l">'+esc(m.name)+
-  '</td><td class="l bad" colspan="3">no holders recorded — a dividend here pays nobody</td></tr>');
  return rows;}).join('');
 
 function renderDiv(){
