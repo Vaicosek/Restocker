@@ -2001,7 +2001,7 @@ __NAV__
   <div class="slider"><span class="s">Rate</span>
     <input type="range" id="rate" min="0" max="100" step="1" value="10">
     <b class="mono" id="rateV">10%</b></div>
-  <table class="inv"><thead><tr><th class="l">Market</th><th>Pool</th><th>Per share</th>
+  <table class="inv"><thead><tr><th class="l">Market</th><th>Pool</th><th>Per held share</th>
   <th>To outside holders</th><th>Back in-house</th><th>Treasury after</th></tr></thead>
   <tbody id="tbDiv"></tbody></table>
 </div>
@@ -2055,7 +2055,12 @@ function renderDiv(){
   // Base the pool on the treasury, which is the money that actually exists here —
   // the page has no monthly-net figure of its own and inventing one would mislead.
   const pool=Math.min(m.treasury*pct/100, m.treasury);
-  const per=m.issued?pool/m.issued:0;
+  // Divide by HELD shares, not issued. _payout_share_dividends sums the holders'
+  // shares, so shares that were never issued absorb nothing and the whole pool
+  // reaches real people. Dividing by issued understated per-share and invented an
+  // "unissued" slice that never actually happens.
+  const held=(m.held_owner||0)+(m.held_other||0);
+  const per=held?pool/held:0;
   const out=per*m.held_other, inh=per*m.held_owner;
   return '<tr><td class="l">'+esc(m.name)+'</td><td>'+fmt(pool)+'</td><td>'+f2(per)+
    '</td><td class="warn">'+fmt(out)+'</td><td class="faint">'+fmt(inh)+

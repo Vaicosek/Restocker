@@ -12523,6 +12523,94 @@ def _check_limit_orders(market_id):
         _LIMIT_INFLIGHT.discard(market_id)
 
 
+def _pay_dividend_now(market_id: str, pool: float, month_key: str, apply: bool) -> dict:
+    """Declare a dividend by hand, instead of waiting for the month-close hook.
+
+    Same money rules as the automatic path — pro-rata across HELD shares, capped by the
+    treasury so nothing is minted, deducted from the treasury, and written to the
+    dividend log. The differences are deliberate:
+      * the pool is a number the owner chooses, not a slice of a computed monthly net
+      * it previews before it moves anything
+      * it stamps the month as paid, so the automatic hook cannot pay the same month
+        again on top of it
+
+    Returns a dict describing what happened (or would happen); never raises.
+    """
+    import Restocker_db as _db
+    out = {"ok": False, "note": "", "lines": [], "pool": 0.0, "per_share": 0.0,
+           "holders": 0, "treasury_before": 0.0, "treasury_after": 0.0, "paid": 0}
+    listing = _db.get_market_shares(market_id)
+    if not listing or not listing.get("active"):
+        out["note"] = "that market is not listed on the exchange"
+        return out
+    holders = _db.get_holders(market_id) or []
+    total_shares = sum(float(h.get("shares") or 0) for h in holders)
+    if total_shares <= 0:
+        out["note"] = "nobody holds shares in it — a dividend would pay no one"
+        return out
+    treasury = float(_db.get_treasury(market_id) or 0.0)
+    out["treasury_before"] = treasury
+    pool = float(pool or 0)
+    if pool <= 0:
+        out["note"] = "the pool has to be a positive number of coins"
+        return out
+    if STOCK_TREASURY_ENABLED and pool > treasury:
+        # Cap rather than refuse: the owner asked to distribute, and paying what exists
+        # is more useful than an error. Say so loudly in the preview.
+        out["lines"].append(f"⚠️ Capped to the treasury — asked for {pool:,.0f}, "
+                            f"it holds {treasury:,.0f}.")
+        pool = treasury
+    per_share = pool / total_shares
+    out.update({"pool": pool, "per_share": per_share, "holders": len(holders)})
+    plan = []
+    for h in holders:
+        sh = float(h.get("shares") or 0)
+        amt = int(round(per_share * sh))
+        if amt > 0:
+            plan.append((str(h["user_id"]), sh, amt))
+    plan.sort(key=lambda x: -x[2])
+    for uid, sh, amt in plan[:20]:
+        out["lines"].append(f"• <@{uid}> — {sh:,.2f} shares → `{amt:,}` 🪙")
+    if len(plan) > 20:
+        out["lines"].append(f"• …and {len(plan) - 20} more")
+    if not apply:
+        out["ok"] = True
+        out["treasury_after"] = treasury - pool
+        return out
+    if _db.dividend_paid(market_id, month_key):
+        out["note"] = f"{month_key} has already had a dividend — refusing to pay it twice"
+        return out
+    paid = 0
+    for uid, _sh, amt in plan:
+        try:
+            add_coins(int(uid), amt, counts_as_principal=True,
+                      reason=f"dividend {market_id} {month_key} (manual)")
+            paid += amt
+            try:
+                _drip_reinvest(uid, amt, market_id)   # opt-in: dividend → more shares
+            except Exception:
+                pass
+        except Exception as e:
+            log.warning("[dividend] credit failed for %s: %s", uid, e)
+    if STOCK_TREASURY_ENABLED and paid > 0:
+        try:
+            _db.adjust_treasury(market_id, -float(paid), allow_negative=False)
+        except Exception as e:
+            log.warning("[dividend] treasury deduct failed for %s: %s", market_id, e)
+    # Claim the month so the automatic hook cannot pay it a second time.
+    try:
+        _db.upsert_market_shares(market_id, last_dividend_month=month_key)
+        _db.log_dividend(market_id, month_key, paid, per_share, len(plan))
+    except Exception as e:
+        log.warning("[dividend] logging failed for %s: %s", market_id, e)
+    out["ok"] = True
+    out["paid"] = paid
+    out["treasury_after"] = float(_db.get_treasury(market_id) or 0.0)
+    log.info("[dividend] MANUAL %s %s: %s paid to %d holder(s) at %.4f/share",
+             market_id, month_key, f"{paid:,}", len(plan), per_share)
+    return out
+
+
 def _payout_share_dividends(market_id, month_key, net_profit):
     """Pay a slice of a month's net profit to current shareholders pro-rata.
     Rate is the per-market dividend_pct override or the global STOCK_DIVIDEND_PCT.
@@ -13510,6 +13598,21 @@ _AI_TOOLS = [
                 "shares": {"type": "integer", "description": "How many unissued shares to retire."}
             },
             "required": ["market", "shares"]
+        }
+    },
+    {
+        "name": "pay_dividend",
+        "description": "Pay a dividend to a listed market's shareholders NOW, by hand, instead of waiting for the month-close hook. Managers or that market's owner. PREVIEWS by default — show who gets what and the treasury before/after, then ask the user to confirm. Give either pool_coins (an exact number of coins to distribute) or pct_of_treasury. Capped by the treasury so nothing is minted; stamps the month as paid so the automatic hook cannot pay it again.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "market": {"type": "string", "description": "Listed market id, e.g. greyhames."},
+                "pool_coins": {"type": "number", "description": "Exact coins to distribute across all held shares."},
+                "pct_of_treasury": {"type": "number", "description": "Alternative to pool_coins: distribute this % of the market's treasury."},
+                "month": {"type": "string", "description": "Month to book it against as YYYY-MM. Defaults to the current month."},
+                "confirm": {"type": "boolean", "description": "false (default) = preview only. true = actually pay."}
+            },
+            "required": ["market"]
         }
     },
     {
@@ -16279,6 +16382,63 @@ async def _ai_tool_liquidate_holdings(guild, channel, user, args):
     return head + body + tail
 
 
+async def _ai_tool_pay_dividend(guild, channel, user, args):
+    import Restocker_db as _db
+    mid = str(args.get("market") or "").strip()
+    if not mid:
+        return "❌ Which market? Give its id, e.g. `greyhames`."
+    listing = _db.get_market_shares(mid)
+    if not listing:
+        return f"❌ `{mid}` is not listed on the exchange."
+    owner = str((_get_market(mid) or {}).get("owner_id") or "")
+    if not (_ai_is_manager(user) or str(getattr(user, "id", "")) == owner):
+        return "❌ Only a manager or that market's owner can pay its dividend."
+    from datetime import datetime as _dt, timezone as _tz
+    month = str(args.get("month") or "").strip() or _dt.now(_tz.utc).strftime("%Y-%m")
+    import re as _re
+    if not _re.fullmatch(r"\d{4}-\d{2}", month):
+        return "❌ month must look like `2026-08`."
+    pool = 0.0
+    if args.get("pool_coins") is not None:
+        try:
+            pool = float(args.get("pool_coins"))
+        except Exception:
+            return "❌ pool_coins must be a number."
+    elif args.get("pct_of_treasury") is not None:
+        try:
+            pct = float(args.get("pct_of_treasury"))
+        except Exception:
+            return "❌ pct_of_treasury must be a number."
+        if not (0 < pct <= 100):
+            return "❌ pct_of_treasury must be between 0 and 100."
+        pool = float(_db.get_treasury(mid) or 0.0) * pct / 100.0
+    else:
+        return ("❌ Say how much: either `pool_coins` (exact coins) or `pct_of_treasury`.")
+    apply = bool(args.get("confirm"))
+    try:
+        res = await run_on_bot_loop(_pay_dividend_now, mid, pool, month, apply)
+    except Exception as e:
+        log.warning("[dividend] manual payout failed: %s", e)
+        return f"❌ Dividend failed: {e}"
+    if not res.get("ok"):
+        return f"❌ Can't pay that dividend — {res.get('note') or 'unknown reason'}."
+    label = _market_stock_label(mid)
+    body = "\n".join(res.get("lines") or []) or "_No holder would receive anything._"
+    if not apply:
+        return (f"**Preview — {label} dividend for {month}** *(nothing has moved)*\n"
+                f"Pool `{res['pool']:,.0f}` 🪙 across {res['holders']} holder(s) — "
+                f"`{res['per_share']:,.4f}` per share.\n"
+                f"Treasury `{res['treasury_before']:,.0f}` → `{res['treasury_after']:,.0f}`.\n\n"
+                f"{body}\n\n"
+                f"Tell the user these numbers and ask them to confirm before re-running "
+                f"with confirm=true. Booking it against {month} also stops the automatic "
+                f"month-close dividend paying that month a second time.")
+    return (f"**{label} dividend paid — {month}**\n"
+            f"`{res['paid']:,}` 🪙 to {res['holders']} holder(s) at "
+            f"`{res['per_share']:,.4f}` per share.\n"
+            f"Treasury `{res['treasury_before']:,.0f}` → `{res['treasury_after']:,.0f}`.")
+
+
 async def _ai_tool_stock_buyback(guild, channel, user, args):
     if not _ai_is_manager(user):
         return "❌ Managers only."
@@ -17184,6 +17344,7 @@ _AI_TOOL_MAP = {
     "set_lands_feed_channel": _ai_tool_set_lands_feed_channel,
     "set_csn_error_channel": _ai_tool_set_csn_error_channel,
     "lands_cleanup":        _ai_tool_lands_cleanup,
+    "pay_dividend":         _ai_tool_pay_dividend,
     "log_manual_restock":   _ai_tool_log_manual_restock,
     "get_channel_config":   _ai_tool_get_channel_config,
     "set_channel_config":   _ai_tool_set_channel_config,
@@ -17221,7 +17382,7 @@ _AI_SENSITIVE_TOOLS = {
     "delete_messages", "create_role", "setup_market_owner", "send_dm", "dm_role",
     "send_channel_message", "ping_user", "propose_code_change", "set_item_price",
     "run_hive_payout", "rebuild_market_channel", "rebuild_hive_channel",
-    "purge_channel", "csn_cleanup", "lands_cleanup", "fix_month_close", "admin_wipe", "set_channel_config", "set_hive_autopay", "set_team_feed", "set_lands_feed_channel", "set_csn_error_channel", "stock_buyback", "stock_dividends",
+    "purge_channel", "csn_cleanup", "lands_cleanup", "fix_month_close", "admin_wipe", "set_channel_config", "set_hive_autopay", "set_team_feed", "set_lands_feed_channel", "set_csn_error_channel", "stock_buyback", "stock_dividends", "pay_dividend",
     "liquidate_holdings",   # force-sells someone else's shares and can move the coins
     "settle_unlinked_harvests",   # clears a real wage debt off the books
     "create_restock_orders", "log_manual_restock",
