@@ -493,6 +493,111 @@ def _load_earnings_full() -> dict:
     return {"markets": out}
 
 
+def _load_liabilities_data() -> dict:
+    """What the company owes, and to whom.
+
+    Three obligations that behave differently and were previously only visible by
+    reading the database by hand:
+      * coin balances — withdrawable on demand, so the hardest of the three
+      * unpaid hive wages — earned but not yet credited; some cannot be paid at all
+        because the harvester has no linked Discord account
+      * the shareholder register — not a debt, but it decides who a dividend pays
+
+    The owner's own balance and shares are reported separately: money you owe
+    yourself is not a liability, and mixing it in made the total meaningless.
+    """
+    out = {"owner_id": "", "coins": [], "coins_total_others": 0.0, "coins_owner": 0.0,
+           "wages": [], "wages_total": 0.0, "wages_unpayable": 0.0,
+           "markets": [], "generated": ""}
+    try:
+        import Restocker_db as db
+        import Restocker_main as core
+    except Exception as e:
+        print(f"[liabilities] unavailable: {e}")
+        return out
+    try:
+        mkts = {}
+        try:
+            mkts = (db.get_markets() or {}).get("markets", {}) or {}
+        except Exception:
+            pass
+        owner = str((mkts.get("greyhames") or {}).get("owner_id") or "")
+        out["owner_id"] = owner
+
+        # One query for every linked IGN — a per-user lookup inside the loops below
+        # would be one round trip per row on a page that already reads three tables.
+        names = {}
+        try:
+            with db.db() as _c:
+                for _i, _u in _c.execute("SELECT ign, user_id FROM ign_registry").fetchall():
+                    names.setdefault(str(_u), []).append(str(_i))
+        except Exception:
+            pass
+
+        try:
+            harv_pct = float(core._hive_harvester_pct())
+        except Exception:
+            harv_pct = 15.0
+
+        with db.db() as conn:
+            for r in conn.execute("SELECT user_id, coins, principal FROM balances "
+                                  "WHERE coins > 0 ORDER BY coins DESC").fetchall():
+                uid = str(r[0]); amt = float(r[1] or 0)
+                row = {"user_id": uid, "coins": amt, "principal": float(r[2] or 0),
+                       "igns": names.get(uid, []), "is_owner": uid == owner}
+                out["coins"].append(row)
+                if row["is_owner"]:
+                    out["coins_owner"] += amt
+                else:
+                    out["coins_total_others"] += amt
+
+            for r in conn.execute(
+                    "SELECT ign, user_id, SUM(qty) q, "
+                    "       SUM(qty * COALESCE(NULLIF(wage_value,0), unit_value)) basis "
+                    "FROM hive_harvests WHERE paid = 0 GROUP BY ign, user_id "
+                    "ORDER BY basis DESC").fetchall():
+                basis = float(r[3] or 0)
+                # The harvester cut is a percentage of the wage basis, not of shop value.
+                owed = basis * harv_pct / 100.0
+                linked = bool(r[1])
+                out["wages"].append({"ign": str(r[0] or ""), "user_id": str(r[1] or ""),
+                                     "qty": int(r[2] or 0), "basis": basis,
+                                     "owed": owed, "linked": linked})
+                out["wages_total"] += owed
+                if not linked:
+                    out["wages_unpayable"] += owed
+
+            for m in conn.execute("SELECT market_id, shares_outstanding, share_price, "
+                                  "treasury_coins, dividend_pct FROM market_shares "
+                                  "WHERE active = 1").fetchall():
+                mid = str(m[0])
+                issued = float(m[1] or 0)
+                holders = [{"user_id": str(h[0]), "shares": float(h[1] or 0),
+                            "igns": names.get(str(h[0]), []),
+                            "is_owner": str(h[0]) == owner}
+                           for h in conn.execute(
+                               "SELECT user_id, shares FROM stock_holdings "
+                               "WHERE market_id = ? AND shares > 0 ORDER BY shares DESC",
+                               (mid,)).fetchall()]
+                held_owner = sum(h["shares"] for h in holders if h["is_owner"])
+                held_other = sum(h["shares"] for h in holders if not h["is_owner"])
+                nm = str((mkts.get(mid) or {}).get("name") or mid)
+                out["markets"].append({
+                    "market_id": mid, "name": nm, "issued": issued,
+                    "price": float(m[2] or 0), "treasury": float(m[3] or 0),
+                    "dividend_pct": (None if m[4] is None else float(m[4])),
+                    "holders": holders, "held_owner": held_owner,
+                    "held_other": held_other,
+                    "unissued": max(0.0, issued - held_owner - held_other)})
+    except Exception as e:
+        print(f"[liabilities] build failed: {e}")
+    try:
+        out["generated"] = core.utcnow_iso()
+    except Exception:
+        pass
+    return out
+
+
 def _load_stock_data() -> dict:
     """Live stock-exchange snapshot from the DB: every public market with its
     price, market cap, recent price history, change since the prior tick, and
@@ -1445,6 +1550,7 @@ _TERMINAL_NAV = r"""
     <a href="/orders" data-nav="orders">Orders</a>
     <a href="/teams" data-nav="teams">Teams</a>
     <a href="/investor" data-nav="investor">Investor</a>
+    <a href="/liabilities" data-nav="liabilities">Liabilities</a>
     <a href="/mymarket" data-nav="mymarket">My Market</a>
   </nav>
   <div class="rt"><div class="bp"><b class="mono" id="hWho">—</b><br><span id="hWhoSub">not linked</span></div>
@@ -1825,6 +1931,143 @@ async function boot(){
 boot();
 setInterval(boot,60000);
 </script></body></html>"""
+
+
+
+# ── /liabilities — what the company owes, and what a dividend would cost ─────
+_LIAB_HTML = r"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Liabilities · Abexilas</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<style>
+__TERMINAL_CSS__
+.statrow{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--seam)}
+.stat{background:var(--panel);padding:9px 12px;border-bottom:1px solid var(--line)}
+.stat .k{font-size:9.5px;letter-spacing:.5px;text-transform:uppercase;color:var(--faint);font-weight:600}
+.stat .v{font-family:var(--mono);font-size:16px;font-weight:600;margin-top:3px;font-variant-numeric:tabular-nums}
+table.inv{width:100%;border-collapse:collapse}
+table.inv th{text-align:right;padding:0 12px;height:28px;font-size:10px;letter-spacing:.5px;
+text-transform:uppercase;color:var(--faint);border-bottom:1px solid var(--line2);font-weight:600;white-space:nowrap}
+table.inv th.l,table.inv td.l{text-align:left}
+table.inv td{padding:0 12px;height:28px;border-bottom:1px solid var(--row);font-size:12px;white-space:nowrap;
+text-align:right;font-family:var(--mono);font-variant-numeric:tabular-nums}
+table.inv td.l{font-family:var(--sans)}
+table.inv tr:hover td{background:var(--hover)}
+table.inv tr.self td{color:var(--faint)}
+table.inv tr.tot td{border-top:1px solid var(--line2);font-weight:700}
+.ph{padding:9px 12px;border-bottom:1px solid var(--line2);display:flex;align-items:baseline;gap:10px}
+.ph .t{font-size:11px;letter-spacing:.6px;text-transform:uppercase;font-weight:700}
+.ph .s{font-size:11px;color:var(--faint)}
+.warn{color:#e8a33d}.bad{color:#e05c5c}
+.note{padding:9px 12px;font-size:11px;color:var(--muted);border-bottom:1px solid var(--line)}
+.slider{display:flex;align-items:center;gap:10px;padding:9px 12px}
+.slider input{flex:1}
+.tag{display:inline-block;padding:0 6px;border:1px solid var(--line2);color:var(--faint);font-size:10px;margin-left:6px}
+</style></head><body>
+__NAV__
+<div class="content">
+<div class="statrow" id="stats"></div>
+
+<div class="panel" style="border-top:0">
+  <div class="ph"><span class="t">Coin balances</span><span class="s">withdrawable on demand</span></div>
+  <table class="inv"><thead><tr><th class="l">Holder</th><th>Coins</th><th>Principal</th></tr></thead>
+  <tbody id="tbCoins"></tbody></table>
+</div>
+
+<div class="panel">
+  <div class="ph"><span class="t">Unpaid hive wages</span><span class="s" id="wagesub"></span></div>
+  <table class="inv"><thead><tr><th class="l">Harvester</th><th class="l">Linked</th><th>Pieces</th>
+  <th>Wage basis</th><th>Owed</th></tr></thead><tbody id="tbWages"></tbody></table>
+</div>
+
+<div class="panel" id="divPanel">
+  <div class="ph"><span class="t">If you pay a dividend</span><span class="s" id="divsub"></span></div>
+  <div class="note">Paid pro-rata across every issued share and capped by the market's treasury —
+  dividends are never minted. Because most shares are held in-house, the real outflow is only
+  the slice going to outside holders.</div>
+  <div class="slider"><span class="s">Rate</span>
+    <input type="range" id="rate" min="0" max="100" step="1" value="10">
+    <b class="mono" id="rateV">10%</b></div>
+  <table class="inv"><thead><tr><th class="l">Market</th><th>Pool</th><th>Per share</th>
+  <th>To outside holders</th><th>Back in-house</th><th>Treasury after</th></tr></thead>
+  <tbody id="tbDiv"></tbody></table>
+</div>
+
+<div class="panel">
+  <div class="ph"><span class="t">Shareholder register</span><span class="s">who a dividend pays</span></div>
+  <table class="inv"><thead><tr><th class="l">Market</th><th class="l">Holder</th><th>Shares</th>
+  <th>% of issued</th></tr></thead><tbody id="tbHold"></tbody></table>
+</div>
+</div>
+<script>
+const L=__LIAB_JSON__;
+const fmt=n=>Math.round(n||0).toLocaleString('en-US').replace(/,/g,' ');
+const f2=n=>(n||0).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+const esc=s=>String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;');
+const who=r=>{const n=(r.igns||[]).join(', ');return n?esc(n):'<span class="faint mono">'+esc(r.user_id)+'</span>';};
+
+const totalOwed=(L.coins_total_others||0)+(L.wages_total||0);
+document.getElementById('stats').innerHTML=[
+ ['Owed to others',fmt(L.coins_total_others)],
+ ['Unpaid wages',fmt(L.wages_total)],
+ ['Total liability',fmt(totalOwed)],
+ ['Held in-house',fmt(L.coins_owner)]
+].map(s=>'<div class="stat"><div class="k">'+s[0]+'</div><div class="v">'+s[1]+'</div></div>').join('');
+
+document.getElementById('tbCoins').innerHTML=(L.coins||[]).map(r=>
+ '<tr class="'+(r.is_owner?'self':'')+'"><td class="l">'+who(r)+(r.is_owner?'<span class="tag">in-house</span>':'')+
+ '</td><td>'+fmt(r.coins)+'</td><td class="faint">'+fmt(r.principal)+'</td></tr>').join('')
+ +'<tr class="tot"><td class="l">Owed to others</td><td>'+fmt(L.coins_total_others)+'</td><td></td></tr>';
+
+document.getElementById('wagesub').textContent=(L.wages_unpayable>0)
+ ? fmt(L.wages_unpayable)+' of it cannot be paid — harvester not linked' : 'earned, not yet credited';
+document.getElementById('tbWages').innerHTML=((L.wages||[]).length?(L.wages||[]).map(r=>
+ '<tr><td class="l">'+esc(r.ign)+'</td><td class="l">'+(r.linked
+   ? '<span class="faint mono">'+esc(r.user_id)+'</span>'
+   : '<span class="bad">not linked — cannot be paid</span>')+
+ '</td><td>'+fmt(r.qty)+'</td><td>'+fmt(r.basis)+'</td><td>'+fmt(r.owed)+'</td></tr>').join('')
+ :'<tr><td class="l faint" colspan="5">Nothing outstanding.</td></tr>')
+ +'<tr class="tot"><td class="l" colspan="4">Total</td><td>'+fmt(L.wages_total)+'</td></tr>';
+
+document.getElementById('tbHold').innerHTML=(L.markets||[]).flatMap(m=>{
+ const rows=(m.holders||[]).map(h=>'<tr class="'+(h.is_owner?'self':'')+'"><td class="l">'+esc(m.name)+
+  '</td><td class="l">'+who(h)+(h.is_owner?'<span class="tag">in-house</span>':'')+
+  '</td><td>'+f2(h.shares)+'</td><td>'+(m.issued?f2(100*h.shares/m.issued):'0.00')+'%</td></tr>');
+ if(!rows.length)rows.push('<tr><td class="l">'+esc(m.name)+
+  '</td><td class="l bad" colspan="3">no holders recorded — a dividend here pays nobody</td></tr>');
+ return rows;}).join('');
+
+function renderDiv(){
+ const pct=+document.getElementById('rate').value;
+ document.getElementById('rateV').textContent=pct+'%';
+ document.getElementById('tbDiv').innerHTML=(L.markets||[]).map(m=>{
+  // Base the pool on the treasury, which is the money that actually exists here —
+  // the page has no monthly-net figure of its own and inventing one would mislead.
+  const pool=Math.min(m.treasury*pct/100, m.treasury);
+  const per=m.issued?pool/m.issued:0;
+  const out=per*m.held_other, inh=per*m.held_owner;
+  return '<tr><td class="l">'+esc(m.name)+'</td><td>'+fmt(pool)+'</td><td>'+f2(per)+
+   '</td><td class="warn">'+fmt(out)+'</td><td class="faint">'+fmt(inh)+
+   '</td><td>'+fmt(m.treasury-pool)+'</td></tr>';}).join('');}
+document.getElementById('rate').addEventListener('input',renderDiv);
+renderDiv();
+document.getElementById('divsub').textContent='% of treasury';
+</script></body></html>"""
+
+
+async def _handle_liabilities_page(request):
+    data = _cached("liabilities", _load_liabilities_data)
+    html = (_LIAB_HTML
+            .replace("__TERMINAL_CSS__", _TERMINAL_CSS)
+            .replace("__NAV__", _TERMINAL_NAV)
+            .replace("__LIAB_JSON__", _jscript(data)))
+    return web.Response(text=html, content_type="text/html")
+
+
+async def _handle_api_liabilities(request):
+    return web.Response(
+        text=json.dumps(_cached("liabilities", _load_liabilities_data), ensure_ascii=False),
+        content_type="application/json")
 
 
 async def _handle_investor_page(request):
@@ -4359,6 +4602,8 @@ async def start_webserver(port: int = 8080):
     app.router.add_post("/api/logout",   _handle_api_logout)
     app.router.add_get("/api/owner/inventory",   _handle_owner_inventory)
     app.router.add_post("/api/owner/remove_item", _handle_owner_remove_item)
+    app.router.add_get("/liabilities",       _handle_liabilities_page)
+    app.router.add_get("/api/liabilities",   _handle_api_liabilities)
     app.router.add_get("/investor",          _handle_investor_page)
     app.router.add_get("/api/investor",      _handle_api_investor)
     app.router.add_post("/api/vote",         _handle_api_vote)
