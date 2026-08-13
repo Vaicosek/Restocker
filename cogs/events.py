@@ -309,6 +309,16 @@ class EventsCog(commands.Cog):
                     try:
                         _per = str(_dbw.get_config(f"csn_allowed_posters:{_mid}") or "")
                         if str(_poster_id) in {x.strip() for x in _per.split(",") if x.strip()}:
+                            # Vouched, so the upload is fine — but if the file's code is
+                            # wrong it will keep being wrong, and the day this webhook is
+                            # rotated the shop goes silent. Tell them now, once a day.
+                            if _code and not core._verify_market_code(_mid, _code):
+                                try:
+                                    await core.dm_owner_correct_code(
+                                        _mid, message.channel,
+                                        why=f"the file says `{_code}`")
+                                except Exception:
+                                    pass
                             return True
                     except Exception:
                         pass
@@ -320,6 +330,59 @@ class EventsCog(commands.Cog):
                             _dbw.set_config(f"csn_allowed_posters:{_mid}", ",".join(sorted(_ids)))
                             log.info("[csn] poster %s vouched for market %s (valid code).",
                                      _poster_id, _mid)
+                        except Exception:
+                            pass
+                        return True
+                # TRUST ON FIRST USE. A market with no vouched poster yet has nothing to
+                # protect: the FIRST webhook to file for it claims it, is recorded
+                # permanently, and every later upload must come from that same webhook.
+                # Rejecting instead is what silenced Amazonia for three weeks — its code
+                # had drifted, so real earnings were thrown away every 30 minutes while
+                # the owner saw a successful scan in game.
+                #
+                # The window this opens is one post, for a market nobody has ever filed
+                # for. After that the market is claimed and a second webhook is refused
+                # exactly as before. Every claim is announced in the errors channel with
+                # the market and the webhook id, so a wrong one is visible and can be
+                # revoked. Set csn_trust_first_webhook=0 to go back to refusing.
+                if _mid and str(_dbw.get_config("csn_trust_first_webhook") or "1") != "0":
+                    try:
+                        _existing = str(_dbw.get_config(f"csn_allowed_posters:{_mid}") or "").strip()
+                    except Exception:
+                        _existing = ""
+                    _known = bool(_existing) or bool(core._get_market(_mid) is None)
+                    if not _existing and core._get_market(_mid) is not None:
+                        try:
+                            _dbw.set_config(f"csn_allowed_posters:{_mid}", str(_poster_id))
+                            log.warning("[csn] CLAIMED %s for market %s on first use — no "
+                                        "poster was vouched and the code did not verify. "
+                                        "Only this webhook is accepted for it from now on.",
+                                        _poster_id, _mid)
+                        except Exception as _ce:
+                            log.warning("[csn] first-use claim failed for %s: %s", _mid, _ce)
+                            return False
+                        try:
+                            await core.report_csn_setup_problem(
+                                "Market claimed by its first webhook",
+                                market_id=_mid, channel=message.channel,
+                                filename=_a.filename, csv_text=_txt, poster_id=_poster_id,
+                                detail=(f"`{_mid}` had no vouched poster and the file's market "
+                                        f"code did not verify, so this upload would previously "
+                                        f"have been thrown away. Webhook `{_poster_id}` has "
+                                        f"claimed the market instead and the report was "
+                                        f"imported. Only this webhook is accepted for `{_mid}` "
+                                        f"from now on."),
+                                fix=(f"If that is the right shop, nothing to do. If it is not, "
+                                     f"clear `csn_allowed_posters:{_mid}` and bind the correct "
+                                     f"channel in `/my market`."))
+                        except Exception:
+                            pass
+                        # Close the loop: send the owner their real code so the next
+                        # upload is clean instead of relying on this fallback forever.
+                        try:
+                            await core.dm_owner_correct_code(
+                                _mid, message.channel,
+                                why="no code, or it didn't match")
                         except Exception:
                             pass
                         return True

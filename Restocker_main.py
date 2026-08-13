@@ -17237,6 +17237,70 @@ async def _csn_webhook_for(channel, label: str, create: bool = True):
     return None
 
 
+# ── a wrong code should fix itself, not silence a shop ───────────────────────
+# Amazonia's code drifted and its earnings were thrown away every 30 minutes for three
+# weeks while the owner watched successful scans in game. Nobody was ever told. The
+# import no longer depends on the code at all; this is what closes the loop afterwards —
+# the owner gets their real code, unprompted, so the next upload is clean.
+CSN_CODE_DM_COOLDOWN_S = 24 * 3600
+
+
+async def dm_owner_correct_code(market_id: str, channel=None, why: str = "") -> bool:
+    """DM a market's owner their correct CSN code and setup pack. At most once a day.
+
+    Returns True if a DM went out. Never raises — this runs inside the ingest path and
+    must never be able to cost someone their upload.
+    """
+    import time as _t
+    try:
+        import Restocker_db as _db
+        m = _get_market(market_id) or {}
+        owner = str(m.get("owner_id") or m.get("leader_discord_id") or "")
+        if not owner:
+            log.info("[csn] can't DM the code for %s — no owner on record.", market_id)
+            return False
+        key = f"csn_code_dm:{market_id}"
+        try:
+            last = float(str(_db.get_config(key) or 0) or 0)
+        except Exception:
+            last = 0.0
+        now = _t.time()
+        if last and (now - last) < CSN_CODE_DM_COOLDOWN_S:
+            return False                      # already told them today
+        ch = None
+        try:
+            if m.get("report_channel_id"):
+                ch = bot.get_channel(int(m["report_channel_id"]))
+        except Exception:
+            ch = None
+        hook = None
+        try:
+            hook = await _csn_webhook_for(ch or channel, m.get("name", market_id))
+        except Exception:
+            hook = None
+        user = bot.get_user(int(owner)) or await bot.fetch_user(int(owner))
+        if user is None:
+            return False
+        emb = _build_setup_embed(market_id, m, ch or channel, hook)
+        note = ("⚠️ Your last CSN upload carried a market code that doesn't match "
+                f"`{market_id}`" + (f" ({why})" if why else "") + ". Your sales were still "
+                "imported — nothing was lost — but here is the correct setup so it stops "
+                "happening. Paste the **Market Code** below into the mod's CSN Export "
+                "Settings.")
+        await user.send(content=note, embed=emb)
+        try:
+            _db.set_config(key, str(int(now)))
+        except Exception:
+            pass
+        log.info("[csn] DM'd %s the correct code for %s.", owner, market_id)
+        return True
+    except discord.Forbidden:
+        log.info("[csn] owner of %s has DMs closed — code not delivered.", market_id)
+    except Exception as e:
+        log.warning("[csn] couldn't DM the code for %s: %s", market_id, e)
+    return False
+
+
 def _build_setup_embed(mid: str, m: dict, channel, webhook_url: str = None) -> discord.Embed:
     """The CSN onboarding pack sent to a market owner. Shared by /admin dm_setup and the
     AI's dm_market_setup tool so the two can never drift."""
