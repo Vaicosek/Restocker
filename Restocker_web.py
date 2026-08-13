@@ -1003,15 +1003,30 @@ def _load_inventory_data() -> dict:
                 cap = _cap_for(it, (cat.get(it) or {}).get("stack"))
             cap = max(cap, cur)
             pct = (100.0 * cur / cap) if cap > 0 else 0.0
-            _sp = r.get("sell_price")
+            # _parse_stock_csv already normalises buy_price/sell_price to PER UNIT
+            # (raw listing price / listing qty), so `price` needs no further division —
+            # dividing again by the bundle would have shown Toolshop's stock at 0.00.
+            # What is missing is the BUNDLE: a shop sells "3456 for 9,192" and the page
+            # only ever showed 2.66, so nobody could tell what they would actually be
+            # asked to buy. Carry the listing qty and its total alongside.
+            _sp, _sq = r.get("sell_price"), r.get("sell_qty")
             if _sp is None or float(_sp or 0) <= 0:
-                _sp = r.get("buy_price")
+                _sp, _sq = r.get("buy_price"), r.get("buy_qty")
             try:
                 price = round(float(_sp), 2) if _sp not in (None, "") and float(_sp) > 0 else 0
             except Exception:
                 price = 0
+            try:
+                pqty = int(_sq or 0)
+            except Exception:
+                pqty = 0
+            if pqty < 1:
+                pqty = 1
             if not price:
+                # Catalog fallback prices are already per-unit, so the bundle is 1.
                 price = round(float((cat.get(it) or {}).get("coin", 0) or 0), 2)
+                pqty = 1
+            lot = round(price * pqty, 2) if (price and pqty) else 0
             try:
                 disp = m._pretty_item_name(it)          # strips lore junk, adds curated effects
             except Exception:
@@ -1023,6 +1038,7 @@ def _load_inventory_data() -> dict:
             items.append({"item": disp, "stock": cur, "capacity": cap,
                           "pct": round(pct, 1), "scanned": _scanned,
                           "owner": r.get("owner") or "", "price": price,
+                          "pqty": pqty, "lot": lot,
                           "cat": _item_category(disp or it)})
         items.sort(key=lambda x: x["pct"])
         low = sum(1 for x in items if x["capacity"] > 0 and x["pct"] <= 20.0)
@@ -1686,6 +1702,7 @@ table.inv tr:hover td{background:var(--hover)}
 .pct{font-family:var(--mono);font-size:11px;width:38px;text-align:right}
 .empty{padding:40px;text-align:center;color:var(--faint);font-size:12px}
 .msg{font-size:11px;color:var(--muted);font-family:var(--mono)}
+.per{color:var(--faint);font-size:10px;font-family:var(--mono)}
 .catbar{overflow-x:auto}
 table.inv tr.grp td{background:var(--panel);color:var(--faint);font-family:var(--sans);font-size:10px;
 letter-spacing:.6px;text-transform:uppercase;font-weight:700;height:26px;text-align:left;
@@ -1707,7 +1724,7 @@ __NAV__
 <div class="panel" style="border-top:0">
 <table class="inv"><thead><tr>
 <th data-k="item" style="text-align:left">Item</th><th data-k="pct" class="sorted">Fullness ↑</th>
-<th data-k="stock">In stock</th><th data-k="capacity">Capacity</th><th data-k="price">Price ¢</th>
+<th data-k="stock">In stock</th><th data-k="capacity">Capacity</th><th data-k="price">Price ¢ / unit</th>
 </tr></thead><tbody id="tb"></tbody></table>
 <div class="empty" id="empty" style="display:none">No barrel scan yet — press the stock-scan key in-game and click your shops.</div>
 </div>
@@ -1741,13 +1758,24 @@ function rowHTML(x){const p=Math.max(0,Math.min(100,x.pct||0));
   '<td class="num"><div class="fillcell"><div class="fillbar"><i style="width:'+p+'%;background:'+col(p)+'"></i></div>'+
   '<span class="pct" style="color:'+(nsc?'var(--muted)':col(p))+'">'+(nsc?'\u2014':Math.round(p)+'%')+'</span></div></td>'+
   '<td class="num">'+fmt(x.stock)+'</td><td class="num">'+fmt(x.capacity)+'</td>'+
-  '<td class="num">'+(x.price>0?(x.price<1?x.price.toFixed(2):fmt(x.price)):'—')+'</td></tr>';}
+  '<td class="num">'+priceCell(x)+'</td></tr>';}
+// Show what a single piece costs, and spell out the bundle it came from. "640" alone
+// could be 640 for one diamond or 640 for a stack of 64 — a 64x difference the page
+// used to hide completely.
+function money(v){return v>=100?fmt(v):(Math.round(v*100)/100).toFixed(2);}
+function priceCell(x){
+ if(!(x.price>0))return '—';
+ const q=Math.max(1,x.pqty||1);
+ // x.price is already per unit. The bundle is the missing context, not a divisor.
+ if(q===1)return money(x.price);
+ const lot=(x.lot&&x.lot>0)?x.lot:(x.price*q);
+ return money(x.price)+'<span class="per"> ea<br>sold as '+fmt(q)+' for '+money(lot)+'</span>';}
 function groupRows(rows){
  const g={};
  for(const x of rows){const k=x.item;
   const e=g[k]||(g[k]={item:k,cat:x.cat,stock:0,capacity:0,prices:[],mkts:new Set()});
   e.stock+=x.stock||0;e.capacity+=x.capacity||0;
-  if(x.price>0)e.prices.push(x.price);
+  if(x.price>0)e.prices.push(x.price);   // already per unit
   if(x._mkt)e.mkts.add(x._mkt);}
  return Object.values(g).map(e=>{
   const ps=e.prices.filter(p=>p>0);let price=0;
@@ -1756,7 +1784,7 @@ function groupRows(rows){
   const pct=e.capacity>0?100*e.stock/e.capacity:0;
   const nm=e.mkts.size?(e.mkts.size+(e.mkts.size===1?" mkt":" mkts")):"";
   return {item:e.item,cat:e.cat,stock:e.stock,capacity:e.capacity,pct:Math.round(pct*10)/10,
-          price:Math.round(price*100)/100,_mkt:nm};});}
+          price:Math.round(price*100)/100,pqty:1,lot:0,_mkt:nm};});}
 function render(){
  const mk=DATA[act]||{};const items=mk.items||[];
  const gen=document.getElementById('gen');
