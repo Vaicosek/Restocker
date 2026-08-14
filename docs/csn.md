@@ -26,7 +26,7 @@ ChestShop phrases everything from the **customer's** view:
 
 ## How a report reaches the right market
 - The CSV header carries `# MARKET,<id>,<code>`. On a channel with no binding, a **valid
-  code auto-binds** the channel to that market (get the code from `/market settings` →
+  code auto-binds** the channel to that market (get the code from `/my market` →
   **Get CSN code**). Or a manager uses the same panel's **Bind/unbind channel** button (no
   code needed after). Channel binding always wins.
 - Reports posted to a bound channel are auto-imported (no command needed).
@@ -35,6 +35,20 @@ ChestShop phrases everything from the **customer's** view:
 - `_parse_monthly_csv` de-dups duplicate `# RUN` timestamps and auto-detects
   cumulative-vs-delta files. Ask the AI to audit a month; `_csn_anomaly_check` flags a
   net >3× the recent average (possible un-cleared/duplicate report).
+
+## When a shop STOPS reporting
+Every rejection alert above needs a file to actually arrive. A shop whose webhook post
+fails produces no file, so it used to produce no signal at all — Amazonia went from 16
+reports in June to 3 in July to none, and nobody found out for six weeks.
+- `csn_silence_watch_loop` checks daily and posts one digest of every market that has
+  reported before and has now gone quiet, naming who to chase for each.
+- Threshold: `csn_silence_days` (default 3), or `csn_silence_days:<market>` per market.
+  Either set to **0** turns it off — use that for a market meant to be dormant.
+- Ask the AI **`csn_silence`** any time for the same list on demand; it is read-only and
+  posts nothing to the errors channel.
+- A market flagged here whose owner says the in-game scan succeeded means the mod's
+  webhook post is failing. Check the CSN settings screen for a blank webhook, and check
+  `.minecraft/sales/` for un-posted `csn_export_*.csv` worth importing by hand.
 
 ## Gotchas the AI must know
 - The **monthly** CSV cannot name sellers — only the **export** CSV (or the mod's live

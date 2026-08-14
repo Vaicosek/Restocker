@@ -4420,6 +4420,133 @@ async def report_csn_setup_problem(kind: str, *, market_id=None, channel=None,
         log.warning("[csn] could not report the setup problem: %s", _e)
 
 
+# ── CSN silence watchdog ─────────────────────────────────────────────────────
+# Every alert above is ARRIVAL-triggered: a file has to reach Discord and be refused
+# before anyone hears about it. Nothing at all fires when a shop simply stops sending,
+# which is the failure that actually costs money. Amazonia filed 16 reports in June, 3
+# in July, then nothing — six weeks of a live market's earnings were missing before its
+# owner happened to mention it in chat. So going quiet is now itself an alert.
+CSN_SILENCE_DAYS_KEY = "csn_silence_days"
+CSN_SILENCE_DAYS_DEFAULT = 3.0
+
+
+def _csn_silence_days(market_id=None) -> float:
+    """Days of silence before a market gets called out. `csn_silence_days:<mid>` wins
+    over the global `csn_silence_days`; setting either to 0 turns the check off for that
+    scope — a market that is *meant* to be dormant is not a fault, and nagging about one
+    is how people learn to ignore the channel."""
+    import Restocker_db as _db
+    keys = ([f"{CSN_SILENCE_DAYS_KEY}:{market_id}"] if market_id else []) + [CSN_SILENCE_DAYS_KEY]
+    for key in keys:
+        try:
+            raw = str(_db.get_config(key) or "").strip()
+        except Exception:
+            continue
+        if not raw:
+            continue
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            # A typo'd threshold must not silently disable the watchdog — say so and
+            # fall through to the next scope.
+            log.warning("[csn silence] ignoring non-numeric %s=%r", key, raw)
+    return float(CSN_SILENCE_DAYS_DEFAULT)
+
+
+async def check_csn_silence(apply: bool = True, days=None) -> list:
+    """Which markets used to report and have now gone quiet.
+
+    Returns [{market_id, name, last_at, days_quiet, threshold}], longest silence first.
+
+    `apply=False` computes the list and posts NOTHING — so the same code answers "who is
+    quiet right now?" on demand without putting anything in the errors channel.
+    `days` overrides the configured threshold for this call only (an ad-hoc "who has been
+    quiet a fortnight?"); it does not change anyone's settings.
+    """
+    import Restocker_db as _db
+    try:
+        last_seen = _db.csn_last_report_at() or {}
+    except Exception as e:
+        log.warning("[csn silence] could not read last report times: %s", e)
+        return []
+
+    now = utcnow_dt()
+    fallback = str(FALLBACK_MARKET_ID).strip().lower()
+    quiet = []
+    for mid, last_at in last_seen.items():
+        if str(mid).strip().lower() == fallback:
+            continue                      # TEST is the unattributed-upload bin, not a shop
+        m = _get_market(mid)
+        if m is None:
+            continue                      # history for a market that no longer exists
+        if not m.get("active", True):
+            continue                      # deliberately retired — silence is correct
+        threshold = _csn_silence_days(mid) if days is None else max(0.0, float(days))
+        if threshold <= 0:
+            continue                      # switched off for this market
+        # NOT `days` — that is the caller's override, and reusing the name here reassigns
+        # it on the first market, so every later market silently got the PREVIOUS one's
+        # elapsed time as its threshold.
+        days_quiet = (now - parse_iso(last_at)).total_seconds() / 86400.0
+        if days_quiet < threshold:
+            continue
+        quiet.append({
+            "market_id": str(mid),
+            "name":      m.get("name", mid),
+            "last_at":   last_at,
+            "days_quiet": round(days_quiet, 1),
+            "threshold": threshold,
+        })
+
+    quiet.sort(key=lambda r: r["days_quiet"], reverse=True)
+    if not apply or not quiet:
+        return quiet
+
+    log.warning("[csn silence] %d market(s) quiet: %s", len(quiet),
+                ", ".join(f"{r['market_id']}={r['days_quiet']}d" for r in quiet))
+
+    # ONE digest, not one embed per market. When several shops stop at once — which is
+    # what a bad mod build or a Discord outage looks like — N separate alerts bury the
+    # pattern that they all stopped together. The rows carry who to chase, so nothing
+    # the per-market alert said is lost.
+    cid = _csn_error_channel_id()
+    if not cid:
+        return quiet
+    try:
+        ch = bot.get_channel(int(cid)) or await bot.fetch_channel(int(cid))
+        if ch is None:
+            return quiet
+        e = discord.Embed(
+            title="🔇 Markets that have stopped reporting",
+            description=("These markets have filed CSN reports before and have now gone "
+                         "quiet. Whatever they have sold since is missing from their "
+                         "earnings, their share price and their harvesters' pay."),
+            colour=0xC94F4F)
+        for row in quiet[:20]:
+            e.add_field(
+                name=f"{row['name']} · quiet {row['days_quiet']:.0f}d",
+                value=(f"`{row['market_id']}` — last report "
+                       f"{human_duration_since(parse_iso(row['last_at']))} ago\n"
+                       f"Ask: {_ign_for_market(row['market_id'])}"),
+                inline=False)
+        if len(quiet) > 20:
+            e.add_field(name="…", value=f"and {len(quiet) - 20} more", inline=False)
+        e.add_field(
+            name="What to check",
+            value=("Have them press the scan key in game and watch this channel. If the "
+                   "scan says it posted but nothing lands here, the mod's webhook post is "
+                   "failing — check the CSN settings screen for a blank webhook, and "
+                   "check whether `.minecraft/sales/` still holds un-posted "
+                   "`csn_export_*.csv` files worth importing by hand."),
+            inline=False)
+        e.set_footer(text="Once a day. A market meant to be dormant: set "
+                          "csn_silence_days:<market> to 0.")
+        await ch.send(embed=e, allowed_mentions=discord.AllowedMentions.none())
+    except Exception as _e:
+        log.warning("[csn silence] could not post the digest: %s", _e)
+    return quiet
+
+
 # ── land ledger: the same event stored under several inbox numbers ───────────
 # The land inbox is a rolling list — #30 is always the newest — so every new event
 # shifts every older one down by one. The ledger's PRIMARY KEY was
@@ -5317,21 +5444,18 @@ async def _process_csn_attachment(attachment: discord.Attachment, report_channel
         _xlsx_name = f"report_{effective_market_id}_{month_key}.xlsx"
         files.append(discord.File(io.BytesIO(_xb), filename=_xlsx_name))
 
-    # Deliver the finished report to the market it belongs to: prefer THAT market's
-    # own bound channel, so per-market reports land in per-market channels instead of
-    # all piling into the central CSN_REPORT_CHANNEL_ID. Falls back to the channel this
-    # was posted in / the central channel when a market has no bound channel of its own.
-    dest_channel = report_channel
-    try:
-        if effective_market_id and effective_market_id != DEFAULT_MARKET_ID:
-            _mrow = _get_market(effective_market_id)
-            _rc = (_mrow or {}).get("report_channel_id")
-            if _rc:
-                dest_channel = (bot.get_channel(int(_rc))
-                                or await bot.fetch_channel(int(_rc))
-                                or report_channel)
-    except Exception as _e:
-        log.debug("[csn] market-channel routing fell back to default: %s", _e)
+    # Deliver the report where the person who ran the scan is looking: the channel the
+    # upload ARRIVED in, then the market's bound channel, then the central one.
+    #
+    # This used to prefer the market's registered report_channel_id over the source
+    # channel, which is the falrija bug in a second place. A shop uploading into channel
+    # A had its file ingested and (once every attachment was clean) DELETED from A, while
+    # the card announcing it went to channel B — so from A it looked exactly like "the bot
+    # stopped sending the report, it just uploads". _market_dest_channel already encodes
+    # the right order for stock scans; routing both through it makes one rule instead of
+    # two that disagree.
+    dest_channel = await _market_dest_channel(
+        effective_market_id, report_channel, source_channel_id=source_channel_id)
 
     # Components-V2 layout when the library supports it (accent container + media gallery
     # + file card + link button); embed fallback otherwise. A LayoutView can't carry
@@ -13615,6 +13739,17 @@ _AI_TOOLS = [
         }
     },
     {
+        "name": "csn_silence",
+        "description": "Which markets used to send CSN reports and have stopped. Read-only — answers 'is anyone's shop not reporting?' without waiting for the daily alert. Anyone can ask.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "days": {"type": "integer", "description": "Call a market quiet after this many days without a report (default: the configured threshold, normally 3)."}
+            },
+            "required": []
+        }
+    },
+    {
         "name": "set_drip",
         "description": "Turn DRIP (dividend reinvestment) on or off for the person asking — when on, their dividends and GEX.PR payouts auto-buy whole shares at market instead of arriving as coins. Anyone can set their own.",
         "input_schema": {
@@ -14083,6 +14218,25 @@ async def _ai_tool_get_open_orders(guild, channel, user, args):
         for o in open_orders[:15]
     ]
     return "\n".join(lines)
+
+
+async def _ai_tool_csn_silence(guild, channel, user, args):
+    """Read-only, so anyone may ask. apply=False — asking must never post the daily
+    digest to the errors channel as a side effect."""
+    days = args.get("days")
+    try:
+        days = None if days in (None, "") else max(1, int(days))
+    except (TypeError, ValueError):
+        return f"`days` needs to be a whole number of days, not {days!r}."
+    quiet = await check_csn_silence(apply=False, days=days)
+    if not quiet:
+        thr = days if days is not None else int(_csn_silence_days())
+        return f"Every market that has ever reported has reported within the last {thr} days."
+    lines = [f"{r['name']} (`{r['market_id']}`) — quiet {r['days_quiet']:.0f}d, "
+             f"last report {r['last_at'][:10]}" for r in quiet[:20]]
+    if len(quiet) > 20:
+        lines.append(f"…and {len(quiet) - 20} more")
+    return "Markets not reporting:\n" + "\n".join(lines)
 
 
 async def _ai_tool_get_user_balance(guild, channel, user, args):
@@ -17453,6 +17607,7 @@ _AI_TOOL_MAP = {
     "rebuild_hive_channel": _ai_tool_rebuild_hive_channel,
     "purge_channel":        _ai_tool_purge_channel,
     "csn_cleanup":          _ai_tool_csn_cleanup,
+    "csn_silence":          _ai_tool_csn_silence,
     "admin_wipe":           _ai_tool_admin_wipe,
     "get_market_holders":   _ai_tool_get_market_holders,
     "settle_unlinked_harvests": _ai_tool_settle_unlinked_harvests,

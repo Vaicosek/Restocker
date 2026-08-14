@@ -1002,13 +1002,42 @@ class LoopsCog(commands.Cog):
     async def _wait_ready_month_close(self):
         await bot.wait_until_ready()
 
+    @tasks.loop(hours=6)
+    async def csn_silence_watch_loop(self):
+        """Call out markets that used to file CSN reports and have stopped.
+
+        Every other CSN alert needs a file to arrive and be refused first, so a shop
+        whose webhook post silently fails produces no signal at all — Amazonia went six
+        weeks that way. Ticks every 6h but alerts at most once per UTC day, stamped in
+        bot_config so restarts and a second instance can't turn this into a spam loop.
+        """
+        try:
+            import Restocker_db as _db
+            today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            flag = f"csn_silence_alerted:{today}"
+            if str(_db.get_config(flag) or "") == "done":
+                return
+            quiet = await core.check_csn_silence()
+            # Stamped whether or not anything was quiet: a clean day still counts as
+            # checked, and re-running it 6h later would only re-post the same list.
+            _db.set_config(flag, "done")
+            if quiet:
+                core.log.warning("[csn silence] alerted on %d quiet market(s)", len(quiet))
+        except Exception as e:
+            core.log.warning("[csn silence] loop failed: %s", e)
+
+    @csn_silence_watch_loop.before_loop
+    async def _wait_ready_csn_silence(self):
+        await bot.wait_until_ready()
+
     def _all_loops(self):
         return (self.worker_announce_loop, self.claimed_dm_cleanup_loop, self.employee_batch_dispatch_loop,
                 self.dividend_report_flush_loop, self.bond_service_loop,
                 self.weekly_interest_loop, self.weekly_funds_report_loop, self.loyalty_decay_loop,
                 self.ign_deadline_loop, self.stock_reversion_loop, self.stock_dashboard_loop,
                 self.team_digest_loop, self.db_backup_loop, self.instance_heartbeat_loop,
-                self.month_close_report_loop, self.bank_report_loop)
+                self.month_close_report_loop, self.bank_report_loop,
+                self.csn_silence_watch_loop)
 
     def _start_loops(self):
         for _lp in self._all_loops():

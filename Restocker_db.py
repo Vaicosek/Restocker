@@ -1744,6 +1744,22 @@ def csn_all_market_ids() -> list:
             "SELECT DISTINCT market_id FROM csn_history").fetchall()]
 
 
+def csn_last_report_at() -> dict:
+    """{market_id: latest recorded_at} — the last time ANY CSN report from that market
+    landed, across every month row it has.
+
+    Only markets that have reported at least once appear, which is exactly the set the
+    silence watchdog should watch: a market that has never reported has nothing to have
+    stopped doing. Rows with a blank recorded_at are skipped rather than read as the
+    epoch, which would call every such market decades quiet.
+    """
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT market_id, MAX(recorded_at) AS last_at FROM csn_history "
+            "WHERE recorded_at IS NOT NULL AND TRIM(recorded_at) <> '' "
+            "GROUP BY market_id").fetchall()
+        return {r["market_id"]: r["last_at"] for r in rows}
+
 
 def get_config(key, default=None):
     with db() as conn:
