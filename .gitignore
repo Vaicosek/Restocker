@@ -57,3 +57,6 @@ _to_delete/
 _pre_audit_backup_*/
 # transfer scratch dirs — never belong in git
 _xfer*/
+
+# Cowork transfer scratch
+_incoming/
