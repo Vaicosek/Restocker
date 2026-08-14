@@ -1,0 +1,820 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Estates bot — Discord UI mockup</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  /* ---- real Discord dark theme values ---- */
+  --d-app:#313338;          /* chat / app background */
+  --d-sidebar:#2b2d31;      /* channel sidebar, embed background */
+  --d-rail:#1e1f22;         /* server rail, inputs, code blocks */
+  --d-elev:#383a40;         /* elevated / secondary surface */
+  --d-userbar:#232428;      /* account strip under the sidebar */
+  --d-active:#404249;
+
+  --d-text:#f2f3f5;         /* primary */
+  --d-body:#dbdee1;         /* embed description body */
+  --d-secondary:#b5bac1;    /* secondary / muted */
+  --d-faint:#949ba4;        /* faint: footers, timestamps, ephemeral note */
+  --d-channel:#80848e;      /* channel names */
+
+  --d-link:#00a8fc;
+  --d-blurple:#5865f2;
+  --d-blurple-hover:#4752c4;
+  --d-secondary-btn:#4e5058;
+  --d-success:#248046;
+  --d-danger:#da373c;
+  --d-divider:#3f4147;
+
+  /* ---- the BOT's own identity inside embeds (owner's house accent) ---- */
+  --accent:#22FF7A;
+  --held:#F5A623;
+  --debt:#FF4D4D;
+
+  /* ---- annotation layer, deliberately NOT Discord ---- */
+  --n-bg:#0f0f0f;
+  --n-page:#080808;
+  --n-border:#1E1E1E;
+  --n-border-strong:#2A2A2A;
+  --n-text:#B4B4B4;
+  --n-strong:#F4F4F4;
+  --n-muted:#6a6a6a;
+
+  --gg:"gg sans","Noto Sans","Helvetica Neue",Helvetica,Arial,sans-serif;
+  --mono:"gg mono",ui-monospace,Consolas,"Liberation Mono",Menlo,Courier,monospace;
+  --grotesk:"Space Grotesk",system-ui,-apple-system,sans-serif;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{
+  background:var(--n-page);
+  background-image:radial-gradient(#151515 .5px,transparent .5px);
+  background-size:24px 24px;
+  color:var(--d-text);
+  font-family:var(--gg);
+  font-size:16px; line-height:1.375; -webkit-font-smoothing:antialiased;
+}
+
+/* ---------- page frame (mockup furniture, not Discord) ---------- */
+.page{max-width:1500px;margin:0 auto;padding:28px 20px 80px}
+.pagehead{font-family:var(--grotesk);padding:0 0 22px;border-bottom:1px solid var(--n-border);margin-bottom:24px}
+.pagehead h1{margin:0 0 6px;font-size:20px;font-weight:600;letter-spacing:-.01em;color:var(--n-strong)}
+.pagehead p{margin:0;color:var(--n-muted);font-size:13px;line-height:1.55;max-width:100ch}
+.pagehead code{font-family:var(--mono);font-size:12px;color:var(--n-text)}
+
+/* ---------- discord chrome ---------- */
+.client{
+  display:flex; height:auto; border-radius:8px;
+  overflow:hidden; background:var(--d-app);
+  box-shadow:0 0 0 1px var(--n-border-strong), 0 14px 44px rgba(0,0,0,.55);
+}
+
+/* server rail */
+.rail{width:72px;background:var(--d-rail);padding:12px 0;display:flex;flex-direction:column;align-items:center;gap:8px;flex:none}
+.guild{width:48px;height:48px;border-radius:50%;background:var(--d-sidebar);display:flex;align-items:center;justify-content:center;
+  font-size:14px;font-weight:500;color:var(--d-text);position:relative;cursor:default;letter-spacing:-.02em}
+.guild.active{border-radius:16px;background:var(--d-blurple);color:#fff}
+.guild.active::before{content:"";position:absolute;left:-16px;top:8px;width:4px;height:32px;border-radius:0 4px 4px 0;background:#f2f3f5}
+.guild.sep{width:32px;height:2px;border-radius:1px;background:var(--d-divider);margin:2px 0}
+.guild.add{color:#23a559;font-size:22px;font-weight:400}
+
+/* channel sidebar */
+.sidebar{width:240px;background:var(--d-sidebar);flex:none;display:flex;flex-direction:column}
+.sbhead{height:48px;display:flex;align-items:center;padding:0 16px;font-weight:600;font-size:15px;color:var(--d-text);
+  box-shadow:0 1px 0 rgba(0,0,0,.2),0 1.5px 0 rgba(0,0,0,.05);gap:6px;flex:none}
+.sbhead .chev{color:var(--d-secondary);margin-left:auto;font-size:10px}
+.sbbody{padding:8px 8px 0;flex:1}
+.cat{font-size:12px;font-weight:600;letter-spacing:.02em;text-transform:uppercase;color:var(--d-channel);padding:16px 8px 4px}
+.chan{display:flex;align-items:center;gap:6px;padding:6px 8px;border-radius:4px;color:var(--d-channel);font-size:16px;font-weight:500;margin-bottom:2px;position:relative}
+.chan .hash{color:var(--d-channel);font-weight:400;font-size:20px;line-height:1;opacity:.85}
+.chan.on{background:var(--d-active);color:var(--d-text)}
+.chan.on .hash{color:var(--d-secondary)}
+.chan.unread{color:var(--d-text)}
+.chan.unread .hash{color:var(--d-secondary)}
+.chan.unread::before{content:"";width:8px;height:8px;border-radius:50%;background:var(--d-text);position:absolute;left:-8px}
+.sbfoot{height:52px;display:flex;align-items:center;gap:8px;padding:0 8px;background:var(--d-userbar);flex:none}
+.sbfoot .av{width:32px;height:32px;border-radius:50%;background:var(--d-blurple);display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:600;color:#fff}
+.sbfoot .nm{font-size:14px;font-weight:600;line-height:1.2;color:var(--d-text)}
+.sbfoot .st{font-size:12px;color:var(--d-secondary)}
+
+/* main column */
+.main{flex:1;min-width:0;display:flex;flex-direction:column;background:var(--d-app)}
+.tophead{height:48px;flex:none;display:flex;align-items:center;gap:8px;padding:0 16px;font-size:16px;font-weight:600;color:var(--d-text);
+  box-shadow:0 1px 0 rgba(0,0,0,.2),0 1.5px 0 rgba(0,0,0,.05);z-index:2}
+.tophead .hash{color:var(--d-channel);font-size:24px;font-weight:400;line-height:1}
+.tophead .topic{font-size:14px;color:var(--d-secondary);font-weight:400;border-left:1px solid var(--d-divider);padding-left:12px;margin-left:8px}
+/* the channel header spans the full width; the member list starts below it */
+.content{display:flex;flex:1;min-height:0}
+.chatcol{flex:1;min-width:0;display:flex;flex-direction:column}
+.chat{padding:16px 0 24px}
+.composer{margin:0 16px 24px;background:var(--d-elev);border-radius:8px;padding:11px 16px;color:var(--d-channel);font-size:16px;display:flex;gap:16px;align-items:center}
+.composer .plus{width:22px;height:22px;border-radius:50%;background:var(--d-secondary);color:var(--d-elev);display:flex;align-items:center;justify-content:center;font-size:17px;line-height:1;flex:none;font-weight:600}
+
+/* ---------- member list (right sidebar of a guild text channel) ---------- */
+.members{width:240px;flex:none;background:var(--d-sidebar);padding:0 8px}
+.mgroup{font-size:12px;font-weight:600;letter-spacing:.02em;text-transform:uppercase;color:var(--d-channel);padding:24px 8px 4px}
+.member{display:flex;align-items:center;gap:12px;height:42px;padding:0 8px;border-radius:4px}
+.member .mav{width:32px;height:32px;border-radius:50%;flex:none;position:relative;display:flex;align-items:center;justify-content:center;
+  font-size:11px;font-weight:600;color:#fff;letter-spacing:-.02em}
+.member .mav::after{content:"";position:absolute;right:-2px;bottom:-2px;width:10px;height:10px;border-radius:50%;
+  background:#23a559;box-shadow:0 0 0 3px var(--d-sidebar)}
+.member.idle .mav::after{background:#f0b232}
+.member.dnd .mav::after{background:#f23f43}
+.member.off{opacity:.3}
+.member.off .mav::after{background:var(--d-channel)}
+.member .mnm{font-size:16px;font-weight:500;color:var(--d-faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.member .tag{flex:none}
+
+/* ---------- messages ---------- */
+.msg{display:flex;gap:16px;padding:2px 48px 2px 16px;position:relative;margin-top:17px}
+.av{width:40px;height:40px;border-radius:50%;flex:none;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:600;color:#0b1f12;letter-spacing:-.02em}
+.av.bot{background:var(--accent)}
+.av.usr{background:var(--d-blurple);color:#fff}
+.body{min-width:0;flex:1}
+.mhead{display:flex;align-items:center;gap:8px;margin-bottom:2px;line-height:1.375;flex-wrap:wrap}
+.who{font-weight:500;font-size:16px;color:var(--d-text)}
+.tag{background:var(--d-blurple);color:#fff;font-size:10px;font-weight:500;padding:0 4.4px;border-radius:3px;height:15px;
+  display:inline-flex;align-items:center;gap:2px;text-transform:uppercase;line-height:1}
+.tag svg{width:11px;height:11px}
+.when{font-size:12px;color:var(--d-faint);font-weight:500}
+.mtext{color:var(--d-body);font-size:16px;line-height:1.375;margin-bottom:4px}
+.mention,.slashref{background:rgba(88,101,242,.3);color:#dee0fc;border-radius:3px;padding:0 2px;font-weight:500;font-family:inherit}
+
+.ephnote{display:flex;align-items:center;gap:4px;font-size:12px;color:var(--d-faint);margin-top:8px;font-weight:500}
+.ephnote .dismiss{color:var(--d-link);cursor:default}
+.eyed{width:16px;height:16px;flex:none;opacity:.9}
+
+/* ---------- embeds ---------- */
+.embed{
+  max-width:520px;background:var(--d-sidebar);border-radius:8px;
+  border-left:4px solid var(--accent); padding:8px 16px 16px 12px; margin-top:8px;
+}
+.embed .author{display:flex;align-items:center;gap:8px;font-size:14px;font-weight:600;color:var(--d-text);margin:8px 0 0}
+.embed .author .dot{width:24px;height:24px;border-radius:50%;background:var(--d-rail);flex:none;display:flex;align-items:center;justify-content:center}
+.embed .author .dot i{width:8px;height:8px;border-radius:50%;background:var(--accent);display:block}
+.embed .etitle{font-size:16px;font-weight:600;color:var(--d-text);margin:8px 0 0;line-height:1.375}
+.embed .edesc{font-size:14px;color:var(--d-body);margin:8px 0 0;line-height:1.375}
+.efields{display:flex;flex-direction:column;gap:0;margin-top:0}
+.efields.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:0 12px}
+.efields.grid2{display:grid;grid-template-columns:repeat(2,1fr);gap:0 12px}
+.fname{font-size:14px;font-weight:600;color:var(--d-text);margin:8px 0 2px;display:flex;align-items:baseline;gap:8px;line-height:1.375}
+.fval{font-size:14px;color:var(--d-body);line-height:1.375}
+.bar{font-family:var(--mono);font-size:13px;letter-spacing:-.5px;color:var(--d-faint);display:block}
+.bar .fill{color:var(--accent)}
+.mult{font-family:var(--mono);font-size:13px;background:var(--d-rail);border-radius:3px;padding:1px 4px;color:var(--d-body);font-weight:400;font-variant-numeric:tabular-nums}
+.efooter{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--d-faint);margin-top:8px;font-weight:500;line-height:1.375}
+.efooter .fdot{width:20px;height:20px;border-radius:50%;background:var(--d-rail);flex:none;position:relative}
+.efooter .fdot::after{content:"";position:absolute;inset:6px;border-radius:50%;background:var(--accent);opacity:.85}
+.codeblk{
+  font-family:var(--mono);font-size:12px;line-height:1.35;background:var(--d-rail);
+  border:1px solid #202225;border-radius:4px;padding:8px 10px;color:var(--d-body);
+  white-space:pre;overflow-x:auto;margin:8px 0 0;font-variant-numeric:tabular-nums;
+}
+/* Discord renders a parsed <t:…:R> as a highlighted relative timestamp */
+.tl{color:var(--d-text);background:rgba(78,80,88,.45);border-radius:3px;padding:0 2px}
+.avail{color:var(--d-text)}
+.heldv{color:var(--held)}
+.goodv{color:var(--accent)}
+.big{font-size:15px;color:var(--d-text)}
+.hr{height:1px;background:rgba(255,255,255,.06);margin:12px 0 0}
+
+/* ---------- components (real Discord message components) ---------- */
+.arow{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;max-width:520px}
+.btn{
+  border:none;border-radius:3px;padding:2px 16px;min-width:60px;height:32px;font-size:14px;font-weight:500;line-height:16px;
+  background:var(--d-secondary-btn);color:#fff;display:inline-flex;align-items:center;justify-content:center;gap:8px;
+  cursor:default;font-family:var(--gg);transition:background .17s ease;
+}
+.btn:hover{background:#6d6f78}
+.btn.primary{background:var(--d-blurple)}
+.btn.primary:hover{background:var(--d-blurple-hover)}
+.btn.success{background:var(--d-success)}
+.btn.success:hover{background:#1a6334}
+.btn.danger{background:var(--d-danger)}
+.btn.danger:hover{background:#a12828}
+/* Modal-footer cancel only. This is Discord's modal chrome, NOT a message component.
+   Message components are Primary/Secondary/Success/Danger/Link, and Link is a grey
+   URL button — there is no transparent-text button style in an action row. */
+.btn.mcancel{background:transparent;color:#fff;padding:2px 4px;min-width:0}
+.btn.mcancel:hover{background:transparent;text-decoration:underline}
+.btn:disabled,.btn.dis{opacity:.5;cursor:not-allowed}
+.btn.dis:hover{background:var(--d-success)}
+.select{
+  max-width:520px;width:100%;background:var(--d-rail);border:1px solid var(--d-rail);border-radius:4px;
+  min-height:40px;display:flex;align-items:center;padding:0 12px;color:var(--d-faint);font-size:14px;margin-top:8px;
+}
+.select .chev{margin-left:auto;color:var(--d-secondary);display:flex}
+
+/* ---------- modal ---------- */
+.modalstage{position:relative;margin:16px 16px 0;border-radius:5px;overflow:hidden;background:var(--d-app)}
+.modalbg{padding:0 0 16px;pointer-events:none}
+.modalveil{position:absolute;inset:0;background:rgba(0,0,0,.85);display:flex;align-items:center;justify-content:center;padding:24px}
+.modal{width:440px;max-width:100%;background:var(--d-app);border-radius:5px;box-shadow:0 0 0 1px rgba(0,0,0,.15),0 8px 16px rgba(0,0,0,.24);overflow:hidden}
+.modal .mh{padding:16px}
+.modal .mh h3{margin:0;font-size:20px;font-weight:600;color:var(--d-text);line-height:1.2}
+.modal .mh p{margin:8px 0 0;font-size:14px;color:var(--d-secondary);line-height:1.375}
+.modal .mb{padding:0 16px 16px;display:flex;flex-direction:column;gap:20px}
+.flabel{font-size:12px;font-weight:700;letter-spacing:.02em;text-transform:uppercase;color:var(--d-secondary);margin-bottom:8px;display:flex;gap:4px;align-items:center}
+.flabel .req{color:var(--d-danger)}
+.finput{background:var(--d-rail);border:1px solid #1e1f22;border-radius:3px;padding:10px;font-size:16px;color:var(--d-text)}
+.fhint{font-size:12px;color:var(--d-faint);margin-top:8px;font-weight:500}
+.modal .mf{background:var(--d-sidebar);padding:16px;display:flex;justify-content:flex-end;gap:8px;align-items:center}
+.caret{display:inline-block;width:1px;height:17px;background:var(--d-text);vertical-align:-3px;margin-left:1px;animation:blink 1.06s steps(1) infinite}
+@keyframes blink{50%{opacity:0}}
+
+/* ---------- Discord's own day / channel divider ---------- */
+.daydiv{display:flex;align-items:center;margin:24px 16px 0;color:var(--d-faint);font-size:12px;font-weight:600}
+.daydiv span{padding:0 4px}
+.daydiv::before,.daydiv::after{content:"";height:1px;background:var(--d-divider);flex:1}
+
+/* ---------- annotation layer — deliberately breaks out of the Discord canvas ---------- */
+.note{
+  font-family:var(--grotesk);
+  margin:20px 0 0;padding:16px 20px 16px 22px;
+  background:var(--n-bg);
+  border-top:1px solid var(--n-border);border-bottom:1px solid var(--n-border);
+  border-left:2px solid var(--n-border-strong);
+}
+.note .lbl{font-size:10px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;color:var(--n-muted);margin-bottom:8px}
+.note p{margin:0 0 6px;font-size:13px;color:var(--n-text);line-height:1.55;max-width:104ch}
+.note p:last-child{margin-bottom:0}
+.note b{color:var(--n-strong);font-weight:600}
+.note code{font-family:var(--mono);font-size:11.5px;color:var(--n-strong);background:#151515;padding:1px 4px}
+.note .bad{color:var(--debt)}
+.note .ok{color:var(--accent)}
+.note .heldn{color:var(--held)}
+.note .cmp{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:10px 0 10px;max-width:900px}
+.note .cmp div{background:#151515;border:1px solid var(--n-border);padding:8px 10px}
+.note .cmp .t{font-size:10px;text-transform:uppercase;letter-spacing:.1em;margin-bottom:5px;font-weight:600}
+.note .cmp .v{font-family:var(--mono);font-size:12px;color:var(--n-text);line-height:1.5}
+.note .cmp .v b{color:var(--n-strong)}
+.step{
+  font-family:var(--grotesk);margin:20px 0 0;padding:9px 22px;background:var(--n-bg);
+  border-top:1px solid var(--n-border);border-bottom:1px solid var(--n-border);border-left:2px solid var(--accent);
+  color:var(--n-muted);font-size:10px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;
+}
+
+/* Motion here is state only — a button hover and the modal text caret. Both are
+   optional, so both go when the reader has asked the OS for less movement. */
+@media (prefers-reduced-motion:reduce){
+  *,*::before,*::after{
+    animation-duration:.01ms !important;animation-iteration-count:1 !important;
+    transition-duration:.01ms !important;scroll-behavior:auto !important;
+  }
+}
+</style>
+</head>
+<body>
+<div class="page">
+
+  <div class="pagehead">
+    <h1>Estates bot — Discord surface mockup</h1>
+    <p>Static, non-interactive. The Discord chrome is drawn to real dark-theme values, so these embeds read as they will in the client; the flat black strips are mockup annotation, not bot output. Every figure below is arithmetically consistent: market #63 pot 92,000 coins, rake 5% (one config value), distributable 87,400, integer-floored payouts summing to 87,399 with the 1-coin remainder to <code>treasury:estates</code>. Annotations under each block name the rule it demonstrates.</p>
+  </div>
+
+  <div class="client">
+
+    <!-- guild rail -->
+    <div class="rail">
+      <div class="guild" title="V Tech">VT</div>
+      <div class="guild" title="Osentar Bank">OB</div>
+      <div class="guild active" title="Estates">ES</div>
+      <div class="guild sep"></div>
+      <div class="guild add">+</div>
+    </div>
+
+    <!-- channel sidebar -->
+    <div class="sidebar">
+      <div class="sbhead">Estates <span class="chev">▾</span></div>
+      <div class="sbbody">
+        <div class="cat">Markets</div>
+        <div class="chan"><span class="hash">#</span> rules</div>
+        <div class="chan on"><span class="hash">#</span> prediction-markets</div>
+        <div class="chan unread"><span class="hash">#</span> auctions</div>
+        <div class="chan"><span class="hash">#</span> lands</div>
+        <div class="cat">Proof</div>
+        <div class="chan"><span class="hash">#</span> payout-proof</div>
+        <div class="chan"><span class="hash">#</span> resolution-log</div>
+        <div class="cat">Talk</div>
+        <div class="chan"><span class="hash">#</span> general</div>
+        <div class="chan"><span class="hash">#</span> bot-spam</div>
+      </div>
+      <div class="sbfoot">
+        <div class="av">JV</div>
+        <div>
+          <div class="nm">Vaicos</div>
+          <div class="st">Online</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- main -->
+    <div class="main">
+      <div class="tophead">
+        <span class="hash">#</span> prediction-markets
+        <span class="topic">Pari-mutuel. Odds float until close. Rake 5%.</span>
+      </div>
+
+      <div class="content">
+      <div class="chatcol">
+
+      <div class="chat">
+
+        <div class="daydiv"><span>August 13, 2026</span></div>
+
+        <!-- =========================================================
+             1. PREDICTION MARKET EMBED
+             ========================================================= -->
+        <div class="msg">
+          <div class="av bot">ES</div>
+          <div class="body">
+            <div class="mhead">
+              <span class="who">Estates</span>
+              <span class="tag"><svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M7.4 1.4a.9.9 0 0 1 1.2 0l1 .9 1.4-.2a.9.9 0 0 1 1 .6l.5 1.3 1.2.7a.9.9 0 0 1 .4 1.1l-.5 1.3.5 1.3a.9.9 0 0 1-.4 1.1l-1.2.7-.5 1.3a.9.9 0 0 1-1 .6l-1.4-.2-1 .9a.9.9 0 0 1-1.2 0l-1-.9-1.4.2a.9.9 0 0 1-1-.6l-.5-1.3-1.2-.7a.9.9 0 0 1-.4-1.1L1.4 8l-.5-1.3a.9.9 0 0 1 .4-1.1l1.2-.7.5-1.3a.9.9 0 0 1 1-.6l1.4.2 1-.9Zm3 4.3L7 9.1 5.6 7.7a.8.8 0 0 0-1.1 1.1l2 2c.3.3.8.3 1.1 0l4-4a.8.8 0 0 0-1.2-1.1Z"/></svg>APP</span>
+              <span class="when">Today at 09:14</span>
+            </div>
+
+            <div class="embed">
+              <div class="author"><span class="dot"><i></i></span> Prediction market · #63</div>
+              <div class="etitle">Which faction holds Redstone Ridge on Sept 1?</div>
+              <div class="edesc">
+                Settled by the <b>/f map</b> claim owner at 00:00 UTC on 1 Sept 2026, read by staff oracle.<br>
+                <b>Betting closes <span class="tl">in 2 days</span></b> (Sat, 15 Aug 2026 14:00 UTC). Stakes are held, not spent, until close.
+              </div>
+
+              <div class="efields">
+                <div>
+                  <div class="fname">Ironhold Company <span class="mult">x1.81</span></div>
+                  <div class="fval">
+                    <span class="bar"><span class="fill">██████████</span>░░░░░░░░░░</span>
+                    <span class="mult">48,200 coins · 52.4% of pot · 31 punters</span>
+                  </div>
+                </div>
+                <div>
+                  <div class="fname">Verdant Pact <span class="mult">x2.75</span></div>
+                  <div class="fval">
+                    <span class="bar"><span class="fill">███████</span>░░░░░░░░░░░░░</span>
+                    <span class="mult">31,750 coins · 34.5% of pot · 4 punters</span>
+                  </div>
+                </div>
+                <div>
+                  <div class="fname">Ashfall Syndicate <span class="mult">x7.25</span></div>
+                  <div class="fval">
+                    <span class="bar"><span class="fill">███</span>░░░░░░░░░░░░░░░░░</span>
+                    <span class="mult">12,050 coins · 13.1% of pot · 6 punters</span>
+                  </div>
+                </div>
+              </div>
+
+              <div class="edesc">
+                <b>Total pot <span class="mult">92,000</span></b> · rake 5% (<span class="mult">4,600</span>) · paid out <span class="mult">87,400</span><br>
+                <span style="color:var(--d-faint)">Multipliers are <b>indicative</b>. Pari-mutuel odds move with every stake and are only final at close.</span>
+              </div>
+
+              <div class="efooter">
+                <span class="fdot"></span>
+                <span>Market #63 · staff oracle · rake 5% · closes Sat 15 Aug 2026 14:00 UTC</span>
+              </div>
+            </div>
+
+            <div class="arow">
+              <button class="btn primary">Stake on Ironhold</button>
+              <button class="btn primary">Stake on Verdant</button>
+              <button class="btn primary">Stake on Ashfall</button>
+            </div>
+            <div class="arow">
+              <button class="btn">My position</button>
+              <button class="btn">Rules &amp; rake</button>
+              <button class="btn">Refresh odds</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="note">
+          <div class="lbl">Annotation · design rules — timestamps, indicative odds, one rake</div>
+          <p><b>Discord does not parse <code>&lt;t:…&gt;</code> tokens inside an embed footer.</b> A competitor ships the raw token there. The live relative time lives in the <b>description</b>, where Discord does render it (highlighted above, “in 2 days”), and the footer carries a plain absolute string that needs no parsing.</p>
+          <div class="cmp">
+            <div><div class="t bad">Competitor footer</div><div class="v">Market #63 · closes &lt;t:1786901694:R&gt;</div></div>
+            <div><div class="t ok">Ours</div><div class="v">description: closes <b>in 2 days</b><br>footer: closes Sat 15 Aug 2026 14:00 UTC</div></div>
+          </div>
+          <p>Three outcome buttons, no ID entry, no name typing. The rake appears in the pot line, the footer and the <b>Rules &amp; rake</b> button, all rendered from the single config value, so the FAQ can never say 7.5% while the embed says 10%.</p>
+          <p>Odds are labelled indicative in the embed body, not in a tooltip nobody opens. Bars are unicode blocks because embeds cannot carry styled graphics; that is the honest medium. Every figure sits in inline code, so Discord renders it in a mono face and pots, percentages and odds line up in columns.</p>
+        </div>
+
+        <!-- =========================================================
+             2a. STAKE MODAL
+             ========================================================= -->
+        <div class="step">Tap “Stake on Ashfall” → modal opens</div>
+
+        <div class="modalstage">
+          <div class="modalbg">
+            <div class="msg" style="margin-top:16px">
+              <div class="av bot">ES</div>
+              <div class="body">
+                <div class="mhead"><span class="who">Estates</span><span class="tag">APP</span><span class="when">Today at 09:14</span></div>
+                <div class="embed">
+                  <div class="etitle">Which faction holds Redstone Ridge on Sept 1?</div>
+                  <div class="edesc">Total pot 92,000 · rake 5% · closes in 2 days</div>
+                </div>
+                <div class="arow">
+                  <button class="btn primary">Stake on Ironhold</button>
+                  <button class="btn primary">Stake on Verdant</button>
+                  <button class="btn primary">Stake on Ashfall</button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="modalveil">
+            <div class="modal">
+              <div class="mh">
+                <h3>Stake on Ashfall Syndicate</h3>
+                <p>Market #63 · indicative x7.25 · closes in 2 days</p>
+              </div>
+              <div class="mb">
+                <div>
+                  <div class="flabel">Outcome <span class="req">*</span></div>
+                  <div class="finput">Ashfall Syndicate</div>
+                  <div class="fhint">Pre-filled from the button you pressed. Editable — Discord has no read-only input — so the handler checks it against the button's custom_id and rejects anything else.</div>
+                </div>
+                <div>
+                  <div class="flabel">Stake in coins <span class="req">*</span></div>
+                  <div class="finput">2500<span class="caret"></span></div>
+                  <div class="fhint">Available 41,320 · already held 6,000 · min 100, max 41,320</div>
+                </div>
+              </div>
+              <div class="mf">
+                <button class="btn mcancel">Cancel</button>
+                <button class="btn primary">Preview stake</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="note">
+          <div class="lbl">Annotation · design rules — modals hold text only, never identity</div>
+          <p>A Discord modal <b>cannot</b> hold a select or an autocomplete, and takes at most 5 text inputs. So the only thing the user types is the one thing only they know: <b>the amount</b>. The market and the outcome arrive from the button that opened the modal, not from a field asking for an ID.</p>
+          <p>The submit button says <b>Preview stake</b>, not <b>Place stake</b>. Nothing has touched the wallet yet.</p>
+          <p><b>The outcome field is pre-filled, not read-only — Discord has no read-only flag on a TextInput.</b> A modal always returns whatever the user left in the box, so on submit the handler re-validates the outcome string against the <code>custom_id</code> of the button that opened the modal (<code>estates:market:63:stake:ashfall</code>) and rejects a mismatch. It also re-resolves market #63 from the message id before doing anything, because after a restart a persistent view comes back with placeholder state.</p>
+        </div>
+
+        <!-- =========================================================
+             2b. EPHEMERAL PREVIEW → CONFIRM
+             ========================================================= -->
+        <div class="msg eph">
+          <div class="av bot">ES</div>
+          <div class="body">
+            <div class="mhead">
+              <span class="who">Estates</span><span class="tag">APP</span>
+              <span class="when">Today at 09:15</span>
+            </div>
+
+            <div class="embed">
+              <div class="author"><span class="dot"><i></i></span> Preview · nothing has moved yet</div>
+              <div class="etitle">Stake 2,500 on Ashfall Syndicate?</div>
+              <div class="edesc">This will place a <b>hold</b> on 2,500 coins. Held coins stay yours and stay in your wallet, they just cannot be spent until the market closes or is voided.</div>
+
+              <div class="efields grid2">
+                <div>
+                  <div class="fname">Your wallet after</div>
+                  <div class="fval">
+                    Available <span class="mult avail">41,320 → <b>38,820</b></span><br>
+                    Held <span class="mult heldv">6,000 → <b>8,500</b></span><br>
+                    Balance <span class="mult"><b>47,320</b></span> (unchanged)
+                  </div>
+                </div>
+                <div>
+                  <div class="fname">Market after your stake</div>
+                  <div class="fval">
+                    Ashfall pool <span class="mult">12,050 → <b>14,550</b></span><br>
+                    Total pot <span class="mult">92,000 → <b>94,500</b></span><br>
+                    Indicative <span class="mult"><b>x7.25 → x6.17</b></span>
+                  </div>
+                </div>
+              </div>
+
+              <div class="edesc">
+                <b>If Ashfall wins, you receive 15,425 coins</b> (profit 12,925), at today's pool sizes.
+              </div>
+              <div class="codeblk">rake_cut      = pot × rake_pct // 100
+              = 94,500 × 5 // 100        =  4,725
+distributable = pot - rake_cut           = 89,775
+payout        = stake × distributable // winning_pool
+              = 2,500 × 89,775 // 14,550
+              = 224,437,500 // 14,550    = 15,425
+                floor drops 3,750/14,550 of a coin — whole-coin
+                remainders go to treasury:estates at resolve</div>
+
+              <div class="edesc" style="color:var(--d-faint)">
+                That figure is <b>indicative</b>. Every stake placed after yours changes it. Only the pools at close decide what you are paid.
+              </div>
+
+              <div class="efooter">
+                <span class="fdot"></span>
+                <span>Preview expires in 60s · key estates:market:63:stake:2418 · hold expires 7d after resolve</span>
+              </div>
+            </div>
+
+            <div class="arow">
+              <button class="btn success">Confirm · hold 2,500</button>
+              <button class="btn">Change amount</button>
+              <button class="btn">Cancel</button>
+            </div>
+
+            <div class="ephnote">
+              <svg class="eyed" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 3C4.5 3 1.7 5.1.7 7.7a.8.8 0 0 0 0 .6C1.7 10.9 4.5 13 8 13s6.3-2.1 7.3-4.7a.8.8 0 0 0 0-.6C14.3 5.1 11.5 3 8 3Zm0 8a3 3 0 1 1 0-6 3 3 0 0 1 0 6Z"/></svg>
+              Only you can see this · <span class="dismiss">Dismiss message</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="note">
+          <div class="lbl">Annotation · design rules — preview by default, claim-first, caller-minted keys</div>
+          <p><b>Users confirm numbers, not intentions.</b> The preview shows the exact before/after on both sides: what happens to their wallet and what happens to the market. Applying is a separate, explicit press.</p>
+          <p>Money uses three colours with fixed meanings: <b>available</b> is primary text, <span class="heldn"><b>held</b></span> is amber, <span class="bad"><b>debt</b></span> would be red. Balance is unchanged, because a hold reserves rather than spends, and the copy says so in words too.</p>
+          <p>The idempotency key <code>estates:market:63:stake:2418</code> is minted from the domain event at preview time and reused on every retry of the confirm. It is not a fresh <code>uuid4()</code> per HTTP attempt. Pressing Confirm twice, or a network retry, produces one hold.</p>
+          <p>On confirm the bot marks the wager row claimed in one <code>UPDATE … WHERE state='pending'</code>, and only calls <code>/hold</code> if it won the row. If the hold fails, the row is released back.</p>
+        </div>
+
+        <!-- =========================================================
+             3. AUCTION LOT
+             ========================================================= -->
+        <div class="daydiv"><span>#auctions</span></div>
+
+        <div class="msg">
+          <div class="av bot">ES</div>
+          <div class="body">
+            <div class="mhead">
+              <span class="who">Estates</span><span class="tag">APP</span>
+              <span class="when">Today at 11:02</span>
+            </div>
+
+            <div class="embed">
+              <div class="author"><span class="dot"><i></i></span> Auction · lot #425</div>
+              <div class="etitle">Redstone Ridge, Parcel 14 — 64×64, river frontage</div>
+              <div class="edesc">
+                Sold by <span class="mention">@mossking</span>. Deed transfers on settle, rails and the dock stay.<br>
+                <b>Closes <span class="tl">in 4 hours</span></b> (today 15:14 UTC). Any bid in the last 5 minutes extends the lot by 5 minutes.
+              </div>
+
+              <div class="efields grid3">
+                <div>
+                  <div class="fname">Current high</div>
+                  <div class="fval"><span class="mult big"><b>18,400</b></span><br><span class="mention">@tinfoiljoe</span></div>
+                </div>
+                <div>
+                  <div class="fname">Min next bid</div>
+                  <div class="fval"><span class="mult big"><b>19,400</b></span><br>increment 1,000</div>
+                </div>
+                <div>
+                  <div class="fname">Bids</div>
+                  <div class="fval"><span class="mult big"><b>11</b></span><br>7 bidders</div>
+                </div>
+              </div>
+
+              <div class="hr"></div>
+
+              <div class="efields">
+                <div>
+                  <div class="fname">Your position</div>
+                  <div class="fval">
+                    You were outbid. <span class="heldv"><b>Hold released, 16,900 back in available.</b></span><br>
+                    Available <span class="mult avail"><b>38,820</b></span> · held <span class="mult heldv"><b>8,500</b></span> (market #63)
+                  </div>
+                </div>
+              </div>
+
+              <div class="efooter">
+                <span class="fdot"></span>
+                <span>Lot #425 · seller fee 3% on hammer · closes today 15:14 UTC · holds expire close + 24h</span>
+              </div>
+            </div>
+
+            <div class="arow">
+              <button class="btn primary">Bid</button>
+              <button class="btn">Bid min (19,400)</button>
+              <button class="btn">Watch</button>
+              <button class="btn">My bids</button>
+              <button class="btn">Lot history</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="note">
+          <div class="lbl">Annotation · design rules — hold/release is visible, empty states stay empty</div>
+          <p>Same escrow machinery as betting: a bid is a <b>hold</b>, being outbid <b>releases</b> it, winning <b>captures</b> to <code>treasury:estates</code> and then transfers hammer minus 3% to the seller. The user is told in plain words that their money came back, because a silent release looks like a loss.</p>
+          <p><b>Bid min (19,400)</b> exists so the common case needs no modal at all. <b>Bid</b> opens the same amount-only modal as staking.</p>
+          <p>If the user had no position on this lot, the “Your position” block would be <b>absent</b>, not present-and-saying-zero. Absence is not decorated.</p>
+          <p>Every button re-resolves lot #425 from the message id before acting, so a bot restart cannot make “Bid min” bid the wrong number on a stale view. Five buttons is one full action row — Discord's maximum per row, five rows per message.</p>
+        </div>
+
+        <!-- =========================================================
+             4. /estates PANEL
+             ========================================================= -->
+        <div class="daydiv"><span>#bot-spam</span></div>
+
+        <div class="msg">
+          <div class="av usr">JV</div>
+          <div class="body">
+            <div class="mhead"><span class="who">Vaicos</span><span class="when">Today at 11:40</span></div>
+            <div class="mtext"><span class="slashref">/estates</span></div>
+          </div>
+        </div>
+
+        <div class="msg eph">
+          <div class="av bot">ES</div>
+          <div class="body">
+            <div class="mhead">
+              <span class="who">Estates</span><span class="tag">APP</span>
+              <span class="when">Today at 11:40</span>
+            </div>
+
+            <div class="embed">
+              <div class="author"><span class="dot"><i></i></span> Estates</div>
+              <div class="etitle">Everything, from one place</div>
+              <div class="edesc">
+                Available <span class="mult avail"><b>38,820</b></span> · held <span class="mult heldv"><b>8,500</b></span> · balance <span class="mult"><b>47,320</b></span><br>
+                <span style="color:var(--d-faint)">Held: 8,500 staked on market #63, released or paid at resolve.</span>
+              </div>
+              <div class="edesc" style="color:var(--d-faint)">
+                2 live auctions · 3 open markets · you own 1 parcel · rake 5% · fee 3%
+              </div>
+              <div class="efooter">
+                <span class="fdot"></span>
+                <span>Balances read live from core. If core is unreachable this panel refuses to open.</span>
+              </div>
+            </div>
+
+            <div class="arow">
+              <button class="btn primary">Auctions</button>
+              <button class="btn primary">Markets</button>
+              <button class="btn primary">Lands</button>
+              <button class="btn primary">My positions</button>
+            </div>
+            <div class="arow">
+              <button class="btn">Watchlist (3)</button>
+              <button class="btn">History</button>
+              <button class="btn">Rules &amp; rake</button>
+              <button class="btn">Sell / list</button>
+            </div>
+            <div class="select">Jump to…
+              <span class="chev"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></span>
+            </div>
+
+            <div class="ephnote">
+              <svg class="eyed" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 3C4.5 3 1.7 5.1.7 7.7a.8.8 0 0 0 0 .6C1.7 10.9 4.5 13 8 13s6.3-2.1 7.3-4.7a.8.8 0 0 0 0-.6C14.3 5.1 11.5 3 8 3Zm0 8a3 3 0 1 1 0-6 3 3 0 0 1 0 6Z"/></svg>
+              Only you can see this · <span class="dismiss">Dismiss message</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="note">
+          <div class="lbl">Annotation · design rules — four slash commands, not forty</div>
+          <p>The whole bot's command surface is <code>/estates</code>, <code>/bet</code>, <code>/lot</code>, <code>/parcel</code>. Everything else is a button on a panel. Restocker went from 136 commands to ~15 for exactly this reason, and Estates ships small from day one instead of being cut back later.</p>
+          <p>Panels are 5 rows × 5 components, so this fits with room to spare. Views cannot hold free text, which is why the <b>Jump to…</b> row is a select and never a “type a lot number” box.</p>
+          <p>Held coins are itemised on sight. A user should never have to ask why their available is lower than their balance.</p>
+          <p>If core is down the panel <b>refuses to open</b> rather than showing a cached or optimistic number. Coins live in one place; when that place cannot be reached, Estates does not guess.</p>
+        </div>
+
+        <!-- =========================================================
+             5. RESOLUTION PROPOSAL
+             ========================================================= -->
+        <div class="daydiv"><span>#resolution-log</span></div>
+
+        <div class="msg">
+          <div class="av bot">ES</div>
+          <div class="body">
+            <div class="mhead">
+              <span class="who">Estates</span><span class="tag">APP</span>
+              <span class="when">Today at 12:31</span>
+            </div>
+
+            <div class="embed">
+              <div class="author"><span class="dot"><i></i></span> Resolution proposed · not paid</div>
+              <div class="etitle">Market #63 → Verdant Pact</div>
+              <div class="edesc">
+                Proposed by <span class="mention">@Vaicos</span> (staff oracle). <b>No coins have moved.</b><br>
+                Confirm unlocks <span class="tl">in 9 minutes</span> (12:40 UTC). Until then, <b>Unresolve</b> costs nothing.
+              </div>
+
+              <div class="efields grid3">
+                <div><div class="fname">Captured pot</div><div class="fval"><span class="mult big"><b>92,000</b></span><br>in treasury:estates</div></div>
+                <div><div class="fname">Rake 5%</div><div class="fval"><span class="mult big"><b>4,600</b></span><br>stays with house</div></div>
+                <div><div class="fname">Distributable</div><div class="fval"><span class="mult big goodv"><b>87,400</b></span><br>to 4 winners</div></div>
+              </div>
+
+              <div class="fname">Payout table that WILL execute</div>
+              <div class="codeblk">winner        stake    share    payout   idempotency key
+─────────────────────────────────────────────────────────────
+@mossking    12,000   37.80%   33,033   …:63:payout:user:1203738126850461738
+@tinfoiljoe   9,500   29.92%   26,151   …:63:payout:user: 984120553771118592
+@hexline      6,250   19.69%   17,204   …:63:payout:user:1178440290716254208
+@quarrycat    4,000   12.59%   11,011   …:63:payout:user:1099873440215302144
+─────────────────────────────────────────────────────────────
+             31,750  100.00%   87,399   remainder 1 → treasury:estates</div>
+
+              <div class="edesc">
+                Losing stakes: 60,250 across 37 punters, already captured. Nothing to refund.<br>
+                <span style="color:var(--d-faint)">Payouts run one row at a time, each marked paid before the next is attempted. If this crashes at row 3, re-running resumes at row 3 and never re-pays rows 1 and 2.</span>
+              </div>
+
+              <div class="efooter">
+                <span class="fdot"></span>
+                <span>Market #63 · proposal #1 · oracle Vaicos · posted to #payout-proof on confirm</span>
+              </div>
+            </div>
+
+            <div class="arow">
+              <button class="btn success dis">Confirm &amp; pay 87,399 (unlocks in 9m)</button>
+              <button class="btn">Unresolve</button>
+              <button class="btn">Change outcome</button>
+              <button class="btn danger">Void &amp; refund 92,000</button>
+            </div>
+            <div class="arow">
+              <button class="btn">Full stake list (41)</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="note">
+          <div class="lbl">Annotation · design rules — two-step gate, integer money, compensating reversal</div>
+          <p><b>resolve(proposed) → confirm(pays out).</b> A competitor resolved a market to the wrong outcome after payouts had started and had to walk it back publicly. Here a single misclick cannot pay 60k: the Confirm button is disabled for the hold-down, and <b>Unresolve</b> before confirm is free.</p>
+          <p>The staff member confirms <b>the exact table that will execute</b>, down to the per-row idempotency keys, not a sentence saying “resolve this market”.</p>
+          <p>All integer arithmetic: <code>stake × distributable // winning_pool</code>, the same expression the stake preview shows. Payouts sum to 87,399 and the <b>1-coin remainder is stated on screen</b> as going to the treasury. No floats anywhere on this path.</p>
+          <p>So the button says <b>87,399</b>, not 87,400. 87,400 is the distributable; 87,399 is what actually leaves in transfers, and the missing coin is the floor remainder named in the table. A confirm button is the last figure anyone reads before coins move, so it is the one figure that must not be rounded up to a friendlier number.</p>
+          <p>Payouts advance the progress marker <b>per row</b>, not after the loop. Each transfer is claimed with <code>UPDATE … WHERE paid_at IS NULL</code> first and only sent if the row was won.</p>
+          <p>After confirm there is no delete. A reversal is a compensating run with keys <code>estates:market:63:reverse:user:&lt;uid&gt;</code>, which fails loudly if a winner already spent the coins rather than pushing a wallet negative. Every run posts itself to <code>#payout-proof</code>, so the proof cannot be forged by omission.</p>
+        </div>
+
+      </div>
+
+      <div class="composer">
+        <span class="plus">+</span>
+        Message #prediction-markets
+      </div>
+
+      </div><!-- /chatcol -->
+
+      <!-- member list: grouped by hoisted role, then Online, then Offline -->
+      <div class="members">
+        <div class="mgroup">Oracle — 1</div>
+        <div class="member">
+          <span class="mav" style="background:#5865f2">JV</span>
+          <span class="mnm">Vaicos</span>
+        </div>
+
+        <div class="mgroup">Bots — 1</div>
+        <div class="member">
+          <span class="mav" style="background:#22FF7A;color:#0b1f12">ES</span>
+          <span class="mnm">Estates</span>
+          <span class="tag">APP</span>
+        </div>
+
+        <div class="mgroup">Online — 5</div>
+        <div class="member">
+          <span class="mav" style="background:#ed4245">HX</span>
+          <span class="mnm">hexline</span>
+        </div>
+        <div class="member idle">
+          <span class="mav" style="background:#3ba55c">MK</span>
+          <span class="mnm">mossking</span>
+        </div>
+        <div class="member">
+          <span class="mav" style="background:#faa81a">QC</span>
+          <span class="mnm">quarrycat</span>
+        </div>
+        <div class="member dnd">
+          <span class="mav" style="background:#949ba4">TJ</span>
+          <span class="mnm">tinfoiljoe</span>
+        </div>
+        <div class="member">
+          <span class="mav" style="background:#5865f2">WR</span>
+          <span class="mnm">wrenlow</span>
+        </div>
+
+        <div class="mgroup">Offline — 3</div>
+        <div class="member off">
+          <span class="mav" style="background:#949ba4">BR</span>
+          <span class="mnm">brambling</span>
+        </div>
+        <div class="member off">
+          <span class="mav" style="background:#3ba55c">NL</span>
+          <span class="mnm">northlight</span>
+        </div>
+        <div class="member off">
+          <span class="mav" style="background:#ed4245">TR</span>
+          <span class="mnm">tamsinroe</span>
+        </div>
+      </div>
+
+      </div><!-- /content -->
+    </div>
+  </div>
+
+</div>
+</body>
+</html>

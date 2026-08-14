@@ -1,0 +1,1383 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>V Tech Ops — Estates console</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Space+Grotesk:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+/* ============================================================
+   V TECH OPS — staff console. All data is fake and in-memory.
+   CSS block is mock_hub.html's, verbatim, minus the tiles that
+   screen used and this one does not. Ops-only additions are in
+   the second <style> block below.
+   ============================================================ */
+:root{
+  --font-data:'IBM Plex Mono',ui-monospace,Menlo,monospace;
+  --font-ui:'Space Grotesk',system-ui,sans-serif;
+  --bg:#080808;--surface:#0f0f0f;--panel2:#151515;--border:#1E1E1E;--border-strong:#2A2A2A;
+  --text:#F4F4F4;--text-body:#B4B4B4;--muted:#6a6a6a;--faint:#3f3f3f;
+  --green:#22FF7A;--green-dim:#0f7a3a;--accent:#22FF7A;--red:#FF4D4D;--amber:#F5A623;--blue:#4A9EFF;--purple:#B47FFF;--nether:#FF6B35;
+}
+:root{
+  /* money roles map onto the house palette */
+  --money-available:var(--text);
+  --money-held:var(--amber);
+  --money-debt:var(--red);
+  --money-save:var(--green);
+  --headh:54px;--navh:46px;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{color-scheme:dark}
+body{background:var(--bg);background-image:radial-gradient(#151515 .5px,transparent .5px);background-size:24px 24px;color:var(--text);font-family:var(--font-ui);font-size:13px;line-height:1.5;-webkit-font-smoothing:antialiased;min-height:100vh}
+.mono,td,.num,input,.pill,.tag,.val,.fv,.tick,.hold-amt,.kfig,.big{font-family:var(--font-data);font-variant-numeric:tabular-nums slashed-zero}
+a{color:inherit;text-decoration:none}
+button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
+::selection{background:rgba(34,255,122,.22)}
+svg.i{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round;flex:0 0 auto}
+
+/* ---------- header ---------- */
+header{position:sticky;top:0;z-index:90;height:var(--headh);background:rgba(15,15,15,.9);backdrop-filter:blur(10px);border-bottom:1px solid var(--border);padding:0 24px;display:flex;align-items:center;justify-content:space-between}
+.logo{display:flex;align-items:center;gap:12px;cursor:pointer}
+.logo-icon{width:30px;height:30px;background:var(--accent);display:flex;align-items:center;justify-content:center;color:#000;font-weight:700;font-size:16px;box-shadow:0 0 24px rgba(34,255,122,.4)}
+.logo-text{font-size:14px;font-weight:600}
+.logo-sub{font-family:var(--font-data);font-size:8.5px;color:var(--muted);margin-top:2px;text-transform:uppercase;letter-spacing:.18em}
+.header-right{display:flex;align-items:center;gap:12px}
+.user-tag{display:flex;align-items:center;gap:9px;padding-left:12px;border-left:1px solid var(--border)}
+.user-mark{width:22px;height:22px;border:1px solid var(--border-strong);background:var(--panel2);display:flex;align-items:center;justify-content:center;font-family:var(--font-data);font-size:9.5px;color:var(--text-body)}
+.auth-name{font-family:var(--font-data);color:var(--accent);font-weight:500;font-size:12px}
+.svc-note{font-family:var(--font-data);font-size:9.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.14em}
+
+/* ---------- nav ---------- */
+nav{position:sticky;top:var(--headh);z-index:80;display:flex;gap:2px;background:var(--surface);border-bottom:1px solid var(--border);padding:0 16px;overflow-x:auto;height:var(--navh);scrollbar-width:none}
+nav::-webkit-scrollbar{display:none}
+.nav-tab{display:flex;align-items:center;gap:7px;height:var(--navh);padding:0 16px;font-size:12px;font-weight:500;color:var(--muted);cursor:pointer;border-bottom:2px solid transparent;white-space:nowrap;user-select:none;background:none}
+.nav-tab svg{opacity:.7}
+.nav-tab:hover{color:var(--text)}
+.nav-tab[aria-current="true"]{color:var(--accent);border-bottom-color:var(--accent)}
+.nav-tab[aria-current="true"] svg{opacity:1}
+
+/* ---------- MONEY STRIP ---------- */
+.strip-wrap{position:sticky;top:calc(var(--headh) + var(--navh));z-index:70;background:var(--surface);border-bottom:1px solid var(--border)}
+.strip{max-width:1180px;margin:0 auto;padding:0 24px;display:flex;align-items:stretch;min-height:60px}
+.seg{display:flex;flex-direction:column;justify-content:center;padding:10px 22px;position:relative;flex:0 0 auto;text-align:left}
+.seg + .seg::before{content:"";position:absolute;left:0;top:12px;bottom:12px;width:1px;background:var(--border)}
+.seg:first-child{padding-left:0}
+.seg .lab{font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);font-weight:600;margin-bottom:3px;display:flex;align-items:center;gap:6px}
+.seg .val{font-size:19px;font-weight:600;letter-spacing:-.01em;line-height:1.15}
+.seg .sub{font-size:10.5px;color:var(--muted)}
+.v-avail{color:var(--money-available)}
+.v-held{color:var(--money-held)}
+.v-save{color:var(--money-save)}
+.v-net{color:var(--text)}
+.coin{font-family:var(--font-data);font-size:.62em;font-weight:500;color:var(--muted);margin-left:3px;letter-spacing:0}
+.seg.held-seg{cursor:pointer}
+.seg.held-seg:hover{background:var(--panel2)}
+.seg.held-seg .lab{color:var(--money-held)}
+.chev{display:inline-flex;transition:transform .18s ease;color:var(--money-held)}
+.chev svg{width:12px;height:12px}
+.strip-wrap.open .chev{transform:rotate(180deg)}
+.strip .spacer{flex:1 1 auto}
+.seg.net-seg{padding-right:0;text-align:right;align-items:flex-end}
+.net-note{font-size:10.5px;color:var(--muted)}
+
+/* held drawer */
+.drawer{max-height:0;overflow:hidden;transition:max-height .22s ease;border-top:1px solid transparent}
+.strip-wrap.open .drawer{max-height:400px;border-top-color:var(--border)}
+.drawer-inner{max-width:1180px;margin:0 auto;padding:12px 24px 16px}
+.drawer-head{font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);font-weight:600;margin-bottom:9px;display:flex;align-items:center;gap:10px}
+.drawer-head::after{content:"";flex:1;height:1px;background:var(--border)}
+.hold-row{display:flex;align-items:center;gap:12px;width:100%;text-align:left;padding:9px 12px;border:1px solid var(--border);background:var(--panel2);margin-bottom:6px;transition:border-color .12s,transform .12s;cursor:pointer}
+.hold-row:hover{border-color:var(--border-strong);transform:translateX(2px)}
+.hold-dot{width:8px;height:8px;border-radius:50%;flex:0 0 auto;display:inline-block}
+.hold-main{flex:1;min-width:0}
+.hold-t{font-size:12.5px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:block}
+.hold-s{font-size:10.5px;color:var(--muted);display:block}
+.hold-amt{font-size:14px;font-weight:600;color:var(--money-held);white-space:nowrap}
+.hold-go{color:var(--faint);display:flex}
+.drawer-foot{display:flex;justify-content:space-between;align-items:center;gap:16px;padding-top:9px;margin-top:6px;border-top:1px solid var(--border);font-size:11px;color:var(--muted)}
+.drawer-foot b{color:var(--money-held);font-size:13px;font-family:var(--font-data);font-variant-numeric:tabular-nums slashed-zero}
+
+/* ---------- layout ---------- */
+main{max-width:1180px;margin:0 auto;padding:24px 24px 80px;animation:f .25s ease}
+@keyframes f{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+.page-head{display:flex;align-items:flex-end;gap:16px;flex-wrap:wrap;margin-bottom:18px}
+h1{font-size:21px;font-weight:600;letter-spacing:-.01em;margin:0}
+.page-sub{color:var(--muted);font-size:12.5px;margin-top:3px}
+.section-h{font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin:24px 0 12px;display:flex;align-items:center;gap:10px;font-weight:600}
+.section-h::after{content:"";flex:1;height:1px;background:var(--border)}
+.tile-h{font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;gap:10px;font-weight:600}
+.eyebrow{font-size:10px;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);font-weight:600;margin-bottom:4px}
+.q{font-size:14px;font-weight:600;letter-spacing:-.01em;color:var(--text)}
+.t-title{font-size:13.5px;font-weight:600;letter-spacing:-.01em}
+
+.bento{display:grid;grid-template-columns:repeat(12,1fr);gap:14px;margin-bottom:16px}
+.tile{background:var(--surface);border:1px solid var(--border);padding:18px 20px;position:relative}
+.s12{grid-column:span 12}.s7{grid-column:span 7}.s6{grid-column:span 6}
+.s5{grid-column:span 5}.s4{grid-column:span 4}.s3{grid-column:span 3}
+@media(max-width:900px){.s7,.s6,.s5,.s4,.s3{grid-column:span 12}}
+
+/* kpi */
+.kgrid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.kpi{background:var(--panel2);border:1px solid var(--border);padding:13px 14px}
+.kpi .k{color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.08em}
+.kpi .kfig{font-size:20px;font-weight:600;margin-top:5px}
+.kpi .kt{font-size:10px;color:var(--muted);margin-top:3px}
+
+/* generic bits */
+.pill{display:inline-flex;align-items:center;gap:6px;padding:2px 8px;font-size:11px;border:1px solid var(--border);color:var(--text-body);white-space:nowrap}
+.pill.good{border-color:rgba(34,255,122,.3);color:var(--green)}
+.pill.warn{border-color:rgba(245,166,35,.3);color:var(--amber)}
+.pill.crit{border-color:rgba(255,77,77,.3);color:var(--red)}
+.pill.mine{border-color:rgba(74,158,255,.35);color:var(--blue)}
+.up{color:var(--green)}.down{color:var(--red)}
+.muted{color:var(--muted)}.sec{color:var(--text-body)}.amb{color:var(--amber)}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:7px;background:var(--accent);color:#000;border:none;padding:8px 14px;font-family:var(--font-ui);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;cursor:pointer}
+.btn:hover{background:#4dff96}
+.btn.ghost{background:transparent;border:1px solid var(--border);color:var(--text-body)}
+.btn.ghost:hover{background:var(--panel2);border-color:var(--border-strong);color:var(--text)}
+.btn:disabled{opacity:.35;cursor:not-allowed}
+.btn.sm{padding:6px 10px;font-size:10px}
+.row{display:flex;align-items:center;gap:10px}
+.between{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.wrapf{flex-wrap:wrap}
+.right{text-align:right}
+
+/* tables */
+table{width:100%;border-collapse:collapse;background:var(--surface);border:1px solid var(--border)}
+th,td{padding:9px 13px;text-align:right;border-bottom:1px solid var(--border);font-size:12.5px}
+th:first-child,td:first-child{text-align:left}
+th{color:var(--muted);font-weight:600;font-family:var(--font-ui);font-size:11px;text-transform:uppercase;letter-spacing:.05em;cursor:pointer;user-select:none}
+th:hover{color:var(--text)}
+tbody tr:hover{background:var(--panel2)}
+tr:last-child td{border-bottom:none}
+.tick{font-weight:600;letter-spacing:.02em}
+.tname{font-size:10.5px;color:var(--muted);font-family:var(--font-ui)}
+.tablewrap{overflow-x:auto}
+
+/* bars */
+.bar{height:6px;background:var(--panel2);overflow:hidden;position:relative}
+.bar > i{display:block;height:100%;background:linear-gradient(90deg,var(--green),#17b558)}
+
+/* modal */
+.scrim{position:fixed;inset:0;background:rgba(4,4,4,.82);z-index:200;display:none;align-items:center;justify-content:center;padding:20px}
+.scrim.on{display:flex}
+.modal{width:100%;max-width:470px;background:var(--surface);border:1px solid var(--border-strong);max-height:92vh;display:flex;flex-direction:column;animation:f .18s ease}
+.modal-head{padding:14px 18px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:flex-start;gap:12px}
+.modal-head h3{margin:0;font-size:13px;font-weight:600;letter-spacing:-.01em}
+.modal-head .mh-sub{font-size:10.5px;color:var(--muted);margin-top:3px}
+.modal-body{padding:18px;overflow-y:auto}
+.modal-foot{padding:13px 18px;border-top:1px solid var(--border);display:flex;gap:10px;justify-content:flex-end;flex-wrap:wrap}
+.x{color:var(--muted);display:flex;padding:2px}
+.x:hover{color:var(--text)}
+.err{color:var(--red);font-size:11.5px;min-height:18px}
+.kv{display:flex;justify-content:space-between;gap:16px;padding:8px 0;font-size:12.5px;border-bottom:1px solid var(--border)}
+.kv:last-of-type{border-bottom:none}
+.kv .k{color:var(--muted)}
+.kv .v{font-weight:600;white-space:nowrap;text-align:right}
+.kv.total{border-top:1px solid var(--border);border-bottom:none;margin-top:6px;padding-top:12px;font-size:13.5px}
+.notebox{margin-top:14px;padding:10px 12px;font-size:11px;line-height:1.55;background:rgba(245,166,35,.06);border:1px solid rgba(245,166,35,.25);color:#d9ae6a}
+.notebox.blue{background:rgba(74,158,255,.06);border-color:rgba(74,158,255,.25);color:#9dc3f0}
+.notebox.red{background:rgba(255,77,77,.06);border-color:rgba(255,77,77,.28);color:#e8a1a1}
+.okbox{margin-top:14px;padding:11px 12px;font-size:11.5px;line-height:1.55;background:rgba(34,255,122,.06);border:1px solid rgba(34,255,122,.25);color:#8fe0b2}
+.big{font-size:24px;font-weight:600;letter-spacing:-.02em}
+.ref{font-family:var(--font-data);font-size:11px;color:var(--text-body)}
+.flash{animation:flash 1.4s ease-out}
+@keyframes flash{0%{background:rgba(245,166,35,.22)}100%{background:transparent}}
+.empty{padding:16px 0;color:var(--muted);font-size:12px}
+.foot{color:var(--faint);font-size:11px;margin-top:12px;line-height:1.5}
+.hide{display:none !important}
+
+/* responsive */
+@media (max-width:760px){
+  header{padding:0 14px}
+  nav{padding:0 6px}
+  .nav-tab{padding:0 11px}
+  .svc-note{display:none}
+  main{padding:20px 14px 60px}
+  .strip{padding:0 14px;flex-wrap:wrap;min-height:0}
+  .seg{padding:9px 14px;flex:1 1 auto;min-width:44%}
+  .seg:first-child{padding-left:0}
+  .seg + .seg::before{display:none}
+  .seg.net-seg{align-items:flex-start;text-align:left;padding-right:14px}
+  .strip .spacer{display:none}
+  .seg .val{font-size:17px}
+  .drawer-inner{padding:10px 14px 14px}
+  .hide-sm{display:none}
+  th.hide-sm,td.hide-sm{display:none}
+  .kgrid{grid-template-columns:1fr}
+}
+</style>
+<style>
+/* ============================================================
+   OPS-ONLY additions. Same tokens, same 4px grid, no radius.
+   ============================================================ */
+.staffbar{background:rgba(245,166,35,.06);border:1px solid rgba(245,166,35,.25);color:#d9ae6a;padding:8px 12px;font-size:11px;display:flex;align-items:center;gap:9px;margin-bottom:16px;line-height:1.5}
+.staffbar b{color:var(--amber);font-weight:600}
+
+.big-fig{font-size:28px;font-weight:600;letter-spacing:-.02em;line-height:1.1}
+.subline{font-size:10.5px;color:var(--muted);margin-top:4px;line-height:1.45}
+.tile.crit{border-color:rgba(255,77,77,.4)}
+.tile.crit .big-fig{color:var(--red)}
+.tile.warnb{border-color:rgba(245,166,35,.35)}
+
+/* segmented progress */
+.segbar{display:flex;height:14px;gap:1px;background:var(--border);border:1px solid var(--border)}
+.segbar > i{display:block;height:100%}
+.counts{display:flex;gap:0;border-top:1px solid var(--border);margin-top:14px;padding-top:12px}
+.counts > div{flex:1;padding-right:12px;min-width:0;border-left:1px solid var(--border);padding-left:12px}
+.counts > div:first-child{border-left:none;padding-left:0}
+.counts .cv{font-family:var(--font-data);font-variant-numeric:tabular-nums slashed-zero;font-size:17px;font-weight:600;letter-spacing:-.01em}
+.counts .cl{font-size:9.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin-top:2px}
+
+/* status words in tables */
+.st{font-family:var(--font-data);font-size:11px;text-transform:uppercase;letter-spacing:.06em;display:inline-flex;align-items:center;gap:7px}
+.st::before{content:"";width:7px;height:7px;display:inline-block;background:currentColor;flex:0 0 auto}
+.st.paid{color:var(--green)}
+.st.pending{color:var(--muted)}
+.st.claimed{color:var(--amber)}
+.st.failed{color:var(--amber)}
+.st.parked{color:var(--red)}
+.st.skipped{color:var(--faint)}
+.st.unknown{color:var(--purple)}
+.st.ok{color:var(--green)}
+.st.replayed{color:var(--blue)}
+.st.refused{color:var(--red)}
+
+/* keys — the point of the audit table, so never truncated */
+.kcell{font-family:var(--font-data);font-size:10.5px;color:var(--text-body);white-space:nowrap;letter-spacing:-.01em}
+.kcell .dim{color:var(--faint)}
+td.lft,th.lft{text-align:left}
+
+/* scrollable table with frozen head */
+.scrollt{max-height:min(620px,68vh);overflow:auto;border:1px solid var(--border);background:var(--surface)}
+.scrollt table{border:none}
+.scrollt thead th{position:sticky;top:0;background:var(--panel2);z-index:2;border-bottom:1px solid var(--border-strong)}
+
+/* filter chips */
+.filters{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
+.fbtn{padding:6px 11px;border:1px solid var(--border);background:var(--surface);font-size:11px;font-weight:500;color:var(--muted);font-family:var(--font-data);font-variant-numeric:tabular-nums slashed-zero}
+.fbtn:hover{color:var(--text);border-color:var(--border-strong)}
+.fbtn[aria-pressed="true"]{color:var(--accent);border-color:rgba(34,255,122,.35)}
+.srch{background:var(--panel2);border:1px solid var(--border);color:var(--text);padding:7px 11px;font-size:11.5px;font-family:var(--font-data);outline:none;min-width:230px;flex:1}
+.srch:focus{border-color:var(--border-strong)}
+
+/* run selector */
+.runtabs{display:flex;border:1px solid var(--border);background:var(--surface);margin-bottom:14px;overflow-x:auto}
+.runtabs button{padding:9px 14px;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);white-space:nowrap}
+.runtabs button + button{border-left:1px solid var(--border)}
+.runtabs button:hover{background:var(--panel2);color:var(--text)}
+.runtabs button[aria-pressed="true"]{background:var(--accent);color:#000}
+
+/* gate */
+.countdown{font-family:var(--font-data);font-variant-numeric:tabular-nums slashed-zero;font-size:34px;font-weight:600;letter-spacing:-.02em;line-height:1.1}
+.chk{display:flex;gap:10px;align-items:flex-start;padding:9px 0;border-bottom:1px solid var(--border);font-size:12px}
+.chk:last-child{border-bottom:none}
+.chk .cmark{width:15px;height:15px;flex:0 0 auto;display:flex;align-items:center;justify-content:center;margin-top:1px}
+.chk .ct{flex:1;min-width:0;color:var(--text-body)}
+.chk .cs{font-size:10.5px;color:var(--muted);margin-top:2px}
+.chk.pass .cmark{color:var(--green)}
+.chk.fail .cmark{color:var(--red)}
+.chk.warn .cmark{color:var(--amber)}
+.chk.fail .ct{color:var(--text)}
+.btn.danger{background:var(--red);color:#000}
+.btn.danger:hover{background:#ff6d6d}
+.btn.danger:disabled{background:var(--red)}
+.dangerbox{margin-top:14px;padding:11px 12px;font-size:11.5px;line-height:1.55;background:rgba(255,77,77,.06);border:1px solid rgba(255,77,77,.28);color:#e79a9a}
+.dangerbox b{color:var(--red)}
+.irrev{display:flex;align-items:center;gap:8px;font-size:10.5px;text-transform:uppercase;letter-spacing:.09em;font-weight:600;color:var(--red)}
+/* hold-to-confirm — the same idiom as the hold-down on the panel behind it,
+   so this screen has exactly one way to arm something irreversible */
+.holdbtn{position:relative;overflow:hidden;min-width:230px}
+.holdbtn > i{position:absolute;right:0;top:0;bottom:0;width:0;background:rgba(0,0,0,.42)}
+.holdbtn > svg,.holdbtn > span{position:relative;z-index:1}
+.holdnote{font-size:11.5px;color:var(--text-body);line-height:1.55;margin-top:4px}
+.actions{display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap}
+.sub-td{font-size:10.5px;color:var(--muted);font-family:var(--font-ui);margin-top:2px}
+.warnstripe{border-left:2px solid var(--amber)}
+.critstripe{border-left:2px solid var(--red)}
+/* motion is state here (drawer, flash, run ticks) — under reduced motion the
+   state still lands, it just stops moving on the way */
+@media (prefers-reduced-motion: reduce){
+  *,*::before,*::after{animation-duration:.01ms !important;animation-iteration-count:1 !important;transition-duration:.01ms !important}
+  .hold-row:hover{transform:none}
+}
+@media (max-width:760px){
+  .counts{flex-wrap:wrap;gap:10px 0}
+  .counts > div{min-width:50%;border-left:none;padding-left:0}
+  .big-fig{font-size:24px}
+  .countdown{font-size:28px}
+  .srch{min-width:0;flex:1 0 100%}
+  .scrollt td:first-child{white-space:nowrap}
+  .runtabs button{padding:9px 11px}
+}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo" onclick="go('treasury')">
+    <div class="logo-icon">V</div>
+    <div><div class="logo-text">V Tech Ops</div><div class="logo-sub">Estates console</div></div>
+  </div>
+  <div class="header-right">
+    <span class="svc-note">staff · treasury:estates</span>
+    <span class="user-tag"><span class="user-mark">VA</span><span class="auth-name">@Vaicos</span></span>
+  </div>
+</header>
+
+<nav id="tabs"></nav>
+
+<!-- ============ MONEY STRIP (from mock_hub.html) ============ -->
+<div class="strip-wrap" id="stripWrap">
+  <div class="strip">
+    <div class="seg">
+      <div class="lab">Wallet · available</div>
+      <div class="val v-avail num" id="sAvail">0</div>
+      <div class="sub">spendable right now</div>
+    </div>
+
+    <button class="seg held-seg" id="heldSeg" aria-expanded="false">
+      <div class="lab">Held <span class="chev"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></span></div>
+      <div class="val v-held num" id="sHeld">0</div>
+      <div class="sub" id="sHeldSub">reserved</div>
+    </button>
+
+    <div class="seg">
+      <div class="lab">Savings · Osentar</div>
+      <div class="val v-save num" id="sSave">0</div>
+      <div class="sub">3.2% APR</div>
+    </div>
+
+    <div class="spacer"></div>
+
+    <div class="seg net-seg">
+      <div class="lab">Net position</div>
+      <div class="val v-net num" id="sNet">0</div>
+      <div class="net-note">available + held + savings &minus; loan · bonds &amp; land excluded</div>
+    </div>
+  </div>
+
+  <div class="drawer">
+    <div class="drawer-inner">
+      <div class="drawer-head">What is holding your coins</div>
+      <div id="holdList"></div>
+      <div class="drawer-foot">
+        <span>Holds are escrow — the coins are yours until captured, and every hold has an expiry.</span>
+        <span>Total held <b id="sHeldTotal">0</b></span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<main id="view"></main>
+
+<div class="scrim" id="scrim">
+  <div class="modal" role="dialog" aria-modal="true">
+    <div class="modal-head">
+      <div><h3 id="mTitle">Confirm</h3><div class="mh-sub" id="mSub"></div></div>
+      <button class="x" onclick="closeModal()" aria-label="Close"><svg class="i" viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
+    </div>
+    <div class="modal-body" id="mBody"></div>
+    <div class="modal-foot" id="mFoot"></div>
+  </div>
+</div>
+
+<script>
+/* ================================================================
+   ICONS — inline lucide-style strokes. No emoji anywhere.
+   ================================================================ */
+const svg = d => '<svg class="i" viewBox="0 0 24 24">' + d + '</svg>';
+const IC = {
+  treasury: svg('<path d="M3 21h18M4 10h16M12 3l9 5H3zM6 10v11M10 10v11M14 10v11M18 10v11"/>'),
+  run:      svg('<path d="M4 6h10M4 12h16M4 18h7"/><path d="M17 15l3 3-3 3"/>'),
+  gate:     svg('<path d="M12 3l8 4v6c0 4.4-3.4 7.6-8 8-4.6-.4-8-3.6-8-8V7z"/><path d="M9 12l2 2 4-4"/>'),
+  recon:    svg('<path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/>'),
+  ledger:   svg('<path d="M4 4h13l3 3v13H4z"/><path d="M8 9h8M8 13h8M8 17h5"/>'),
+  play:     svg('<path d="M6 4l14 8-14 8z"/>'),
+  pause:    svg('<path d="M8 5v14M16 5v14"/>'),
+  check:    svg('<path d="M20 6L9 17l-5-5"/>'),
+  cross:    svg('<path d="M18 6L6 18M6 6l12 12"/>'),
+  alert:    svg('<path d="M12 3l9 16H3z"/><path d="M12 10v4M12 17h.01"/>'),
+  arrow:    svg('<path d="M5 12h14M13 6l6 6-6 6"/>'),
+  back:     svg('<path d="M19 12H5M11 18l-6-6 6-6"/>'),
+  undo:     svg('<path d="M3 12a9 9 0 1 0 2.6-6.4"/><path d="M3 3v6h6"/>'),
+  dl:       svg('<path d="M12 3v12M7 11l5 5 5-5"/><path d="M4 21h16"/>')
+};
+
+/* ================================================================
+   CONFIG — one place. Rake and auction fee in basis points, integer,
+   because money never touches a float. Same figures as the hub.
+   ================================================================ */
+const CFG = { RAKE_BPS:500, FEE_BPS:300, HOLDDOWN_S:300, CONFIRM_HOLD_S:3, MAX_ATTEMPTS:5, WORKER:'estates-w1' };
+const rakePct = () => (CFG.RAKE_BPS/100).toFixed(CFG.RAKE_BPS%100?2:0) + '%';
+const rakeOn  = pool => Math.floor(pool * CFG.RAKE_BPS / 10000);
+const netPool = pool => pool - rakeOn(pool);
+const feeOn   = amt  => Math.floor(amt * CFG.FEE_BPS / 10000);
+const n  = v => v.toLocaleString('en-US');
+const sg = v => (v<0?'−':'') + n(Math.abs(v));
+const cn = v => sg(v) + '<span class="coin">c</span>';
+
+/* human dates, never ISO */
+const MON=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+const NOW = new Date(2026,7,13,19,42);            // 13 Aug 2026, 19:42
+function stamp(minsAgo){
+  const d = new Date(NOW.getTime() - minsAgo*60000);
+  const hh = String(d.getHours()).padStart(2,'0'), mm = String(d.getMinutes()).padStart(2,'0');
+  return d.getDate()+' '+MON[d.getMonth()]+' '+d.getFullYear()+' '+hh+':'+mm;
+}
+function ago(m){
+  if(m < 1)  return 'just now';
+  if(m < 60) return Math.round(m)+' min ago';
+  if(m < 60*24)   return Math.round(m/60)+' h ago';
+  if(m < 60*24*7) return Math.round(m/(60*24))+' d ago';
+  if(m < 60*24*28)return Math.round(m/(60*24*7))+' weeks ago';
+  return stamp(m).slice(0,11);
+}
+function mmss(s){ s=Math.max(0,Math.round(s)); return Math.floor(s/60)+':'+String(s%60).padStart(2,'0'); }
+
+/* ================================================================
+   FAKE DATA — deterministic. Seeded LCG so the run is the same
+   every reload and the figures below always add up.
+   ================================================================ */
+let _s = 8675309;
+const rnd = () => { _s = (_s*1664525 + 1013904223) >>> 0; return _s/4294967296; };
+
+const PA=['Grey','Ash','Bram','Thorn','Wren','Cald','Mor','Vex','Nim','Rook','Sable','Ver','Quill','Hal','Fen','Dross','Ember','Kest','Lark','Mire','Osric','Pell','Ridd','Stag','Tolle','Umber','Vane','Wick','Brack','Corr','Dunn','Falk','Gret','Hesp','Ives','Jarl','Kell','Lund','Marr','Neve','Orv','Pyke','Rane','Solm','Tarn','Ulve','Vord','Wold','Yarr','Zeph'];
+const PB=['hames','fell','wood','ridge','mere','stone','vale','holt','ford','gate','shade','burn','moor','crag','hollow','reach','barrow','thwaite','cliff','marsh','hearth','spire','row','banks','strand','warren','helm','wold','fen','drift'];
+const seen = new Set();
+function handle(){
+  for(let t=0;t<80;t++){
+    const a=PA[Math.floor(rnd()*PA.length)], b=PB[Math.floor(rnd()*PB.length)], s=rnd();
+    let h = s<.46 ? a+b : s<.72 ? a+'_'+b : s<.88 ? (a+b).toLowerCase() : a+b+String(10+Math.floor(rnd()*89));
+    if(!seen.has(h)){ seen.add(h); return h; }
+  }
+  return 'Player'+Math.floor(rnd()*9999);
+}
+function snowflake(){
+  let s='1'+String(2+Math.floor(rnd()*2));
+  for(let i=0;i<17;i++) s+=Math.floor(rnd()*10);
+  return s;
+}
+const ref = () => 'lgr:'+Math.floor(rnd()*0xffffffff).toString(16).padStart(8,'0');
+
+/* --- market #74 payout run, attempt a2 --------------------------
+   #74 closed 11 Aug when lot #398 hammered at 44,200 and its resolution
+   was confirmed 22 minutes ago, which is why this run exists.
+   NOT market #77: #77 (the Mockrean election) is OPEN, closes in 2d 04h
+   and still carries his live 4,500c hold — see the drawer row h_77 below
+   and CANON §0. A market cannot be open and paying out; do not renumber
+   this run back onto #77. #74's pot happens to also be 80,000 — that is
+   a coincidence of size, not the same market.
+   Winning side (Yes) 42,000 across 199 captured stakes.
+   Total pool 80,000 → rake 5% = 4,000 → net 76,000 distributed.  */
+const M74 = { id:74, q:'Emberwatch Freehold — will it hammer above 40,000?', winner:'Yes',
+              side:42000, pool:80000 };
+M74.rake = rakeOn(M74.pool);
+M74.net  = netPool(M74.pool);
+
+function makeStakes(count, total){
+  const raw=[]; for(let i=0;i<count;i++) raw.push(100+Math.floor(rnd()*rnd()*760));
+  const S=raw.reduce((a,b)=>a+b,0), f=total/S;
+  const out=raw.map(v=>Math.max(100,Math.round(v*f)));
+  let d=total-out.reduce((a,b)=>a+b,0), i=0;
+  while(d!==0){ const j=i%count; if(d>0){out[j]++;d--;} else if(out[j]>100){out[j]--;d++;} i++; }
+  return out;
+}
+const stakes = makeStakes(199, M74.side);
+
+const RUNS = {};
+(function buildRun318(){
+  const rows=[]; let seq=1;
+  const stakeIter = stakes[Symbol.iterator]();
+  for(let i=0;i<199;i++){          // 199 payable rows + 1 built-skipped = 200
+    const uid=snowflake(), name=handle();
+    if(seq===96){
+      rows.push({seq, uid, name, stake:0, amount:0, status:'skipped', attempts:0,
+                 err:'amount 0 · hold released at close, never captured',
+                 key:'estates:market:74:payout:a2:user:'+uid, ref:null});
+      seq++; i--; continue;                       // the skipped row is a 201st punter
+    }
+    const st = stakeIter.next().value;
+    const amount = Math.floor(st * M74.net / M74.side);
+    rows.push({seq, uid, name, stake:st, amount, status:'pending', attempts:0, err:null,
+               key:'estates:market:74:payout:a2:user:'+uid, ref:null});
+    seq++;
+  }
+  // 63 rows already paid, in seq order. Row 64 is next. Nothing after 63 is paid.
+  for(let i=0;i<63;i++){ rows[i].status='paid'; rows[i].attempts=1; rows[i].ref=ref(); rows[i].paidAt=180-i*2.4; }
+  rows[70].status='pending'; rows[70].attempts=2;
+  rows[70].err='ledger_unavailable · transient, handed back to pending';
+  rows[87].status='parked';  rows[87].attempts=5;
+  rows[87].err='idempotency_conflict · same key, different fingerprint — needs a human';
+  RUNS[318]={ id:318, kind:'market_payout', subject:'market #74', attempt:2,
+              key:'estates:market:74:payout:a2', rows, created:22, lease:null,
+              worker:CFG.WORKER, leaseLost:41, status:'paused', note:
+              'Attempt a1 was confirmed, paid 12 rows, then reversed — those keys end :a1: and are dead.' };
+})();
+
+/* --- market #84, the resolution waiting on the gate ------------- */
+const M84 = {
+  id:84, q:'First guild to claim Ashfell?', closedAgo:73,
+  outcomes:[ {k:'ironvale',  n:'Ironvale',        pool:12400, unknown:0},
+             {k:'greyhames', n:'Grey Hames Co.',  pool:7600,  unknown:600},
+             {k:'northlight',n:'Northlight',      pool:5200,  unknown:300},
+             {k:'other',     n:'Any other guild', pool:2900,  unknown:0} ],
+  winnerKey:'ironvale', attempt:1, proposedBy:'Vaicos', proposedAgo:4,
+  state:'proposed',                       // proposed | confirmed
+  holddownLeft:45,                        // seconds remaining on this proposal
+  winners:[ {name:'Ironvale_Kade', uid:snowflake(), stake:4200},
+            {name:'Bramblefen',    uid:snowflake(), stake:2600},
+            {name:'wickstrand',    uid:snowflake(), stake:1900},
+            {name:'Mirebarrow',    uid:snowflake(), stake:1300},
+            {name:'Tolle_Reach',   uid:snowflake(), stake:1000},
+            {name:'KestrelMoor',   uid:snowflake(), stake:900},
+            {name:'Sablecrag41',   uid:snowflake(), stake:500} ]
+};
+M84.previewPool = M84.outcomes.reduce((a,o)=>a+o.pool,0);   // frozen at propose time
+const poolNow    = () => M84.outcomes.reduce((a,o)=>a+o.pool,0);
+const unknownCnt = () => RECON.filter(r=>r.market===84 && r.status!=='done').length;
+const unknownAmt = () => RECON.filter(r=>r.market===84 && r.status!=='done').reduce((a,r)=>a+r.amount,0);
+const winSide    = () => M84.outcomes.find(o=>o.k===M84.winnerKey).pool;
+function payoutTable(){
+  const pool=poolNow(), net=netPool(pool), side=winSide();
+  const rows=M84.winners.map(w=>({...w, amount:Math.floor(w.stake*net/side)}));
+  const paid=rows.reduce((a,r)=>a+r.amount,0);
+  return {rows, pool, rake:rakeOn(pool), net, side, paid, remainder:net-paid};
+}
+
+/* --- holds whose outcome core has not confirmed ----------------- */
+const RECON = [
+  {id:'stake #4471', kind:'stake', market:74, lot:null, user:'Bramblefen', amount:1200,
+   ours:'capturing', age:41, hold:'h_9f21a4', core:null, truth:'captured', status:'open',
+   note:'capture committed at core, response lost'},
+  {id:'stake #4489', kind:'stake', market:84, lot:null, user:'KestrelMoor', amount:600,
+   ours:'capture_unknown', age:18, hold:'h_a04d17', core:null, truth:'captured', status:'open',
+   note:'worker died between claim and settle'},
+  {id:'stake #4502', kind:'stake', market:84, lot:null, user:'Northlight_Ivo', amount:300,
+   ours:'capturing', age:22, hold:'h_b7734c', core:null, truth:'released', status:'open',
+   note:'hold expired before the close swept it'},
+  {id:'bid #1188',   kind:'bid', market:null, lot:412, user:'Tamsin_Roe', amount:7200,
+   ours:'release_unknown', age:64, hold:'h_c1180e', core:null, truth:'open', status:'open',
+   note:'losing bid, release never acknowledged'},
+  {id:'bid #1205',   kind:'bid', market:null, lot:418, user:'Ashwold', amount:24500,
+   ours:'held', age:196, hold:'h_d5520b', core:null, truth:'released', status:'open',
+   note:'held past expiry — core expires holds on its own clock'},
+  {id:'stake #4460', kind:'stake', market:71, lot:null, user:'Dross_Helm', amount:5000,
+   ours:'releasing', age:311, hold:'h_e7712f', core:null, truth:'not_found', status:'open',
+   note:'hold id unknown to core — the place call never landed'}
+];
+
+/* --- treasury -------------------------------------------------- */
+const OTHER_OBLIGATIONS = [
+  /* #405 closed today at 31,000 and is the settle that is stuck. #412 is
+     still open in every other surface, so it owes nobody anything yet. */
+  {t:'Auction #405 · hammer settle',  s:'seller Ironvale Guild · 31,000 hammer less 3% fee', amt:31000-feeOn(31000),  due:'on capture'},
+  {t:'Auction #418 · hammer settle',  s:'seller Amazonia Mining · 24,500 hammer less 3% fee', amt:24500-feeOn(24500), due:'blocked · bid #1205 unreconciled'},
+  {t:'Market #71 · void refunds',     s:'96 punters, full stake, no rake', amt:41000, due:'run not built'},
+  {t:'Rent to landlords · Aug 2026',  s:'14 parcels, period key 2026-08', amt:9300, due:'sweep at 00:00'}
+];
+const runRemaining = r => r.rows.filter(x=>x.status!=='paid'&&x.status!=='skipped').reduce((a,x)=>a+x.amount,0);
+const obligations = () => runRemaining(RUNS[318]) + OTHER_OBLIGATIONS.reduce((a,o)=>a+o.amt,0)
+                          + (RUNS[319] ? runRemaining(RUNS[319]) : 0);
+const HEADROOM = 17705;                    // what treasury holds above what it owes
+const TR = { balance: 0, escrowUsers: 318400, escrowCount: 87, rakeMonth: 21480 };
+TR.balance = obligations() + HEADROOM;     // double entry: paying a row drops both sides
+
+/* --- audit ledger ---------------------------------------------- */
+let AUDIT = [
+  {m:2,   kind:'payout.row',       subj:'run #318 · row 63', actor:'estates-w1', cp:'Wickford',      amt:-1817, key:'estates:market:74:payout:a2:user:1203738126850461738', res:'ok',       ref:'lgr:4a19c0d2'},
+  {m:3,   kind:'payout.row',       subj:'run #318 · row 62', actor:'estates-w1', cp:'Kellbarrow',    amt:-914,  key:'estates:market:74:payout:a2:user:1288104427710099457', res:'replayed', ref:'lgr:4a19bf8e'},
+  {m:5,   kind:'payout.row',       subj:'run #318 · row 61', actor:'estates-w1', cp:'mirefen',       amt:-2260, key:'estates:market:74:payout:a2:user:1310774829554213890', res:'ok',       ref:'lgr:4a19be11'},
+  {m:9,   kind:'payout.row',       subj:'run #318 · row 88', actor:'estates-w1', cp:'Vordholt',      amt:-1410, key:'estates:market:74:payout:a2:user:1266390118447752193', res:'refused',  ref:null, err:'idempotency_conflict · parked after 5 attempts'},
+  {m:14,  kind:'payout.row',       subj:'run #318 · row 71', actor:'estates-w1', cp:'Rookmarsh',     amt:-688,  key:'estates:market:74:payout:a2:user:1229940055311842305', res:'refused',  ref:null, err:'ledger_unavailable · back to pending'},
+  {m:22,  kind:'run.create',       subj:'run #318',          actor:'Vaicos',     cp:'treasury:estates', amt:-76000, key:'estates:market:74:payout:a2',                       res:'ok',       ref:'lgr:49f0a731'},
+  {m:22,  kind:'resolution.confirm',subj:'market #74 · a2',  actor:'Vaicos',     cp:'—',            amt:0,     key:'estates:market:74:resolve:a2',                          res:'ok',       ref:'lgr:49f0a6c4'},
+  {m:71,  kind:'resolution.reverse',subj:'market #74 · a1',  actor:'Vaicos',     cp:'12 punters',   amt:9840,  key:'estates:market:74:reverse:a1',                          res:'ok',       ref:'lgr:49b21d0a'},
+  {m:73,  kind:'resolution.unresolve',subj:'market #74 · a1',actor:'Osric_Vane', cp:'—',            amt:0,     key:'estates:market:74:resolve:a1',                          res:'ok',       ref:null, err:'wrong outcome confirmed — reversed, then re-proposed as a2'},
+  {m:74,  kind:'payout.row',       subj:'run #311 · row 4',  actor:'estates-w1', cp:'Falkmoor',     amt:820,   key:'estates:market:74:reverse:a1:user:1274003881922560002', res:'ok',       ref:'lgr:49b1cc55'},
+  {m:96,  kind:'hold.capture',     subj:'stake #4471',       actor:'estates-w1', cp:'Bramblefen',   amt:1200,  key:'estates:market:74:capture:4471',                        res:'refused',  ref:null, err:'no response · state capturing, awaiting reconcile'},
+  {m:112, kind:'market.close',     subj:'market #84',        actor:'lifecycle',  cp:'—',            amt:0,     key:'estates:market:84:close',                               res:'ok',       ref:'lgr:4938f10c'},
+  {m:118, kind:'hold.capture',     subj:'stake #4498',       actor:'estates-w1', cp:'Ironvale_Kade',amt:4200,  key:'estates:market:84:capture:4498',                        res:'ok',       ref:'lgr:4931a882'},
+  {m:119, kind:'hold.capture',     subj:'stake #4489',       actor:'estates-w1', cp:'KestrelMoor',  amt:600,   key:'estates:market:84:capture:4489',                        res:'refused',  ref:null, err:'timeout · state capture_unknown'},
+  {m:151, kind:'hold.place',       subj:'stake #4502',       actor:'Northlight_Ivo', cp:'core',     amt:300,   key:'estates:market:84:stake:117',                           res:'ok',       ref:'lgr:48d0b19a'},
+  {m:187, kind:'hold.place',       subj:'bid #1191',         actor:'GreyHames',  cp:'core',         amt:8000,  key:'estates:lot:412:bid:3',                                 res:'ok',       ref:'lgr:4881cc23'},
+  {m:188, kind:'hold.release',     subj:'bid #1188',         actor:'estates-w1', cp:'Tamsin_Roe',   amt:7200,  key:'estates:lot:412:release:2',                             res:'refused',  ref:null, err:'no response · state release_unknown'},
+  {m:214, kind:'hold.place',       subj:'bid #1205',         actor:'Ashwold',    cp:'core',         amt:24500, key:'estates:lot:418:bid:11',                                res:'ok',       ref:'lgr:47f21e40'},
+  {m:640, kind:'rent.charge',      subj:'RV-C4',             actor:'rent-sweep', cp:'Riverside Wharf 4',amt:1200,key:'estates:parcel:RV-C4:rent:2026-W33',                  res:'replayed', ref:'lgr:4610aa98'},
+  {m:641, kind:'rent.charge',      subj:'RV-D4',             actor:'rent-sweep', cp:'Coalhurst Stall 3',amt:900, key:'estates:parcel:RV-D4:rent:2026-W33',                  res:'refused',  ref:null, err:'insufficient_funds · tenant had 340c, short 560c'},
+  {m:642, kind:'transfer',         subj:'RV-D4',             actor:'rent-sweep', cp:'GreyHames',    amt:-900,  key:'estates:parcel:RV-D4:payout:2026-W33',                  res:'refused',  ref:null, err:'forbidden_source · src must be treasury:estates'},
+  {m:1502,kind:'auction.settle',   subj:'lot #404',          actor:'Vaicos',     cp:'Amazonia Co.', amt:-14550,key:'estates:lot:404:settle',                                res:'ok',       ref:'lgr:41ba0d76'},
+  {m:2960,kind:'resolution.confirm',subj:'market #62 · a1',  actor:'Osric_Vane', cp:'—',            amt:0,     key:'estates:market:62:resolve:a1',                          res:'ok',       ref:'lgr:3d02cc19'},
+  {m:2961,kind:'run.create',       subj:'run #294',          actor:'Osric_Vane', cp:'treasury:estates',amt:-31350,key:'estates:market:62:payout:a1',                        res:'ok',       ref:'lgr:3d02cb02'},
+  {m:10080,kind:'auction.settle',  subj:'lot #388',          actor:'Vaicos',     cp:'V Tech Estates',amt:-6790, key:'estates:lot:388:settle',                               res:'ok',       ref:'lgr:2e11b455'},
+  {m:23040,kind:'transfer',        subj:'treasury seed',     actor:'Vaicos',     cp:'treasury:estates',amt:250000,key:'estates:treasury:seed:2026-06',                      res:'ok',       ref:'lgr:1a0033c1'}
+];
+function audit(row){ AUDIT.unshift(Object.assign({m:0}, row)); }
+
+/* --- the operator's own wallet (the strip is personal, not treasury) ---
+   CANON — GreyHames, 13 Aug 2026 19:42. The same wallet as every other
+   surface: two stored inputs (available, savings), one stored debt, and
+   holds that are listed as rows and never as a total. Integer coins.   */
+const S = {
+  wallet:{available:48200, savings:90000},
+  /* loan #9 outstanding. Derived in mock_banking.html's schedule() from
+     paidPrincipal 10,415 of 25,000 — stored here because this console has
+     no loan object of its own. Never netted silently: the strip names it. */
+  loanOutstanding: 14585,
+  /* four live holds, 46,700c. Ordered by amount descending — the drawer is
+     scanned, not read. `route` only where this console actually holds the
+     object; the rest are rows, not links. */
+  holds:[
+    {id:'h_405', amount:31000, color:'var(--amber)',
+     title:'Auction #405 — Ironvale Watchtower',
+     sub:'you won · settle stuck on attempt 3 of 5 · retry in 2m 10s',
+     route:'reconcile'},
+    {id:'h_412', amount:8000, color:'var(--nether)',
+     title:'Auction #412 — Riverside Parcel R-12',
+     sub:'you are the high bidder · closes in 5h 12m · expires close + 24h',
+     route:'reconcile'},
+    {id:'h_77', amount:4500, color:'var(--purple)',
+     title:'Bet — Mockrean election',
+     sub:'4,500 on Verrin Hald · resolves in 2d 04h · expires resolve + 7d',
+     route:'run'},
+    {id:'h_423', amount:3200, color:'var(--blue)',
+     title:'Auction #423 — Skyport Dock 7',
+     sub:'you are the high bidder · closes in 22h 04m · expires close + 24h'}
+  ]
+};
+const held  = () => S.holds.reduce((a,h)=>a+h.amount,0);          // 46,700
+/* NET POSITION — held stays in because escrowed coins are still his, and
+   the strip breaks them out two columns to the left. Debt comes off,
+   because a figure called "net" that ignores a live loan is a lie.
+   48,200 + 46,700 + 90,000 − 14,585 = 170,315 */
+const netPos = () => S.wallet.available + held() + S.wallet.savings - S.loanOutstanding;
+
+/* ================================================================
+   MONEY STRIP — markup and behaviour copied from mock_hub.html
+   ================================================================ */
+function renderStrip(){
+  sAvail.innerHTML = cn(S.wallet.available);
+  sHeld.innerHTML  = cn(held());
+  sSave.innerHTML  = cn(S.wallet.savings);
+  sNet.innerHTML   = cn(netPos());
+  sHeldTotal.innerHTML = cn(held());
+  sHeldSub.textContent = S.holds.length
+    ? 'reserved by ' + S.holds.length + ' thing' + (S.holds.length>1?'s':'')
+    : 'nothing reserved';
+  holdList.innerHTML = !S.holds.length
+    ? '<div class="empty">No open holds. All of your coins are available.</div>'
+    : S.holds.map(h=>`
+      <button class="hold-row" ${h.route?`onclick="go('${h.route}')"`:'style="cursor:default"'}>
+        <span class="hold-dot" style="background:${h.color}"></span>
+        <span class="hold-main"><span class="hold-t">${h.title}</span><span class="hold-s">${h.sub}</span></span>
+        <span class="hold-amt num">${cn(h.amount)}</span>
+        ${h.route?`<span class="hold-go">${IC.arrow}</span>`:''}
+      </button>`).join('');
+}
+heldSeg.onclick = () => heldSeg.setAttribute('aria-expanded', stripWrap.classList.toggle('open'));
+
+/* ================================================================
+   ROUTER
+   ================================================================ */
+const PAGES = [
+  {k:'treasury',  label:'Treasury',       icon:IC.treasury},
+  {k:'run',       label:'Payout run',     icon:IC.run},
+  {k:'gate',      label:'Resolution gate',icon:IC.gate},
+  {k:'reconcile', label:'Reconcile holds',icon:IC.recon},
+  {k:'audit',     label:'Audit ledger',   icon:IC.ledger}
+];
+let cur='treasury';
+tabs.innerHTML = PAGES.map(p=>`<button class="nav-tab" onclick="go('${p.k}')" data-k="${p.k}">${p.icon}${p.label}</button>`).join('');
+const VIEWS = {};
+function go(p){
+  if(p) cur=p;
+  [...tabs.children].forEach(b=>b.setAttribute('aria-current', b.dataset.k===cur));
+  view.innerHTML = VIEWS[cur]();
+  if(p){ view.style.animation='none'; void view.offsetWidth; view.style.animation=''; window.scrollTo({top:0}); }
+}
+const repaint = () => go();
+const STAFF = `<div class="staffbar">${IC.alert}<span>The strip above is <b>your own wallet</b>, not the treasury.
+  Nothing on this console spends it — every action here moves <b>treasury:estates</b>, and every one of them is logged with a key.</span></div>`;
+
+/* ================================================================
+   TREASURY
+   ================================================================ */
+VIEWS.treasury = function(){
+  const owed = obligations(), net = TR.balance - owed;
+  const pt = payoutTable();
+  // once #84 is confirmed its run is already inside `owed` — never count it twice
+  const pending84 = M84.state==='proposed' ? pt.paid : 0;
+  const projected = net - pending84;
+  const captured84 = poolNow() - unknownAmt();
+  const oblRows = [
+    {t:`Run #318 · market #74 payout (a2)`, s:`${RUNS[318].rows.filter(r=>r.status!=='paid'&&r.status!=='skipped').length} rows unpaid · resumable`, amt:runRemaining(RUNS[318]), due:'in flight'},
+    ...(RUNS[319]?[{t:'Run #319 · market #84 payout (a'+M84.attempt+')', s:RUNS[319].rows.filter(r=>r.status!=='paid').length+' rows unpaid', amt:runRemaining(RUNS[319]), due:'queued'}]:[]),
+    ...OTHER_OBLIGATIONS
+  ];
+  return STAFF + `
+  <div class="page-head">
+    <div><h1>Treasury position</h1>
+      <div class="page-sub">Account <span class="ref">treasury:estates</span> · every figure below is derived from rows, never from a stored counter.</div></div>
+    <div style="margin-left:auto" class="row">
+      <span class="pill">as of ${stamp(0)}</span>
+      <button class="btn ghost sm">${IC.dl} Export</button>
+    </div>
+  </div>
+
+  <div class="bento">
+    <div class="tile s3">
+      <div class="tile-h">Treasury holds</div>
+      <div class="big-fig num">${cn(TR.balance)}</div>
+      <div class="subline">captured stake + auction fees + accrued rake<br>rake this month <span class="num">${n(TR.rakeMonth)}</span>c</div>
+    </div>
+    <div class="tile s3">
+      <div class="tile-h">Owed out</div>
+      <div class="big-fig num amb">${cn(owed)}</div>
+      <div class="subline">${oblRows.length} obligations · unpaid run rows, refunds, seller proceeds, rent</div>
+    </div>
+    <div class="tile s3 ${net<0?'crit':''}">
+      <div class="tile-h">Net after obligations</div>
+      <div class="big-fig num" style="color:${net<0?'var(--red)':'var(--green)'}">${net>=0?'+':''}${cn(net)}</div>
+      <div class="subline">what is left once everything already owed is paid</div>
+    </div>
+    ${pending84?`<div class="tile s3 ${projected<0?'crit':''}">
+      <div class="tile-h">If #84 is confirmed</div>
+      <div class="big-fig num">${projected>=0?'+':''}${cn(projected)}</div>
+      <div class="subline">proposed resolution on the gate pays <span class="num">${n(pt.paid)}</span>c to ${pt.rows.length} winners<br>indicative — pari-mutuel, final only when the gate confirms</div>
+    </div>`:`<div class="tile s3">
+      <div class="tile-h">Market #84</div>
+      <div class="big-fig num">${cn(pt.paid)}</div>
+      <div class="subline">confirmed · run #319 built and counted in owed out, not projected on top of it</div>
+    </div>`}
+  </div>
+
+  ${(projected<0||net<0)?`<div class="tile s12 critstripe" style="margin-bottom:16px">
+    <div class="tile-h" style="color:var(--red)"><span class="row" style="gap:8px">${IC.alert} Warning · ${pending84?'this would go negative':'this is negative'}</span></div>
+    <div class="sec" style="font-size:12.5px;line-height:1.6">
+      ${pending84
+        ? `Confirming market #84 pays <b class="num">${n(pt.paid)}c</b> out of a treasury with
+           <b class="num">${sg(net)}c</b> of genuinely free coin. Net after obligations lands at
+           <b class="num" style="color:var(--red)">${sg(projected)}c</b>.`
+        : `Market #84 was confirmed. Run #319 is now a real obligation, and net after obligations is
+           <b class="num" style="color:var(--red)">${sg(net)}c</b> — estates owes more than it holds.
+           Nothing is broken yet: it breaks when the last row of whichever run finishes second is refused.`}
+    </div>
+    <div class="kv" style="margin-top:12px"><span class="k">Market #84 pool</span><span class="v num">${n(poolNow())}c</span></div>
+    <div class="kv"><span class="k">…of which actually captured into treasury:estates</span><span class="v num">${n(captured84)}c</span></div>
+    <div class="kv"><span class="k">…still unknown (${unknownCnt()} holds)</span><span class="v num amb">${n(unknownAmt())}c</span></div>
+    <div class="dangerbox">
+      Core ${pending84?'will':'did'} <b>not</b> stop you: <span class="ref">treasury:estates</span> has
+      <span class="num">${n(TR.balance)}c</span> of literal balance, so the transfers succeed until it
+      runs dry — then the remaining rows come back <span class="ref">treasury_insolvent</span>, park
+      permanently, and market #74 is left half paid with no automatic way out. The obligation
+      arithmetic is this panel's job, not core's.
+    </div>
+  </div>`:''}
+
+  <div class="section-h">Obligations</div>
+  <div class="tablewrap"><table>
+    <thead><tr><th>What is owed</th><th>Amount</th><th class="hide-sm">When</th></tr></thead>
+    <tbody>
+      ${oblRows.map(o=>`<tr>
+        <td><div>${o.t}</div><div class="sub-td">${o.s}</div></td>
+        <td class="num amb" style="font-weight:600">${n(o.amt)}<span class="coin">c</span></td>
+        <td class="hide-sm muted" style="font-size:11.5px">${o.due}</td></tr>`).join('')}
+      <tr style="background:var(--panel2)">
+        <td style="font-weight:600">Total owed out</td>
+        <td class="num amb" style="font-weight:600">${n(owed)}<span class="coin">c</span></td>
+        <td class="hide-sm"></td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="section-h">Not treasury coin</div>
+  <div class="bento">
+    <div class="tile s6">
+      <div class="tile-h">Escrow held on users' wallets</div>
+      <div class="big-fig num amb">${cn(TR.escrowUsers)}</div>
+      <div class="subline"><span class="num">${TR.escrowCount}</span> open holds across live bids and stakes.
+        These coins sit on the punters' own wallets — reserved, not captured. They are
+        <b>not</b> in <span class="ref">treasury:estates</span> and must never be counted as cover.</div>
+      <div style="margin-top:14px">
+        ${[['Auction bids · 4 live lots',54,121900,'var(--nether)'],
+           ['Open stakes · 3 markets',33,196500,'var(--purple)']].map(([t,cnt,amt,col])=>`
+          <div class="between" style="padding:9px 0;border-top:1px solid var(--border)">
+            <span class="row"><span class="hold-dot" style="background:${col}"></span>
+              <span>${t}<div class="sub-td"><span class="num">${cnt}</span> holds</div></span></span>
+            <span class="num" style="font-weight:600">${n(amt)}<span class="coin">c</span></span></div>`).join('')}
+      </div>
+      <div class="foot">Each one expires on core's clock, not ours — an expired hold returns the coins whether or not estates ever asks.</div>
+    </div>
+    <div class="tile s6">
+      <div class="tile-h">Where the balance came from</div>
+      ${(()=>{const parts=[['Captured stake awaiting payout',owed,'var(--amber)'],['Free coin (rake + fees)',net,'var(--green)']];
+        const tot=Math.max(1,parts.reduce((a,p)=>a+Math.max(0,p[1]),0));
+        return `<div style="height:10px;display:flex;gap:2px">${parts.map(p=>`<i style="flex:${Math.max(0,p[1])/tot};background:${p[2]}"></i>`).join('')}</div>
+        <div style="margin-top:12px">${parts.map(p=>`<div class="kv"><span class="k"><span class="hold-dot" style="background:${p[2]};margin-right:8px"></span>${p[0]}</span><span class="v num">${sg(p[1])}c</span></div>`).join('')}
+        <div class="kv total"><span class="k">treasury:estates</span><span class="v num">${n(TR.balance)}c</span></div></div>`;})()}
+    </div>
+  </div>
+  <div class="foot">Balance and obligations move together: settling a payout row debits the treasury and clears the same amount of debt, so the net figure only changes when new money is committed.</div>`;
+};
+
+/* ================================================================
+   PAYOUT RUN
+   ================================================================ */
+let RUNSEL = 318, ROWFILTER = 'all', ticker = null;
+const runList = () => Object.values(RUNS);
+function runStats(r){
+  const c={paid:0,pending:0,claimed:0,parked:0,skipped:0,moved:0,owed:0};
+  r.rows.forEach(x=>{ c[x.status]=(c[x.status]||0)+1;
+    if(x.status==='paid') c.moved+=x.amount; else if(x.status!=='skipped') c.owed+=x.amount; });
+  return c;
+}
+function nextRow(r){ return r.rows.find(x=>x.status==='pending'); }
+
+function toggleRun(){
+  const r = RUNS[RUNSEL];
+  if(r.status==='running'){ pauseRun('paused by @Vaicos'); return; }
+  r.status='running'; r.lease=300;
+  audit({kind:'run.claim', subj:'run #'+r.id, actor:'Vaicos', cp:CFG.WORKER, amt:0,
+         key:r.key, res:'ok', ref:ref()});
+  clearInterval(ticker);
+  ticker = setInterval(step, 420);
+  repaint();
+}
+function pauseRun(why){
+  const r = RUNS[RUNSEL];
+  clearInterval(ticker); ticker=null; r.status='paused'; r.leaseLost=0;
+  audit({kind:'run.release', subj:'run #'+r.id, actor:'Vaicos', cp:CFG.WORKER, amt:0,
+         key:r.key, res:'ok', ref:null, err:why+' · lease dropped, rows keep their state'});
+  repaint();
+}
+function step(){
+  const r=RUNS[RUNSEL], row=nextRow(r);
+  if(!row){
+    clearInterval(ticker); ticker=null;
+    const st = r.rows.some(x=>x.status==='parked') ? 'failed' : 'done';
+    r.status=st;
+    audit({kind:'run.finish', subj:'run #'+r.id, actor:CFG.WORKER, cp:'—', amt:0, key:r.key,
+           res: st==='done'?'ok':'refused', ref:null,
+           err: st==='done'?null:'finished with parked rows — market stays in paying'});
+    repaint(); return;
+  }
+  row.status='paid'; row.attempts++; row.ref=ref(); row.paidAt=0;
+  TR.balance -= row.amount;
+  audit({kind:'payout.row', subj:'run #'+r.id+' · row '+row.seq, actor:CFG.WORKER,
+         cp:row.name, amt:-row.amount, key:row.key, res: row.attempts>1?'replayed':'ok', ref:row.ref});
+  if(cur==='run'||cur==='treasury') repaint();
+}
+
+VIEWS.run = function(){
+  const r=RUNS[RUNSEL], c=runStats(r), nxt=nextRow(r);
+  const total=r.rows.length, pct=x=>x/total*100;
+  const rows = ROWFILTER==='all' ? r.rows : r.rows.filter(x=>x.status===ROWFILTER);
+  const running = r.status==='running';
+  return STAFF + `
+  <div class="page-head">
+    <div><h1>Payout run #${r.id}</h1>
+      <div class="page-sub">${r.kind} · ${r.subject} · attempt a${r.attempt} · worker <span class="ref">${r.worker}</span></div></div>
+    <div style="margin-left:auto" class="row wrapf">
+      <span class="pill ${running?'good':(r.status==='failed'?'crit':'warn')}">${r.status}${running?' · lease 5:00':''}</span>
+      <span class="pill"><span class="ref">${r.key}</span></span>
+    </div>
+  </div>
+
+  ${runList().length>1?`<div class="runtabs">${runList().map(x=>`<button aria-pressed="${x.id===RUNSEL}" onclick="RUNSEL=${x.id};ROWFILTER='all';go()">Run #${x.id} · ${x.subject}</button>`).join('')}</div>`:''}
+
+  <div class="bento">
+    <div class="tile s7">
+      <div class="tile-h"><span>Progress</span><span class="num" style="font-size:11px">${n(c.paid)} / ${n(total)} rows paid</span></div>
+      <div class="segbar">
+        <i style="flex:${pct(c.paid)};background:var(--green)"></i>
+        <i style="flex:${pct(c.parked||0)};background:var(--red)"></i>
+        <i style="flex:${pct(c.skipped||0)};background:var(--faint)"></i>
+        <i style="flex:${pct(c.pending||0)};background:var(--panel2)"></i>
+      </div>
+      <div class="counts">
+        <div><div class="cv up">${n(c.paid)}</div><div class="cl">Paid</div></div>
+        <div><div class="cv">${n(c.pending||0)}</div><div class="cl">Pending</div></div>
+        <div><div class="cv down">${n(c.parked||0)}</div><div class="cl">Parked</div></div>
+        <div><div class="cv muted">${n(c.skipped||0)}</div><div class="cl">Skipped</div></div>
+      </div>
+      <div class="counts" style="border-top:none;padding-top:0;margin-top:12px">
+        <div><div class="cv">${n(c.moved)}<span class="coin">c</span></div><div class="cl">Moved so far</div></div>
+        <div><div class="cv amb">${n(c.owed)}<span class="coin">c</span></div><div class="cl">Still owed</div></div>
+        <div><div class="cv muted">${n(M74.rake)}<span class="coin">c</span></div><div class="cl">Rake kept</div></div>
+        <div><div class="cv muted">${n(M74.net - c.moved - c.owed)}<span class="coin">c</span></div><div class="cl">Remainder</div></div>
+      </div>
+
+      <div class="tile-h" style="margin:20px 0 8px">Attempt history</div>
+      ${(r.id===318?[
+        ['a1','confirmed then reversed', 'paid 12 rows, all clawed back · keys end :a1: and are dead', 'reversed '+ago(71)],
+        ['a2','this run', c.paid+' of '+total+' rows paid · keys end :a2:', 'built '+ago(RUNS[318].created)]
+      ]:[['a'+r.attempt,'this run', c.paid+' of '+total+' rows paid', 'just now']]).map(([a,t,s2,w],i,arr)=>`
+        <div class="between" style="padding:8px 0;${i<arr.length-1?'border-bottom:1px solid var(--border)':''}">
+          <div class="row"><span class="hold-dot" style="background:${i===arr.length-1?'var(--green)':'var(--faint)'}"></span>
+            <span><span class="tick" style="font-size:12px">${a}</span>
+              <span class="muted" style="font-size:11.5px;margin-left:8px">${t}</span>
+              <div class="sub-td">${s2}</div></span></div>
+          <span class="muted num" style="font-size:11px">${w}</span>
+        </div>`).join('')}
+      <div class="foot">Same market, same winners, different keys. That is the whole reason a re-resolution is safe.</div>
+    </div>
+
+    <div class="tile s5 warnstripe">
+      <div class="tile-h">If it stops right now</div>
+      <div class="sec" style="font-size:12.5px;line-height:1.65">
+        ${c.paid ? `Rows 1–${c.paid} stay <b class="up">paid</b>. Nothing is re-sent and nothing is refunded.` : 'No row has been paid yet.'}
+        The next tick calls <span class="ref">next_payout_row(${r.id})</span> and gets
+        <b>row ${nxt?nxt.seq:'—'}</b> ${nxt?'':'· there is none left'} — seq order, no cursor stored.
+      </div>
+      <div class="kv" style="margin-top:12px"><span class="k">Resumes at</span><span class="v num">row ${nxt?nxt.seq:'—'}</span></div>
+      <div class="kv"><span class="k">Re-pays rows 1–${c.paid}</span><span class="v" style="color:var(--green)">never</span></div>
+      <div class="kv"><span class="k">Lease</span><span class="v">${running?'held 5:00':'released '+(r.leaseLost||0)+' min ago'}</span></div>
+      <div class="notebox">
+        Each row carries its own key <span class="ref">…:a2:user:&lt;discord id&gt;</span>. A row that
+        already completed answers a repeat of that key with the original ledger ref instead of
+        moving coins again — which is why a crashed worker, a redeploy and this Pause button are
+        all the same event.
+      </div>
+      <div class="row wrapf" style="margin-top:14px">
+        ${running
+          ? `<button class="btn ghost" onclick="pauseRun('paused by @Vaicos')">${IC.pause} Pause</button>`
+          : `<button class="btn" onclick="toggleRun()" ${nxt?'':'disabled'}>${IC.play} Resume at row ${nxt?nxt.seq:'—'}</button>`}
+        <button class="btn ghost" onclick="alert('Proof embed posted to the Estates Discord.')">Post proof</button>
+      </div>
+    </div>
+  </div>
+
+  ${c.parked?`<div class="tile s12 critstripe" style="margin-bottom:16px">
+    <div class="tile-h" style="color:var(--red)"><span class="row" style="gap:8px">${IC.alert} ${c.parked} parked row${c.parked>1?'s':''} — the loop will not retry ${c.parked>1?'them':'it'}</span></div>
+    ${r.rows.filter(x=>x.status==='parked').map(x=>`<div class="between wrapf" style="padding:8px 0;border-bottom:1px solid var(--border)">
+      <div><div style="font-weight:500">Row ${x.seq} · ${x.name}</div><div class="sub-td">${x.err} · ${x.attempts} of ${CFG.MAX_ATTEMPTS} attempts</div>
+        <div class="kcell" style="margin-top:4px">${x.key}</div></div>
+      <div class="row"><span class="num amb" style="font-weight:600">${n(x.amount)}c</span>
+        <button class="btn ghost sm">Inspect key</button><button class="btn sm">Pay by hand</button></div>
+    </div>`).join('')}
+    <div class="foot">A permanent failure never becomes pending again. Until a human clears it, <span class="ref">finish_run</span> returns <span class="ref">failed</span> and market #74 stays in <span class="ref">paying</span> — it is not "complete".</div>
+  </div>`:''}
+
+  <div class="section-h">Rows</div>
+  <div class="filters">
+    ${['all','paid','pending','parked','skipped'].map(f=>{
+      const cc = f==='all'?total:(c[f]||0);
+      return `<button class="fbtn" aria-pressed="${ROWFILTER===f}" onclick="ROWFILTER='${f}';go()">${f} ${cc}</button>`;}).join('')}
+    <span class="muted" style="font-size:11px;margin-left:auto">stake → payout at ×${(M74.net/M74.side).toFixed(4)} · floor, remainder stays in treasury</span>
+  </div>
+  <div class="scrollt"><table>
+    <thead><tr><th>#</th><th class="lft">Winner</th><th class="hide-sm">Stake <span class="coin">c</span></th><th>Payout <span class="coin">c</span></th>
+      <th class="lft">Status</th><th class="lft hide-sm">Idempotency key</th><th class="lft hide-sm">Result</th></tr></thead>
+    <tbody>
+    ${rows.length?rows.map(x=>`<tr>
+      <td class="num muted">${x.seq}</td>
+      <td class="lft">${x.name}<div class="sub-td num">${x.uid}</div></td>
+      <td class="num hide-sm muted">${x.stake?n(x.stake):'—'}</td>
+      <td class="num" style="font-weight:600;color:${x.status==='paid'?'var(--green)':(x.amount?'var(--text)':'var(--faint)')}">${x.amount?n(x.amount):'0'}</td>
+      <td class="lft"><span class="st ${x.status}">${x.status}</span>${x.attempts>1?`<div class="sub-td">${x.attempts} attempts</div>`:''}</td>
+      <td class="lft hide-sm"><span class="kcell">${x.key}</span></td>
+      <td class="lft hide-sm">${x.ref?`<span class="kcell">${x.ref}</span>`:(x.err?`<span class="sub-td" style="color:${x.status==='parked'?'var(--red)':'var(--muted)'}">${x.err}</span>`:'<span class="muted">—</span>')}</td>
+    </tr>`).join(''):'<tr><td colspan="7" class="lft empty">No rows in that state.</td></tr>'}
+    </tbody>
+  </table></div>
+  <div class="foot">Row 96 was built as <span class="ref">skipped</span> because its amount is 0 — that punter's hold was released at close, so there is nothing to pay and no key is ever sent. Row 88 is parked. Every other unpaid row is simply next.</div>`;
+};
+
+/* ================================================================
+   RESOLUTION GATE — two steps, and only one of them is irreversible
+   ================================================================ */
+let holdTimer = null;
+function startHolddown(){
+  clearInterval(holdTimer);
+  holdTimer = setInterval(()=>{
+    if(M84.holddownLeft<=0){ clearInterval(holdTimer); holdTimer=null; return; }
+    M84.holddownLeft--;
+    const el=document.getElementById('cd');
+    if(el){ el.textContent=mmss(M84.holddownLeft); if(M84.holddownLeft<=0) repaint(); }
+    else if(M84.holddownLeft<=0) repaint();
+  },1000);
+}
+function gateChecks(){
+  const pt=payoutTable();
+  const owed=obligations(), net=TR.balance-owed;
+  return [
+    {ok:true, t:'Market #84 is closed', s:'closed '+ago(M84.closedAgo)+' · status closed, no stake can land'},
+    {ok:true, t:`Resolution proposed by @${M84.proposedBy}, attempt a${M84.attempt}`,
+     s:'proposed '+ago(M84.proposedAgo)+' · outcome '+pt.rows.length+' winners on '+M84.outcomes.find(o=>o.k===M84.winnerKey).n},
+    {ok:M84.holddownLeft<=0, t:'Hold-down elapsed',
+     s: M84.holddownLeft>0 ? 'confirmable in '+mmss(M84.holddownLeft)+' · '+mmss(CFG.HOLDDOWN_S)+' hold-down, proposed '+ago(M84.proposedAgo)
+                           : 'elapsed · a second pair of eyes has had time to look'},
+    {ok:unknownCnt()===0, t:'Every stake on this market is reconciled',
+     s: unknownCnt() ? unknownCnt()+' hold'+(unknownCnt()>1?'s':'')+' worth '+n(unknownAmt())+'c are in an unknown state — run the reconciler first'
+                     : 'no unknown holds · the captured pool is the real pool'},
+    {ok:poolNow()===M84.previewPool, t:'Pool has not moved since propose',
+     s: poolNow()===M84.previewPool ? 'preview '+n(M84.previewPool)+'c = pool now '+n(poolNow())+'c'
+        : 'preview '+n(M84.previewPool)+'c but pool is now '+n(poolNow())+'c — staff would be paying a figure they never saw'},
+    {ok:true, warn:net-pt.paid<0, t:'treasury:estates covers '+n(pt.paid)+'c',
+     s: net-pt.paid<0 ? 'balance '+n(TR.balance)+'c is enough, but net after obligations lands at '+sg(net-pt.paid)+'c. Core will not refuse this.'
+                     : 'balance '+n(TR.balance)+'c · net after obligations '+sg(net-pt.paid)+'c'}
+  ];
+}
+VIEWS.gate = function(){
+  const pt = payoutTable();
+  const checks = gateChecks();
+  const blockers = checks.filter(c=>!c.ok);
+  const canConfirm = blockers.length===0 && M84.state==='proposed';
+  if(M84.holddownLeft>0 && !holdTimer) setTimeout(startHolddown,0);
+
+  if(M84.state==='confirmed') return STAFF + `
+    <div class="page-head"><div><h1>Resolution gate</h1>
+      <div class="page-sub">Market #84 · confirmed and paying</div></div></div>
+    <div class="tile s12">
+      <div class="tile-h"><span>Market #84 confirmed</span><span class="pill good">run #319 created</span></div>
+      <div class="q" style="margin-bottom:10px">${M84.q}</div>
+      <div class="kv"><span class="k">Outcome</span><span class="v">${M84.outcomes.find(o=>o.k===M84.winnerKey).n}</span></div>
+      <div class="kv"><span class="k">Paying</span><span class="v num">${n(pt.paid)}c to ${pt.rows.length} winners</span></div>
+      <div class="kv"><span class="k">Run key</span><span class="v ref">estates:market:84:payout:a${M84.attempt}</span></div>
+      <div class="okbox">The confirm is done and cannot be taken back with a button. The only way out
+      is a <b>reverse run</b> — a compensating run that debits every winner it just paid, which needs
+      each punter's account to still hold the coins. Open run #319 to watch it pay.</div>
+      <div class="row" style="margin-top:14px"><button class="btn" onclick="RUNSEL=319;go('run')">Open run #319 ${IC.arrow}</button>
+        <button class="btn ghost">Build reverse run</button></div>
+    </div>`;
+
+  return STAFF + `
+  <div class="page-head">
+    <div><h1>Resolution gate</h1>
+      <div class="page-sub">Step 1 proposed. Step 2 pays. Only step 2 moves coins, and it does not come back.</div></div>
+    <div style="margin-left:auto"><span class="pill warn">market #84 · proposed</span></div>
+  </div>
+
+  <div class="bento">
+    <div class="tile s7">
+      <div class="eyebrow">Market #84 · pari-mutuel · closed ${ago(M84.closedAgo)}</div>
+      <div class="q" style="margin-bottom:14px">${M84.q}</div>
+      ${M84.outcomes.map(o=>{
+        const win=o.k===M84.winnerKey, pct=Math.round(o.pool*100/poolNow());
+        return `<div class="between" style="padding:9px 0;border-bottom:1px solid var(--border)">
+          <div class="row"><span class="hold-dot" style="background:${win?'var(--green)':'var(--faint)'}"></span>
+            <span style="font-weight:${win?600:400};color:${win?'var(--text)':'var(--text-body)'}">${o.n}</span>
+            ${win?'<span class="pill good">proposed winner</span>':''}
+            ${o.unknown?`<span class="pill warn">${n(o.unknown)}c unknown</span>`:''}</div>
+          <div class="right"><span class="num" style="font-weight:600">${n(o.pool)}<span class="coin">c</span></span>
+            <span class="muted num" style="font-size:11px;margin-left:8px">${pct}%</span></div>
+        </div>`;}).join('')}
+      <div class="kv" style="margin-top:12px"><span class="k">Pool it pays from</span><span class="v num">${n(pt.pool)}c</span></div>
+      <div class="kv"><span class="k">Rake (${rakePct()}) kept by treasury</span><span class="v num">−${n(pt.rake)}c</span></div>
+      <div class="kv"><span class="k">Winning side</span><span class="v num">${n(pt.side)}c across ${pt.rows.length} stakes</span></div>
+      <div class="kv total"><span class="k">Paid to winners<br><span class="sub-td" style="margin-top:2px">indicative until confirm</span></span><span class="v num up">${n(pt.paid)}c</span></div>
+      <div class="foot">Indicative. Pari-mutuel odds move with every stake and are only final at close — this
+        pool still moves while ${unknownCnt()?'unknown holds are reconciled':'holds settle'}, and the confirm below is what freezes it.
+        Remainder <span class="num">${n(pt.remainder)}</span>c stays in treasury:estates — payouts floor to whole coins.</div>
+
+      <div class="tile-h" style="margin:20px 0 4px">The two steps</div>
+      ${[['1','Propose', 'done', 'var(--green)',
+          'Records the outcome and freezes the figures. Reversible with Unresolve. Moves nothing, touches no wallet.',
+          '@'+M84.proposedBy+' · '+ago(M84.proposedAgo)],
+         ['2','Confirm', M84.holddownLeft>0?'held down':'armed', 'var(--red)',
+          'Builds run #'+(319)+' and starts transferring from treasury:estates to '+pt.rows.length+' wallets. No undo — only a reverse run.',
+          n(pt.paid)+'c leaves the treasury']
+        ].map(([num,t,state,col,desc,meta],i)=>`
+        <div style="display:flex;gap:12px;padding:11px 0;${i?'':'border-bottom:1px solid var(--border)'}">
+          <span class="tick" style="color:${col};font-size:12px;width:14px;flex:0 0 auto">${num}</span>
+          <span style="flex:1;min-width:0">
+            <span class="between"><span style="font-weight:600">${t}</span>
+              <span class="pill ${i?(M84.holddownLeft>0?'warn':'crit'):'good'}">${state}</span></span>
+            <div class="sub-td" style="line-height:1.5;margin-top:3px">${desc}</div>
+            <div class="sub-td num" style="margin-top:3px">${meta}</div>
+          </span>
+        </div>`).join('')}
+    </div>
+
+    <div class="tile s5 ${canConfirm?'critstripe':'warnstripe'}">
+      <div class="tile-h"><span>Hold-down</span><span class="pill">attempt a${M84.attempt}</span></div>
+      <div class="countdown" style="color:${M84.holddownLeft>0?'var(--amber)':'var(--green)'}"><span id="cd">${mmss(M84.holddownLeft)}</span></div>
+      <div class="subline">${M84.holddownLeft>0?'until this proposal may be confirmed':'hold-down elapsed'}</div>
+
+      <div class="tile-h" style="margin:18px 0 4px">Confirm checks</div>
+      ${checks.map(c=>`<div class="chk ${c.ok?(c.warn?'warn':'pass'):'fail'}">
+        <span class="cmark">${c.ok?(c.warn?IC.alert:IC.check):IC.cross}</span>
+        <span class="ct">${c.t}<div class="cs">${c.s}</div></span></div>`).join('')}
+
+      ${blockers.length?`<div class="notebox" style="margin-top:14px">
+        Blocked by ${blockers.length} check${blockers.length>1?'s':''}. Clear ${blockers.length>1?'them':'it'} or
+        <b>unresolve</b> — unresolving costs nothing, it just puts the market back to closed.
+      </div>`:`<div class="dangerbox">
+        <div class="irrev">${IC.alert} This confirm is irreversible</div>
+        <div style="margin-top:7px">It builds run #319 and starts paying <b class="num">${n(pt.paid)}c</b> to
+        ${pt.rows.length} wallets. There is no undo button — only a reverse run that debits each winner
+        again, and only if they still have the coins.</div></div>`}
+
+      <div class="actions" style="margin-top:14px">
+        <button class="btn ghost" onclick="unresolve()">${IC.undo} Unresolve</button>
+        <button class="btn danger" ${canConfirm?'':'disabled'} onclick="openConfirm()">${IC.alert} Confirm &amp; pay ${n(pt.paid)}c</button>
+      </div>
+      <div class="foot">Unresolve is the reversible one. It is deliberately the quiet button.</div>
+    </div>
+  </div>
+
+  <div class="section-h">Payout table · indicative, re-computed at render, not at propose</div>
+  <div class="tablewrap"><table>
+    <thead><tr><th>Winner</th><th class="hide-sm">Stake <span class="coin">c</span></th><th>Share</th><th>Payout</th><th class="lft hide-sm">Row key it will use</th></tr></thead>
+    <tbody>
+      ${pt.rows.map(w=>`<tr>
+        <td>${w.name}<div class="sub-td num">${w.uid}</div></td>
+        <td class="num hide-sm muted">${n(w.stake)}</td>
+        <td class="num muted">${(w.stake*100/pt.side).toFixed(1)}%</td>
+        <td class="num up" style="font-weight:600">${n(w.amount)}<span class="coin">c</span></td>
+        <td class="lft hide-sm"><span class="kcell">estates:market:84:payout:a${M84.attempt}:user:${w.uid}</span></td></tr>`).join('')}
+      <tr style="background:var(--panel2)">
+        <td style="font-weight:600">${pt.rows.length} winners</td><td class="num hide-sm">${n(pt.side)}</td><td></td>
+        <td class="num up" style="font-weight:600">${n(pt.paid)}<span class="coin">c</span></td>
+        <td class="lft hide-sm muted" style="font-size:11px">run key estates:market:84:payout:a${M84.attempt}</td></tr>
+    </tbody>
+  </table></div>
+  <div class="foot">Indicative. Pari-mutuel odds move with every stake and are only final at close.
+  This table is rebuilt from the pool every time the panel renders, not read back from
+  the proposal — a second staff member who never saw the preview must not be able to pay a stale figure
+  off someone else's intention.</div>`;
+};
+function unresolve(){
+  audit({kind:'resolution.unresolve', subj:'market #84 · a'+M84.attempt, actor:'Vaicos', cp:'—', amt:0,
+         key:'estates:market:84:resolve:a'+M84.attempt, res:'ok', ref:null,
+         err:'unresolved by staff — nothing moved, market back to closed'});
+  M84.attempt++; M84.previewPool = poolNow(); M84.proposedAgo = 0;
+  M84.holddownLeft = 20; startHolddown();
+  audit({kind:'resolution.propose', subj:'market #84 · a'+M84.attempt, actor:'Vaicos', cp:'—', amt:0,
+         key:'estates:market:84:resolve:a'+M84.attempt, res:'ok', ref:null,
+         err:'re-proposed at pool '+n(poolNow())+'c · hold-down restarted'});
+  repaint();
+}
+function openConfirm(){
+  const pt=payoutTable();
+  mTitle.textContent='Confirm resolution · market #84';
+  mSub.textContent='This pays coins out. It cannot be undone with a button.';
+  mBody.innerHTML=`
+    <div class="dangerbox" style="margin-top:0">
+      <div class="irrev">${IC.alert} Irreversible</div>
+      <div style="margin-top:7px">Confirming builds run #319 and transfers from
+      <span class="ref">treasury:estates</span> to ${pt.rows.length} wallets.</div>
+    </div>
+    <div class="kv" style="margin-top:14px"><span class="k">Outcome</span><span class="v">${M84.outcomes.find(o=>o.k===M84.winnerKey).n}</span></div>
+    <div class="kv"><span class="k">Pool</span><span class="v num">${n(pt.pool)}c</span></div>
+    <div class="kv"><span class="k">Rake (${rakePct()})</span><span class="v num">−${n(pt.rake)}c</span></div>
+    <div class="kv"><span class="k">Winners</span><span class="v num">${pt.rows.length}</span></div>
+    <div class="kv total"><span class="k">Leaving the treasury</span><span class="v num" style="color:var(--red)">−${n(pt.paid)}c</span></div>
+    <div class="kv"><span class="k">Treasury after</span><span class="v num">${n(TR.balance-pt.paid)}c</span></div>
+    <div class="kv"><span class="k">Net after obligations</span><span class="v num" style="color:${TR.balance-obligations()-pt.paid<0?'var(--red)':'var(--green)'}">${sg(TR.balance-obligations()-pt.paid)}c</span></div>
+    <div style="margin-top:16px"><div class="eyebrow">Hold the button down to arm this</div>
+      <div class="holdnote">Press and hold <b>Confirm</b> for ${CFG.CONFIRM_HOLD_S} seconds. Let go before it fills and
+        nothing moves. There is nothing to type — the cost of this action is ${CFG.CONFIRM_HOLD_S} seconds of
+        your attention, and an id you can read off the screen is not a check.</div></div>
+    <div class="err" id="cferr"></div>`;
+  mFoot.innerHTML=`<button class="btn ghost" id="cfcancel" onclick="closeModal()">Cancel</button>
+    <button class="btn danger holdbtn" id="cfbtn"
+      onpointerdown="holdArm(event)" onpointerup="holdRelease()" onpointerleave="holdRelease()"
+      onpointercancel="holdRelease()" onkeydown="holdArm(event)" onkeyup="holdRelease()" onblur="holdRelease()"
+      >${IC.alert}<i id="cffill"></i><span id="cflab">${cfLabel()}</span></button>`;
+  scrim.classList.add('on');
+  setTimeout(()=>{const el=document.getElementById('cfcancel'); if(el) el.focus();},30);
+}
+/* Hold to confirm. One idiom per screen: the panel behind this modal already
+   counts a hold-down out loud, so the confirm counts one out too. The bar is
+   painted from a timer, not a CSS transition, so it still runs under
+   prefers-reduced-motion — it is state, not decoration. */
+let cfHold = null;
+const cfLabel = () => `Hold to confirm &amp; pay ${n(payoutTable().paid)}c`;
+function holdArm(ev){
+  if(ev && ev.type==='keydown' && (ev.repeat || (ev.key!==' ' && ev.key!=='Enter'))) return;
+  if(ev && ev.type==='keydown') ev.preventDefault();
+  if(cfHold) return;
+  const fill=document.getElementById('cffill'), lab=document.getElementById('cflab'),
+        err=document.getElementById('cferr');
+  if(!fill) return;
+  err.textContent='';
+  const t0=Date.now(), ms=CFG.CONFIRM_HOLD_S*1000;
+  fill.style.width='100%';            // dims on press, then charges left to right
+  cfHold=setInterval(()=>{
+    const p=Math.min(1,(Date.now()-t0)/ms);
+    fill.style.width=((1-p)*100).toFixed(1)+'%';
+    lab.textContent = p<1 ? 'Keep holding · '+(ms*(1-p)/1000).toFixed(1)+'s' : 'Paying…';
+    if(p>=1){ clearInterval(cfHold); cfHold=null; doConfirm(); }
+  },40);
+}
+function holdRelease(){
+  if(!cfHold) return;
+  clearInterval(cfHold); cfHold=null;
+  const fill=document.getElementById('cffill'), lab=document.getElementById('cflab'),
+        err=document.getElementById('cferr');
+  if(fill) fill.style.width='0';
+  if(lab)  lab.innerHTML=cfLabel();
+  if(err)  err.textContent='Let go early — nothing moved. Hold for the full '+CFG.CONFIRM_HOLD_S+'s to pay.';
+}
+function closeModal(){ holdRelease(); scrim.classList.remove('on'); }
+scrim.addEventListener('click', e=>{ if(e.target===scrim) closeModal(); });
+function doConfirm(){
+  const pt=payoutTable();
+  M84.state='confirmed';
+  audit({kind:'resolution.confirm', subj:'market #84 · a'+M84.attempt, actor:'Vaicos', cp:'—', amt:0,
+         key:'estates:market:84:resolve:a'+M84.attempt, res:'ok', ref:ref()});
+  RUNS[319]={ id:319, kind:'market_payout', subject:'market #84', attempt:M84.attempt,
+    key:'estates:market:84:payout:a'+M84.attempt, worker:CFG.WORKER, status:'paused',
+    created:0, leaseLost:0, lease:null,
+    rows: pt.rows.map((w,i)=>({seq:i+1, uid:w.uid, name:w.name, stake:w.stake, amount:w.amount,
+      status:'pending', attempts:0, err:null, ref:null,
+      key:'estates:market:84:payout:a'+M84.attempt+':user:'+w.uid}))};
+  audit({kind:'run.create', subj:'run #319', actor:'Vaicos', cp:'treasury:estates', amt:-pt.paid,
+         key:RUNS[319].key, res:'ok', ref:ref()});
+  closeModal(); repaint();
+}
+
+/* ================================================================
+   RECONCILE HOLDS
+   ================================================================ */
+const CORE_WORD = {captured:'captured at core', released:'released at core',
+                   open:'still open at core', not_found:'no such hold at core'};
+function queryCore(i){
+  const r=RECON[i]; r.core=r.truth;
+  audit({kind:'hold.query', subj:r.id, actor:'reconciler', cp:r.user, amt:0,
+         key:'core GET /hold/'+r.hold, res:'ok', ref:null, err:'core says '+r.core});
+  repaint();
+}
+function queryAll(){ RECON.forEach((r,i)=>{ if(r.status==='open' && !r.core) queryCore(i); }); }
+function reconcile(i){
+  const r=RECON[i];
+  if(!r.core) return;
+  if(r.core==='not_found'){ r.status='manual'; repaint(); return; }
+  // 'open' means nothing happened: re-send the original key and core acts once.
+  const resent = r.core==='open';
+  r.core = resent ? (r.ours.indexOf('release')===0 ? 'released' : 'captured') : r.core;
+  r.status='done'; r.landed=r.core; r.resent=resent;
+  if(r.kind==='stake' && r.market===84){
+    if(r.core==='captured'){
+      // captured coin joins the pool it belongs to and lands in the treasury
+      const side = r.user==='KestrelMoor' ? 'greyhames' : 'northlight';
+      const oc = M84.outcomes.find(x=>x.k===side);
+      oc.unknown = 0; TR.balance += r.amount;
+    } else {
+      const side = r.user==='KestrelMoor' ? 'greyhames' : 'northlight';
+      const oc = M84.outcomes.find(x=>x.k===side);
+      oc.pool -= r.amount; oc.unknown = 0;
+    }
+  }
+  audit({kind:'hold.reconcile', subj:r.id, actor:'reconciler', cp:r.user, amt:r.core==='captured'?r.amount:0,
+         key:'estates:'+(r.kind==='stake'?'market:'+r.market:'lot:'+r.lot)+':reconcile:'+r.id.split('#')[1],
+         res: r.resent?'replayed':'ok', ref:ref(),
+         err:'our state '+r.ours+' → '+r.core+(r.resent?' (was still open at core; original key re-sent)':'')});
+  repaint();
+}
+VIEWS.reconcile = function(){
+  const open=RECON.filter(r=>r.status==='open'), manual=RECON.filter(r=>r.status==='manual');
+  const amt=open.reduce((a,r)=>a+r.amount,0);
+  return STAFF + `
+  <div class="page-head">
+    <div><h1>Reconcile holds</h1>
+      <div class="page-sub">Holds whose capture or release outcome we do not know. Only core knows — so we ask it, then record the answer.</div></div>
+    <div style="margin-left:auto" class="row wrapf">
+      <span class="pill ${open.length?'warn':'good'}">${open.length} unknown · ${n(amt)}c</span>
+      <button class="btn ghost sm" onclick="queryAll()" ${open.every(r=>r.core)?'disabled':''}>Query core for all</button>
+    </div>
+  </div>
+
+  ${unknownCnt()?`<div class="notebox" style="margin-bottom:16px">${unknownCnt()} of these sit on market #84,
+    which has a resolution waiting on the gate. Its confirm stays blocked until they are settled —
+    an unknown hold means the pool figure is a guess, and a pool figure that is a guess pays the wrong people.</div>`:''}
+
+  <div class="tablewrap"><table>
+    <thead><tr><th>Subject</th><th class="lft hide-sm">Holder</th><th>Amount</th>
+      <th class="lft">Our state</th><th class="lft">Core says</th><th class="hide-sm">Age</th><th></th></tr></thead>
+    <tbody>
+    ${RECON.map((r,i)=>`<tr>
+      <td>${r.id}<div class="sub-td">${r.kind==='stake'?'market #'+r.market:'lot #'+r.lot} · hold ${r.hold}</div></td>
+      <td class="lft hide-sm">${r.user}</td>
+      <td class="num" style="font-weight:600">${n(r.amount)}<span class="coin">c</span></td>
+      <td class="lft"><span class="st ${r.status==='done'?'ok':(r.status==='manual'?'parked':'unknown')}">${r.status==='done'?r.landed:r.ours}</span>
+        <div class="sub-td">${r.status==='done'?(r.resent?'key re-sent · core acted once':'settled'):r.note}</div></td>
+      <td class="lft">${r.core
+        ? `<span class="st ${r.core==='not_found'?'refused':(r.core==='captured'?'ok':'pending')}">${r.core}</span><div class="sub-td">${CORE_WORD[r.core]}</div>`
+        : '<span class="muted" style="font-size:11.5px">not asked yet</span>'}</td>
+      <td class="num muted hide-sm">${ago(r.age)}</td>
+      <td><div class="actions">${
+        r.status==='done' ? '<span class="muted" style="font-size:11px">reconciled</span>'
+        : r.status==='manual' ? '<span class="down" style="font-size:11px">needs a human</span>'
+        : r.core ? `<button class="btn sm" onclick="reconcile(${i})">Reconcile</button>`
+                 : `<button class="btn ghost sm" onclick="queryCore(${i})">Query core</button>`}</div></td>
+    </tr>`).join('')}
+    </tbody>
+  </table></div>
+
+  ${manual.length?`<div class="tile s12 critstripe" style="margin-top:16px">
+    <div class="tile-h" style="color:var(--red)"><span class="row" style="gap:8px">${IC.alert} ${manual.length} hold${manual.length>1?'s':''} core has never heard of</span></div>
+    <div class="sec" style="font-size:12.5px;line-height:1.6">
+      ${manual.map(r=>`<b>${r.id}</b> · ${r.user} · <span class="num">${n(r.amount)}c</span> — we recorded a hold id core
+      does not know, so the place call never landed. Nothing is escrowed and nothing is owed; the row is
+      wrong, not the money. Clear it by hand and log why.`).join('<br>')}
+    </div>
+  </div>`:''}
+
+  <div class="section-h">What each answer means</div>
+  <div class="bento">
+    ${[['captured','var(--green)','The coins are already in treasury:estates. Record it, add the stake to the pool — do not capture again.'],
+       ['released','var(--blue)','The hold is gone and the punter has their coins. The stake is void and must leave the pool before anyone resolves.'],
+       ['open','var(--amber)','Nothing happened. Re-send the original key; core replays rather than double-acting.'],
+       ['not_found','var(--red)','Core has no such hold. Our row is fiction. Escalate — never guess an outcome.']]
+      .map(([k,c,s])=>`<div class="tile s3"><div class="row" style="margin-bottom:8px">
+        <span class="hold-dot" style="background:${c}"></span><span class="tick" style="font-size:12px">${k}</span></div>
+        <div class="subline" style="font-size:11.5px;color:var(--text-body)">${s}</div></div>`).join('')}
+  </div>
+  <div class="foot">Sweeper input is <span class="ref">holds_needing_reconcile(older_than_seconds=900)</span> — held, capturing, releasing, capture_unknown, release_unknown. A hold with no id is invisible to it, which is why the key is logged even on the branch that failed.</div>`;
+};
+
+/* ================================================================
+   AUDIT LEDGER — the keys are the point
+   ================================================================ */
+let AFILTER='all', AQ='';
+VIEWS.audit = function(){
+  let rows = AUDIT.slice();
+  if(AFILTER!=='all') rows = rows.filter(r=>r.res===AFILTER);
+  if(AQ) rows = rows.filter(r=>(r.key+' '+r.subj+' '+(r.cp||'')+' '+r.actor).toLowerCase().includes(AQ.toLowerCase()));
+  const counts = {all:AUDIT.length, ok:0, replayed:0, refused:0};
+  AUDIT.forEach(r=>counts[r.res]!==undefined && counts[r.res]++);
+  return STAFF + `
+  <div class="page-head">
+    <div><h1>Audit ledger</h1>
+      <div class="page-sub">Every money action estates has taken, with the key it used. The key is the primary key of the money — replay it and you get the same answer, not a second payment.</div></div>
+    <div style="margin-left:auto"><button class="btn ghost sm">${IC.dl} Export CSV</button></div>
+  </div>
+
+  <div class="filters">
+    ${['all','ok','replayed','refused'].map(f=>`<button class="fbtn" aria-pressed="${AFILTER===f}" onclick="AFILTER='${f}';go()">${f} ${counts[f]}</button>`).join('')}
+    <input class="srch" id="aq" placeholder="filter by key, subject, actor…" value="${AQ}"
+           oninput="AQ=this.value;go();const e=document.getElementById('aq');e.focus();e.setSelectionRange(e.value.length,e.value.length)">
+  </div>
+
+  <div class="scrollt"><table>
+    <thead><tr><th>When</th><th class="lft">Action</th><th class="lft hide-sm">Actor</th>
+      <th>Amount</th><th class="lft">Idempotency key</th><th class="lft">Result</th></tr></thead>
+    <tbody>
+    ${rows.length?rows.map(r=>`<tr>
+      <td class="lft"><span class="num" style="font-size:11.5px;white-space:nowrap">${ago(r.m)}</span><div class="sub-td num hide-sm">${stamp(r.m)}</div></td>
+      <td class="lft"><span class="tick" style="font-size:11.5px">${r.kind}</span><div class="sub-td">${r.subj}${r.cp&&r.cp!=='—'?' → '+r.cp:''}</div></td>
+      <td class="lft hide-sm muted" style="font-size:11.5px">${r.actor}</td>
+      <td class="num" style="font-weight:600;color:${r.amt<0?'var(--red)':(r.amt>0?'var(--green)':'var(--faint)')}">${r.amt?sg(r.amt):'—'}</td>
+      <td class="lft"><span class="kcell">${r.key}</span></td>
+      <td class="lft"><span class="st ${r.res}">${r.res}</span>${r.err?`<div class="sub-td">${r.err}</div>`:(r.ref?`<div class="sub-td num">${r.ref}</div>`:'')}</td>
+    </tr>`).join(''):'<tr><td colspan="6" class="lft empty">Nothing matches that filter.</td></tr>'}
+    </tbody>
+  </table></div>
+  <div class="foot">
+    Keys read <span class="ref">estates:&lt;domain&gt;:&lt;entity&gt;:&lt;action&gt;[:&lt;seq&gt;]</span>, and payout rows carry the
+    attempt: <span class="ref">…:payout:a2:user:&lt;discord id&gt;</span>. Attempt a1 of market #74 was confirmed, paid 12 rows and
+    was reversed — those keys still exist and are dead, which is exactly why a2 is a different string and a genuinely new run.
+    <span class="ref">replayed</span> means the key came back with its original ledger ref: a retry that moved nothing.
+  </div>`;
+};
+
+/* boot */
+renderStrip();
+go('treasury');
+</script>
+</body>
+</html>

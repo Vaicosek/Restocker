@@ -1,0 +1,1031 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>V Tech Estates — Auctions</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Space+Grotesk:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+/* ============================================================
+   V TECH — AUCTIONS. All data is fake and in-memory.
+   CSS block is mock_hub.html's, verbatim, plus an auction section
+   at the end. Visual language matches dashboard_redesign_v3.html.
+   ============================================================ */
+:root{
+  --font-data:'IBM Plex Mono',ui-monospace,Menlo,monospace;
+  --font-ui:'Space Grotesk',system-ui,sans-serif;
+  --bg:#080808;--surface:#0f0f0f;--panel2:#151515;--border:#1E1E1E;--border-strong:#2A2A2A;
+  --text:#F4F4F4;--text-body:#B4B4B4;--muted:#6a6a6a;--faint:#3f3f3f;
+  --green:#22FF7A;--green-dim:#0f7a3a;--accent:#22FF7A;--red:#FF4D4D;--amber:#F5A623;--blue:#4A9EFF;--purple:#B47FFF;--nether:#FF6B35;
+}
+:root{
+  /* money roles map onto the house palette */
+  --money-available:var(--text);
+  --money-held:var(--amber);
+  --money-debt:var(--red);
+  --money-save:var(--green);
+  --headh:54px;--navh:46px;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{color-scheme:dark}
+body{background:var(--bg);background-image:radial-gradient(#151515 .5px,transparent .5px);background-size:24px 24px;color:var(--text);font-family:var(--font-ui);font-size:13px;line-height:1.5;-webkit-font-smoothing:antialiased;min-height:100vh}
+.mono,td,.num,input,.pill,.tag,.val,.fv,.tick,.o-odds,.lot-bid,.hold-amt,.kfig,.big{font-family:var(--font-data);font-variant-numeric:tabular-nums slashed-zero}
+a{color:inherit;text-decoration:none}
+button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
+::selection{background:rgba(34,255,122,.22)}
+svg.i{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round;flex:0 0 auto}
+
+/* ---------- header ---------- */
+header{position:sticky;top:0;z-index:90;height:var(--headh);background:rgba(15,15,15,.9);backdrop-filter:blur(10px);border-bottom:1px solid var(--border);padding:0 24px;display:flex;align-items:center;justify-content:space-between}
+.logo{display:flex;align-items:center;gap:12px;cursor:pointer}
+.logo-icon{width:30px;height:30px;background:var(--accent);display:flex;align-items:center;justify-content:center;color:#000;font-weight:700;font-size:16px;box-shadow:0 0 24px rgba(34,255,122,.4)}
+.logo-text{font-size:14px;font-weight:600}
+.logo-sub{font-family:var(--font-data);font-size:8.5px;color:var(--muted);margin-top:2px;text-transform:uppercase;letter-spacing:.18em}
+.header-right{display:flex;align-items:center;gap:12px}
+.user-tag{display:flex;align-items:center;gap:9px;padding-left:12px;border-left:1px solid var(--border)}
+.user-mark{width:22px;height:22px;border:1px solid var(--border-strong);background:var(--panel2);display:flex;align-items:center;justify-content:center;font-family:var(--font-data);font-size:9.5px;color:var(--text-body)}
+.auth-name{font-family:var(--font-data);color:var(--accent);font-weight:500;font-size:12px}
+.svc-note{font-family:var(--font-data);font-size:9.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.14em}
+
+/* ---------- nav ---------- */
+nav{position:sticky;top:var(--headh);z-index:80;display:flex;gap:2px;background:var(--surface);border-bottom:1px solid var(--border);padding:0 16px;overflow-x:auto;height:var(--navh);scrollbar-width:none}
+nav::-webkit-scrollbar{display:none}
+.nav-tab{display:flex;align-items:center;gap:7px;height:var(--navh);padding:0 16px;font-size:12px;font-weight:500;color:var(--muted);cursor:pointer;border-bottom:2px solid transparent;white-space:nowrap;user-select:none;background:none}
+.nav-tab svg{opacity:.7}
+.nav-tab:hover{color:var(--text)}
+.nav-tab[aria-current="true"]{color:var(--accent);border-bottom-color:var(--accent)}
+.nav-tab[aria-current="true"] svg{opacity:1}
+
+/* ---------- MONEY STRIP ---------- */
+.strip-wrap{position:sticky;top:calc(var(--headh) + var(--navh));z-index:70;background:var(--surface);border-bottom:1px solid var(--border)}
+.strip{max-width:1180px;margin:0 auto;padding:0 24px;display:flex;align-items:stretch;min-height:60px}
+.seg{display:flex;flex-direction:column;justify-content:center;padding:10px 22px;position:relative;flex:0 0 auto;text-align:left}
+.seg + .seg::before{content:"";position:absolute;left:0;top:12px;bottom:12px;width:1px;background:var(--border)}
+.seg:first-child{padding-left:0}
+.seg .lab{font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);font-weight:600;margin-bottom:3px;display:flex;align-items:center;gap:6px}
+.seg .val{font-size:19px;font-weight:600;letter-spacing:-.01em;line-height:1.15}
+.seg .sub{font-size:10.5px;color:var(--muted)}
+.v-avail{color:var(--money-available)}
+.v-held{color:var(--money-held)}
+.v-save{color:var(--money-save)}
+.v-net{color:var(--text)}
+.coin{font-family:var(--font-data);font-size:.62em;font-weight:500;color:var(--muted);margin-left:3px;letter-spacing:0}
+.seg.held-seg{cursor:pointer}
+.seg.held-seg:hover{background:var(--panel2)}
+.seg.held-seg .lab{color:var(--money-held)}
+.chev{display:inline-flex;transition:transform .18s ease;color:var(--money-held)}
+.chev svg{width:12px;height:12px}
+.strip-wrap.open .chev{transform:rotate(180deg)}
+.strip .spacer{flex:1 1 auto}
+.seg.net-seg{padding-right:0;text-align:right;align-items:flex-end}
+.net-note{font-size:10.5px;color:var(--muted)}
+
+/* held drawer */
+.drawer{max-height:0;overflow:hidden;transition:max-height .22s ease;border-top:1px solid transparent}
+.strip-wrap.open .drawer{max-height:400px;border-top-color:var(--border)}
+.drawer-inner{max-width:1180px;margin:0 auto;padding:12px 24px 16px}
+.drawer-head{font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);font-weight:600;margin-bottom:9px;display:flex;align-items:center;gap:10px}
+.drawer-head::after{content:"";flex:1;height:1px;background:var(--border)}
+.hold-row{display:flex;align-items:center;gap:12px;width:100%;text-align:left;padding:9px 12px;border:1px solid var(--border);background:var(--panel2);margin-bottom:6px;transition:border-color .12s,transform .12s;cursor:pointer}
+.hold-row:hover{border-color:var(--border-strong);transform:translateX(2px)}
+.hold-dot{width:8px;height:8px;border-radius:50%;flex:0 0 auto;display:inline-block}
+.hold-main{flex:1;min-width:0}
+.hold-t{font-size:12.5px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:block}
+.hold-s{font-size:10.5px;color:var(--muted);display:block}
+.hold-amt{font-size:14px;font-weight:600;color:var(--money-held);white-space:nowrap}
+.hold-go{color:var(--faint);display:flex}
+.drawer-foot{display:flex;justify-content:space-between;align-items:center;gap:16px;padding-top:9px;margin-top:6px;border-top:1px solid var(--border);font-size:11px;color:var(--muted)}
+.drawer-foot b{color:var(--money-held);font-size:13px;font-family:var(--font-data);font-variant-numeric:tabular-nums slashed-zero}
+
+/* ---------- layout ---------- */
+main{max-width:1180px;margin:0 auto;padding:24px 24px 80px;animation:f .25s ease}
+@keyframes f{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+.page-head{display:flex;align-items:flex-end;gap:16px;flex-wrap:wrap;margin-bottom:18px}
+h1{font-size:21px;font-weight:600;letter-spacing:-.01em;margin:0}
+.page-sub{color:var(--muted);font-size:12.5px;margin-top:3px}
+.section-h{font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin:24px 0 12px;display:flex;align-items:center;gap:10px;font-weight:600}
+.section-h::after{content:"";flex:1;height:1px;background:var(--border)}
+.tile-h{font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;gap:10px;font-weight:600}
+.eyebrow{font-size:10px;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);font-weight:600;margin-bottom:4px}
+.q{font-size:14px;font-weight:600;letter-spacing:-.01em;color:var(--text)}
+.t-title{font-size:13.5px;font-weight:600;letter-spacing:-.01em}
+
+.bento{display:grid;grid-template-columns:repeat(12,1fr);gap:14px;margin-bottom:16px}
+.tile{background:var(--surface);border:1px solid var(--border);padding:18px 20px;position:relative}
+.s12{grid-column:span 12}.s7{grid-column:span 7}.s6{grid-column:span 6}
+.s5{grid-column:span 5}.s4{grid-column:span 4}.s3{grid-column:span 3}
+@media(max-width:900px){.s7,.s6,.s5,.s4,.s3{grid-column:span 12}}
+
+/* kpi */
+.kgrid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.kpi{background:var(--panel2);border:1px solid var(--border);padding:13px 14px}
+.kpi .k{color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.08em}
+.kpi .kfig{font-size:20px;font-weight:600;margin-top:5px}
+.kpi .kt{font-size:10px;color:var(--muted);margin-top:3px}
+
+/* generic bits */
+.pill{display:inline-flex;align-items:center;gap:6px;padding:2px 8px;font-size:11px;border:1px solid var(--border);color:var(--text-body);white-space:nowrap}
+.pill.good{border-color:rgba(34,255,122,.3);color:var(--green)}
+.pill.warn{border-color:rgba(245,166,35,.3);color:var(--amber)}
+.pill.crit{border-color:rgba(255,77,77,.3);color:var(--red)}
+.pill.mine{border-color:rgba(74,158,255,.35);color:var(--blue)}
+.up{color:var(--green)}.down{color:var(--red)}
+.muted{color:var(--muted)}.sec{color:var(--text-body)}.amb{color:var(--amber)}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:7px;background:var(--accent);color:#000;border:none;padding:8px 14px;font-family:var(--font-ui);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;cursor:pointer}
+.btn:hover{background:#4dff96}
+.btn.ghost{background:transparent;border:1px solid var(--border);color:var(--text-body)}
+.btn.ghost:hover{background:var(--panel2);border-color:var(--border-strong);color:var(--text)}
+.btn:disabled{opacity:.35;cursor:not-allowed}
+.btn.sm{padding:6px 10px;font-size:10px}
+.row{display:flex;align-items:center;gap:10px}
+.between{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.wrapf{flex-wrap:wrap}
+.right{text-align:right}
+
+/* tables */
+table{width:100%;border-collapse:collapse;background:var(--surface);border:1px solid var(--border)}
+th,td{padding:9px 13px;text-align:right;border-bottom:1px solid var(--border);font-size:12.5px}
+th:first-child,td:first-child{text-align:left}
+th{color:var(--muted);font-weight:600;font-family:var(--font-ui);font-size:11px;text-transform:uppercase;letter-spacing:.05em;cursor:pointer;user-select:none}
+th:hover{color:var(--text)}
+tbody tr:hover{background:var(--panel2)}
+tr:last-child td{border-bottom:none}
+.tick{font-weight:600;letter-spacing:.02em}
+.tname{font-size:10.5px;color:var(--muted);font-family:var(--font-ui)}
+.tablewrap{overflow-x:auto}
+
+/* bars */
+.bar{height:6px;background:var(--panel2);overflow:hidden;position:relative}
+.bar > i{display:block;height:100%;background:linear-gradient(90deg,var(--green),#17b558)}
+
+/* auction lots */
+.lot{border:1px solid var(--border);border-top:2px solid var(--lc);background:var(--surface);display:flex;flex-direction:column}
+.lot:hover{border-left-color:var(--border-strong);border-right-color:var(--border-strong);border-bottom-color:var(--border-strong)}
+.lot-body{padding:16px;display:flex;flex-direction:column;gap:10px;flex:1}
+.lot-id{font-family:var(--font-data);font-size:9.5px;text-transform:uppercase;letter-spacing:.14em;color:var(--muted)}
+.lot-t{font-size:13px;font-weight:600;letter-spacing:-.01em;margin-top:5px}
+.lot-m{font-size:10.5px;color:var(--muted)}
+.lot-bid{font-size:19px;font-weight:600;letter-spacing:-.01em}
+
+/* forms / figures */
+.amount-wrap{position:relative;margin-bottom:10px}
+.amount{width:100%;padding:13px 14px 13px 40px;font-size:22px;font-weight:600;background:var(--bg);border:1px solid var(--border);color:var(--text);outline:none;letter-spacing:-.01em;font-family:var(--font-data);font-variant-numeric:tabular-nums slashed-zero}
+.amount:focus{border-color:var(--accent)}
+.amount-wrap .cn{position:absolute;left:14px;top:50%;transform:translateY(-50%);color:var(--muted);font-size:15px;font-family:var(--font-data)}
+.chips{display:flex;gap:7px;flex-wrap:wrap;margin-bottom:14px}
+.chip{padding:5px 10px;border:1px solid var(--border);background:var(--panel2);font-size:11px;font-weight:500;color:var(--text-body);font-family:var(--font-data);font-variant-numeric:tabular-nums slashed-zero}
+.chip:hover{border-color:var(--border-strong);color:var(--text)}
+.err{color:var(--red);font-size:11.5px;min-height:18px}
+.kv{display:flex;justify-content:space-between;gap:16px;padding:8px 0;font-size:12.5px;border-bottom:1px solid var(--border)}
+.kv:last-of-type{border-bottom:none}
+.kv .k{color:var(--muted)}
+.kv .v{font-weight:600;white-space:nowrap;text-align:right}
+.kv.total{border-top:1px solid var(--border);border-bottom:none;margin-top:6px;padding-top:12px;font-size:13.5px}
+.notebox{margin-top:14px;padding:10px 12px;font-size:11px;line-height:1.55;background:rgba(245,166,35,.06);border:1px solid rgba(245,166,35,.25);color:#d9ae6a}
+.notebox.blue{background:rgba(74,158,255,.06);border-color:rgba(74,158,255,.25);color:#9dc3f0}
+.notebox.red{background:rgba(255,77,77,.06);border-color:rgba(255,77,77,.28);color:#e8a1a1}
+.okbox{margin-top:14px;padding:11px 12px;font-size:11.5px;line-height:1.55;background:rgba(34,255,122,.06);border:1px solid rgba(34,255,122,.25);color:#8fe0b2}
+.big-ok{width:40px;height:40px;background:rgba(34,255,122,.08);border:1px solid rgba(34,255,122,.35);display:flex;align-items:center;justify-content:center;margin:0 auto 14px;color:var(--green)}
+.big-ok svg{width:20px;height:20px}
+.big{font-size:24px;font-weight:600;letter-spacing:-.02em}
+.ref{font-family:var(--font-data);font-size:11px;color:var(--text-body)}
+.flash{animation:flash 1.4s ease-out}
+@keyframes flash{0%{background:rgba(245,166,35,.22)}100%{background:transparent}}
+.empty{padding:16px 0;color:var(--muted);font-size:12px}
+.foot{color:var(--faint);font-size:11px;margin-top:12px;line-height:1.5}
+.hide{display:none !important}
+
+/* ============================================================
+   AUCTION-SPECIFIC — added on top of the shared block
+   ============================================================ */
+/* settlement state machine */
+.pipe{display:flex;gap:2px;width:100%}
+.pipe .st{flex:1;padding:9px 12px;background:var(--panel2);border:1px solid var(--border);border-left-width:2px;border-left-color:var(--border-strong);min-width:0}
+.pipe .st .sn{font-size:10px;text-transform:uppercase;letter-spacing:.1em;font-weight:600;color:var(--faint)}
+.pipe .st .sd{font-size:10.5px;color:var(--faint);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pipe .st.done .sn{color:var(--muted)}
+.pipe .st.done{border-left-color:var(--green-dim)}
+.pipe .st.done .sd{color:var(--muted)}
+.pipe .st.now{background:var(--surface);border-color:var(--border-strong);border-left-color:var(--accent)}
+.pipe .st.now .sn{color:var(--accent)}
+.pipe .st.now .sd{color:var(--text-body)}
+.pipe .st.now.stuck{border-left-color:var(--amber)}
+.pipe .st.now.stuck .sn{color:var(--amber)}
+@media(max-width:760px){.pipe{flex-wrap:wrap}.pipe .st{min-width:46%}}
+
+/* Motion here is state, not decoration — but honour the OS setting. */
+@media (prefers-reduced-motion:reduce){
+  *,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important;scroll-behavior:auto!important}
+}
+
+/* state tag used in the lot table */
+.stag{display:inline-flex;align-items:center;gap:6px;font-size:10.5px;text-transform:uppercase;letter-spacing:.08em;font-weight:600;color:var(--muted);font-family:var(--font-ui)}
+.stag i{width:7px;height:7px;border-radius:50%;display:inline-block;background:currentColor;flex:0 0 auto}
+.stag.open{color:var(--green)}
+.stag.closing{color:var(--amber)}
+.stag.settling{color:var(--amber)}
+.stag.settled{color:var(--muted)}
+
+/* position column */
+.pos-lead{color:var(--blue);font-weight:600}
+.pos-out{color:var(--red);font-weight:600}
+.pos-none{color:var(--faint)}
+tr.mine-row td:first-child{box-shadow:inset 2px 0 0 var(--blue)}
+tr.click{cursor:pointer}
+
+/* bid ladder */
+.ladder td:first-child,.ladder th:first-child{width:38%}
+.ladder tr.you td{background:rgba(74,158,255,.05)}
+.ladder tr.you:hover td{background:rgba(74,158,255,.09)}
+.hstate{font-size:10.5px;text-transform:uppercase;letter-spacing:.08em;font-family:var(--font-ui);font-weight:600}
+.hstate.open{color:var(--amber)}
+.hstate.rel{color:var(--faint)}
+.hstate.cap{color:var(--green)}
+
+/* your-hold callout */
+.holdcall{border:1px solid rgba(245,166,35,.3);background:rgba(245,166,35,.06);padding:12px 14px;display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap}
+.holdcall .hc-l{font-size:10px;text-transform:uppercase;letter-spacing:.1em;color:var(--amber);font-weight:600}
+.holdcall .hc-v{font-family:var(--font-data);font-variant-numeric:tabular-nums slashed-zero;font-size:22px;font-weight:600;color:var(--amber);letter-spacing:-.01em;line-height:1.2}
+.holdcall .hc-s{font-size:11px;color:#c39a58;max-width:340px}
+
+/* toolbar */
+.toolbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
+.toolbar input{background:var(--panel2);border:1px solid var(--border);color:var(--text);padding:8px 11px;font-size:12px;min-width:190px;flex:1;outline:none;font-family:var(--font-data)}
+.toolbar input:focus{border-color:var(--border-strong)}
+.fbtn{padding:7px 11px;border:1px solid var(--border);background:transparent;color:var(--muted);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em}
+.fbtn:hover{color:var(--text);border-color:var(--border-strong)}
+.fbtn[aria-pressed="true"]{color:var(--accent);border-color:rgba(34,255,122,.35)}
+
+/* detail head */
+.crumb{display:inline-flex;align-items:center;gap:7px;font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);font-weight:600;margin-bottom:10px}
+.crumb:hover{color:var(--text)}
+.bidnow{font-family:var(--font-data);font-variant-numeric:tabular-nums slashed-zero;font-size:34px;font-weight:600;letter-spacing:-.02em;line-height:1.1}
+.deadline{font-family:var(--font-data);font-variant-numeric:tabular-nums slashed-zero;font-size:19px;font-weight:600}
+
+/* responsive */
+@media (max-width:760px){
+  header{padding:0 14px}
+  nav{padding:0 6px}
+  .nav-tab{padding:0 11px}
+  .svc-note{display:none}
+  main{padding:20px 14px 60px}
+  .strip{padding:0 14px;flex-wrap:wrap;min-height:0}
+  .seg{padding:9px 14px;flex:1 1 auto;min-width:44%}
+  .seg:first-child{padding-left:0}
+  .seg + .seg::before{display:none}
+  .seg.net-seg{align-items:flex-start;text-align:left;padding-right:14px}
+  .strip .spacer{display:none}
+  .seg .val{font-size:17px}
+  .drawer-inner{padding:10px 14px 14px}
+  .hide-sm{display:none}
+  th.hide-sm,td.hide-sm{display:none}
+  .kgrid{grid-template-columns:1fr}
+  .bidnow{font-size:28px}
+}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo" onclick="go('list')">
+    <div class="logo-icon">V</div>
+    <div><div class="logo-text">V Tech Estates</div><div class="logo-sub">Auctions</div></div>
+  </div>
+  <div class="header-right">
+    <span class="svc-note">Markets · Banking · Estates</span>
+    <span class="user-tag"><span class="user-mark">GH</span><span class="auth-name">@GreyHames</span></span>
+  </div>
+</header>
+
+<nav id="tabs"></nav>
+
+<!-- ============ MONEY STRIP (from mock_hub.html) ============ -->
+<div class="strip-wrap" id="stripWrap">
+  <div class="strip">
+    <div class="seg">
+      <div class="lab">Wallet · available</div>
+      <div class="val v-avail num" id="sAvail">0</div>
+      <div class="sub">spendable right now</div>
+    </div>
+
+    <button class="seg held-seg" id="heldSeg" aria-expanded="false">
+      <div class="lab">Held <span class="chev"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></span></div>
+      <div class="val v-held num" id="sHeld">0</div>
+      <div class="sub" id="sHeldSub">reserved by 4 things</div>
+    </button>
+
+    <div class="seg">
+      <div class="lab">Savings · Osentar</div>
+      <div class="val v-save num" id="sSave">0</div>
+      <div class="sub">3.2% APR</div>
+    </div>
+
+    <div class="spacer"></div>
+
+    <div class="seg net-seg">
+      <div class="lab">Net position</div>
+      <div class="val v-net num" id="sNet">0</div>
+      <div class="net-note">available + held + savings &minus; loan · bonds &amp; land excluded</div>
+    </div>
+  </div>
+
+  <div class="drawer">
+    <div class="drawer-inner">
+      <div class="drawer-head">What is holding your coins</div>
+      <div id="holdList"></div>
+      <div class="drawer-foot">
+        <span>Holds are escrow — the coins are yours until captured, and every hold has an expiry.</span>
+        <span>Total held <b id="sHeldTotal">0</b></span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<main id="view"></main>
+
+<script>
+/* ================================================================
+   ICONS — inline lucide-style strokes. No emoji anywhere.
+   ================================================================ */
+const svg = d => '<svg class="i" viewBox="0 0 24 24">' + d + '</svg>';
+const IC = {
+  hub:     svg('<path d="M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z"/>'),
+  markets: svg('<path d="M3 3v18h18"/><path d="M7 15l4-5 3 3 5-7"/>'),
+  banking: svg('<path d="M3 21h18M4 10h16M12 3l9 5H3zM6 10v11M10 10v11M14 10v11M18 10v11"/>'),
+  estates: svg('<path d="M9 4L3 7v13l6-3 6 3 6-3V4l-6 3z"/><path d="M9 4v13M15 7v13"/>'),
+  arrow:   svg('<path d="M5 12h14M13 6l6 6-6 6"/>'),
+  back:    svg('<path d="M19 12H5M11 18l-6-6 6-6"/>'),
+  check:   svg('<path d="M20 6L9 17l-5-5"/>'),
+  gavel:   svg('<path d="M3 21h9M12 3l6 6M15 6l-6 6M9 3l6 6M6 12l6 6M9 9l-6 6 3 3 6-6"/>'),
+  alert:   svg('<path d="M12 9v4M12 17h.01M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/>')
+};
+
+/* ================================================================
+   CONFIG — one place. The settlement fee is rendered from here
+   everywhere it appears. Basis points, integer: money never floats.
+   ================================================================ */
+const CFG = {
+  FEE_BPS: 300,          // 3.00 % of the hammer price, taken from the seller
+  MIN_BID: 100,
+  HOLD_EXPIRY: 'close + 24h',
+  SETTLE_TIMEOUT_MIN: 60 // after this, a stuck settle auto-refunds every hold
+};
+const feePct = () => (CFG.FEE_BPS/100).toFixed(CFG.FEE_BPS%100?2:0) + '%';
+const feeOn  = amt => Math.floor(amt * CFG.FEE_BPS / 10000);
+const n  = v => v.toLocaleString('en-US');
+const cn = v => n(v) + '<span class="coin">c</span>';
+const ME    = 'GreyHames';
+const GUILD = 'Grey Hames Co.';   // his guild — a separate wallet from his own
+
+/* ================================================================
+   STATE — in-memory only. No storage APIs.
+   Bids are newest-first. Every bid carries its own hold state.
+   ================================================================ */
+const S = {
+  wallet:{ available:48200, savings:90000 },
+
+  /* Loan #9's outstanding principal. This file has no loan object; the
+     figure is derived by schedule() in mock_banking.html — 25,000c
+     principal less 10,415c repaid over rows 1–5 — and is carried here
+     only so the net position can subtract it. If banking's schedule
+     moves, this moves with it. */
+  loanOutstanding: 14585,
+
+  bet:{ id:'h_77', amount:4500, title:'Bet — Mockrean election',
+        sub:'4,500 on Verrin Hald · resolves in 2d 04h · expires resolve + 7d' },
+  lots:[
+    {id:412, t:'Riverside Parcel R-12', cat:'Land · 64×64 · Riverside', seller:'Osentar Estates',
+     reserve:6000, inc:250, opened:'11 Aug 2026', state:'open', secs:5*3600+12*60, c:'var(--nether)',
+     parcel:'RV-C6',
+     bids:[
+       {by:ME,             amt:8000, when:'2h ago',                hold:'open'},
+       {by:'Tamsin Roe',   amt:7200, when:'5h ago',                hold:'released'},
+       {by:ME,             amt:6400, when:'9h ago',                hold:'released'},
+       {by:'Tamsin Roe',   amt:5200, when:'yesterday, 21:40',      hold:'released'},
+       {by:'Bramble Hollow',amt:4000,when:'11 Aug 2026, 18:02',    hold:'released'}
+     ]},
+    {id:418, t:'Blackstone Yard', cat:'Land · 64×64 · Blackstone', seller:'Amazonia Mining',
+     reserve:20000, inc:500, opened:'9 Aug 2026', state:'open', secs:27*3600+18*60, c:'var(--nether)',
+     parcel:'RV-F7',
+     bids:[
+       {by:'Ironvale Guild',amt:24500, when:'40m ago',   hold:'open'},
+       {by:ME,              amt:22000, when:'3h ago',    hold:'released'},
+       {by:'Northlight',    amt:20500, when:'6h ago',    hold:'released'},
+       {by:'Ironvale Guild',amt:18000, when:'yesterday, 09:12', hold:'released'}
+     ]},
+    {id:423, t:'Skyport Dock 7', cat:'Commercial plot · 32×32', seller:'V Tech Logistics',
+     reserve:5000, inc:200, opened:'12 Aug 2026', state:'open', secs:22*3600+4*60, c:'var(--blue)',
+     parcel:'RV-E6', note:'You already lease this dock from V Tech Logistics at 750c per week (RV-E6). This lot is the freehold.',
+     bids:[
+       {by:ME, amt:3200, when:'7h ago', hold:'open'}
+     ]},
+    {id:430, t:'Northgate Terrace', cat:'Build · furnished · 4 rooms', seller:'Northlight',
+     reserve:12000, inc:250, opened:'10 Aug 2026', state:'open', secs:2*86400+9*60, c:'var(--purple)',
+     parcel:'RV-L2',
+     bids:[
+       {by:'Tamsin Roe', amt:15750, when:'1h ago',  hold:'open'},
+       {by:'Northlight', amt:15000, when:'4h ago',  hold:'released'},
+       {by:'Verrin Hald',amt:13500, when:'yesterday, 20:15', hold:'released'},
+       {by:'Tamsin Roe', amt:12250, when:'10 Aug 2026, 22:41', hold:'released'}
+     ]},
+    {id:431, t:'Nether Portal Frame ×2', cat:'Item lot · crated', seller:GUILD,
+     reserve:1500, inc:100, opened:'13 Aug 2026', state:'open', secs:3*86400+6*3600, c:'var(--nether)',
+     note:'Listed by '+GUILD+', your guild — a separate wallet. Its 250c list bond is held there, not on you, which is why your held total is 46,700c and not 46,950c.',
+     bids:[
+       {by:'Osric Vane', amt:1900, when:'20m ago', hold:'open'}
+     ]},
+    {id:407, t:'Coalhurst Stall 5', cat:'Commercial · leasehold', seller:'Osentar Estates',
+     reserve:9000, inc:200, opened:'6 Aug 2026', state:'open', secs:41, c:'var(--amber)',
+     bids:[
+       {by:'Verrin Hald', amt:11400, when:'12m ago', hold:'open'},
+       {by:ME,            amt:10900, when:'26m ago', hold:'released'},
+       {by:'Verrin Hald', amt:10400, when:'1h ago',  hold:'released'},
+       {by:'Northlight',  amt:9200,  when:'yesterday, 19:03', hold:'released'}
+     ]},
+    {id:405, t:'Ironvale Watchtower', cat:'Build · stone · 3 floors', seller:'Ironvale Guild',
+     reserve:28000, inc:500, opened:'4 Aug 2026', state:'settling', secs:0, c:'var(--amber)',
+     parcel:'RV-H5',
+     closedWhen:'today, 13:02', settleAttempt:3, settleMax:5, retrySecs:130, stuckSecs:14*60,
+     settleErr:'ledger capture returned TIMEOUT on attempt 2 — the wallet service did not answer inside 8s',
+     bids:[
+       {by:ME,              amt:31000, when:'today, 12:58', hold:'open'},
+       {by:'Northlight',    amt:30500, when:'today, 12:51', hold:'released'},
+       {by:'Ironvale Guild',amt:29000, when:'yesterday, 23:10', hold:'released'},
+       {by:ME,              amt:28000, when:'11 Aug 2026, 17:22', hold:'released'}
+     ]},
+    {id:398, t:'Emberwatch Freehold', cat:'Land · 128×64 · riverfront', seller:'Amazonia Estates',
+     reserve:40000, inc:1000, opened:'28 Jul 2026', state:'settled', secs:0, c:'var(--purple)',
+     parcel:'RV-K6',
+     closedWhen:'11 Aug 2026, 20:00', settledWhen:'11 Aug 2026, 20:00', settledAgo:'2 days ago',
+     bids:[
+       {by:'Northlight', amt:44200, when:'11 Aug 2026, 19:58', hold:'captured'},
+       {by:ME,           amt:43000, when:'11 Aug 2026, 19:44', hold:'released'},
+       {by:'Osric Vane', amt:41000, when:'11 Aug 2026, 18:30', hold:'released'},
+       {by:'Northlight', amt:40000, when:'10 Aug 2026, 12:00', hold:'released'}
+     ]}
+  ]
+};
+
+/* ---------- derived ---------- */
+const high    = l => l.bids.length ? l.bids[0].amt : 0;
+const leader  = l => l.bids.length ? l.bids[0].by  : null;
+const live    = l => l.state==='open' || l.state==='closing' || l.state==='settling';
+// a hold exists only while you are the standing high bidder and nothing is captured yet
+const myHold  = l => (live(l) && leader(l)===ME) ? high(l) : 0;
+const iBid    = l => l.bids.some(b=>b.by===ME);
+const myPos   = l => leader(l)===ME ? 'leading' : (iBid(l) ? 'outbid' : 'none');
+const minNext = l => high(l) ? high(l) + l.inc : Math.max(l.reserve, CFG.MIN_BID);
+const stateOf = l => l.state==='open' && l.secs<=180 ? 'closing' : l.state;
+const heldLots = () => S.lots.filter(l=>myHold(l)>0);
+/* held is DERIVED from the lot rows — never a stored counter. Three lots
+   where he leads (31,000 + 8,000 + 3,200 = 42,200) plus the 4,500 bet
+   = 46,700c, and the drawer holds exactly those four rows. */
+const held = () => heldLots().reduce((a,l)=>a+myHold(l),0) + S.bet.amount;
+/* NET POSITION = available + held + savings − loan outstanding = 170,315c.
+   Debt is subtracted because a figure called "net" that ignores a live
+   loan is a lie; held stays in because the coins are still his and the
+   strip breaks them out in their own segment. The caption under the
+   strip names every term, so nothing is folded away silently. */
+const netPos = () => S.wallet.available + held() + S.wallet.savings - S.loanOutstanding;
+const lotById = id => S.lots.find(l=>l.id===id);
+
+/* time left, human. Never ISO, never a bare number. */
+function fmtLeft(secs){
+  if(secs<=0) return 'closed';
+  const d=Math.floor(secs/86400), h=Math.floor(secs%86400/3600),
+        m=Math.floor(secs%3600/60), s=secs%60;
+  // days + the next unit down that is actually non-zero, so a lot two days
+  // and nine minutes out reads "2d 09m" and not a flat "2d 00h".
+  if(d) return d+'d '+(h ? String(h).padStart(2,'0')+'h' : String(m).padStart(2,'0')+'m');
+  if(h) return h+'h '+String(m).padStart(2,'0')+'m';
+  if(m) return String(m).padStart(2,'0')+'m '+String(s).padStart(2,'0')+'s';
+  return s+'s';
+}
+const fmtMins = secs => Math.floor(secs/60)+'m '+String(secs%60).padStart(2,'0')+'s';
+
+/* ================================================================
+   MONEY STRIP — identical behaviour to mock_hub.html
+   ================================================================ */
+function holdItems(){
+  const items = heldLots().map(l=>({
+    id:'h_'+l.id, amount:myHold(l), color:l.c,
+    title:'Auction #'+l.id+' — '+l.t,
+    sub: stateOf(l)==='settling'
+      ? 'you won · settle stuck on attempt '+l.settleAttempt+' of '+l.settleMax+' · retry in '+fmtMins(l.retrySecs)
+      : 'you are the high bidder · closes in '+fmtLeft(l.secs)+' · expires '+CFG.HOLD_EXPIRY,
+    lot:l.id
+  }));
+  items.push({id:S.bet.id, amount:S.bet.amount, color:'var(--purple)',
+              title:S.bet.title, sub:S.bet.sub, lot:null});
+  return items;
+}
+function renderStrip(flashHold){
+  sAvail.innerHTML = cn(S.wallet.available);
+  sHeld.innerHTML  = cn(held());
+  sSave.innerHTML  = cn(S.wallet.savings);
+  sNet.innerHTML   = cn(netPos());
+  sHeldTotal.innerHTML = cn(held());
+  const items = holdItems();
+  sHeldSub.textContent = items.length
+    ? 'reserved by ' + items.length + ' thing' + (items.length>1?'s':'')
+    : 'nothing reserved';
+  if(!items.length){
+    holdList.innerHTML = '<div class="empty">No open holds. All of your coins are available.</div>';
+  } else {
+    holdList.innerHTML = items.map(h=>`
+      <button class="hold-row ${h.id===flashHold?'flash':''}" ${h.lot?`onclick="go('lot',${h.lot})"`:''}>
+        <span class="hold-dot" style="background:${h.color}"></span>
+        <span class="hold-main">
+          <span class="hold-t">${h.title}</span>
+          <span class="hold-s">${h.sub}</span>
+        </span>
+        <span class="hold-amt num">${cn(h.amount)}</span>
+        ${h.lot?`<span class="hold-go">${IC.arrow}</span>`:''}
+      </button>`).join('');
+  }
+}
+heldSeg.onclick = () => {
+  const open = stripWrap.classList.toggle('open');
+  heldSeg.setAttribute('aria-expanded', open);
+};
+
+/* ================================================================
+   ROUTER — this file is the auctions surface only. The other three
+   tabs say so in one line rather than pretending to be pages.
+   ================================================================ */
+const PAGES = [
+  {k:'hub',     label:'Hub',      icon:IC.hub},
+  {k:'markets', label:'Markets',  icon:IC.markets},
+  {k:'banking', label:'Banking',  icon:IC.banking},
+  {k:'auctions',label:'Auctions', icon:IC.estates}
+];
+let route = {page:'list', lot:null};
+tabs.innerHTML = PAGES.map(p=>`<button class="nav-tab" onclick="goTab('${p.k}')" data-k="${p.k}">${p.icon}${p.label}</button>`).join('');
+
+function goTab(k){ k==='auctions' ? go('list') : go('elsewhere', k); }
+function go(page, arg){
+  route = {page, lot: page==='lot' ? arg : null, other: page==='elsewhere' ? arg : null};
+  const activeTab = page==='elsewhere' ? route.other : 'auctions';
+  [...tabs.children].forEach(b=>b.setAttribute('aria-current', b.dataset.k===activeTab));
+  render();
+  view.style.animation='none'; void view.offsetWidth; view.style.animation='';
+  window.scrollTo({top:0});
+}
+function render(){
+  if(route.page==='lot')       view.innerHTML = LotDetail(lotById(route.lot));
+  else if(route.page==='elsewhere') view.innerHTML = Elsewhere(route.other);
+  else                         view.innerHTML = LotList();
+  if(route.page==='lot') afterDetail();
+}
+
+function Elsewhere(k){
+  const label = PAGES.find(p=>p.k===k).label;
+  return `<div class="empty">${label} lives in the hub mockup — this file is the auctions surface.
+    <button class="btn ghost sm" style="margin-left:10px" onclick="go('list')">Back to auctions</button></div>`;
+}
+
+/* ================================================================
+   SETTLEMENT STATE MACHINE — shown wherever a lot is shown, because
+   a settle that never lands is the failure mode that costs real coins.
+   ================================================================ */
+const STEPS = [
+  ['Open',     'bids accepted · holds placed'],
+  ['Closing',  'final minute · no new bids after'],
+  ['Settling', 'capture winner · release losers'],
+  ['Settled',  'item transferred · fee taken']
+];
+const STEP_IX = {open:0, closing:1, settling:2, settled:3};
+function pipe(l){
+  const st = stateOf(l), cur = STEP_IX[st];
+  const stuck = st==='settling' && l.stuckSecs > 5*60;
+  return `<div class="pipe">${STEPS.map(([nm,ds],i)=>{
+    let cls = i<cur ? 'done' : (i===cur ? 'now' : '');
+    if(i===cur && stuck) cls += ' stuck';
+    let desc = ds;
+    if(i===cur && st==='settling') desc = 'attempt '+l.settleAttempt+' of '+l.settleMax+' · retry in <span data-retry="'+l.id+'">'+fmtMins(l.retrySecs)+'</span>';
+    if(i===cur && st==='closing')  desc = fmtLeft(l.secs)+' to close';
+    if(i===cur && st==='open')     desc = fmtLeft(l.secs)+' left';
+    if(i===cur && st==='settled')  desc = l.settledAgo+' · '+l.settledWhen;
+    return `<div class="st ${cls}"><div class="sn">${nm}</div><div class="sd">${desc}</div></div>`;
+  }).join('')}</div>`;
+}
+function stuckNote(l){
+  if(stateOf(l)!=='settling') return '';
+  return `<div class="notebox red" style="display:flex;gap:10px;align-items:flex-start">
+    <span style="color:var(--red);display:flex;padding-top:1px">${IC.alert}</span>
+    <span><b>Settlement has been retrying for ${Math.floor(l.stuckSecs/60)} minutes.</b>
+    ${l.settleErr}.<br>
+    Nothing has been captured yet: your <b>${n(high(l))}c</b> is still a hold, still yours, and still
+    unspendable. The losing bidders' holds were already released. If the ledger does not answer by
+    attempt ${l.settleMax}, or ${CFG.SETTLE_TIMEOUT_MIN} minutes after close, every hold on this lot is
+    released in full, no fee is taken and the lot is relisted. You do not need to do anything.</span></div>`;
+}
+
+/* ================================================================
+   LOT LIST
+   ================================================================ */
+let sortK='left', sortDir=1, q='', filter='all';
+const SORTV = {
+  lot:   l=>l.id,
+  item:  l=>l.t.toLowerCase(),
+  seller:l=>l.seller.toLowerCase(),
+  high:  l=>high(l),
+  pos:   l=>({leading:0,outbid:1,none:2})[myPos(l)],
+  state: l=>STEP_IX[stateOf(l)],
+  left:  l=>live(l)? l.secs : 9e9,
+  hold:  l=>-myHold(l)
+};
+function sortBy(k){ if(sortK===k) sortDir=-sortDir; else {sortK=k; sortDir=1;} render(); }
+function setFilter(f){ filter=f; render(); }
+function onSearch(el){ q=el.value.toLowerCase(); render(); const i=document.getElementById('q'); if(i){i.focus();i.setSelectionRange(i.value.length,i.value.length);} }
+
+function rows(){
+  let r = S.lots.filter(l=>
+    (l.t+' '+l.seller+' '+l.cat+' #'+l.id).toLowerCase().includes(q));
+  if(filter==='mine')   r = r.filter(l=>iBid(l) && live(l));
+  if(filter==='outbid') r = r.filter(l=>myPos(l)==='outbid' && live(l));
+  if(filter==='live')   r = r.filter(l=>live(l));
+  return r.sort((a,b)=>{
+    const x=SORTV[sortK](a), y=SORTV[sortK](b);
+    return (x<y?-1:x>y?1:0)*sortDir;
+  });
+}
+/* Leading is the blue "mine" pill used by the hub and the phone, not
+   green: green is positive money in this theme, and leading a lot is
+   money held, not money gained. */
+const posCell = l => ({
+  leading:'<span class="pill mine">Leading</span>',
+  outbid:'<span class="pos-out">Outbid</span>',
+  none:'<span class="pos-none">—</span>'
+})[myPos(l)];
+const stateCell = l => { const s=stateOf(l); return `<span class="stag ${s}"><i></i>${s}</span>`; };
+
+function LotList(){
+  const lots = rows();
+  const mine = S.lots.filter(l=>live(l) && myPos(l)==='leading');
+  const out  = S.lots.filter(l=>live(l) && myPos(l)==='outbid');
+  const inBids = mine.reduce((a,l)=>a+myHold(l),0);
+  const settling = S.lots.filter(l=>stateOf(l)==='settling');
+  const soonest = S.lots.filter(l=>live(l)&&l.secs>0).sort((a,b)=>a.secs-b.secs)[0] || null;
+
+  return `
+  <div class="page-head">
+    <div><h1>Auctions</h1>
+      <div class="page-sub">Open lots across Estates · your bids reserve coins, they do not spend them</div></div>
+  </div>
+
+  <div class="bento">
+    <div class="tile s4">
+      <div class="tile-h" style="margin-bottom:6px">Held in bids</div>
+      <div class="num v-held" style="font-size:28px;font-weight:600;letter-spacing:-.02em">${cn(inBids)}</div>
+      <div class="hold-s" style="margin-top:3px">${mine.length} lot${mine.length===1?'':'s'} where you lead · released the moment you are outbid</div>
+    </div>
+    <div class="tile s4">
+      <div class="tile-h" style="margin-bottom:6px">Your position</div>
+      <div class="row" style="align-items:baseline;gap:14px">
+        <span class="num pos-lead" style="font-size:28px;font-weight:600">${mine.length}</span>
+        <span class="hold-s">leading</span>
+        <span class="num pos-out" style="font-size:28px;font-weight:600">${out.length}</span>
+        <span class="hold-s">outbid</span>
+      </div>
+      <div class="hold-s" style="margin-top:3px">${out.length?'Outbid on '+out.map(l=>'#'+l.id).join(', ')+' — those holds are already back':'No open holds against you'}</div>
+    </div>
+    <div class="tile s4">
+      <div class="tile-h" style="margin-bottom:6px">Next to close</div>
+      ${soonest ? `<div class="deadline ${stateOf(soonest)==='closing'?'amb':''}" data-clock="${soonest.id}">${fmtLeft(soonest.secs)}</div>
+      <div class="hold-s" style="margin-top:3px">#${soonest.id} ${soonest.t} · high ${n(high(soonest))}c</div>`
+      : '<div class="empty" style="padding:0">Nothing open — every lot has closed.</div>'}
+    </div>
+  </div>
+
+  ${settling.length ? settling.map(l=>`
+    <div class="notebox red" style="margin-top:0;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+      <span style="color:var(--red);display:flex">${IC.alert}</span>
+      <span style="flex:1;min-width:220px">Lot #${l.id} <b>${l.t}</b> has been settling for
+        ${Math.floor(l.stuckSecs/60)} minutes — you won it at ${n(high(l))}c and that hold is still open.</span>
+      <button class="btn sm" onclick="go('lot',${l.id})">Open lot #${l.id}</button>
+    </div>`).join('') : ''}
+
+  <div class="section-h">Open lots</div>
+  <div class="toolbar">
+    <input id="q" placeholder="Search lot, item or seller" value="${q}" oninput="onSearch(this)" autocomplete="off">
+    ${[['all','All'],['live','Live'],['mine','Your bids'],['outbid','Outbid']]
+      .map(([k,lb])=>`<button class="fbtn" aria-pressed="${filter===k}" onclick="setFilter('${k}')">${lb}</button>`).join('')}
+  </div>
+
+  <div class="tablewrap">
+    <table>
+      <thead><tr>
+        <th onclick="sortBy('item')">Lot</th>
+        <th onclick="sortBy('seller')" class="hide-sm">Seller</th>
+        <th onclick="sortBy('high')">High bid</th>
+        <th onclick="sortBy('high')" class="hide-sm">Leader</th>
+        <th onclick="sortBy('pos')">You</th>
+        <th onclick="sortBy('state')" class="hide-sm">State</th>
+        <th onclick="sortBy('left')">Time left</th>
+        <th onclick="sortBy('hold')">Your hold</th>
+      </tr></thead>
+      <tbody>
+      ${lots.length ? lots.map(l=>{
+        const h=myHold(l), st=stateOf(l);
+        return `<tr class="click ${iBid(l)&&live(l)?'mine-row':''}" onclick="go('lot',${l.id})">
+          <td><span class="tick">#${l.id}</span> ${l.t}<div class="tname">${l.cat}${l.parcel?' · '+l.parcel:''}</div></td>
+          <td class="hide-sm sec" style="font-family:var(--font-ui)">${l.seller}</td>
+          <td class="num" style="font-weight:600">${cn(high(l))}</td>
+          <td class="hide-sm num" style="font-size:11.5px;color:${leader(l)===ME?'var(--blue)':'var(--text-body)'}">${leader(l)||'<span class="muted">no bids</span>'}</td>
+          <td>${posCell(l)}</td>
+          <td class="hide-sm">${stateCell(l)}</td>
+          <td class="num ${st==='closing'?'amb':''}" data-clock="${l.id}">${live(l)?fmtLeft(l.secs):(l.settledAgo||'closed')}</td>
+          <td class="num" style="color:${h?'var(--money-held)':'var(--faint)'};font-weight:${h?600:400}">${h?n(h)+'c':'—'}</td>
+        </tr>`;
+      }).join('') : '<tr><td colspan="8" class="muted" style="padding:16px 13px">No lots match that search.</td></tr>'}
+      </tbody>
+    </table>
+  </div>
+  <div class="foot">Fee at settlement is ${feePct()} of the hammer price, taken from the seller's proceeds — the winner pays exactly the bid.
+  Bidding places an escrow hold; being outbid releases it automatically, with no action from you.</div>`;
+}
+
+/* ================================================================
+   LOT DETAIL
+   ================================================================ */
+let B = null;   // active bid flow: {lot, amount, step}
+
+function LotDetail(l){
+  const st = stateOf(l), h = myHold(l), hi = high(l), fee = feeOn(hi);
+  const reserveMet = hi >= l.reserve;
+  const posLabel = {leading:'You are the high bidder', outbid:'You have been outbid', none:'You are not bidding on this lot'}[myPos(l)];
+  return `
+  <button class="crumb" onclick="go('list')">${IC.back} All auctions</button>
+  <div class="page-head" style="margin-bottom:14px">
+    <div>
+      <div class="eyebrow">Lot #${l.id} · ${l.cat}${l.parcel?' · register '+l.parcel:''}</div>
+      <h1>${l.t}</h1>
+      <div class="page-sub">Sold by ${l.seller} · listed ${l.opened}${l.parcel?' · parcel '+l.parcel+' in the Riverside register':''}</div>
+    </div>
+    <div style="margin-left:auto" class="row wrapf">
+      ${stateCell(l)}
+      ${reserveMet?'<span class="pill good">reserve met</span>':'<span class="pill warn">reserve not met</span>'}
+      <span class="pill">${l.bids.length} bid${l.bids.length===1?'':'s'}</span>
+    </div>
+  </div>
+
+  ${pipe(l)}
+  ${stuckNote(l)}
+  ${l.note ? `<div class="notebox">${l.note}</div>` : ''}
+
+  <div class="bento" style="margin-top:14px">
+    <div class="tile s7">
+      <div class="tile-h"><span>${st==='settled'?'Hammer price':'Current high bid'}</span>
+        <span class="num" style="color:var(--muted)">${(st==='open'||st==='closing')?'min next '+n(minNext(l))+'c':'bidding closed'}</span></div>
+      <div class="row" style="align-items:baseline;gap:14px;flex-wrap:wrap">
+        <span class="bidnow ${st==='settled'?'':'up'}">${cn(hi)}</span>
+        <span class="hold-s">by <b style="color:${leader(l)===ME?'var(--blue)':'var(--text-body)'}">${leader(l)}</b>${leader(l)===ME?' (you)':''}</span>
+      </div>
+      <div class="kv" style="margin-top:14px"><span class="k">Reserve</span>
+        <span class="v num">${n(l.reserve)}c <span class="${reserveMet?'up':'amb'}" style="font-weight:400;font-size:11px">${reserveMet?'met':'not met — lot will not sell'}</span></span></div>
+      <div class="kv"><span class="k">Minimum increment</span><span class="v num">${n(l.inc)}c</span></div>
+      <div class="kv"><span class="k">${live(l)&&l.secs>0?'Closes in':'Closed'}</span>
+        <span class="v num ${st==='closing'?'amb':''}" data-clock="${l.id}">${live(l)&&l.secs>0?fmtLeft(l.secs):(l.closedWhen||'—')}</span></div>
+      <div class="kv"><span class="k">Your position</span><span class="v">${posCell(l)}</span></div>
+    </div>
+
+    <div class="tile s5" id="bidbox" style="${live(l)&&st!=='settling'?'':'align-self:start'}">${BidBox(l)}</div>
+  </div>
+
+  ${h ? `<div class="holdcall" style="margin-bottom:16px">
+      <div>
+        <div class="hc-l">Your hold on this lot</div>
+        <div class="hc-v">${cn(h)}</div>
+      </div>
+      <div class="hc-s">${st==='settling'
+        ? 'Reserved while settlement runs. It becomes a payment only when capture succeeds; if settlement fails it comes straight back.'
+        : 'Reserved, not spent. Released automatically the moment someone outbids you, or if the lot is cancelled. Expires '+CFG.HOLD_EXPIRY+'.'}</div>
+      <button class="btn ghost sm" onclick="openDrawer()">See all holds</button>
+    </div>` : ''}
+
+  <div class="section-h">Bid ladder</div>
+  <div class="tablewrap">
+    <table class="ladder">
+      <thead><tr>
+        <th>Bidder</th><th>Amount</th><th class="hide-sm">Over previous</th><th>Placed</th><th>Hold</th>
+      </tr></thead>
+      <tbody>
+      ${l.bids.map((b,i)=>{
+        const prev = l.bids[i+1];
+        const hs = {open:['open','Open'],released:['rel','Released'],captured:['cap','Captured']}[b.hold];
+        return `<tr class="${b.by===ME?'you':''}">
+          <td>${b.by}${b.by===ME?' <span class="pill mine">you</span>':''}${i===0&&live(l)?' <span class="pill good">standing</span>':''}</td>
+          <td class="num" style="font-weight:600">${n(b.amt)}c</td>
+          <td class="num hide-sm muted">${prev?'+'+n(b.amt-prev.amt)+'c':'opening'}</td>
+          <td class="num muted">${b.when}</td>
+          <td><span class="hstate ${hs[0]}">${hs[1]}</span></td>
+        </tr>`;
+      }).join('')}
+      </tbody>
+    </table>
+  </div>
+  <div class="foot">Every bid places its own hold. When a higher bid lands, the lower bid's hold is released in the same
+  ledger transaction — there is never a moment where two holds sit on the same bidder for this lot.</div>
+
+  <div class="section-h">Settlement</div>
+  <div class="bento">
+    <div class="tile s6">
+      <div class="tile-h">Fee at settlement</div>
+      <div class="kv"><span class="k">Hammer price</span><span class="v num">${n(hi)}c</span></div>
+      <div class="kv"><span class="k">Winner pays</span><span class="v num">${n(hi)}c <span class="muted" style="font-weight:400;font-size:11px">captured from hold</span></span></div>
+      <div class="kv"><span class="k">Estates fee (${feePct()})</span><span class="v num" style="color:var(--red)">−${n(fee)}c</span></div>
+      <div class="kv total"><span class="k">${l.seller} receives</span><span class="v num up">${cn(hi-fee)}</span></div>
+      <div class="foot">The fee comes off the seller's side only. It is charged once, at capture — never on a hold,
+      never on a bid that gets outbid, and never if the lot is voided.</div>
+    </div>
+    <div class="tile s6">
+      <div class="tile-h">What happens at close</div>
+      ${st==='settled' ? `
+        <div class="kv"><span class="k">Closed</span><span class="v">${l.closedWhen}</span></div>
+        <div class="kv"><span class="k">Settled</span><span class="v">${l.settledWhen} · ${l.settledAgo}</span></div>
+        <div class="kv"><span class="k">Captured from</span><span class="v">${leader(l)}</span></div>
+        <div class="kv"><span class="k">Holds released</span><span class="v num">${l.bids.length-1} losing bid${l.bids.length-1===1?'':'s'}</span></div>
+        <div class="okbox">Settled cleanly. ${myPos(l)==='outbid'?'Your '+n(l.bids.find(b=>b.by===ME).amt)+'c hold was released when you were outbid, well before settlement.':''}</div>`
+      : `
+        <div class="kv"><span class="k">1 · Close</span><span class="v" style="font-weight:400">no further bids accepted</span></div>
+        <div class="kv"><span class="k">2 · Capture</span><span class="v" style="font-weight:400">winner's hold becomes a payment</span></div>
+        <div class="kv"><span class="k">3 · Release</span><span class="v" style="font-weight:400">every losing hold returns to available</span></div>
+        <div class="kv"><span class="k">4 · Transfer</span><span class="v" style="font-weight:400">deed moves, fee taken from seller</span></div>
+        <div class="notebox">Capture and release are one transaction. If any step fails it rolls back and retries —
+        up to ${CFG.SETTLE_TIMEOUT_MIN} minutes, after which everything is refunded and the lot is relisted.
+        Coins are never in two places at once, and a failed settle can only ever end with you holding coins, not losing them.</div>`}
+    </div>
+  </div>`;
+}
+function openDrawer(){
+  stripWrap.classList.add('open');
+  heldSeg.setAttribute('aria-expanded', true);
+  window.scrollTo({top:0, behavior:'smooth'});
+}
+
+/* ================================================================
+   BID BOX — amount → preview (real figures) → confirm → receipt.
+   Nothing moves until Confirm. The preview says what the hold
+   becomes, what is left available, and what releases it.
+   ================================================================ */
+function BidBox(l){
+  const st = stateOf(l);
+  if(st==='settled')
+    return `<div class="tile-h">Bidding</div><div class="empty">Closed ${l.settledAgo}. This lot sold to ${leader(l)}.</div>`;
+  if(st==='settling')
+    return `<div class="tile-h">Bidding</div><div class="empty">Bidding closed ${l.closedWhen}. Settlement is running — nothing can be bid or cancelled now.</div>`;
+
+  if(!B || B.lot!==l.id) B = {lot:l.id, amount:'', step:1};
+  if(B.step===2) return bidPreview(l);
+  if(B.step===3) return bidReceipt(l);
+
+  const mn = minNext(l), h = myHold(l);
+  const quick = [mn, mn+l.inc*2, mn+l.inc*4, mn+l.inc*10];
+  return `
+    <div class="tile-h"><span>${h?'Raise your bid':'Place a bid'}</span>
+      <span class="num" style="color:var(--muted)">available ${n(S.wallet.available)}c</span></div>
+    <div class="amount-wrap">
+      <span class="cn">c</span>
+      <input id="amt" class="amount" inputmode="numeric" placeholder="${n(mn)}"
+             value="${B.amount?n(parseInt(B.amount,10)):''}" oninput="onAmt(this)" autocomplete="off">
+    </div>
+    <div class="chips">
+      ${quick.map(v=>`<button class="chip" onclick="setAmt(${v})">${n(v)}c</button>`).join('')}
+    </div>
+    <div class="err" id="err"></div>
+    <div class="kv"><span class="k">Minimum accepted</span><span class="v num">${n(mn)}c</span></div>
+    <div class="kv"><span class="k">Your hold on this lot now</span>
+      <span class="v num" style="color:${h?'var(--money-held)':'var(--faint)'}">${h?n(h)+'c':'none'}</span></div>
+    <button class="btn" id="toPreview" style="width:100%;margin-top:14px" disabled onclick="B.step=2;refreshBox()">Preview bid ${IC.arrow}</button>`;
+}
+function amtInt(){ return parseInt(B.amount||'0',10) || 0; }
+function setAmt(v){ B.amount=String(v); const el=document.getElementById('amt'); if(el) el.value=n(v); validate(); }
+function onAmt(el){
+  const raw = el.value.replace(/[^\d]/g,'');
+  B.amount = raw;
+  el.value = raw ? n(parseInt(raw,10)) : '';
+  validate();
+}
+function validate(){
+  const l = lotById(B.lot), v = amtInt(), mn = minNext(l),
+        e = document.getElementById('err'), b = document.getElementById('toPreview');
+  if(!e) return;
+  const delta = v - myHold(l);
+  let msg='';
+  if(v>0 && v<mn) msg = 'Minimum next bid is '+n(mn)+'c (high bid + '+n(l.inc)+'c increment).';
+  else if(delta > S.wallet.available) msg = 'That needs '+n(delta)+'c more held. You have '+n(S.wallet.available)+'c available — holds are not spendable.';
+  e.textContent = msg;
+  b.disabled = !(v>=mn && delta<=S.wallet.available);
+}
+function refreshBox(){
+  const l = lotById(B.lot);
+  document.getElementById('bidbox').innerHTML = BidBox(l);
+  if(B.step===1){ validate(); const a=document.getElementById('amt'); if(a) a.focus(); }
+}
+function computed(l){
+  const bid = amtInt(), oldHold = myHold(l), delta = bid - oldHold;
+  return {bid, oldHold, newHold:bid, delta,
+          oldAvail:S.wallet.available, newAvail:S.wallet.available - delta,
+          fee:feeOn(bid), sellerGets:bid-feeOn(bid)};
+}
+function bidPreview(l){
+  const c = computed(l);
+  return `
+    <div class="tile-h">Preview — nothing has moved yet</div>
+    <div class="kv"><span class="k">Your bid</span><span class="v num">${cn(c.bid)}</span></div>
+    <div class="kv"><span class="k">Beats current high by</span><span class="v num">+${n(c.bid-high(l))}c</span></div>
+    <div class="kv"><span class="k">Your hold on lot #${l.id}</span>
+      <span class="v num" style="color:var(--money-held)">${c.oldHold?n(c.oldHold)+'c':'0c'} → <b>${n(c.newHold)}c</b></span></div>
+    <div class="kv"><span class="k">Extra coins reserved now</span>
+      <span class="v num" style="color:var(--money-held)">${n(c.delta)}c</span></div>
+    <div class="kv total"><span class="k">Available after</span>
+      <span class="v num">${n(c.oldAvail)}c → <b>${n(c.newAvail)}c</b></span></div>
+    <div class="notebox">
+      <b>Outbid releases this hold automatically.</b> If someone bids above you, all
+      ${n(c.newHold)}c returns to available in the same transaction that records their bid —
+      you do not cancel anything, and you are never holding two bids on one lot.
+      The hold expires ${CFG.HOLD_EXPIRY} if the lot never settles.
+    </div>
+    <div class="notebox blue">If you win at ${n(c.bid)}c you pay exactly that. The ${feePct()} Estates fee
+      (${n(c.fee)}c) comes off ${l.seller}'s proceeds, not yours.</div>
+    <div class="row" style="margin-top:14px">
+      <button class="btn ghost" onclick="B.step=1;refreshBox()">${IC.back} Change</button>
+      <button class="btn" style="flex:1" onclick="confirmBid()">Confirm ${n(c.bid)}c bid</button>
+    </div>`;
+}
+function confirmBid(){
+  const l = lotById(B.lot), c = computed(l);
+  // apply: release my previous hold on this lot, place the new one, reserve the difference
+  l.bids.forEach(b=>{ if(b.hold==='open') b.hold='released'; });
+  l.bids.unshift({by:ME, amt:c.bid, when:'just now', hold:'open'});
+  S.wallet.available -= c.delta;
+  B.step = 3; B.receipt = c;
+  render();
+  renderStrip('h_'+l.id);
+  openDrawer();
+}
+function bidReceipt(l){
+  const c = B.receipt;
+  return `
+    <div class="tile-h">Bid placed</div>
+    <div class="big-ok">${IC.check}</div>
+    <div style="text-align:center;margin-bottom:14px">
+      <div class="num big">${cn(c.bid)}</div>
+      <div class="sec" style="font-size:12px">held against lot #${l.id}</div>
+    </div>
+    <div class="kv"><span class="k">Hold reference</span><span class="v ref">estates:auction:${l.id}:bid</span></div>
+    <div class="kv"><span class="k">Hold now</span><span class="v num" style="color:var(--money-held)">${cn(c.newHold)}</span></div>
+    <div class="kv"><span class="k">Available now</span><span class="v num">${cn(S.wallet.available)}</span></div>
+    <div class="kv"><span class="k">Hold expires</span><span class="v">${CFG.HOLD_EXPIRY}</span></div>
+    <div class="okbox">Reserved, not spent. You get it all back the moment you are outbid, or if the
+      lot is cancelled or fails to settle.</div>
+    <button class="btn ghost" style="width:100%;margin-top:14px" onclick="B.step=1;B.amount='';refreshBox()">Bid again</button>`;
+}
+function afterDetail(){
+  if(B && B.step===1){ validate(); }
+}
+
+/* ================================================================
+   CLOCKS — one tick, updating only the time cells. Motion here is
+   state, not decoration: these numbers are actually counting down.
+   ================================================================ */
+setInterval(()=>{
+  let stateChanged = false;
+  S.lots.forEach(l=>{
+    if(l.state==='open' && l.secs>0){
+      const before = stateOf(l);
+      l.secs--;
+      if(stateOf(l)!==before) stateChanged = true;
+      if(l.secs===0){ l.state='settling'; l.settleAttempt=1; l.settleMax=5; l.retrySecs=30;
+                      l.stuckSecs=0; l.closedWhen='just now';
+                      l.settleErr='capture queued'; stateChanged = true; }
+    }
+    if(l.state==='settling'){
+      l.stuckSecs = (l.stuckSecs||0)+1;
+      if(l.retrySecs>0) l.retrySecs--;
+    }
+  });
+  if(stateChanged){ render(); renderStrip(); return; }
+  document.querySelectorAll('[data-clock]').forEach(el=>{
+    const l = lotById(+el.dataset.clock);
+    if(!l) return;
+    if(live(l) && l.secs>0){
+      el.textContent = fmtLeft(l.secs);
+      el.classList.toggle('amb', stateOf(l)==='closing');
+    }
+  });
+  document.querySelectorAll('[data-retry]').forEach(el=>{
+    const l = lotById(+el.dataset.retry);
+    if(l) el.textContent = fmtMins(l.retrySecs);
+  });
+}, 1000);
+
+/* boot */
+renderStrip();
+go('list');
+</script>
+</body>
+</html>

@@ -1,0 +1,1287 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>V Tech Estates — Lands</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Space+Grotesk:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+/* ============================================================
+   V TECH — LANDS. All data is fake and in-memory.
+   CSS block is mock_hub.html's, verbatim, plus a parcel-map
+   section at the end. Matches dashboard_redesign_v3.html.
+   ============================================================ */
+:root{
+  --font-data:'IBM Plex Mono',ui-monospace,Menlo,monospace;
+  --font-ui:'Space Grotesk',system-ui,sans-serif;
+  --bg:#080808;--surface:#0f0f0f;--panel2:#151515;--border:#1E1E1E;--border-strong:#2A2A2A;
+  --text:#F4F4F4;--text-body:#B4B4B4;--muted:#6a6a6a;--faint:#3f3f3f;
+  --green:#22FF7A;--green-dim:#0f7a3a;--accent:#22FF7A;--red:#FF4D4D;--amber:#F5A623;--blue:#4A9EFF;--purple:#B47FFF;--nether:#FF6B35;
+}
+:root{
+  /* money roles map onto the house palette */
+  --money-available:var(--text);
+  --money-held:var(--amber);
+  --money-debt:var(--red);
+  --money-save:var(--green);
+  --headh:54px;--navh:46px;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{color-scheme:dark}
+body{background:var(--bg);background-image:radial-gradient(#151515 .5px,transparent .5px);background-size:24px 24px;color:var(--text);font-family:var(--font-ui);font-size:13px;line-height:1.5;-webkit-font-smoothing:antialiased;min-height:100vh}
+.mono,td,.num,input,.pill,.tag,.val,.fv,.tick,.o-odds,.lot-bid,.hold-amt,.kfig,.big{font-family:var(--font-data);font-variant-numeric:tabular-nums slashed-zero}
+a{color:inherit;text-decoration:none}
+button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
+::selection{background:rgba(34,255,122,.22)}
+svg.i{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round;flex:0 0 auto}
+
+/* ---------- header ---------- */
+header{position:sticky;top:0;z-index:90;height:var(--headh);background:rgba(15,15,15,.9);backdrop-filter:blur(10px);border-bottom:1px solid var(--border);padding:0 24px;display:flex;align-items:center;justify-content:space-between}
+.logo{display:flex;align-items:center;gap:12px;cursor:pointer}
+.logo-icon{width:30px;height:30px;background:var(--accent);display:flex;align-items:center;justify-content:center;color:#000;font-weight:700;font-size:16px;box-shadow:0 0 24px rgba(34,255,122,.4)}
+.logo-text{font-size:14px;font-weight:600}
+.logo-sub{font-family:var(--font-data);font-size:8.5px;color:var(--muted);margin-top:2px;text-transform:uppercase;letter-spacing:.18em}
+.header-right{display:flex;align-items:center;gap:12px}
+.user-tag{display:flex;align-items:center;gap:9px;padding-left:12px;border-left:1px solid var(--border)}
+.user-mark{width:22px;height:22px;border:1px solid var(--border-strong);background:var(--panel2);display:flex;align-items:center;justify-content:center;font-family:var(--font-data);font-size:9.5px;color:var(--text-body)}
+.auth-name{font-family:var(--font-data);color:var(--accent);font-weight:500;font-size:12px}
+.svc-note{font-family:var(--font-data);font-size:9.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.14em}
+
+/* ---------- nav ---------- */
+nav{position:sticky;top:var(--headh);z-index:80;display:flex;gap:2px;background:var(--surface);border-bottom:1px solid var(--border);padding:0 16px;overflow-x:auto;height:var(--navh);scrollbar-width:none}
+nav::-webkit-scrollbar{display:none}
+.nav-tab{display:flex;align-items:center;gap:7px;height:var(--navh);padding:0 16px;font-size:12px;font-weight:500;color:var(--muted);cursor:pointer;border-bottom:2px solid transparent;white-space:nowrap;user-select:none;background:none}
+.nav-tab svg{opacity:.7}
+.nav-tab:hover{color:var(--text)}
+.nav-tab[aria-current="true"]{color:var(--accent);border-bottom-color:var(--accent)}
+.nav-tab[aria-current="true"] svg{opacity:1}
+
+/* ---------- MONEY STRIP ---------- */
+.strip-wrap{position:sticky;top:calc(var(--headh) + var(--navh));z-index:70;background:var(--surface);border-bottom:1px solid var(--border)}
+.strip{max-width:1180px;margin:0 auto;padding:0 24px;display:flex;align-items:stretch;min-height:60px}
+.seg{display:flex;flex-direction:column;justify-content:center;padding:10px 22px;position:relative;flex:0 0 auto;text-align:left}
+.seg + .seg::before{content:"";position:absolute;left:0;top:12px;bottom:12px;width:1px;background:var(--border)}
+.seg:first-child{padding-left:0}
+.seg .lab{font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);font-weight:600;margin-bottom:3px;display:flex;align-items:center;gap:6px}
+.seg .val{font-size:19px;font-weight:600;letter-spacing:-.01em;line-height:1.15}
+.seg .sub{font-size:10.5px;color:var(--muted)}
+.v-avail{color:var(--money-available)}
+.v-held{color:var(--money-held)}
+.v-save{color:var(--money-save)}
+.v-net{color:var(--text)}
+.coin{font-family:var(--font-data);font-size:.62em;font-weight:500;color:var(--muted);margin-left:3px;letter-spacing:0}
+.seg.held-seg{cursor:pointer}
+.seg.held-seg:hover{background:var(--panel2)}
+.seg.held-seg .lab{color:var(--money-held)}
+.chev{display:inline-flex;transition:transform .18s ease;color:var(--money-held)}
+.chev svg{width:12px;height:12px}
+.strip-wrap.open .chev{transform:rotate(180deg)}
+.strip .spacer{flex:1 1 auto}
+.seg.net-seg{padding-right:0;text-align:right;align-items:flex-end}
+.net-note{font-size:10.5px;color:var(--muted)}
+
+/* held drawer */
+.drawer{max-height:0;overflow:hidden;transition:max-height .22s ease;border-top:1px solid transparent}
+.strip-wrap.open .drawer{max-height:400px;border-top-color:var(--border)}
+.drawer-inner{max-width:1180px;margin:0 auto;padding:12px 24px 16px}
+.drawer-head{font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);font-weight:600;margin-bottom:9px;display:flex;align-items:center;gap:10px}
+.drawer-head::after{content:"";flex:1;height:1px;background:var(--border)}
+.hold-row{display:flex;align-items:center;gap:12px;width:100%;text-align:left;padding:9px 12px;border:1px solid var(--border);background:var(--panel2);margin-bottom:6px;transition:border-color .12s,transform .12s;cursor:pointer}
+.hold-row:hover{border-color:var(--border-strong);transform:translateX(2px)}
+.hold-dot{width:8px;height:8px;border-radius:50%;flex:0 0 auto;display:inline-block}
+.hold-main{flex:1;min-width:0}
+.hold-t{font-size:12.5px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:block}
+.hold-s{font-size:10.5px;color:var(--muted);display:block}
+.hold-amt{font-size:14px;font-weight:600;color:var(--money-held);white-space:nowrap}
+.hold-go{color:var(--faint);display:flex}
+.drawer-foot{display:flex;justify-content:space-between;align-items:center;gap:16px;padding-top:9px;margin-top:6px;border-top:1px solid var(--border);font-size:11px;color:var(--muted)}
+.drawer-foot b{color:var(--money-held);font-size:13px;font-family:var(--font-data);font-variant-numeric:tabular-nums slashed-zero}
+
+/* ---------- layout ---------- */
+main{max-width:1180px;margin:0 auto;padding:24px 24px 80px;animation:f .25s ease}
+@keyframes f{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+.page-head{display:flex;align-items:flex-end;gap:16px;flex-wrap:wrap;margin-bottom:18px}
+h1{font-size:21px;font-weight:600;letter-spacing:-.01em;margin:0}
+.page-sub{color:var(--muted);font-size:12.5px;margin-top:3px}
+.section-h{font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin:24px 0 12px;display:flex;align-items:center;gap:10px;font-weight:600}
+.section-h::after{content:"";flex:1;height:1px;background:var(--border)}
+.tile-h{font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;gap:10px;font-weight:600}
+.eyebrow{font-size:10px;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);font-weight:600;margin-bottom:4px}
+.q{font-size:14px;font-weight:600;letter-spacing:-.01em;color:var(--text)}
+.t-title{font-size:13.5px;font-weight:600;letter-spacing:-.01em}
+
+.bento{display:grid;grid-template-columns:repeat(12,1fr);gap:14px;margin-bottom:16px}
+.tile{background:var(--surface);border:1px solid var(--border);padding:18px 20px;position:relative}
+.s12{grid-column:span 12}.s8{grid-column:span 8}.s7{grid-column:span 7}.s6{grid-column:span 6}
+.s5{grid-column:span 5}.s4{grid-column:span 4}.s3{grid-column:span 3}
+@media(max-width:900px){.s8,.s7,.s6,.s5,.s4,.s3{grid-column:span 12}}
+
+/* kpi */
+.kgrid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.kpi{background:var(--panel2);border:1px solid var(--border);padding:13px 14px}
+.kpi .k{color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.08em}
+.kpi .kfig{font-size:20px;font-weight:600;margin-top:5px}
+.kpi .kt{font-size:10px;color:var(--muted);margin-top:3px}
+
+/* generic bits */
+.pill{display:inline-flex;align-items:center;gap:6px;padding:2px 8px;font-size:11px;border:1px solid var(--border);color:var(--text-body);white-space:nowrap}
+.pill.good{border-color:rgba(34,255,122,.3);color:var(--green)}
+.pill.warn{border-color:rgba(245,166,35,.3);color:var(--amber)}
+.pill.crit{border-color:rgba(255,77,77,.3);color:var(--red)}
+.pill.mine{border-color:rgba(74,158,255,.35);color:var(--blue)}
+.up{color:var(--green)}.down{color:var(--red)}
+.muted{color:var(--muted)}.sec{color:var(--text-body)}.amb{color:var(--amber)}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:7px;background:var(--accent);color:#000;border:none;padding:8px 14px;font-family:var(--font-ui);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;cursor:pointer}
+.btn:hover{background:#4dff96}
+.btn.ghost{background:transparent;border:1px solid var(--border);color:var(--text-body)}
+.btn.ghost:hover{background:var(--panel2);border-color:var(--border-strong);color:var(--text)}
+.btn:disabled{opacity:.35;cursor:not-allowed}
+.btn.sm{padding:6px 10px;font-size:10px}
+.btn.danger{background:transparent;border:1px solid rgba(255,77,77,.35);color:var(--red)}
+.btn.danger:hover{background:rgba(255,77,77,.08)}
+.row{display:flex;align-items:center;gap:10px}
+.between{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.wrapf{flex-wrap:wrap}
+.right{text-align:right}
+
+/* tables */
+table{width:100%;border-collapse:collapse;background:var(--surface);border:1px solid var(--border)}
+th,td{padding:9px 13px;text-align:right;border-bottom:1px solid var(--border);font-size:12.5px}
+th:first-child,td:first-child{text-align:left}
+th{color:var(--muted);font-weight:600;font-family:var(--font-ui);font-size:11px;text-transform:uppercase;letter-spacing:.05em;cursor:pointer;user-select:none}
+th:hover{color:var(--text)}
+tbody tr:hover{background:var(--panel2)}
+tr:last-child td{border-bottom:none}
+.tick{font-weight:600;letter-spacing:.02em}
+.tname{font-size:10.5px;color:var(--muted);font-family:var(--font-ui)}
+.tablewrap{overflow-x:auto}
+
+/* bars */
+.bar{height:6px;background:var(--panel2);overflow:hidden;position:relative}
+.bar > i{display:block;height:100%;background:linear-gradient(90deg,var(--green),#17b558)}
+
+/* modal */
+.scrim{position:fixed;inset:0;background:rgba(4,4,4,.82);z-index:200;display:none;align-items:center;justify-content:center;padding:20px}
+.scrim.on{display:flex}
+.modal{width:100%;max-width:470px;background:var(--surface);border:1px solid var(--border-strong);max-height:92vh;display:flex;flex-direction:column;animation:f .18s ease}
+.modal-head{padding:14px 18px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:flex-start;gap:12px}
+.modal-head h3{margin:0;font-size:13px;font-weight:600;letter-spacing:-.01em}
+.modal-head .mh-sub{font-size:10.5px;color:var(--muted);margin-top:3px}
+.modal-body{padding:18px;overflow-y:auto}
+.modal-foot{padding:13px 18px;border-top:1px solid var(--border);display:flex;gap:10px;justify-content:flex-end;flex-wrap:wrap}
+.x{color:var(--muted);display:flex;padding:2px}
+.x:hover{color:var(--text)}
+.amount-wrap{position:relative;margin-bottom:10px}
+.amount{width:100%;padding:13px 14px 13px 40px;font-size:22px;font-weight:600;background:var(--bg);border:1px solid var(--border);color:var(--text);outline:none;letter-spacing:-.01em}
+.amount:focus{border-color:var(--accent)}
+.amount-wrap .cn{position:absolute;left:14px;top:50%;transform:translateY(-50%);color:var(--muted);font-size:15px;font-family:var(--font-data)}
+.text-in{width:100%;padding:10px 12px;font-size:13px;background:var(--bg);border:1px solid var(--border);color:var(--text);outline:none;font-family:var(--font-ui)}
+.text-in:focus{border-color:var(--accent)}
+/* search-select — names come off the register, never out of a text box */
+.picklist{max-height:184px;overflow:auto;border:1px solid var(--border);border-top:none;background:var(--panel2)}
+.pickrow{display:flex;align-items:center;justify-content:space-between;gap:10px;width:100%;text-align:left;padding:8px 11px;border-bottom:1px solid var(--border);font-size:12.5px;cursor:pointer}
+.pickrow:last-child{border-bottom:none}
+.pickrow:hover{background:var(--surface);color:var(--text)}
+.pickrow[aria-selected="true"]{color:var(--accent)}
+.pickrow .pm{display:block;font-size:10.5px;color:var(--muted);font-family:var(--font-ui)}
+.pickrow svg{color:var(--accent)}
+.chips{display:flex;gap:7px;flex-wrap:wrap;margin-bottom:14px}
+.chip{padding:5px 10px;border:1px solid var(--border);background:var(--panel2);font-size:11px;font-weight:500;color:var(--text-body);font-family:var(--font-data);font-variant-numeric:tabular-nums slashed-zero}
+.chip:hover{border-color:var(--border-strong);color:var(--text)}
+.chip[aria-pressed="true"]{border-color:var(--accent);color:var(--accent)}
+.err{color:var(--red);font-size:11.5px;min-height:18px}
+.kv{display:flex;justify-content:space-between;gap:16px;padding:8px 0;font-size:12.5px;border-bottom:1px solid var(--border)}
+.kv:last-of-type{border-bottom:none}
+.kv .k{color:var(--muted)}
+.kv .v{font-weight:600;white-space:nowrap;text-align:right}
+.kv.total{border-top:1px solid var(--border);border-bottom:none;margin-top:6px;padding-top:12px;font-size:13.5px}
+/* not a total of the rows above it — an opportunity cost sitting beside them.
+   Dashed rule and body size, so it never reads as the sum. */
+.kv.oppcost{border-top:1px dashed var(--border-strong);border-bottom:none;margin-top:6px;padding-top:12px}
+.notebox{margin-top:14px;padding:10px 12px;font-size:11px;line-height:1.55;background:rgba(245,166,35,.06);border:1px solid rgba(245,166,35,.25);color:#d9ae6a}
+.notebox.blue{background:rgba(74,158,255,.06);border-color:rgba(74,158,255,.25);color:#9dc3f0}
+.notebox.red{background:rgba(255,77,77,.06);border-color:rgba(255,77,77,.25);color:#e79a9a}
+.okbox{margin-top:14px;padding:11px 12px;font-size:11.5px;line-height:1.55;background:rgba(34,255,122,.06);border:1px solid rgba(34,255,122,.25);color:#8fe0b2}
+.big-ok{width:40px;height:40px;background:rgba(34,255,122,.08);border:1px solid rgba(34,255,122,.35);display:flex;align-items:center;justify-content:center;margin:0 auto 14px;color:var(--green)}
+.big-ok svg{width:20px;height:20px}
+.step-dots{display:flex;gap:6px;align-items:center}
+.sd{width:6px;height:6px;border-radius:50%;background:var(--border-strong);display:inline-block}
+.sd.on{background:var(--accent)}
+.sd.done{background:var(--green-dim)}
+.big{font-size:24px;font-weight:600;letter-spacing:-.02em}
+.ref{font-family:var(--font-data);font-size:11px;color:var(--text-body);word-break:break-all}
+.flash{animation:flash 1.4s ease-out}
+@keyframes flash{0%{background:rgba(245,166,35,.22)}100%{background:transparent}}
+.empty{padding:16px 0;color:var(--muted);font-size:12px}
+.foot{color:var(--faint);font-size:11px;margin-top:12px;line-height:1.5}
+.hide{display:none !important}
+
+/* ============================================================
+   LANDS — parcel map, holdings list, lease panel, rent ledger
+   ============================================================ */
+.mapwrap{overflow-x:auto;padding-bottom:2px}
+.map{display:grid;grid-template-columns:18px repeat(14,minmax(26px,1fr));gap:3px;min-width:460px}
+.axis{font-family:var(--font-data);font-size:9px;color:var(--faint);display:flex;align-items:center;justify-content:center;letter-spacing:.02em}
+.axis.rowlab{justify-content:flex-end;padding-right:4px}
+.cell{aspect-ratio:1;border:1px solid var(--cb,#1a1a1a);background:var(--cf,transparent);position:relative;cursor:pointer;padding:0;display:block;transition:border-color .1s}
+.cell:hover{border-color:var(--text-body)}
+.cell.sel{border-color:var(--text);box-shadow:inset 0 0 0 1px var(--text)}
+.cell.unclaimed{border-style:dashed;border-color:#191919}
+.cell.let::after{content:"";position:absolute;left:0;right:0;bottom:0;height:3px;background:var(--amber)}
+.cell.arrears::after{background:var(--red)}
+.cell:focus-visible{outline:1px solid var(--accent);outline-offset:1px}
+.legend{display:flex;flex-wrap:wrap;gap:14px;margin-top:14px;font-size:10.5px;color:var(--muted)}
+.legend span{display:flex;align-items:center;gap:6px}
+.swatch{width:11px;height:11px;border:1px solid var(--cb);background:var(--cf);display:inline-block;flex:0 0 auto;position:relative}
+.swatch.dash{border-style:dashed}
+.swatch.let::after{content:"";position:absolute;left:0;right:0;bottom:0;height:3px;background:var(--amber)}
+#tip{position:fixed;z-index:150;pointer-events:none;display:none;background:var(--surface);border:1px solid var(--border-strong);padding:9px 11px;min-width:180px;max-width:250px}
+#tip .tip-id{font-family:var(--font-data);font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted)}
+#tip .tip-n{font-size:12.5px;font-weight:600;margin-top:2px;letter-spacing:-.01em}
+#tip .tip-r{font-size:10.5px;color:var(--muted);margin-top:4px;display:flex;justify-content:space-between;gap:12px}
+#tip .tip-r b{color:var(--text-body);font-weight:500;font-family:var(--font-data);font-variant-numeric:tabular-nums slashed-zero}
+
+.hold-list{display:flex;flex-direction:column}
+.hrow{display:grid;grid-template-columns:8px 1fr auto;gap:10px;align-items:center;width:100%;text-align:left;padding:8px 0;border-bottom:1px solid var(--border);cursor:pointer}
+.hrow:last-child{border-bottom:none}
+.hrow:hover .hn{color:var(--accent)}
+.hn{font-size:12.5px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.hsq{width:8px;height:8px;background:var(--c);display:block}
+.hamt{font-family:var(--font-data);font-variant-numeric:tabular-nums slashed-zero;font-size:12.5px;font-weight:600;white-space:nowrap}
+
+.pdetail{display:grid;grid-template-columns:1fr 1fr;gap:0 28px}
+@media(max-width:760px){.pdetail{grid-template-columns:1fr;gap:0}}
+.pd-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:16px;padding-top:14px;border-top:1px solid var(--border)}
+.leasebox{border:1px solid var(--border);background:var(--panel2);padding:13px 14px;margin-top:6px}
+.st-key{font-family:var(--font-data);font-size:10.5px;color:var(--faint);letter-spacing:.01em}
+.scope{display:flex;gap:6px}
+.parcel-title{font-size:17px;font-weight:600;letter-spacing:-.01em}
+.coordline{font-family:var(--font-data);font-size:11px;color:var(--muted);letter-spacing:.02em}
+
+/* motion here is state — the drawer opening, the hold flashing, the panel
+   changing. Under reduced motion the state still lands, it just stops moving. */
+@media (prefers-reduced-motion: reduce){
+  *,*::before,*::after{animation-duration:.01ms !important;animation-iteration-count:1 !important;transition-duration:.01ms !important}
+  .hold-row:hover{transform:none}
+}
+
+/* responsive */
+@media (max-width:760px){
+  header{padding:0 14px}
+  nav{padding:0 6px}
+  .nav-tab{padding:0 11px}
+  .svc-note{display:none}
+  main{padding:20px 14px 60px}
+  .strip{padding:0 14px;flex-wrap:wrap;min-height:0}
+  .seg{padding:9px 14px;flex:1 1 auto;min-width:44%}
+  .seg:first-child{padding-left:0}
+  .seg + .seg::before{display:none}
+  .seg.net-seg{align-items:flex-start;text-align:left;padding-right:14px}
+  .strip .spacer{display:none}
+  .seg .val{font-size:17px}
+  .drawer-inner{padding:10px 14px 14px}
+  .hide-sm{display:none}
+  th.hide-sm,td.hide-sm{display:none}
+  .kgrid{grid-template-columns:1fr}
+  #tip{display:none !important}
+}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo" onclick="select('RV-C4')">
+    <div class="logo-icon">V</div>
+    <div><div class="logo-text">V Tech Estates</div><div class="logo-sub">Lands</div></div>
+  </div>
+  <div class="header-right">
+    <span class="svc-note">Markets · Banking · Estates</span>
+    <span class="user-tag"><span class="user-mark">GH</span><span class="auth-name">@GreyHames</span></span>
+  </div>
+</header>
+
+<nav id="tabs"></nav>
+
+<!-- ============ MONEY STRIP (from mock_hub.html) ============ -->
+<div class="strip-wrap" id="stripWrap">
+  <div class="strip">
+    <div class="seg">
+      <div class="lab">Wallet · available</div>
+      <div class="val v-avail num" id="sAvail">0</div>
+      <div class="sub">spendable right now</div>
+    </div>
+
+    <button class="seg held-seg" id="heldSeg" aria-expanded="false">
+      <div class="lab">Held <span class="chev"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></span></div>
+      <div class="val v-held num" id="sHeld">0</div>
+      <div class="sub" id="sHeldSub">reserved</div>
+    </button>
+
+    <div class="seg">
+      <div class="lab">Savings · Osentar</div>
+      <div class="val v-save num" id="sSave">0</div>
+      <div class="sub">3.2% APR</div>
+    </div>
+
+    <div class="spacer"></div>
+
+    <div class="seg net-seg">
+      <div class="lab">Net position</div>
+      <div class="val v-net num" id="sNet">0</div>
+      <div class="net-note">available + held + savings &minus; loan · bonds &amp; land excluded</div>
+    </div>
+  </div>
+
+  <div class="drawer">
+    <div class="drawer-inner">
+      <div class="drawer-head">What is holding your coins</div>
+      <div id="holdList"></div>
+      <div class="drawer-foot">
+        <span>Holds are escrow — the coins are yours until captured, and every hold has an expiry.</span>
+        <span>Total held <b id="sHeldTotal">0</b></span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<main id="view"></main>
+
+<div id="tip" role="tooltip"></div>
+
+<!-- ============ ACTION MODAL ============ -->
+<div class="scrim" id="scrim">
+  <div class="modal" role="dialog" aria-modal="true">
+    <div class="modal-head">
+      <div>
+        <h3 id="mTitle">Action</h3>
+        <div class="mh-sub" id="mSub"></div>
+      </div>
+      <div class="row" style="gap:14px">
+        <div class="step-dots" id="dots"></div>
+        <button class="x" onclick="closeModal()" aria-label="Close"><svg class="i" viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
+      </div>
+    </div>
+    <div class="modal-body" id="mBody"></div>
+    <div class="modal-foot" id="mFoot"></div>
+  </div>
+</div>
+
+<script>
+/* ================================================================
+   ICONS — inline lucide-style strokes. No emoji anywhere.
+   ================================================================ */
+const svg = d => '<svg class="i" viewBox="0 0 24 24">' + d + '</svg>';
+const IC = {
+  hub:     svg('<path d="M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z"/>'),
+  markets: svg('<path d="M3 3v18h18"/><path d="M7 15l4-5 3 3 5-7"/>'),
+  banking: svg('<path d="M3 21h18M4 10h16M12 3l9 5H3zM6 10v11M10 10v11M14 10v11M18 10v11"/>'),
+  estates: svg('<path d="M9 4L3 7v13l6-3 6 3 6-3V4l-6 3z"/><path d="M9 4v13M15 7v13"/>'),
+  arrow:   svg('<path d="M5 12h14M13 6l6 6-6 6"/>'),
+  back:    svg('<path d="M19 12H5M11 18l-6-6 6-6"/>'),
+  check:   svg('<path d="M20 6L9 17l-5-5"/>'),
+  gavel:   svg('<path d="M3 21h9M12 3l6 6M15 6l-6 6M9 3l6 6M6 12l6 6M9 9l-6 6 3 3 6-6"/>'),
+  key:     svg('<path d="M21 2l-2 2M15.5 8.5L19 5M10 14a4 4 0 1 0-4-4 4 4 0 0 0 4 4zM12.5 11.5L19 5"/>'),
+  stop:    svg('<path d="M5 5h14v14H5z"/>'),
+  alert:   svg('<path d="M12 9v4M12 17h.01M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/>')
+};
+
+/* ================================================================
+   CONFIG — one place. Every fee below is rendered from here, in
+   basis points, integer. Money never touches a float.
+   ================================================================ */
+const CFG = {
+  LIST_BOND_BPS: 200,     // 2.00 % of reserve, escrowed while a lot is listed
+  LIST_BOND_MIN: 250,
+  SETTLE_FEE_BPS: 300,    // 3.00 % of hammer price, from the seller, on sale
+  MIN_RENT: 100,
+  DEPOSIT_PERIODS: 2,     // tenant deposit, in rent periods
+  NOTICE_DAYS: 7,
+  TODAY: 'Thu 13 Aug 2026'
+};
+const reduceMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+const pct = bps => (bps/100).toFixed(bps%100?2:0) + '%';
+const bondOn = reserve => Math.max(CFG.LIST_BOND_MIN, Math.floor(reserve*CFG.LIST_BOND_BPS/10000));
+const n  = v => v.toLocaleString('en-US');
+const cn = v => n(v) + '<span class="coin">c</span>';
+const ME = 'GreyHames';
+
+/* ================================================================
+   STATE — in-memory only. No storage APIs.
+   The world is a 14 x 8 parcel block in the Riverside register.
+   Parcel ids are coordinate-addressed: REGION-COLUMN + ROW.
+   ================================================================ */
+const COLS = ['A','B','C','D','E','F','G','H','J','K','L','M','N','P']; // no I, no O
+const ROWS = 8;
+const ORIGIN = {x:1024, z:-1280};   // world block coords of A1's north-west corner
+const PARCEL_BLOCKS = 64;
+
+const OWNERS = ['Osentar Estates','Amazonia Mining','Ironvale Guild','Northlight',
+                'Bramble Hollow','Tamsin Roe','Verrin Hald','Osric Vane','V Tech Logistics'];
+
+/* Hand-authored parcels. Everything else on the block is filled in
+   below by a seeded generator so the map is stable between renders. */
+const NOTABLE = [
+  {c:'C',r:4, name:'Riverside Wharf 4',    st:'mine', size:'64×64', claimed:'12 Jun 2026',
+   lease:{tenant:'Bramble Hollow', rent:1200, per:'week', paid:9, term:12, next:'Mon 17 Aug 2026', nextIn:'in 4 days', since:'8 Jun 2026', deposit:2400, arrears:0}},
+  {c:'C',r:5, name:'Riverside Wharf 5',    st:'mine', size:'64×64', claimed:'12 Jun 2026'},
+  {c:'D',r:4, name:'Coalhurst Stall 3',    st:'mine', size:'32×32', claimed:'2 Mar 2026',
+   lease:{tenant:'Tamsin Roe', rent:900, per:'week', paid:6, term:8, next:'Mon 17 Aug 2026', nextIn:'in 4 days', since:'6 Jul 2026', deposit:1800, arrears:900}},
+  {c:'G',r:2, name:'Ashfell Row House',    st:'mine', size:'48×48', claimed:'21 Apr 2026',
+   lease:{tenant:'Northlight', rent:2400, per:'4 weeks', paid:3, term:6, next:'1 Sep 2026', nextIn:'in 19 days', since:'6 Apr 2026', deposit:4800, arrears:0}},
+  {c:'G',r:3, name:'Ashfell Back Lot',     st:'mine', size:'48×48', claimed:'21 Apr 2026'},
+  /* lot #398 settled to Northlight at 44,200c on 11 Aug — he was the
+     underbidder at 43,000c and his hold came back in full. Not his. */
+  {c:'K',r:6, name:'Emberwatch Freehold',  st:'other', size:'128×64', owner:'Northlight',
+   claimed:'11 Aug 2026', lot:398},
+  {c:'B',r:7, name:'Millrace Cottage',     st:'mine', size:'32×32', claimed:'19 May 2026'},
+
+  {c:'E',r:6, name:'Skyport Dock 7',       st:'leasedin', size:'32×32', owner:'V Tech Logistics', lot:423,
+   note:'You rent this parcel and you hold the high bid on lot #423 for the freehold — both are true at once.',
+   lease:{tenant:ME, rent:750, per:'week', paid:11, term:24, next:'Mon 17 Aug 2026', nextIn:'in 4 days', since:'26 May 2026', deposit:1500, arrears:0}},
+  {c:'M',r:3, name:'Quarry Access Strip',  st:'leasedin', size:'64×64', owner:'Amazonia Mining',
+   lease:{tenant:ME, rent:1400, per:'4 weeks', paid:2, term:12, next:'1 Sep 2026', nextIn:'in 19 days', since:'4 Jun 2026', deposit:2800, arrears:0}},
+
+  {c:'H',r:5, name:'Ironvale Watchtower',  st:'sale', size:'64×64', owner:'Ironvale Guild', reserve:28000, bidNow:31000, lot:405, closes:'closed today 13:02 · settling'},
+  {c:'L',r:2, name:'Northgate Terrace',    st:'sale', size:'48×48', owner:'Northlight', reserve:12000, bidNow:15750, lot:430, closes:'closes in 2d 09m'},
+  {c:'F',r:7, name:'Blackstone Yard',      st:'sale', size:'64×64', owner:'Amazonia Mining', reserve:20000, bidNow:24500, lot:418, closes:'closes in 1d 03h'},
+  /* lot #412's parcel. Four other surfaces hold 8,000c against it; without
+     this row the register does not contain the thing they are holding. */
+  {c:'C',r:6, name:'Riverside Parcel R-12',st:'sale', size:'64×64', owner:'Osentar Estates', reserve:6000, bidNow:8000, lot:412, closes:'closes in 5h 12m'},
+
+  {c:'A',r:1, name:'Osentar Registry',     st:'other', size:'64×64', owner:'Osentar Estates'},
+  {c:'N',r:8, name:'Verrin Hall',          st:'other', size:'128×64', owner:'Verrin Hald'}
+];
+
+/* seeded generator — same map every load, no Math.random */
+function lcg(seed){ let s=seed>>>0; return ()=>{ s=(s*1664525+1013904223)>>>0; return s/4294967296; }; }
+const P = {};              // id -> parcel
+function buildWorld(){
+  const rnd = lcg(20260813);
+  COLS.forEach((c,ci)=>{
+    for(let r=1;r<=ROWS;r++){
+      const id = 'RV-'+c+r;
+      const hand = NOTABLE.find(p=>p.c===c && p.r===r);
+      const base = {id, col:c, ci, row:r,
+        x: ORIGIN.x + ci*PARCEL_BLOCKS, z: ORIGIN.z + (r-1)*PARCEL_BLOCKS};
+      if(hand){ P[id] = Object.assign(base, hand, {lease: hand.lease?Object.assign({},hand.lease):null}); continue; }
+      const roll = rnd();
+      if(roll < 0.42){
+        P[id] = Object.assign(base, {st:'unclaimed', name:null, size:'64×64', owner:null});
+      } else {
+        const o = OWNERS[Math.floor(rnd()*OWNERS.length)];
+        P[id] = Object.assign(base, {st:'other', name:null, size: rnd()<0.22?'32×32':'64×64', owner:o});
+      }
+    }
+  });
+}
+buildWorld();
+
+const S = {
+  wallet:{ available:48200, savings:90000 },
+  /* loan #9 outstanding — derived in mock_banking.html's schedule() from
+     paidPrincipal 10,415 of 25,000. Stored here because this surface has no
+     loan object; it is subtracted from the net position, never silently. */
+  loanOutstanding: 14585,
+  /* holds that came in from the other two Estates surfaces. Four of them,
+     46,700c, ordered by amount descending. `pid` where the object is a
+     parcel on this register — those rows open it. */
+  holds:[
+    {id:'h_405', amount:31000, color:'var(--amber)', pid:'RV-H5',
+     title:'Auction #405 — Ironvale Watchtower',
+     sub:'you won · settle stuck on attempt 3 of 5 · retry in 2m 10s'},
+    {id:'h_412', amount:8000, color:'var(--nether)', pid:'RV-C6',
+     title:'Auction #412 — Riverside Parcel R-12',
+     sub:'you are the high bidder · closes in 5h 12m · expires close + 24h'},
+    {id:'h_77',  amount:4500, color:'var(--purple)',
+     title:'Bet — Mockrean election',
+     sub:'4,500 on Verrin Hald · resolves in 2d 04h · expires resolve + 7d'},
+    {id:'h_423', amount:3200, color:'var(--blue)', pid:'RV-E6',
+     title:'Auction #423 — Skyport Dock 7',
+     sub:'you are the high bidder · closes in 22h 04m · expires close + 24h'}
+  ],
+  /* rent ledger — newest first. Every charge carries the key that
+     makes a retry a no-op instead of a second month of rent. */
+  ledger:[
+    {per:'wk 34 · 17–23 Aug', pid:'RV-C4', tenant:'Bramble Hollow', amt:1200, st:'scheduled', key:'rent:RV-C4:2026-W34'},
+    {per:'wk 34 · 17–23 Aug', pid:'RV-D4', tenant:'Tamsin Roe',     amt:900,  st:'scheduled', key:'rent:RV-D4:2026-W34'},
+    {per:'wk 33 · 10–16 Aug', pid:'RV-C4', tenant:'Bramble Hollow', amt:1200, st:'paid', when:'Mon 10 Aug 2026', key:'rent:RV-C4:2026-W33'},
+    {per:'wk 33 · 10–16 Aug', pid:'RV-C4', tenant:'Bramble Hollow', amt:0,    st:'suppressed', when:'Mon 10 Aug 2026', key:'rent:RV-C4:2026-W33',
+     note:'collector retried after an 8s ledger timeout — same key, so the charge above was returned instead of a second one being written'},
+    {per:'wk 33 · 10–16 Aug', pid:'RV-D4', tenant:'Tamsin Roe',     amt:900,  st:'failed', when:'Mon 10 Aug 2026', key:'rent:RV-D4:2026-W33',
+     note:'tenant had 340c available — short by 560c. Retries daily at 09:00, then the balance becomes arrears'},
+    {per:'Aug · 1–28 Aug',    pid:'RV-G2', tenant:'Northlight',     amt:2400, st:'paid', when:'Sat 1 Aug 2026', key:'rent:RV-G2:2026-M08'},
+    {per:'wk 32 · 3–9 Aug',   pid:'RV-C4', tenant:'Bramble Hollow', amt:1200, st:'paid', when:'Mon 3 Aug 2026',  key:'rent:RV-C4:2026-W32'},
+    {per:'wk 32 · 3–9 Aug',   pid:'RV-D4', tenant:'Tamsin Roe',     amt:900,  st:'paid', when:'Mon 3 Aug 2026',  key:'rent:RV-D4:2026-W32'},
+    {per:'wk 31 · 27 Jul–2 Aug', pid:'RV-C4', tenant:'Bramble Hollow', amt:1200, st:'paid', when:'Mon 27 Jul 2026', key:'rent:RV-C4:2026-W31'},
+    {per:'wk 31 · 27 Jul–2 Aug', pid:'RV-D4', tenant:'Tamsin Roe',  amt:900,  st:'paid', when:'Mon 27 Jul 2026', key:'rent:RV-D4:2026-W31'},
+    {per:'Jul · 4–31 Jul',    pid:'RV-G2', tenant:'Northlight',     amt:2400, st:'paid', when:'Sat 4 Jul 2026',  key:'rent:RV-G2:2026-M07'},
+    {per:'wk 30 · 20–26 Jul', pid:'RV-C4', tenant:'Bramble Hollow', amt:1200, st:'paid', when:'Mon 20 Jul 2026', key:'rent:RV-C4:2026-W30'}
+  ]
+};
+
+/* ---------- derived ---------- */
+const all       = () => Object.values(P);
+const mine      = () => all().filter(p=>p.st==='mine');
+const leasedIn  = () => all().filter(p=>p.st==='leasedin');
+const leasedOut = () => mine().filter(p=>p.lease);
+const rentIn    = () => leasedOut().reduce((a,p)=>a+weekly(p.lease),0);
+const rentOut   = () => leasedIn().reduce((a,p)=>a+weekly(p.lease),0);
+const arrears   = () => leasedOut().reduce((a,p)=>a+(p.lease.arrears||0),0);
+const weekly    = l => l.per==='week' ? l.rent : Math.floor(l.rent/4);
+const held      = () => S.holds.reduce((a,h)=>a+h.amount,0);           // 46,700
+/* NET POSITION — held stays in, because escrowed coins are still his and the
+   strip breaks them out in their own amber segment. Debt comes off, because a
+   figure called "net" that ignores a live loan is a lie.
+   48,200 + 46,700 + 90,000 − 14,585 = 170,315 */
+const netPos    = () => S.wallet.available + held() + S.wallet.savings - S.loanOutstanding;
+const holdOn    = pid => S.holds.find(h=>h.pid===pid);
+
+/* Every name in this product comes off a list. These are the names this
+   register already knows: owners of parcels on the block, plus every sitting
+   tenant. A lease is written against a player who exists. */
+const tenantNames = () => [...new Set(OWNERS.concat(all().filter(p=>p.lease).map(p=>p.lease.tenant)))]
+  .filter(x=>x!==ME).sort((a,b)=>a.localeCompare(b));
+function tenantSub(name){
+  const owns = all().filter(p=>p.owner===name).length;
+  const lets = all().filter(p=>p.lease && p.lease.tenant===name).map(p=>p.id);
+  const bits = [];
+  if(lets.length) bits.push('tenant on ' + lets.join(', '));
+  if(owns) bits.push(owns + ' parcel' + (owns>1?'s':'') + ' on this block');
+  return bits.join(' · ') || 'on the register, nothing on this block';
+}
+
+const CLR = {
+  mine:     {f:'rgba(34,255,122,.20)',  b:'rgba(34,255,122,.55)',  label:'Yours'},
+  leasedin: {f:'rgba(74,158,255,.20)',  b:'rgba(74,158,255,.55)',  label:'Leased to you'},
+  sale:     {f:'rgba(255,107,53,.20)',  b:'rgba(255,107,53,.55)',  label:'For sale'},
+  other:    {f:'#161616',               b:'#242424',               label:'Owned by someone else'},
+  unclaimed:{f:'transparent',           b:'#191919',               label:'Unclaimed'}
+};
+/* a parcel you own and have listed still belongs to you — it just wears the
+   auction tint on the map until the lot settles */
+const cellState = p => p.listed ? 'sale' : p.st;
+const dotOf = p => ({mine:'var(--green)',leasedin:'var(--blue)',sale:'var(--nether)',other:'var(--faint)',unclaimed:'var(--faint)'})[cellState(p)];
+const displayName = p => p.name || (p.st==='unclaimed' ? 'Unclaimed parcel' : 'Unregistered parcel');
+const ownerOf = p => (p.st==='mine' || p.owner===ME) ? ME + ' (you)' : (p.owner || 'nobody');
+
+/* ================================================================
+   MONEY STRIP — identical behaviour to mock_hub.html
+   ================================================================ */
+function renderStrip(flashHold){
+  sAvail.innerHTML = cn(S.wallet.available);
+  sHeld.innerHTML  = cn(held());
+  sSave.innerHTML  = cn(S.wallet.savings);
+  sNet.innerHTML   = cn(netPos());
+  sHeldTotal.innerHTML = cn(held());
+  sHeldSub.textContent = S.holds.length
+    ? 'reserved by ' + S.holds.length + ' thing' + (S.holds.length>1?'s':'')
+    : 'nothing reserved';
+  if(!S.holds.length){
+    holdList.innerHTML = '<div class="empty">No open holds. All of your coins are available.</div>';
+  } else {
+    holdList.innerHTML = S.holds.map(h=>`
+      <button class="hold-row ${h.id===flashHold?'flash':''}" ${h.pid?`onclick="select('${h.pid}')"`:''}>
+        <span class="hold-dot" style="background:${h.color}"></span>
+        <span class="hold-main">
+          <span class="hold-t">${h.title}</span>
+          <span class="hold-s">${h.sub}</span>
+        </span>
+        <span class="hold-amt num">${cn(h.amount)}</span>
+        ${h.pid?`<span class="hold-go">${IC.arrow}</span>`:''}
+      </button>`).join('');
+  }
+}
+heldSeg.onclick = () => {
+  const open = stripWrap.classList.toggle('open');
+  heldSeg.setAttribute('aria-expanded', open);
+};
+
+/* ================================================================
+   ROUTER — this file is the lands surface only. The other tabs say
+   so in one line rather than pretending to be pages.
+   ================================================================ */
+const PAGES = [
+  {k:'hub',     label:'Hub',      icon:IC.hub},
+  {k:'markets', label:'Markets',  icon:IC.markets},
+  {k:'banking', label:'Banking',  icon:IC.banking},
+  {k:'lands',   label:'Lands',    icon:IC.estates}
+];
+let route = {page:'lands', other:null};
+let sel = 'RV-C4';
+let scope = 'parcel';   // rent ledger scope: 'parcel' | 'all'
+
+tabs.innerHTML = PAGES.map(p=>`<button class="nav-tab" onclick="goTab('${p.k}')" data-k="${p.k}">${p.icon}${p.label}</button>`).join('');
+function goTab(k){
+  route = {page: k==='lands'?'lands':'elsewhere', other: k==='lands'?null:k};
+  [...tabs.children].forEach(b=>b.setAttribute('aria-current', b.dataset.k===k));
+  render(); window.scrollTo({top:0});
+}
+function render(){
+  view.innerHTML = route.page==='elsewhere' ? Elsewhere(route.other) : Lands();
+  view.style.animation='none'; void view.offsetWidth; view.style.animation='';
+}
+function Elsewhere(k){
+  const label = PAGES.find(p=>p.k===k).label;
+  return `<div class="empty">${label} lives in the hub mockup — this file is the lands surface.
+    <button class="btn ghost sm" style="margin-left:10px" onclick="goTab('lands')">Back to lands</button></div>`;
+}
+function select(id){
+  sel = id;
+  const p = P[id];
+  scope = (p.st==='mine' && p.lease) || p.st==='leasedin' ? 'parcel' : 'all';
+  if(route.page!=='lands'){ goTab('lands'); return; }
+  render();
+  const el = document.getElementById('pdetail');
+  if(el) el.scrollIntoView({behavior: reduceMotion() ? 'auto' : 'smooth', block:'center'});
+}
+function setScope(s){ scope = s; render(); }
+
+/* ================================================================
+   PARCEL MAP — coordinate-addressed, one cell per parcel.
+   Colour carries owner state and nothing else: five states, five
+   tints, and a single amber underline for "yours and let".
+   ================================================================ */
+function mapGrid(){
+  let out = '<div class="axis"></div>';
+  COLS.forEach(c=>out += `<div class="axis">${c}</div>`);
+  for(let r=1;r<=ROWS;r++){
+    out += `<div class="axis rowlab">${r}</div>`;
+    COLS.forEach(c=>{
+      const p = P['RV-'+c+r], k = CLR[cellState(p)];
+      const let_ = p.st==='mine' && p.lease;
+      const arr  = let_ && p.lease.arrears>0;
+      out += `<button class="cell ${cellState(p)} ${p.id===sel?'sel':''} ${let_?'let':''} ${arr?'arrears':''}"
+        style="--cf:${k.f};--cb:${k.b}"
+        onclick="select('${p.id}')"
+        onmousemove="showTip(event,'${p.id}')" onmouseleave="hideTip()"
+        aria-label="${p.id} ${displayName(p)}"></button>`;
+    });
+  }
+  return out;
+}
+function showTip(e,id){
+  const p = P[id];
+  const rows = [];
+  rows.push(['Owner', ownerOf(p)]);
+  rows.push(['Size', p.size]);
+  if(p.st==='mine' && p.lease)   rows.push(['Let to', p.lease.tenant], ['Rent', n(p.lease.rent)+'c / '+p.lease.per]);
+  if(p.st==='mine' && !p.lease && !p.listed) rows.push(['Lease', 'vacant']);
+  if(p.st==='leasedin')          rows.push(['You pay', n(p.lease.rent)+'c / '+p.lease.per]);
+  if(cellState(p)==='sale')      rows.push(['Bid now', p.bidNow? n(p.bidNow)+'c' : 'no bids yet'], ['Auction', p.closes]);
+  if(p.st==='unclaimed')         rows.push(['Status', 'open to claim']);
+  tip.innerHTML = `<div class="tip-id">${p.id} · x ${n(p.x)} / z ${n(p.z)}</div>
+    <div class="tip-n">${displayName(p)}</div>
+    ${rows.map(([k,v])=>`<div class="tip-r"><span>${k}</span><b>${v}</b></div>`).join('')}`;
+  tip.style.display = 'block';
+  const w = tip.offsetWidth, h = tip.offsetHeight;
+  let x = e.clientX + 14, y = e.clientY + 14;
+  if(x + w > innerWidth - 8)  x = e.clientX - w - 14;
+  if(y + h > innerHeight - 8) y = e.clientY - h - 14;
+  tip.style.left = x+'px'; tip.style.top = y+'px';
+}
+function hideTip(){ tip.style.display='none'; }
+
+function legend(){
+  const items = [
+    ['mine','Yours'],['leasedin','Leased to you'],['sale','For sale'],
+    ['other','Owned'],['unclaimed','Unclaimed']
+  ];
+  return `<div class="legend">
+    ${items.map(([k,l])=>`<span><i class="swatch ${k==='unclaimed'?'dash':''}" style="--cf:${CLR[k].f};--cb:${CLR[k].b}"></i>${l}</span>`).join('')}
+    <span><i class="swatch let" style="--cf:${CLR.mine.f};--cb:${CLR.mine.b}"></i>Let out</span>
+    <span><i class="swatch" style="--cf:${CLR.mine.f};--cb:${CLR.mine.b};border-bottom:3px solid var(--red)"></i>Rent in arrears</span>
+  </div>`;
+}
+
+/* ================================================================
+   HOLDINGS — top-left, because this is the number he opens for.
+   ================================================================ */
+function holdings(){
+  const vacant = mine().filter(p=>!p.lease && !p.listed).length;
+  const listed = mine().filter(p=>p.listed).length;
+  const rows = mine().concat(leasedIn()).map(p=>{
+    const sub = p.st==='leasedin'
+      ? 'leased from ' + p.owner + (p.lot ? ' · you hold the high bid on lot #' + p.lot : '')
+      : (p.listed ? 'at auction · reserve ' + n(p.reserve) + 'c · ' + p.closes.replace('closes ','')
+      /* strip only a weekday prefix — \w+ ate the day number off "1 Sep 2026" */
+      : (p.lease ? 'let to ' + p.lease.tenant + ' · next ' + p.lease.next.replace(/^(Mon|Tue|Wed|Thu|Fri|Sat|Sun) /,'')
+                 : 'vacant · no tenant'));
+    const amt = p.st==='leasedin' ? '−'+n(p.lease.rent) : (p.lease? '+'+n(p.lease.rent) : '0');
+    const col = p.st==='leasedin' ? 'var(--red)' : (p.lease?'var(--green)':'var(--muted)');
+    /* a rent figure without its period is two different numbers wearing one
+       label — 2,400c per 4 weeks is not 2,400c per week */
+    const per = p.lease ? 'per ' + p.lease.per : 'no rent';
+    return `<button class="hrow" onclick="select('${p.id}')">
+      <span class="hsq" style="--c:${dotOf(p)}"></span>
+      <span style="min-width:0">
+        <span class="hn">${displayName(p)} <span class="muted" style="font-family:var(--font-data);font-size:10.5px">${p.id}</span></span>
+        <span class="hold-s">${sub}</span>
+      </span>
+      <span class="hamt" style="color:${col}">${amt}<span class="coin">c</span>
+        <span class="hold-s" style="text-align:right">${per}</span></span>
+    </button>`;
+  }).join('');
+
+  return `<div class="tile s5">
+    <div class="tile-h"><span>Your holdings</span><span class="pill">Riverside register</span></div>
+    <div class="kgrid">
+      <div class="kpi"><div class="k">Parcels owned</div>
+        <div class="kfig num">${mine().length}</div>
+        <div class="kt">${leasedOut().length} let · ${vacant} vacant${listed?' · '+listed+' at auction':''}</div></div>
+      <div class="kpi"><div class="k">Rent in · week</div>
+        <div class="kfig num up">+${n(rentIn())}<span class="coin">c</span></div>
+        <div class="kt">from ${leasedOut().length} tenants</div></div>
+      <div class="kpi"><div class="k">Rent out · week</div>
+        <div class="kfig num down">−${n(rentOut())}<span class="coin">c</span></div>
+        <div class="kt">${leasedIn().length} parcels leased in</div></div>
+      <div class="kpi"><div class="k">Arrears</div>
+        <div class="kfig num" style="color:${arrears()?'var(--red)':'var(--muted)'}">${n(arrears())}<span class="coin">c</span></div>
+        <div class="kt">${arrears()? '1 tenant · 1 period behind' : 'nothing overdue'}</div></div>
+    </div>
+    <div class="tile-h" style="margin:18px 0 4px">Parcels</div>
+    <div class="hold-list">${rows}</div>
+    <div class="foot">Land is an asset but not liquid coin, so it is excluded from the net
+      position in the strip above. Rent settles into <b>available</b> the moment it is collected.</div>
+  </div>`;
+}
+
+/* ================================================================
+   PARCEL DETAIL
+   ================================================================ */
+function statePill(p){
+  if(p.st==='mine' && p.listed) return '<span class="pill warn">Yours · at auction</span>';
+  if(p.st==='mine')      return p.lease ? '<span class="pill good">Yours · let</span>' : '<span class="pill good">Yours · vacant</span>';
+  if(p.st==='leasedin')  return '<span class="pill mine">Leased to you</span>';
+  if(p.st==='sale')      return '<span class="pill warn">At auction</span>';
+  if(p.st==='unclaimed') return '<span class="pill">Unclaimed</span>';
+  return '<span class="pill">Owned</span>';
+}
+function leaseBlock(p){
+  const l = p.lease;
+  if(p.st==='mine' && !l){
+    return `<div class="tile-h" style="margin:16px 0 6px">Lease</div>
+      <div class="empty" style="padding:6px 0">No tenant. This parcel earns nothing while it is vacant.</div>`;
+  }
+  if(!l) return '';
+  const w = Math.min(100, Math.round(l.paid*100/l.term));
+  const iAmTenant = p.st==='leasedin';
+  return `<div class="tile-h" style="margin:16px 0 6px">${iAmTenant?'Your lease':'Current lease'}</div>
+    <div class="leasebox">
+      <div class="kv"><span class="k">${iAmTenant?'Landlord':'Tenant'}</span>
+        <span class="v">${iAmTenant? p.owner : l.tenant}</span></div>
+      <div class="kv"><span class="k">Rent</span>
+        <span class="v num">${cn(l.rent)} <span class="muted" style="font-weight:400">/ ${l.per}</span></span></div>
+      <div class="kv"><span class="k">Next charge</span>
+        <span class="v">${l.next} <span class="muted" style="font-weight:400">${l.nextIn}</span></span></div>
+      <div class="kv"><span class="k">Periods paid</span>
+        <span class="v num">${l.paid} of ${l.term}</span></div>
+      <div class="kv"><span class="k">Deposit held</span>
+        <span class="v num">${cn(l.deposit)}</span></div>
+      ${l.arrears? `<div class="kv"><span class="k">Arrears</span>
+        <span class="v num" style="color:var(--red)">${cn(l.arrears)}</span></div>`:''}
+      <div class="bar" style="margin-top:12px"><i style="width:${w}%"></i></div>
+      <div class="between hold-s" style="margin-top:6px">
+        <span>started ${l.since}</span><span>${l.term-l.paid} period${l.term-l.paid===1?'':'s'} left on term</span>
+      </div>
+      <div class="st-key" style="margin-top:10px">next key · rent:${p.id}:${nextKeyFor(p)}</div>
+    </div>`;
+}
+function nextKeyFor(p){
+  const l = p.lease; if(!l) return '';
+  return l.per==='week' ? '2026-W34' : '2026-M09';
+}
+function actions(p){
+  if(p.st==='mine' && p.listed){
+    return `<div class="pd-actions">
+      <span class="hold-s">Listed at reserve <span class="num">${n(p.reserve)}</span>c — the lot runs on the
+      auctions surface, and your <span class="num">${n(bondOn(p.reserve))}</span>c bond is held until it settles.
+      Leases cannot start while a lot is live.</span>
+    </div>`;
+  }
+  if(p.st==='mine'){
+    const listBlocked = !!p.lease;
+    return `<div class="pd-actions">
+      <button class="btn" ${listBlocked?'disabled':''} onclick="openFlow('list','${p.id}')">${IC.gavel} List for auction</button>
+      ${p.lease
+        ? `<button class="btn danger" onclick="openFlow('end','${p.id}')">${IC.stop} End lease</button>`
+        : `<button class="btn ghost" onclick="openFlow('lease','${p.id}')">${IC.key} Start lease</button>`}
+      ${listBlocked?'<span class="hold-s" style="align-self:center">Listing is blocked while a tenant is in place — end the lease first.</span>':''}
+    </div>`;
+  }
+  if(p.st==='leasedin'){
+    return `<div class="pd-actions">
+      <button class="btn danger" onclick="openFlow('end','${p.id}')">${IC.stop} End lease</button>
+      <span class="hold-s" style="align-self:center">${p.owner} owns this parcel — you can only end your side of the lease.</span>
+    </div>`;
+  }
+  if(p.st==='sale'){
+    const h = holdOn(p.id), closed = p.closes.startsWith('closed');
+    return `<div class="pd-actions">
+      ${closed?'':`<button class="btn ghost" onclick="goTab('lands')">${IC.gavel} Bid in Auctions</button>`}
+      <span class="hold-s" style="align-self:center">${closed
+        ? 'This lot has closed. Settlement runs on the auctions surface, against the same wallet.'
+        : 'Bidding happens on the auctions surface, against the same wallet.'}</span>
+      ${h?`<div class="notebox" style="flex:1 0 100%">${closed
+        ? `You won this lot at <b class="num">${n(h.amount)}c</b> and the hold is still live. At settlement it is
+           <b>captured</b>: that figure is the price of the parcel, so those coins are spent, not returned.`
+        : `Your <b class="num">${n(h.amount)}c</b> is held against this lot right now. It is the <b>price of the parcel</b>,
+           not a fee and not a deposit — if you are still the high bidder at close the hold is <b>captured</b> and the coins
+           are spent. It comes back to available in full only if someone outbids you.`}</div>`:''}
+    </div>`;
+  }
+  return '';
+}
+function detail(){
+  const p = P[sel];
+  const blocks = p.size.split('×').reduce((a,b)=>a*(+b),1);
+  return `<div class="tile s7" id="pdetail">
+    <div class="between wrapf" style="align-items:flex-start;margin-bottom:12px">
+      <div>
+        <div class="eyebrow">Parcel ${p.id}</div>
+        <div class="parcel-title">${displayName(p)}</div>
+        <div class="coordline">x ${n(p.x)} → ${n(p.x+PARCEL_BLOCKS)} · z ${n(p.z)} → ${n(p.z+PARCEL_BLOCKS)}</div>
+      </div>
+      <div class="row wrapf" style="gap:8px">${statePill(p)}</div>
+    </div>
+    <div class="pdetail">
+      <div>
+        <div class="kv"><span class="k">Owner</span><span class="v">${ownerOf(p)}</span></div>
+        <div class="kv"><span class="k">Size</span><span class="v num">${p.size} <span class="muted" style="font-weight:400">${n(blocks)} blocks</span></span></div>
+      </div>
+      <div>
+        <div class="kv"><span class="k">Register</span><span class="v">Riverside · column ${p.col}, row ${p.row}</span></div>
+        <div class="kv"><span class="k">${p.st==='mine'?'Claimed':'Recorded'}</span>
+          <span class="v">${p.claimed || (p.st==='unclaimed'?'never claimed':'before the register opened')}</span></div>
+      </div>
+    </div>
+    ${cellState(p)==='sale'? (()=>{ const h = holdOn(p.id); return `
+      <div class="tile-h" style="margin:16px 0 6px">Auction${p.lot?' · lot #'+p.lot:''}</div>
+      <div class="leasebox">
+        <div class="kv"><span class="k">Reserve</span><span class="v num">${cn(p.reserve)}</span></div>
+        <div class="kv"><span class="k">Bid now</span><span class="v ${p.bidNow?'num':'muted'}">${p.bidNow?cn(p.bidNow):'no bids yet'}</span></div>
+        ${h?`<div class="kv"><span class="k">Your bid, held now</span>
+          <span class="v num" style="color:var(--money-held)">${cn(h.amount)}</span></div>`:''}
+        <div class="kv"><span class="k">${p.closes.startsWith('closed')?'Closed':'Closes'}</span><span class="v">${p.closes.replace('closes ','')}</span></div>
+      </div>`;})():''}
+    ${leaseBlock(p)}
+    ${p.note?`<div class="notebox blue">${p.note}${holdOn(p.id)&&cellState(p)!=='sale'
+      ? ` Your <b class="num">${n(holdOn(p.id).amount)}c</b> bid on lot #${p.lot} is held now — captured as the purchase price if you win it, returned to available in full if you are outbid.`
+      : ''}</div>`:''}
+    ${p.st==='unclaimed'? '<div class="empty">Nothing is recorded against this parcel.</div>':''}
+    ${actions(p)}
+  </div>`;
+}
+
+/* ================================================================
+   RENT LEDGER
+   ================================================================ */
+const ST = {
+  paid:      ['pill good','Paid'],
+  scheduled: ['pill','Scheduled'],
+  failed:    ['pill crit','Failed'],
+  suppressed:['pill warn','Duplicate suppressed'],
+  ended:     ['pill','Lease ended']
+};
+function ledgerRows(){
+  const p = P[sel];
+  const rows = scope==='parcel' ? S.ledger.filter(r=>r.pid===sel) : S.ledger;
+  return rows;
+}
+function ledger(){
+  const p = P[sel];
+  const rows = ledgerRows();
+  const table = rows.length ? `
+    <div class="tablewrap"><table>
+      <thead><tr>
+        <th>Period</th><th>Parcel</th><th>Tenant</th>
+        <th>Amount</th><th>Status</th><th class="hide-sm">Idempotency key</th>
+      </tr></thead>
+      <tbody>
+      ${rows.map(r=>{
+        const [cls,lab] = ST[r.st];
+        return `<tr>
+          <td><span class="num" style="font-size:12px">${r.per}</span>
+              ${r.when?`<div class="tname">${r.st==='scheduled'?'charges':'charged'} ${r.when}</div>`:'<div class="tname">not yet charged</div>'}
+              ${r.note?`<div class="hold-s" style="max-width:340px;white-space:normal;margin-top:3px">${r.note}</div>`:''}</td>
+          <td class="num" style="font-size:11.5px">${r.pid}<div class="tname">${displayName(P[r.pid])}</div></td>
+          <td class="right">${r.tenant}</td>
+          <td class="num" style="color:${r.st==='suppressed'?'var(--muted)':(r.st==='failed'?'var(--red)':'var(--text)')}">
+            ${r.st==='suppressed'? '0<span class="coin">c</span>' : cn(r.amt)}</td>
+          <td><span class="${cls}">${lab}</span></td>
+          <td class="hide-sm st-key">${r.key}</td>
+        </tr>`;
+      }).join('')}
+      </tbody>
+    </table></div>`
+    : `<div class="empty">No rent has ever been charged on ${p.id}.</div>`;
+
+  return `<div class="between wrapf" style="margin-bottom:12px">
+      <span class="hold-s">${scope==='parcel'? p.id+' · '+displayName(p) : 'All holdings · 4 leases'}</span>
+      <span class="scope">
+        <button class="chip" aria-pressed="${scope==='parcel'}" onclick="setScope('parcel')">This parcel</button>
+        <button class="chip" aria-pressed="${scope==='all'}" onclick="setScope('all')">All holdings</button>
+      </span>
+    </div>
+    ${table}
+    <div class="foot">Every charge is written under its own key — <b class="st-key">rent:PARCEL:PERIOD</b>.
+      The collector can be retried as many times as it likes: a key that already exists returns
+      the original charge instead of writing a second one, which is why the retry above moved
+      <span class="num">0</span>c. A failed charge keeps its key and retries into the same slot.</div>`;
+}
+
+/* ================================================================
+   PAGE
+   ================================================================ */
+function Lands(){
+  const p = P[sel];
+  return `
+  <div class="page-head">
+    <div><h1>Lands</h1>
+      <div class="page-sub">Riverside register · ${COLS.length}×${ROWS} parcels · ${CFG.TODAY}</div></div>
+    <div class="row wrapf" style="margin-left:auto">
+      <span class="pill">${all().filter(x=>x.st==='unclaimed').length} unclaimed</span>
+      <span class="pill warn">${all().filter(x=>cellState(x)==='sale').length} at auction</span>
+    </div>
+  </div>
+
+  <div class="bento">
+    ${holdings()}
+    <div class="tile s7">
+      <div class="tile-h"><span>Parcel map</span>
+        <span class="hold-s">hover a parcel · click to open it</span></div>
+      <div class="mapwrap"><div class="map">${mapGrid()}</div></div>
+      ${legend()}
+    </div>
+  </div>
+
+  <div class="section-h">Parcel</div>
+  <div class="bento">
+    ${detail()}
+    <div class="tile s5">
+      <div class="tile-h"><span>Neighbours</span><span class="hold-s">column ${p.col}</span></div>
+      ${[p.row-1,p.row+1].filter(r=>r>=1&&r<=ROWS).map(r=>{
+        const q = P['RV-'+p.col+r];
+        return `<button class="hrow" onclick="select('${q.id}')">
+          <span class="hsq" style="--c:${dotOf(q)}"></span>
+          <span style="min-width:0"><span class="hn">${displayName(q)} <span class="muted" style="font-family:var(--font-data);font-size:10.5px">${q.id}</span></span>
+          <span class="hold-s">${ownerOf(q)} · ${q.size}</span></span>
+          <span class="hold-go">${IC.arrow}</span>
+        </button>`;
+      }).join('')}
+      <div class="tile-h" style="margin:18px 0 6px">Same owner elsewhere</div>
+      ${(() => {
+        const owner = p.st==='mine' ? ME : p.owner;
+        const others = all().filter(q=>q.id!==p.id && (p.st==='mine' ? q.st==='mine' : q.owner===owner));
+        if(!owner || !others.length) return '<div class="empty" style="padding:6px 0">Nothing else on this block.</div>';
+        return others.slice(0,4).map(q=>`<button class="hrow" onclick="select('${q.id}')">
+          <span class="hsq" style="--c:${dotOf(q)}"></span>
+          <span style="min-width:0"><span class="hn">${displayName(q)} <span class="muted" style="font-family:var(--font-data);font-size:10.5px">${q.id}</span></span>
+          <span class="hold-s">${q.size}${q.lease?' · let to '+q.lease.tenant:''}</span></span>
+          <span class="hold-go">${IC.arrow}</span>
+        </button>`).join('') + (others.length>4?`<div class="foot">and ${others.length-4} more on this block</div>`:'');
+      })()}
+    </div>
+  </div>
+
+  <div class="section-h">Rent ledger</div>
+  ${ledger()}`;
+}
+
+/* ================================================================
+   ACTION FLOWS — form → preview (real figures) → confirm → receipt.
+   Preview is always the default. Nothing moves until Confirm.
+   ================================================================ */
+let F = null;
+
+function openFlow(kind, pid){
+  const p = P[pid];
+  F = {kind, p, step:1, amount:'', tenant:'', q:'', term: kind==='lease'?12:0, per:'week', dur:'3d'};
+  if(kind==='list'){ F.amount = String(Math.max(1000, Math.round((p.st==='mine'?12000:8000)/100)*100)); }
+  mTitle.textContent = ({list:'List for auction', lease:'Start a lease', end:'End the lease'})[kind];
+  mSub.textContent = p.id + ' · ' + displayName(p);
+  scrim.classList.add('on');
+  renderFlow();
+}
+function closeModal(){ scrim.classList.remove('on'); F=null; }
+scrim.addEventListener('click', e=>{ if(e.target===scrim) closeModal(); });
+addEventListener('keydown', e=>{ if(e.key==='Escape' && F) closeModal(); });
+
+function amtInt(){ return parseInt(F.amount||'0',10) || 0; }
+function setAmt(v){ F.amount=String(v); const el=document.getElementById('amt'); if(el) el.value=n(v); validate(); }
+function onAmt(el){
+  const raw = el.value.replace(/[^\d]/g,'');
+  F.amount = raw; el.value = raw ? n(parseInt(raw,10)) : '';
+  validate();
+}
+function setTerm(t){ F.term=t; renderFlow(); }
+function setPer(p){ F.per=p; renderFlow(); }
+function setDur(d){ F.dur=d; renderFlow(); }
+
+function validate(){
+  const e = document.getElementById('err'), b = document.getElementById('next');
+  if(!e || !b) return;
+  const v = amtInt();
+  let msg='';
+  if(F.kind==='list'){
+    const bond = bondOn(v);
+    if(v>0 && v<500) msg = 'Reserve must be at least 500c.';
+    else if(bond > S.wallet.available) msg = `Listing bond is ${n(bond)}c and you have ${n(S.wallet.available)}c available. Holds are not spendable.`;
+    b.disabled = !(v>=500 && bondOn(v)<=S.wallet.available);
+  } else if(F.kind==='lease'){
+    if(v>0 && v<CFG.MIN_RENT) msg = `Minimum rent is ${n(CFG.MIN_RENT)}c per ${F.per}.`;
+    else if(v>=CFG.MIN_RENT && !F.tenant) msg = 'Choose the tenant from the register — a lease is written against a player, not a typed name.';
+    b.disabled = !(v>=CFG.MIN_RENT && !!F.tenant);
+  }
+  e.textContent = msg;
+}
+function dotState(){
+  dots.innerHTML = [1,2,3].map(i=>`<i class="sd ${F.step>i?'done':(F.step===i?'on':'')}"></i>`).join('');
+}
+function renderFlow(){
+  dotState();
+  if(F.step===3) return stepDone();
+  if(F.kind==='list')  return F.step===1 ? listForm()  : listPreview();
+  if(F.kind==='lease') return F.step===1 ? leaseForm() : leasePreview();
+  return endPreview();   // end-lease has no form: there is nothing to type
+}
+
+/* ---------- list for auction ---------- */
+const DURS = {'24h':'24 hours','3d':'3 days','7d':'7 days'};
+function listForm(){
+  mBody.innerHTML = `
+    <div class="between" style="margin-bottom:12px">
+      <span class="tile-h" style="margin:0">Reserve price</span>
+      <span class="hold-s">available ${n(S.wallet.available)}c</span>
+    </div>
+    <div class="amount-wrap"><span class="cn">c</span>
+      <input id="amt" class="amount num" inputmode="numeric" placeholder="0"
+             value="${F.amount?n(amtInt()):''}" oninput="onAmt(this)" autocomplete="off"></div>
+    <div class="chips">
+      ${[5000,12000,20000,28000].map(v=>`<button class="chip" onclick="setAmt(${v})">${n(v)}c</button>`).join('')}
+    </div>
+    <div class="tile-h" style="margin:4px 0 8px">Run for</div>
+    <div class="chips">
+      ${Object.keys(DURS).map(d=>`<button class="chip" aria-pressed="${F.dur===d}" onclick="setDur('${d}')">${DURS[d]}</button>`).join('')}
+    </div>
+    <div class="err" id="err"></div>
+    <div class="kv"><span class="k">Listing bond (${pct(CFG.LIST_BOND_BPS)} of reserve, min ${n(CFG.LIST_BOND_MIN)}c)</span>
+      <span class="v num">${cn(bondOn(amtInt()))}</span></div>
+    <div class="kv"><span class="k">Sale fee if it sells (${pct(CFG.SETTLE_FEE_BPS)} of hammer)</span>
+      <span class="v muted">taken at settlement</span></div>`;
+  mFoot.innerHTML = `<button class="btn ghost" onclick="closeModal()">Cancel</button>
+    <button class="btn" id="next" onclick="F.step=2;renderFlow()">Preview listing ${IC.arrow}</button>`;
+  validate();
+  setTimeout(()=>{const a=document.getElementById('amt'); if(a) a.focus();},30);
+}
+function listPreview(){
+  const reserve = amtInt(), bond = bondOn(reserve);
+  const feeAtReserve = Math.floor(reserve*CFG.SETTLE_FEE_BPS/10000);
+  mBody.innerHTML = `
+    <div class="tile-h" style="margin-bottom:8px">Preview — nothing has moved yet</div>
+    <div class="kv"><span class="k">Parcel</span><span class="v">${F.p.id} · ${displayName(F.p)}</span></div>
+    <div class="kv"><span class="k">Reserve</span><span class="v num">${cn(reserve)}</span></div>
+    <div class="kv"><span class="k">Runs for</span><span class="v">${DURS[F.dur]}</span></div>
+    <div class="kv"><span class="k">Listing bond, escrowed now</span><span class="v num" style="color:var(--money-held)">${cn(bond)}</span></div>
+    <div class="kv total"><span class="k">If it sells at reserve<br><span class="hold-s">hammer minus ${pct(CFG.SETTLE_FEE_BPS)} fee, bond returned</span></span>
+      <span class="v num" style="color:var(--green)">${cn(reserve - feeAtReserve)}
+        <div class="hold-s right" style="font-weight:400">fee −${n(feeAtReserve)}c</div></span></div>
+
+    <div style="margin-top:16px;padding:12px;border:1px solid var(--border);background:var(--panel2)">
+      <div class="kv" style="border:none;padding:4px 0"><span class="k">Available after</span>
+        <span class="v num">${n(S.wallet.available)}c → <b>${n(S.wallet.available-bond)}c</b></span></div>
+      <div class="kv" style="border:none;padding:4px 0"><span class="k">Held after</span>
+        <span class="v num" style="color:var(--money-held)">${n(held())}c → <b>${n(held()+bond)}c</b></span></div>
+    </div>
+    <div class="notebox">The bond is a <b>hold, not a payment</b>. It comes back in full when the lot
+      settles or when it fails to reach reserve. It is forfeited only if you cancel a lot that already
+      has bids on it — that is the thing it exists to price.</div>`;
+  mFoot.innerHTML = `<button class="btn ghost" onclick="F.step=1;renderFlow()">${IC.back} Change reserve</button>
+    <button class="btn" onclick="commit()">Confirm listing</button>`;
+}
+
+/* ---------- start a lease ---------- */
+function pickRows(){
+  const q = (F.q||'').trim().toLowerCase();
+  const list = tenantNames().filter(x=>x.toLowerCase().includes(q));
+  if(!list.length) return `<div class="empty" style="padding:10px 11px">No name on this register matches that.
+    A lease can only be written against a player the register already knows.</div>`;
+  return list.map(x=>`<button class="pickrow" role="option" aria-selected="${F.tenant===x}"
+      onclick="pickTenant('${x.replace(/'/g,"\\'")}')">
+      <span>${x}<span class="pm">${tenantSub(x)}</span></span>${F.tenant===x?IC.check:''}</button>`).join('');
+}
+function onTenantSearch(el){
+  F.q = el.value;
+  const l = document.getElementById('picklist');
+  if(l) l.innerHTML = pickRows();
+}
+function pickTenant(name){
+  F.tenant = name; F.q = ''; renderFlow();
+  const row = document.querySelector('.pickrow[aria-selected="true"]');
+  if(row) row.scrollIntoView({block:'nearest'});
+}
+function leaseForm(){
+  mBody.innerHTML = `
+    <div class="between" style="margin:0 0 8px">
+      <span class="tile-h" style="margin:0">Tenant</span>
+      <span class="hold-s">${F.tenant ? 'selected · ' + F.tenant : 'choose from the register'}</span>
+    </div>
+    <input class="text-in" id="tq" role="combobox" aria-controls="picklist" aria-expanded="true"
+           placeholder="Search names on the register" value="${F.q||''}" oninput="onTenantSearch(this)" autocomplete="off">
+    <div class="picklist" id="picklist" role="listbox" aria-label="Names on the Riverside register">${pickRows()}</div>
+    <div class="tile-h" style="margin:16px 0 8px">Rent per period</div>
+    <div class="amount-wrap"><span class="cn">c</span>
+      <input id="amt" class="amount num" inputmode="numeric" placeholder="0"
+             value="${F.amount?n(amtInt()):''}" oninput="onAmt(this)" autocomplete="off"></div>
+    <div class="chips">
+      ${[600,900,1200,2400].map(v=>`<button class="chip" onclick="setAmt(${v})">${n(v)}c</button>`).join('')}
+    </div>
+    <div class="chips">
+      ${['week','4 weeks'].map(p=>`<button class="chip" aria-pressed="${F.per===p}" onclick="setPer('${p}')">per ${p}</button>`).join('')}
+    </div>
+    <div class="tile-h" style="margin:4px 0 8px">Term</div>
+    <div class="chips">
+      ${[4,8,12,24].map(t=>`<button class="chip" aria-pressed="${F.term===t}" onclick="setTerm(${t})">${t} periods</button>`).join('')}
+    </div>
+    <div class="err" id="err"></div>`;
+  mFoot.innerHTML = `<button class="btn ghost" onclick="closeModal()">Cancel</button>
+    <button class="btn" id="next" onclick="F.step=2;renderFlow()">Preview lease ${IC.arrow}</button>`;
+  validate();
+}
+function leasePreview(){
+  const rent = amtInt(), dep = rent*CFG.DEPOSIT_PERIODS, total = rent*F.term;
+  const key = 'rent:'+F.p.id+':'+(F.per==='week'?'2026-W34':'2026-M09');
+  mBody.innerHTML = `
+    <div class="tile-h" style="margin-bottom:8px">Preview — nothing has moved yet</div>
+    <div class="kv"><span class="k">Parcel</span><span class="v">${F.p.id} · ${displayName(F.p)}</span></div>
+    <div class="kv"><span class="k">Tenant</span><span class="v">${F.tenant.trim()}</span></div>
+    <div class="kv"><span class="k">Rent</span><span class="v num">${cn(rent)} <span class="muted" style="font-weight:400">/ ${F.per}</span></span></div>
+    <div class="kv"><span class="k">Term</span><span class="v num">${F.term} periods <span class="muted" style="font-weight:400">ends ${F.per==='week'?'2 Nov 2026':'26 Jul 2027'}</span></span></div>
+    <div class="kv"><span class="k">Deposit taken from tenant</span><span class="v num">${cn(dep)}</span></div>
+    <div class="kv"><span class="k">First charge</span><span class="v">Mon 17 Aug 2026 <span class="muted" style="font-weight:400">in 4 days</span></span></div>
+    <div class="kv"><span class="k">First charge key</span><span class="v st-key" style="font-weight:400">${key}</span></div>
+    <div class="kv total"><span class="k">Rent over the full term<br><span class="hold-s">if no period is missed</span></span>
+      <span class="v num" style="color:var(--green)">${cn(total)}</span></div>
+    <div class="notebox blue">This does not move your coins. It creates a standing charge against
+      <b>${F.tenant.trim()||'the tenant'}</b> that runs every ${F.per} from 17 Aug, and it holds their
+      ${n(dep)}c deposit in escrow — theirs until you claim against it, not yours to spend.</div>`;
+  mFoot.innerHTML = `<button class="btn ghost" onclick="F.step=1;renderFlow()">${IC.back} Change terms</button>
+    <button class="btn" onclick="commit()">Confirm lease</button>`;
+}
+
+/* ---------- end a lease ---------- */
+function endPreview(){
+  const p = F.p, l = p.lease, iAmTenant = p.st==='leasedin';
+  const left = l.term - l.paid;
+  const prorata = Math.floor(l.rent*4/7);    // 4 of 7 days into the current period
+  mBody.innerHTML = `
+    <div class="tile-h" style="margin-bottom:8px">Preview — nothing has moved yet</div>
+    <div class="kv"><span class="k">Parcel</span><span class="v">${p.id} · ${displayName(p)}</span></div>
+    <div class="kv"><span class="k">${iAmTenant?'Landlord':'Tenant'}</span><span class="v">${iAmTenant?p.owner:l.tenant}</span></div>
+    <div class="kv"><span class="k">Notice</span><span class="v">${CFG.NOTICE_DAYS} days · ends Thu 20 Aug 2026</span></div>
+    <div class="kv"><span class="k">Periods paid</span><span class="v num">${l.paid} of ${l.term}</span></div>
+    <div class="kv"><span class="k">Final pro-rata rent<br><span class="hold-s">4 of 7 days of wk 34</span></span>
+      <span class="v num" style="color:${iAmTenant?'var(--red)':'var(--green)'}">${iAmTenant?'−':'+'}${n(prorata)}<span class="coin">c</span></span></div>
+    <div class="kv"><span class="k">Deposit ${iAmTenant?'returned to you':'returned to tenant'}</span>
+      <span class="v num">${cn(l.deposit)}</span></div>
+    ${l.arrears? `<div class="kv"><span class="k">Arrears still owed</span>
+      <span class="v num" style="color:var(--red)">${cn(l.arrears)}</span></div>`:''}
+    <div class="kv oppcost"><span class="k">Rent you give up<br><span class="hold-s">${left} unrun period${left===1?'':'s'} of the term
+      · not part of this settlement, and never charged</span></span>
+      <span class="v num" style="color:var(--red)">−${n(l.rent*left)}<span class="coin">c</span>
+        <div class="hold-s right" style="font-weight:400">${left} × ${n(l.rent)}c per ${l.per}</div></span></div>
+    ${l.arrears? `<div class="notebox red">${l.tenant} is <b>${n(l.arrears)}c</b> behind. Ending the lease now
+      settles the arrears against the ${n(l.deposit)}c deposit first; only the remainder goes back to them.
+      Once the lease is closed you cannot charge the missed period again — its key is spent.</div>`
+    : `<div class="notebox">Ending a lease cancels every future charge on this parcel. The keys for
+      unrun periods are never written, so nothing can collect them later. This cannot be undone —
+      a new lease starts a new term at period 1.</div>`}`;
+  mFoot.innerHTML = `<button class="btn ghost" onclick="closeModal()">Keep the lease</button>
+    <button class="btn danger" onclick="commit()">End lease on Thu 20 Aug</button>`;
+}
+
+/* ---------- commit + receipt ---------- */
+function commit(){
+  const p = F.p;
+  if(F.kind==='list'){
+    const reserve = amtInt(), bond = bondOn(reserve);
+    S.wallet.available -= bond;
+    S.holds.push({id:'h_'+p.id, amount:bond, color:'var(--nether)', pid:p.id,
+      title:'Listing bond — '+p.id+' '+displayName(p),
+      sub:'reserve '+n(reserve)+'c · runs '+DURS[F.dur]+' · released at settle or no-sale'});
+    F.receipt = {ref:'estates:parcel:'+p.id+':list', bond, reserve};
+    p.listed = true; p.reserve = reserve; p.bidNow = 0; p.closes = 'closes in '+DURS[F.dur];
+  }
+  if(F.kind==='lease'){
+    const rent = amtInt();
+    p.lease = {tenant:F.tenant.trim(), rent, per:F.per, paid:0, term:F.term,
+               next:'Mon 17 Aug 2026', nextIn:'in 4 days', since:CFG.TODAY.replace('Thu ',''),
+               deposit:rent*CFG.DEPOSIT_PERIODS, arrears:0};
+    const key = 'rent:'+p.id+':'+(F.per==='week'?'2026-W34':'2026-M09');
+    S.ledger.unshift({per:F.per==='week'?'wk 34 · 17–23 Aug':'Sep · 1–28 Sep', pid:p.id,
+      tenant:p.lease.tenant, amt:rent, st:'scheduled', key});
+    F.receipt = {ref:'estates:parcel:'+p.id+':lease', key, rent, dep:rent*CFG.DEPOSIT_PERIODS};
+  }
+  if(F.kind==='end'){
+    const l = p.lease, iAmTenant = p.st==='leasedin';
+    S.ledger.unshift({per:'wk 34 · 17–23 Aug', pid:p.id, tenant:iAmTenant?ME:l.tenant,
+      amt:Math.floor(l.rent*4/7), st:'ended', when:'Thu 20 Aug 2026',
+      key:'rent:'+p.id+':2026-W34-final', note:'final pro-rata charge · lease closed, no further keys are written'});
+    S.ledger = S.ledger.filter(r=>!(r.pid===p.id && r.st==='scheduled'));
+    F.receipt = {ref:'estates:parcel:'+p.id+':lease:end', dep:l.deposit, tenant:iAmTenant?p.owner:l.tenant};
+    if(iAmTenant){ p.st='other'; }
+    p.lease = null;
+  }
+  F.step = 3;
+  renderFlow();
+  renderStrip(F.kind==='list' ? 'h_'+p.id : null);
+  if(F.kind==='list'){ stripWrap.classList.add('open'); heldSeg.setAttribute('aria-expanded', true); }
+  render();
+}
+function stepDone(){
+  const p = F.p, r = F.receipt;
+  mTitle.textContent = ({list:'Lot listed', lease:'Lease started', end:'Lease ended'})[F.kind];
+  mSub.textContent = p.id + ' · ' + displayName(p);
+  let body = '';
+  if(F.kind==='list'){
+    body = `<div style="text-align:center;margin-bottom:16px">
+        <div class="num big">${cn(r.bond)}</div>
+        <div class="sec" style="font-size:12px">held as a listing bond</div></div>
+      <div class="kv"><span class="k">Reserve</span><span class="v num">${cn(r.reserve)}</span></div>
+      <div class="kv"><span class="k">Reference</span><span class="v ref">${r.ref}</span></div>
+      <div class="kv"><span class="k">Available now</span><span class="v num">${cn(S.wallet.available)}</span></div>
+      <div class="kv"><span class="k">Held now</span><span class="v num" style="color:var(--money-held)">${cn(held())}</span></div>
+      <div class="okbox">The lot is live on the auctions surface. Your bond is <b>reserved, not spent</b>
+        — it returns in full at settlement, whether or not the lot sells.</div>`;
+  } else if(F.kind==='lease'){
+    body = `<div style="text-align:center;margin-bottom:16px">
+        <div class="num big">${cn(r.rent)}</div>
+        <div class="sec" style="font-size:12px">per ${F.per}, from Mon 17 Aug 2026</div></div>
+      <div class="kv"><span class="k">Tenant</span><span class="v">${p.lease.tenant}</span></div>
+      <div class="kv"><span class="k">Deposit in escrow</span><span class="v num">${cn(r.dep)}</span></div>
+      <div class="kv"><span class="k">First charge key</span><span class="v st-key" style="font-weight:400">${r.key}</span></div>
+      <div class="kv"><span class="k">Reference</span><span class="v ref">${r.ref}</span></div>
+      <div class="okbox">The first charge is queued, not taken. It runs on 17 Aug under the key above —
+        if the collector has to retry, that key stops it charging twice.</div>`;
+  } else {
+    body = `<div style="text-align:center;margin-bottom:16px">
+        <div class="num big">${cn(r.dep)}</div>
+        <div class="sec" style="font-size:12px">deposit released</div></div>
+      <div class="kv"><span class="k">Counterparty</span><span class="v">${r.tenant}</span></div>
+      <div class="kv"><span class="k">Lease ends</span><span class="v">Thu 20 Aug 2026</span></div>
+      <div class="kv"><span class="k">Reference</span><span class="v ref">${r.ref}</span></div>
+      <div class="okbox">All scheduled charges on ${p.id} were removed. The final pro-rata line is in
+        the rent ledger; no key exists for any later period, so nothing can collect one.</div>`;
+  }
+  mBody.innerHTML = `<div class="big-ok">${IC.check}</div>` + body;
+  mFoot.innerHTML = `<button class="btn ghost" onclick="closeModal();select('${p.id}')">View parcel</button>
+    <button class="btn" onclick="closeModal()">Done</button>`;
+}
+
+/* boot */
+renderStrip();
+goTab('lands');
+</script>
+</body>
+</html>
