@@ -235,7 +235,8 @@ class LoopsCog(commands.Cog):
                     except Exception:
                         pass
 
-                await channel.send(content, allowed_mentions=discord.AllowedMentions(roles=True))
+                await channel.send(content, allowed_mentions=discord.AllowedMentions(
+                    everyone=False, roles=True, users=False))
 
                 import asyncio as _aio_wa
                 worker_role = discord.utils.get(channel.guild.roles, name=EMPLOYEE_ROLE_NAME)
@@ -944,6 +945,79 @@ class LoopsCog(commands.Cog):
     async def _wait_ready_bank_report(self):
         await bot.wait_until_ready()
 
+    # ── Standing split rules: finish anything that was interrupted ───────────
+    @tasks.loop(minutes=5)
+    async def split_resume_loop(self):
+        """Resume split runs that were interrupted, and name the ones nobody can.
+
+        Four candidate states and all four are real: a run parked in `unknown`
+        because its commit outcome was ambiguous; a run left `claimed` because its
+        money transaction rolled back; a `pending_funds` run on a `defer` account
+        waiting for a top-up; and a `pending` run minted by a process that died
+        before it could claim. In every one of them the plan is already pinned, so
+        the retry pays the same people the same integers.
+
+        NOT deadline-gated and not gated on anything else either (DECISIONS.md,
+        'Land resume sweep — un-gate it'). A run with a pinned plan is unfinished
+        work regardless of when it was created, and the whole reason it exists is
+        that something already went wrong.
+
+        Off the event loop: `resume_pending` opens real write transactions and a
+        money transaction blocking heartbeats is how the instance heartbeat loop
+        started reporting phantom second instances.
+        """
+        try:
+            import split_rules
+        except Exception:
+            return                                  # not deployed — nothing to do
+        try:
+            out = await asyncio.to_thread(split_rules.resume_pending, 25)
+        except Exception as e:
+            log.warning("[split] resume sweep failed: %s", e)
+            return
+        if any(out.get(k) for k in ("applied", "refused", "still_unknown", "errors")):
+            log.info("[split] resume sweep: %s", out)
+        try:
+            stuck = await asyncio.to_thread(split_rules.stuck_runs, 900.0)
+        except Exception:
+            stuck = []
+        if stuck:
+            # A run this sweep could not resolve is coins that are provably in the
+            # right account and provably not distributed. Silent is the one thing
+            # it must not be.
+            log.error("[split] %d run(s) need a human: %s", len(stuck),
+                      ", ".join(f"{r['run_id'][:14]}… {r['state']} "
+                                f"{r['source_account']} {r['amount_in']}"
+                                for r in stuck[:5]))
+        try:
+            unrouted = await asyncio.to_thread(split_rules.unrouted_runs)
+        except Exception:
+            unrouted = []
+        if unrouted:
+            # ERROR, at the same rate as `stuck`, and DELIBERATELY not the
+            # treatment `parked_runs` gets. The distinction is whether anything
+            # will ever retry it on its own:
+            #   parked  — `pending_funds` on a `defer` account. Not broken; the
+            #             sweep above picks it up the moment it is topped up, so
+            #             shouting every five minutes is noise. `/splits runs`.
+            #   stuck   — the sweep cannot resolve it. A human must.
+            #   unrouted— an income event whose only run REFUSED. Nothing will
+            #             re-plan it, because a re-plan needs a re-offer and
+            #             `land_commission` offers a settled lot exactly ONCE
+            #             (see `unrouted_runs` / the module docstring). It was
+            #             visible only in `/splits runs`, i.e. only if somebody
+            #             happened to look. That is the state that has to shout.
+            log.error("[split] %d commission(s) UNROUTED — nothing will re-plan "
+                      "these on its own; fix the rules and re-offer: %s",
+                      len(unrouted),
+                      ", ".join(f"{r['run_id'][:14]}… {r['source_account']} "
+                                f"{r['amount_in']} ({r.get('reason') or 'refused'})"
+                                for r in unrouted[:5]))
+
+    @split_resume_loop.before_loop
+    async def _wait_ready_split_resume(self):
+        await bot.wait_until_ready()
+
     @tasks.loop(hours=6)
     async def month_close_report_loop(self):
         """Month-end closing post: once per market per month, after a month ends, post the
@@ -1002,34 +1076,6 @@ class LoopsCog(commands.Cog):
     async def _wait_ready_month_close(self):
         await bot.wait_until_ready()
 
-    @tasks.loop(hours=6)
-    async def csn_silence_watch_loop(self):
-        """Call out markets that used to file CSN reports and have stopped.
-
-        Every other CSN alert needs a file to arrive and be refused first, so a shop
-        whose webhook post silently fails produces no signal at all — Amazonia went six
-        weeks that way. Ticks every 6h but alerts at most once per UTC day, stamped in
-        bot_config so restarts and a second instance can't turn this into a spam loop.
-        """
-        try:
-            import Restocker_db as _db
-            today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-            flag = f"csn_silence_alerted:{today}"
-            if str(_db.get_config(flag) or "") == "done":
-                return
-            quiet = await core.check_csn_silence()
-            # Stamped whether or not anything was quiet: a clean day still counts as
-            # checked, and re-running it 6h later would only re-post the same list.
-            _db.set_config(flag, "done")
-            if quiet:
-                core.log.warning("[csn silence] alerted on %d quiet market(s)", len(quiet))
-        except Exception as e:
-            core.log.warning("[csn silence] loop failed: %s", e)
-
-    @csn_silence_watch_loop.before_loop
-    async def _wait_ready_csn_silence(self):
-        await bot.wait_until_ready()
-
     def _all_loops(self):
         return (self.worker_announce_loop, self.claimed_dm_cleanup_loop, self.employee_batch_dispatch_loop,
                 self.dividend_report_flush_loop, self.bond_service_loop,
@@ -1037,7 +1083,7 @@ class LoopsCog(commands.Cog):
                 self.ign_deadline_loop, self.stock_reversion_loop, self.stock_dashboard_loop,
                 self.team_digest_loop, self.db_backup_loop, self.instance_heartbeat_loop,
                 self.month_close_report_loop, self.bank_report_loop,
-                self.csn_silence_watch_loop)
+                self.split_resume_loop)
 
     def _start_loops(self):
         for _lp in self._all_loops():
@@ -1054,9 +1100,47 @@ class LoopsCog(commands.Cog):
         if self.bot.is_ready():
             self._start_loops()
 
+    def _register_split_resolver(self):
+        """Teach `split_rules` how to enumerate a Discord role — or that it can't.
+
+        THE RULE IS `== 0`, NEVER `not n` (DECISIONS.md NEW-5, and the bank paid
+        for it once already). Restocker does NOT request the privileged members
+        intent, so `role.members` is whatever happens to be in the member cache —
+        for a role with 40 holders that might be 3. Returning it as a fact would
+        pay 100% of a role's share to those 3. So:
+
+            role not found in any guild  -> None   ("cannot say")
+            members intent OFF           -> None   ("cannot say")
+            role found, intent on, empty -> []     (a FACT: nobody holds it)
+
+        `None` makes a `role` rule refuse safely and retryably; `[]` makes it
+        contribute zero and leave the coins in the source. Neither pays anybody.
+        If John turns the members intent on, this starts answering and role-based
+        rules become usable with no other change.
+        """
+        try:
+            import split_rules
+        except Exception:
+            return
+
+        def resolve(role_id):
+            try:
+                intents = getattr(bot, "intents", None)
+                if not bool(getattr(intents, "members", False)):
+                    return None                  # cannot say — see the docstring
+                for g in bot.guilds:
+                    role = g.get_role(int(role_id))
+                    if role is not None:
+                        return [str(m.id) for m in role.members]
+            except Exception:
+                return None
+            return None                          # no guild has this role
+        split_rules.set_member_resolver(resolve)
+
     @commands.Cog.listener()
     async def on_ready(self):
         # Fires after login -> wait_until_ready() now returns instantly, loops run for real.
+        self._register_split_resolver()
         self._start_loops()
 
     def cog_unload(self):

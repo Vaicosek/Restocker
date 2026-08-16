@@ -5,6 +5,7 @@ Replaces all YAML file I/O with a single restocker.db file.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import threading
 from contextlib import contextmanager
@@ -13,6 +14,11 @@ from pathlib import Path
 from typing import Any, Optional
 
 DB_PATH = Path("restocker.db")
+
+#: Module logger. This file used bare `print` for its one status line; the CSN
+#: ingest path needs real log levels, because "a row could not be signed" must be
+#: findable after the fact and must not go to stdout in the middle of a run.
+log = logging.getLogger("restocker.db")
 
 _local = threading.local()
 
@@ -38,6 +44,26 @@ def db():
     except Exception:
         conn.rollback()
         raise
+
+
+@contextmanager
+def db_in(conn=None):
+    """Run inside the CALLER's transaction when given one, otherwise own a new one.
+
+    `db()` is not re-entrant: it commits on exit, over a thread-local connection.
+    So a nested `with db()` inside a caller's open transaction commits the
+    caller's half-written work early — which is precisely the "money moved, the
+    key is recorded separately" split that took six rounds to kill in ledger v2.
+    Composition therefore has to be explicit, and this is the one place it
+    happens. A helper that takes `conn=` promises: if you hand me your
+    transaction, my effect and your idempotency record commit together or not
+    at all.
+    """
+    if conn is not None:
+        yield conn
+    else:
+        with db() as c:
+            yield c
 
 
 
@@ -145,6 +171,37 @@ CREATE TABLE IF NOT EXISTS investor_payout_log (
     paid_at     TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- ── Investor profit-share LEGS: one progress marker per investor ─────────────
+-- investor_payout_log answers "did this month's distribution run". It could not
+-- answer "which investors were paid", and the GEX.PR distribution checked the
+-- MONTH tag once before its loop while writing it per investor. One investor
+-- paid meant the tag existed, so every later attempt returned [] and the rest
+-- were never paid again: measured 7 of 10 investors permanently unpaid, with the
+-- outer `except` swallowing the reason.
+--
+-- Same shape as stock_dividend_legs, deliberately: a per-beneficiary row that is
+-- moved to `claimed` and COMMITTED before that investor's credit is attempted,
+-- and the amount pinned on the first claim so a later net correction cannot
+-- re-price a leg somebody is already owed.
+--
+--   claimed  -- marker written, credit not yet resolved
+--   applied  -- the credit returned; never pay this leg again
+--   refused  -- the credit provably did not happen; re-armed on the next run
+--   unknown  -- claimed by an attempt that died. MAY be paid. Never automatically
+--               re-credited; a human reads the coin ledger and settles it.
+CREATE TABLE IF NOT EXISTS investor_payout_claims (
+    tag         TEXT NOT NULL,               -- vtech:<market_id>:<month>
+    user_id     TEXT NOT NULL,
+    amount      INTEGER NOT NULL,
+    state       TEXT NOT NULL DEFAULT 'claimed',
+    detail      TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (tag, user_id),
+    CHECK (state IN ('claimed','applied','refused','unknown'))
+);
+CREATE INDEX IF NOT EXISTS idx_investor_claims_state ON investor_payout_claims(state);
+
 -- ── Hive Claims ──────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS hive_claims (
     location    TEXT PRIMARY KEY,
@@ -194,6 +251,29 @@ CREATE TABLE IF NOT EXISTS csn_month_sources (
     updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (market_id, month, source_key)
 );
+-- Superseded month-source rows, kept instead of destroyed.
+--
+-- `csn_retire_superseded_sources` used to DELETE. Its test (items a subset, every
+-- quantity <=) is also the ordinary relationship between a corner shop and a
+-- flagship in the same market, so a real second shop's 40,000 coins could be
+-- erased by an unrelated shop's routine upload with no archive and no undo. A
+-- destructive heuristic with no undo is not a heuristic, it is a data-loss bug.
+-- Retirement now MOVES the row here, so the figure is always recoverable and
+-- `csn_month_totals` + the retired rows still add up to everything ever booked.
+CREATE TABLE IF NOT EXISTS csn_month_sources_retired (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    market_id     TEXT NOT NULL,
+    month         TEXT NOT NULL,
+    source_key    TEXT NOT NULL,
+    income        REAL NOT NULL DEFAULT 0,
+    spent         REAL NOT NULL DEFAULT 0,
+    items_json    TEXT,
+    superseded_by TEXT,                   -- the source_key that replaced it
+    reason        TEXT,                   -- 'shop-stamp' | 'unstamped-rescan'
+    retired_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_csn_src_retired
+    ON csn_month_sources_retired(market_id, month);
 CREATE TABLE IF NOT EXISTS csn_history_items (
     market_id     TEXT NOT NULL DEFAULT 'main',
     month         TEXT NOT NULL,
@@ -383,10 +463,101 @@ CREATE TABLE IF NOT EXISTS csn_transactions (
 );
 CREATE INDEX IF NOT EXISTS idx_csn_txn_day    ON csn_transactions(market_id, sale_day);
 CREATE INDEX IF NOT EXISTS idx_csn_txn_actor  ON csn_transactions(market_id, actor);
--- Full sale identity. The mod already dedups per-run via its .seen file, but re-scans after
--- a .seen wipe (and two operators scanning the same shop) must not create duplicates.
-CREATE UNIQUE INDEX IF NOT EXISTS uq_csn_txn
-    ON csn_transactions(market_id, actor, item, qty, coins, sale_ts);
+-- NOTE: there was a UNIQUE(market_id, actor, item, qty, coins, sale_ts) index here.
+-- It is gone, and _migrate() DROPs it from existing databases. It used the
+-- reconstructed `sale_ts` as the tiebreaker between two otherwise identical sales,
+-- and that timestamp is minute-granular, so two real purchases in the same minute
+-- collided and the second was silently discarded. Uniqueness is now the content
+-- signature (uq_csn_txn_uid), decided upstream in csn_ingest.
+
+-- ── CSN ingest: the ONE durable store every consumer reads from ─────────────
+-- Every CSN sale that ever reaches this bot lands here first, exactly once, and
+-- each downstream consumer then claims it with its OWN flag column.
+--
+-- WHY: before this table there was no single place a sale existed. The per-sale
+-- ledger deduped one way (sale_uid, then a ±90s fuzzy window), the earnings
+-- roll-up deduped by "whatever add_csn_transactions_detailed said was new", the
+-- hive payout deduped on its own (market, ign, item, qty, sale_ts) index, and the
+-- Discord report card deduped on a hash of the raw file. Five answers to one
+-- question. A sale could be booked into the ledger but not paid as a wage, or
+-- paid twice because one of the five said "new" while the others said "seen".
+--
+-- Now: `sig` (csn_sig.sale_sig — see that module for what is and is not in it) is
+-- exactly reproducible from the row's own content, so INSERTING and catching the
+-- UNIQUE violation IS the idempotency check. There is no read-then-write, no
+-- time window, and no dependence on the mod having cleared anything: however many
+-- times a sale is re-walked, re-uploaded or re-delivered, it occupies one row.
+--
+-- Each consumer carries its own <name>_state column so it processes each row
+-- exactly once and never waits on another consumer. States are:
+--   'pending'  nothing has touched it
+--   'claimed'  a consumer won the claim and is acting NOW (or died mid-act)
+--   'done'     the effect is committed
+--   'skip'     deliberately not applicable (e.g. a non-hive item for the hive
+--              consumer) — distinct from 'done' so "never applied" and "applied"
+--              stay tellable apart at 2am
+-- Claims are claim-first (rule 1): one atomic UPDATE ... WHERE state='pending',
+-- and the effect runs only if that UPDATE matched a row. A row stuck in 'claimed'
+-- is a crash mid-effect: visible, countable, re-drivable by an operator, and
+-- never silently replayed.
+CREATE TABLE IF NOT EXISTS csn_ingest (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    link_id       TEXT NOT NULL,             -- effective market id: the ingest scope
+    sig           TEXT NOT NULL,             -- csn_sig.SIG_VERSION content signature
+    -- ── content, canonical: EXACTLY what the signature hashes ──
+    -- These are normalised (names lower-cased, colour codes stripped, whitespace
+    -- collapsed) because the signature has to be reproducible in two languages. They
+    -- are NOT for display — see the *_display columns below.
+    seller        TEXT NOT NULL DEFAULT '',
+    actor         TEXT NOT NULL DEFAULT '',
+    verb          TEXT NOT NULL DEFAULT '',
+    item_raw      TEXT NOT NULL DEFAULT '',  -- with its #code; what the sig hashes
+    -- ── the same three things as a HUMAN should see them ──
+    -- Minecraft names are case-preserving, and players identify by the capitalisation
+    -- they chose: JesseNapoleon, not jessenapoleon. Storing only the canonical form
+    -- meant every downstream surface that reads a name out of this table — the
+    -- per-customer ledger, the hive wage rows, the operator view — rendered it
+    -- lower-cased. Real names over internal ones, everywhere a user looks.
+    item_display  TEXT NOT NULL DEFAULT '',  -- alias/profile-resolved item name
+    actor_display TEXT NOT NULL DEFAULT '',  -- counterparty IGN as CSN printed it
+    seller_display TEXT NOT NULL DEFAULT '', -- shop owner IGN as CSN printed it
+    qty           INTEGER NOT NULL DEFAULT 0,
+    coins_centi   INTEGER NOT NULL DEFAULT 0,-- INTEGER money. No floats on this path.
+    sale_date     TEXT NOT NULL DEFAULT '',  -- YYYY-MM-DD, in the signature
+    occ           INTEGER NOT NULL DEFAULT 1,-- occurrence ordinal, in the signature
+    -- ── informational only: NEVER inputs to the signature ──
+    sale_ts       TEXT,                      -- reconstructed instant, drifts up to 60s
+    source_key    TEXT,                      -- uploader, for provenance
+    source_file   TEXT,
+    legacy        INTEGER NOT NULL DEFAULT 0,-- 1 = pre-v3 row, occ minted bot-side
+    first_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+    last_seen_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    seen_count    INTEGER NOT NULL DEFAULT 1,-- how often it was re-delivered; pure telemetry
+    -- ── per-consumer flags ──
+    txn_state     TEXT NOT NULL DEFAULT 'pending',  -- csn_transactions per-sale ledger
+    txn_at        TEXT,
+    earn_state    TEXT NOT NULL DEFAULT 'pending',  -- csn_history / csn_history_items roll-up
+    earn_at       TEXT,
+    hive_state    TEXT NOT NULL DEFAULT 'pending',  -- hive wage payout
+    hive_at       TEXT,
+    feed_state    TEXT NOT NULL DEFAULT 'pending',  -- Discord report card / scrape feed
+    feed_at       TEXT
+);
+-- THE dedup point. Inserting and catching the duplicate is the idempotency check.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_csn_ingest ON csn_ingest(link_id, sig);
+-- One partial index per consumer: "what is still mine to do", cheap at any table size.
+CREATE INDEX IF NOT EXISTS idx_csn_ingest_txn
+    ON csn_ingest(link_id, id) WHERE txn_state = 'pending';
+CREATE INDEX IF NOT EXISTS idx_csn_ingest_earn
+    ON csn_ingest(link_id, id) WHERE earn_state = 'pending';
+CREATE INDEX IF NOT EXISTS idx_csn_ingest_hive
+    ON csn_ingest(link_id, id) WHERE hive_state = 'pending';
+CREATE INDEX IF NOT EXISTS idx_csn_ingest_feed
+    ON csn_ingest(link_id, id) WHERE feed_state = 'pending';
+-- The midnight-boundary probe (csn_sig.boundary_dates) looks a row up by its
+-- content on an adjacent date, so that lookup needs to be an index hit too.
+CREATE INDEX IF NOT EXISTS idx_csn_ingest_content
+    ON csn_ingest(link_id, sale_date, actor, item_raw, qty, coins_centi, verb);
 
 -- ── Hive engine: per-player harvest feed + monthly value bookings ───────────
 -- hive_harvests: one row per parsed "X sold you Nx Item" feed line. The chest shops buy
@@ -514,7 +685,12 @@ CREATE TABLE IF NOT EXISTS stock_limit_orders (
     fill_total      REAL,
     note            TEXT,
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
-    resolved_at     TEXT
+    resolved_at     TEXT,
+    -- A refusal that is neither a fill nor a cancel used to leave no trace at
+    -- all; these are where it goes. See `note_limit_order_refusal`.
+    refusals        INTEGER NOT NULL DEFAULT 0,
+    last_refusal    TEXT,
+    last_refused_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_limit_orders_market ON stock_limit_orders(market_id, status);
 CREATE INDEX IF NOT EXISTS idx_limit_orders_user ON stock_limit_orders(user_id, status);
@@ -601,6 +777,60 @@ CREATE TABLE IF NOT EXISTS stock_dividend_log (
     paid_at     TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_dividend_log_market ON stock_dividend_log(market_id);
+
+-- ── Dividend RUNS: the per-holder progress markers ──────────────────────────
+-- stock_dividend_log answers "was this month paid at all". It cannot answer
+-- "which holders were paid", and that is the question a crash asks. A run killed
+-- at holder 61 of 200 used to restart from holder 1: the 60 already-credited
+-- holders were paid a second time and 300,000 coins were created against a
+-- 1,000,000 pool, because the credit ran before the treasury debit and there was
+-- no marker in between.
+--
+-- Shape borrowed deliberately from split_runs/split_legs rather than invented:
+-- a header row pinning the plan, and one leg per beneficiary carrying its own
+-- state. A leg is moved to 'claimed' and COMMITTED BEFORE its credit is
+-- attempted, so a process death leaves evidence pointing at the one holder whose
+-- outcome is genuinely unknown instead of losing the whole run's history.
+--
+-- Leg states are the three outcomes, never two:
+--   planned  -- nothing attempted; safe to pay
+--   applied  -- the credit returned; definitely paid, never pay again
+--   unknown  -- claimed but no answer (crash/timeout). MAY be paid. Never
+--               re-credited automatically; a human resolves it.
+--   refused  -- the credit definitely did not happen (it raised before moving
+--               coins); safe to retry on the next run
+CREATE TABLE IF NOT EXISTS stock_dividend_runs (
+    run_id          TEXT PRIMARY KEY,
+    market_id       TEXT NOT NULL,
+    month           TEXT NOT NULL,
+    source          TEXT NOT NULL DEFAULT 'auto',   -- auto | manual
+    pool            INTEGER NOT NULL DEFAULT 0,
+    per_share       REAL    NOT NULL DEFAULT 0,
+    holders         INTEGER NOT NULL DEFAULT 0,
+    charge_treasury INTEGER NOT NULL DEFAULT 1,
+    state           TEXT    NOT NULL DEFAULT 'open', -- open | complete | partial
+    paid            INTEGER NOT NULL DEFAULT 0,
+    treasury_charged INTEGER NOT NULL DEFAULT 0,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    settled_at      TEXT,
+    UNIQUE (market_id, month, source),
+    CHECK (state IN ('open','complete','partial'))
+);
+CREATE INDEX IF NOT EXISTS idx_dividend_runs_state ON stock_dividend_runs(state);
+
+CREATE TABLE IF NOT EXISTS stock_dividend_legs (
+    run_id     TEXT NOT NULL,
+    user_id    TEXT NOT NULL,
+    shares     REAL NOT NULL DEFAULT 0,
+    amount     INTEGER NOT NULL,
+    state      TEXT NOT NULL DEFAULT 'planned',
+    detail     TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (run_id, user_id),
+    CHECK (amount > 0),
+    CHECK (state IN ('planned','claimed','applied','unknown','refused'))
+);
+CREATE INDEX IF NOT EXISTS idx_dividend_legs_state ON stock_dividend_legs(run_id, state);
 
 -- ── Runtime config overrides (channel/category/guild IDs, etc.) ───────────────
 CREATE TABLE IF NOT EXISTS bot_config (
@@ -786,6 +1016,60 @@ CREATE TABLE IF NOT EXISTS land_bids (
     ts          TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_land_bids_listing ON land_bids(listing_id);
+
+-- ── Leased parcels and their rent (LAND_ESCROW_PLAN §6 item 12, overruled) ────
+-- The plan says DROP the parcel/rent domain because `cogs/lands.py` owns land
+-- ownership and building a second owner is how two systems come to disagree
+-- about who owns a plot. That reasoning still stands and these tables are shaped
+-- to respect it: `land_leases` records a RENT AGREEMENT (who pays whom, how
+-- much, how often) and nothing else. It does not record ownership, it is not
+-- consulted by anything that decides ownership, and `parcel_id` is an opaque
+-- string — whatever `cogs/lands.py` calls the plot. If the two ever disagree
+-- about who the owner is, the lease is wrong and the parcel wins; the rent sweep
+-- refuses a lease whose owner cannot be resolved rather than paying the stale one.
+--
+-- Rent is OFF until `realestate:rent_enabled` is set. With no leases the sweep is
+-- a single indexed SELECT returning nothing.
+CREATE TABLE IF NOT EXISTS land_leases (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    parcel_id       TEXT NOT NULL,
+    tenant_id       TEXT NOT NULL,
+    owner_id        TEXT NOT NULL,     -- the landlord AT THE TIME THE LEASE WAS AGREED
+    amount          INTEGER NOT NULL,  -- integer coins. Rent is new money movement, so
+                                       -- it starts integer and never needs a migration.
+    period_days     INTEGER NOT NULL DEFAULT 30,
+    status          TEXT NOT NULL DEFAULT 'active',   -- active | ended
+    last_period     TEXT,              -- the last period this parcel has PAID
+    next_due_at     TEXT,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_land_leases_due ON land_leases(status, next_due_at);
+
+-- One row per (parcel, period). The UNIQUE index is the FIRST of the three
+-- things that stop a retry charging twice — before the row claim and before the
+-- ledger key, a second charge for the same month cannot even be written down.
+CREATE TABLE IF NOT EXISTS land_rent_charges (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    lease_id    INTEGER NOT NULL,
+    parcel_id   TEXT NOT NULL,
+    period      TEXT NOT NULL,          -- 'YYYY-MM' for a 30-day lease; see _rent_period
+    tenant_id   TEXT NOT NULL,
+    owner_id    TEXT NOT NULL,
+    amount      INTEGER NOT NULL,
+    idem_key    TEXT NOT NULL,          -- land:parcel:<parcel_id>:rent:<period>
+    status      TEXT NOT NULL DEFAULT 'pending',  -- pending|claimed|paid|failed|unknown
+    attempts    INTEGER NOT NULL DEFAULT 0,
+    last_error  TEXT,
+    ledger_ref  TEXT,
+    replayed    INTEGER NOT NULL DEFAULT 0,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    claimed_at  TEXT,
+    settled_at  TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_land_rent_period ON land_rent_charges(parcel_id, period);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_land_rent_idem   ON land_rent_charges(idem_key);
+CREATE INDEX IF NOT EXISTS idx_land_rent_status ON land_rent_charges(status);
 """
 
 
@@ -868,6 +1152,78 @@ def _migrate(conn: sqlite3.Connection) -> None:
         # One column served both jobs before, so raising a shop price also raised wages.
         # 0 means "never set" and reads as unit_value, so old rows behave exactly as before.
         "ALTER TABLE hive_harvests ADD COLUMN wage_value REAL NOT NULL DEFAULT 0",
+        # The csn_sig content signature of the sale this wage row was paid for
+        # (2026-08-15). Only rows that came through csn_ingest carry one; rows parsed
+        # from the csn-hive WEBHOOK FEED have no signature (the feed line carries no
+        # seller, verb or amount, so it cannot be signed) and stay NULL. NULL is the
+        # discriminator both hive indexes below key off, so the two sources keep their
+        # own dedup rule and neither weakens the other.
+        "ALTER TABLE hive_harvests ADD COLUMN sale_sig TEXT",
+        # csn_ingest ships with these in its CREATE TABLE, so they only matter for a
+        # database built from an interim build of this change set that had the table
+        # without them. Cheap, idempotent, and removes the question entirely.
+        "ALTER TABLE csn_ingest ADD COLUMN actor_display  TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE csn_ingest ADD COLUMN seller_display TEXT NOT NULL DEFAULT ''",
+        # ── Land Exchange escrow (LAND_ESCROW_PLAN §1.2) ──────────────────────
+        # Every column here is nullable, so this is an ALTER on a live table with
+        # no rewrite and no default backfill. A pre-escrow bid row reads as
+        # kind=NULL/status=NULL, which `land_bid_escrow_rows` treats as "not an
+        # escrow row" — it is a bid that was settled under the old debit model
+        # and there is nothing to capture or release on it.
+        #
+        # `amount` stays REAL. Converting the float money columns is a SEPARATE
+        # migration with its own dry run (land_money_migrate.py); doing it here
+        # would fold two different risks into one commit and neither would be
+        # testable on its own.
+        "ALTER TABLE land_bids ADD COLUMN kind TEXT",             # bid | buy
+        "ALTER TABLE land_bids ADD COLUMN idem_key TEXT",         # minted BEFORE the hold call
+        "ALTER TABLE land_bids ADD COLUMN capture_key TEXT",      # minted at row creation, not at capture
+        "ALTER TABLE land_bids ADD COLUMN hold_id TEXT",          # core's id, written back after place
+        "ALTER TABLE land_bids ADD COLUMN hold_expires_at TEXT",  # mirror, for the anti-snipe extender
+        # The INTEGER actually reserved at core. `amount` stays REAL and stays the
+        # display figure; this is the one the capture uses, stored once so no
+        # settlement ever re-derives it from a float. The two are separate on
+        # purpose — `land_money_migrate.py` owns the float conversion.
+        "ALTER TABLE land_bids ADD COLUMN hold_amount INTEGER",
+        # DEFAULT 'legacy', not NULL: every row written before escrow existed was
+        # a bid backed by a DEBIT, and it must be impossible to mistake one for
+        # live escrow. `legacy` is in none of land_escrow's status sets, so no
+        # sweep, release or capture will ever touch those rows.
+        "ALTER TABLE land_bids ADD COLUMN status TEXT NOT NULL DEFAULT 'legacy'",
+        "ALTER TABLE land_bids ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0",
+        # DEFINITE refusals of the same capture/release, so a permanently-refused
+        # row parks for a human instead of being retried once a minute forever
+        # (land_escrow.MAX_HOLD_REFUSALS). Distinct from `attempts`, which counts
+        # every claim including the ones that worked.
+        "ALTER TABLE land_bids ADD COLUMN refusals INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE land_bids ADD COLUMN last_error TEXT",
+        "ALTER TABLE land_bids ADD COLUMN claimed_at TEXT",
+        "ALTER TABLE land_bids ADD COLUMN settled_at TEXT",
+        # UNIQUE on the key a row minted: a resumed placement that re-derives the
+        # same key cannot produce a second row, whatever the caller believes.
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_land_bids_idem ON land_bids(idem_key)",
+        "CREATE INDEX IF NOT EXISTS idx_land_bids_status ON land_bids(listing_id, status)",
+        # Per-stage progress markers on the listing itself. The bid rows carry
+        # their own state, but "has the seller been paid?" has no row of its own —
+        # so it gets one column, claimed the same way (LAND_ESCROW_PLAN §2.1).
+        "ALTER TABLE land_listings ADD COLUMN settle_stage TEXT",
+        "ALTER TABLE land_listings ADD COLUMN settling_at  TEXT",
+        "ALTER TABLE land_listings ADD COLUMN fee_stage    TEXT",
+        "ALTER TABLE land_listings ADD COLUMN fee_paid     REAL",
+        # ── A refused limit order must have an OUTCOME (2026-08-16) ───────────
+        # `_check_limit_orders` filled on ok, cancelled on a terminal refusal,
+        # and did NOTHING with `no_liquidity` / `credit_refused` / `slippage`:
+        # not filled, not cancelled, not logged, retried on every price tick for
+        # ever. These three columns are where the refusal goes, so the order can
+        # say why it is still sitting there and can give up after a bounded
+        # number of tries instead of never.
+        "ALTER TABLE stock_limit_orders ADD COLUMN refusals      INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE stock_limit_orders ADD COLUMN last_refusal  TEXT",
+        "ALTER TABLE stock_limit_orders ADD COLUMN last_refused_at TEXT",
+        # After the ALTERs, never in the CREATE-TABLE script: on an existing
+        # database that script runs first and the column would not exist yet.
+        "CREATE INDEX IF NOT EXISTS idx_limit_orders_refusals "
+        "ON stock_limit_orders(status, refusals)",
     ]
     for sql in migrations:
         try:
@@ -875,23 +1231,86 @@ def _migrate(conn: sqlite3.Connection) -> None:
         except sqlite3.OperationalError:
             pass
 
-    # Hive dedup by real sale identity: the same in-game sale (market+ign+item+qty+sale_ts)
-    # can only be stored once, so re-posting harvest lines, re-scanning after a .seen wipe,
-    # or two instances reporting the same shop can NEVER double-pay. Partial index (only
-    # timed rows) so legacy/untimed lines still fall back to the msg_id+line_no dedup.
+    # Hive dedup, now split by SOURCE, because the two sources can answer "is this the
+    # same sale?" with very different confidence.
+    #
+    # 1. WEBHOOK-FEED rows (sale_sig IS NULL) keep the original identity index exactly
+    #    as it was: market+ign+item+qty+sale_ts, timed rows only. A feed line has no
+    #    seller, verb or coin amount, so it cannot be signed and there is nothing
+    #    better available for it.
+    #
+    #    The predicate gains `AND sale_sig IS NULL` so it stops applying to rows that
+    #    DO carry a signature. That matters because sale_ts is reconstructed from
+    #    "Xh Ym ago" at MINUTE precision: two genuinely separate harvests of 64 honey
+    #    by the same player inside one minute reconstruct to the SAME sale_ts, collided
+    #    on this index, and the second was silently dropped by the INSERT OR IGNORE —
+    #    a harvester simply never got paid for it, with no error anywhere. Rows with a
+    #    signature can tell those two apart exactly, so they must not be judged by an
+    #    index that cannot.
+    try:
+        conn.execute("DROP INDEX IF EXISTS uq_hive_sale")
+    except sqlite3.OperationalError:
+        pass
     try:
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_hive_sale "
                      "ON hive_harvests(market_id, ign, item, qty, sale_ts) "
-                     "WHERE sale_ts IS NOT NULL")
+                     "WHERE sale_ts IS NOT NULL AND sale_sig IS NULL")
     except sqlite3.OperationalError:
         pass
 
-    # CSN transactions: one row per (market, sale_uid) when the mod supplied its stable
-    # per-sale id. Partial index so legacy rows (no uid) keep using the identity index.
+    # 2. CSN-EXPORT rows (sale_sig IS NOT NULL) are keyed on the signature alone.
+    #
+    #    NOT market-scoped, deliberately, and that is a behaviour we are KEEPING: a
+    #    sale is a physical event — the same honey leaving the same barrel — and the
+    #    market id is only how the exporter happened to be configured at the time.
+    #    When the same shop was exported under two market ids, the identical sale was
+    #    recorded once per market and EACH market paid the harvester (observed live:
+    #    JesseNapoleon's Honey Block sales under both 'greyhames' and 'vtech'). The
+    #    ±120s heuristic in add_hive_harvest was the previous answer to that; this is
+    #    the exact one. First market to record the sale owns it.
+    #
+    #    Note the deliberate asymmetry with csn_ingest, which is keyed
+    #    UNIQUE(link_id, sig) and DOES store the same sale under two markets. That is
+    #    correct at that layer: two markets each making a claim is two claims worth
+    #    recording. But a wage is paid once to one person, so the wage ledger collapses
+    #    them. Each layer keys on what it is actually counting.
+    try:
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_hive_sig "
+                     "ON hive_harvests(sale_sig) WHERE sale_sig IS NOT NULL")
+    except sqlite3.OperationalError:
+        pass
+
+    # CSN transactions: one row per (market, sale_uid). sale_uid now carries the
+    # csn_sig content signature, which is exactly reproducible, so this index is the
+    # only per-sale uniqueness constraint the table needs.
     try:
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_csn_txn_uid "
                      "ON csn_transactions(market_id, sale_uid) "
                      "WHERE sale_uid IS NOT NULL")
+    except sqlite3.OperationalError:
+        pass
+
+    # DROP uq_csn_txn — it silently merged genuinely distinct sales.
+    #
+    # The index was UNIQUE(market_id, actor, item, qty, coins, sale_ts) — that is,
+    # it made `sale_ts` the tiebreaker between two otherwise identical sales. But
+    # sale_ts is the ONE field that is not trustworthy: it is reconstructed from
+    # CSN's "Xm ago" text at minute granularity, so two genuinely separate
+    # purchases of the same item by the same player in the same minute reconstruct
+    # to the SAME instant, collide on this index, and the second one is thrown away
+    # by the `INSERT OR IGNORE`. Silently: no error, no log line, the coins simply
+    # never appear.
+    #
+    # Caught by test_csn_ingest.py check 9 — two identical 120.50 sales landed
+    # correctly as two rows in csn_ingest and then collapsed to one 120.50 row in
+    # csn_transactions, so the ledger read 120.50 where the shop had earned 241.00.
+    #
+    # It is safe to drop because dedup no longer lives here: every row now arrives
+    # via csn_ingest, which has already decided uniqueness on the content signature,
+    # and uq_csn_txn_uid enforces one ledger row per signature. Keeping both meant a
+    # correct upstream decision being overruled by a broken downstream one.
+    try:
+        conn.execute("DROP INDEX IF EXISTS uq_csn_txn")
     except sqlite3.OperationalError:
         pass
 
@@ -947,6 +1366,16 @@ def init_db():
         _migrate(conn)
         conn.execute("INSERT OR IGNORE INTO platform_balance (id, balance) VALUES (1, 0)")
         conn.execute("INSERT OR IGNORE INTO hive_active_batch (id, batch_id) VALUES (1, NULL)")
+    # Subsystems that own their own DDL. They bootstrap themselves lazily anyway
+    # (ensure_schema() is idempotent), so this is only to have the tables in place
+    # before the first panel renders. Imported here rather than at module scope:
+    # both modules import THIS one back for db(), and a top-level import would be a
+    # cycle. A build without these files still boots.
+    for _mod in ("panel_skus", "action_log"):
+        try:
+            __import__(_mod).ensure_schema()
+        except Exception as _e:
+            print(f"⚠️ {_mod}: schema bootstrap skipped ({_e})")
     print("✅ Database initialised.")
 
 
@@ -979,6 +1408,76 @@ def set_balance(user_id: str, coins: float, principal: float = None, lp: float =
         """, (str(user_id), coins, p, l))
 
 
+def adjust_balance_tx(conn, user_id: str, delta: int, *,
+                      counts_as_principal: bool = True,
+                      reduce_principal: bool = True,
+                      reason: Optional[str] = None) -> tuple[int, int, int]:
+    """`adjust_balance`, but INSIDE the caller's transaction — and, when `reason`
+    is given, the coin_ledger row is one more statement in that same transaction.
+
+    WHY THIS EXISTS (money review §6)
+    ---------------------------------
+    `adjust_balance` moved the coins and `record_coin_ledger` wrote the tag in a
+    SECOND `with db()` block, documented "best-effort: never raises" and wrapped
+    in `except Exception: pass`. Two commits, no atomicity. Any caller that
+    promotes that ledger row from an *audit log* to a *correctness guarantee* —
+    which `action_log`'s Retry path does, because `coin_ledger_has(uid, key)` is
+    the only thing standing between a retry and a second refund — inherits a
+    window where the money has moved and the key is absent. A crash, or a
+    SQLITE_BUSY swallowed by that `except`, and the retry pays again.
+
+    This is the same defect ledger v2 spent six rounds on, and this is ledger
+    v2's answer, not a second one: `ledger_v2._finalize_idempotency` records the
+    key with "one more statement in the same transaction as the debit and the
+    credit; they commit together or not at all". Here the ledger INSERT is that
+    statement. `reason` present and no ledger row is now an impossible state.
+
+    Deliberately NOT swallowing: the INSERT is allowed to raise. A caller that
+    passes a namespaced idempotency reason (`rb:<action>#<op>`) is protected by
+    the partial UNIQUE index on `coin_ledger(user_id, reason)` — a duplicate
+    raises IntegrityError and takes the balance delta down with it, which is
+    exactly the outcome wanted. `record_coin_ledger` keeps its old best-effort
+    behaviour for the callers that only want an audit line.
+
+    Returns (coins_after, principal_after, applied_delta); `applied_delta` is
+    read inside the transaction, so it is the real change to THIS wallet by THIS
+    statement and cannot be corrupted by concurrent activity the way a
+    before/after pair of separate reads can.
+    """
+    uid = str(user_id)
+    d = int(delta or 0)
+    conn.execute(
+        "INSERT INTO balances (user_id, coins, principal, lp) VALUES (?, 0, 0, 0) "
+        "ON CONFLICT(user_id) DO NOTHING", (uid,))
+    before = conn.execute("SELECT coins FROM balances WHERE user_id=?", (uid,)).fetchone()
+    old_coins = int(before["coins"]) if before else 0
+    if d > 0:
+        conn.execute(
+            "UPDATE balances SET coins = coins + ?, principal = principal + ?, "
+            "updated_at = datetime('now') WHERE user_id = ?",
+            (d, d if counts_as_principal else 0, uid))
+    elif d < 0:
+        amt = -d
+        # RHS expressions are evaluated against the pre-update row, so `coins`
+        # here is the balance before deduction -> MIN(amt, coins) is the amount
+        # actually removed, matching the old read-modify-write semantics exactly.
+        conn.execute(
+            "UPDATE balances SET "
+            "principal = CASE WHEN ? THEN MAX(0, principal - MIN(principal, MIN(?, coins))) "
+            "ELSE principal END, "
+            "coins = MAX(0, coins - ?), "
+            "updated_at = datetime('now') WHERE user_id = ?",
+            (1 if reduce_principal else 0, amt, amt, uid))
+    row = conn.execute("SELECT coins, principal FROM balances WHERE user_id=?", (uid,)).fetchone()
+    coins = int(row["coins"])
+    principal = int(row["principal"])
+    if reason is not None:
+        conn.execute(
+            "INSERT INTO coin_ledger (user_id, delta, balance_after, reason) VALUES (?,?,?,?)",
+            (uid, coins - old_coins, coins, str(reason)[:200]))
+    return coins, principal, coins - old_coins
+
+
 def adjust_balance(user_id: str, delta: int, *, counts_as_principal: bool = True,
                    reduce_principal: bool = True) -> tuple[int, int, int]:
     """Atomically apply an integer coin delta in a single transaction (no
@@ -989,36 +1488,15 @@ def adjust_balance(user_id: str, delta: int, *, counts_as_principal: bool = True
     removed iff reduce_principal).
 
     Returns (coins_after, principal_after, applied_delta) where applied_delta is the
-    real change to coins (may be smaller in magnitude than `delta` when clamped)."""
-    uid = str(user_id)
-    d = int(delta or 0)
+    real change to coins (may be smaller in magnitude than `delta` when clamped).
+
+    Writes no ledger row — every existing caller pairs this with its own
+    `record_coin_ledger`. A caller that needs the tag and the money to commit
+    together calls `adjust_balance_tx(conn, ..., reason=key)` instead."""
     with db() as conn:
-        conn.execute(
-            "INSERT INTO balances (user_id, coins, principal, lp) VALUES (?, 0, 0, 0) "
-            "ON CONFLICT(user_id) DO NOTHING", (uid,))
-        before = conn.execute("SELECT coins FROM balances WHERE user_id=?", (uid,)).fetchone()
-        old_coins = int(before["coins"]) if before else 0
-        if d > 0:
-            conn.execute(
-                "UPDATE balances SET coins = coins + ?, principal = principal + ?, "
-                "updated_at = datetime('now') WHERE user_id = ?",
-                (d, d if counts_as_principal else 0, uid))
-        elif d < 0:
-            amt = -d
-            # RHS expressions are evaluated against the pre-update row, so `coins`
-            # here is the balance before deduction -> MIN(amt, coins) is the amount
-            # actually removed, matching the old read-modify-write semantics exactly.
-            conn.execute(
-                "UPDATE balances SET "
-                "principal = CASE WHEN ? THEN MAX(0, principal - MIN(principal, MIN(?, coins))) "
-                "ELSE principal END, "
-                "coins = MAX(0, coins - ?), "
-                "updated_at = datetime('now') WHERE user_id = ?",
-                (1 if reduce_principal else 0, amt, amt, uid))
-        row = conn.execute("SELECT coins, principal FROM balances WHERE user_id=?", (uid,)).fetchone()
-        coins = int(row["coins"])
-        principal = int(row["principal"])
-    return coins, principal, coins - old_coins
+        return adjust_balance_tx(conn, user_id, delta,
+                                 counts_as_principal=counts_as_principal,
+                                 reduce_principal=reduce_principal)
 
 
 def get_all_balances() -> dict:
@@ -1437,8 +1915,10 @@ def upsert_investor(user_id: str, balance: float, principal: float, joined_at: s
         """, (str(user_id), balance, principal, joined_at))
 
 
-def add_investor_payout(user_id: str, amount: float, note: str = None):
-    with db() as conn:
+def add_investor_payout(user_id: str, amount: float, note: str = None, *, conn=None):
+    """Record the receipt for an investor credit. Pass `conn=` to write it in the
+    same transaction as the credit itself (see `db_in`)."""
+    with db_in(conn) as conn:
         conn.execute(
             "INSERT INTO investor_payout_log (user_id, amount, note) VALUES (?,?,?)",
             (str(user_id), amount, note)
@@ -1456,11 +1936,146 @@ def get_investor_payout_log(limit: int = 50) -> list[dict]:
 
 
 def investor_payout_exists(note: str) -> bool:
-    """True if a distribution with this note tag already ran — makes the monthly V Tech
-    profit share idempotent per (market, month) even if a CSN month is re-ingested."""
+    """True if a distribution with this note tag already ran.
+
+    NOT the idempotency guard for the monthly V Tech profit share any more. It was,
+    and it was checked ONCE before the payout loop while the tag was written per
+    investor — so the first investor paid made the tag exist and every subsequent
+    attempt returned early with the other nine unpaid, permanently. The guard is
+    now per-investor (`investor_leg_claim`), checked inside the loop. This stays
+    for display/audit callers asking "did anything at all happen for this tag".
+    """
     with db() as conn:
         return conn.execute("SELECT 1 FROM investor_payout_log WHERE note=? LIMIT 1",
                             (str(note),)).fetchone() is not None
+
+
+def investor_leg_claim(tag: str, user_id: str, amount: int, *, conn=None) -> int:
+    """Claim-first, per investor: write this investor's marker as the FIRST
+    statement of the transaction that pays them. Returns the amount we are
+    cleared to pay, or 0 if we did not win the row.
+
+    It used to say "and COMMIT it before any coins move", and that was the best
+    available answer while the marker and the credit were separate transactions:
+    a death then cost one investor their CERTAINTY rather than their coins. Pass
+    `conn=` — as `_distribute_investor_profit` now does — and the marker, the
+    credit and the receipt commit together, so a death rolls the leg back to
+    unclaimed (or to `refused`, if that is where it came from) and the next run
+    simply pays it. Same move `_execute_dividend_run` made per holder leg.
+
+    One atomic write gated on the believed state, and the ROWCOUNT decides — never
+    a preceding SELECT:
+      * no row yet          -> INSERT OR IGNORE wins it, state `claimed`
+      * row is `refused`    -> a previous attempt provably paid nothing, so it is
+                               re-armed to `claimed` and paid again
+      * `claimed`/`applied`/`unknown` -> 0. Not ours, or already done, or nobody
+                               knows. Skipped in every case, which is the whole
+                               double-pay defence.
+
+    THE AMOUNT RETURNED IS THE PINNED ONE, not the caller's. A leg first sized
+    against one month's net keeps that size when a corrected net re-runs the
+    distribution, for the same reason `dividend_run_open` pins its plan: the
+    investor is owed what they were promised, and re-pricing mid-run silently
+    pays some investors on one basis and some on another.
+    """
+    amt = int(amount or 0)
+    if amt <= 0:
+        return 0
+    with db_in(conn) as conn:
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO investor_payout_claims (tag, user_id, amount, state) "
+            "VALUES (?,?,?,'claimed')", (str(tag), str(user_id), amt))
+        if cur.rowcount == 1:
+            return amt
+        cur = conn.execute(
+            "UPDATE investor_payout_claims SET state='claimed', detail='', "
+            " updated_at=datetime('now') WHERE tag=? AND user_id=? AND state='refused'",
+            (str(tag), str(user_id)))
+        if not cur.rowcount:
+            return 0
+        row = conn.execute(
+            "SELECT amount FROM investor_payout_claims WHERE tag=? AND user_id=?",
+            (str(tag), str(user_id))).fetchone()
+        return int(row["amount"]) if row else 0
+
+
+def investor_leg_settle(tag: str, user_id: str, state: str, detail: str = "",
+                        *, conn=None) -> bool:
+    """Resolve a claimed investor leg to applied / refused / unknown. Pass `conn=`
+    to settle it in the same transaction as the money it describes; bare is still
+    right for a leg being written down AFTER its transaction rolled back."""
+    if state not in ("applied", "refused", "unknown"):
+        raise ValueError(f"bad investor leg state {state!r}")
+    with db_in(conn) as conn:
+        cur = conn.execute(
+            "UPDATE investor_payout_claims SET state=?, detail=?, updated_at=datetime('now') "
+            "WHERE tag=? AND user_id=? AND state='claimed'",
+            (state, str(detail)[:400], str(tag), str(user_id)))
+        return cur.rowcount > 0
+
+
+def investor_leg_state(tag: str, user_id: str):
+    """The leg's own state. Used when a `commit()` itself fails: because the marker
+    commits WITH the money, the leg IS the receipt — `applied` means the
+    transaction landed, and no row at all means it rolled back.
+
+    THE THREE ANSWERS ARE KEPT APART ON PURPOSE. `None` means "no row: the claim
+    rolled back with the credit, nothing moved". `"unreadable"` means "the
+    database would not answer, so nobody knows". Collapsing those two into one
+    `None` — which is what an `except: return None` does — turns a real UNKNOWN
+    into "nothing moved", and the caller then pays the investor again on the next
+    run. That is the exact shape of every mint this component has had."""
+    try:
+        with db() as conn:
+            row = conn.execute(
+                "SELECT state FROM investor_payout_claims WHERE tag=? AND user_id=?",
+                (str(tag), str(user_id))).fetchone()
+        return row["state"] if row else None
+    except Exception:
+        return "unreadable"
+
+
+def investor_legs_adopt_stale(tag: str) -> int:
+    """Legs still `claimed` when a distribution STARTS were claimed by an attempt
+    that died holding them. Their outcome is UNKNOWN — the credit may or may not
+    have landed — so they are recorded as such and never automatically re-paid.
+    Returns how many. (Same rule and same words as
+    `dividend_run_adopt_stale_claims`; re-crediting is the mint both exist to stop.)"""
+    with db() as conn:
+        cur = conn.execute(
+            "UPDATE investor_payout_claims SET state='unknown', updated_at=datetime('now'), "
+            " detail=CASE WHEN detail='' THEN 'claimed by an attempt that did not finish; "
+            "outcome unknown — check the coin ledger before paying' ELSE detail END "
+            "WHERE tag=? AND state='claimed'", (str(tag),))
+        return int(cur.rowcount or 0)
+
+
+def investor_legs(tag: str = None, state: str = None) -> list:
+    """The read side: every investor leg, optionally filtered by tag and/or state.
+    `state='unknown'` is the operator's "who does nobody know about" list."""
+    sql = "SELECT * FROM investor_payout_claims"
+    where, args = [], []
+    if tag:
+        where.append("tag=?"); args.append(str(tag))
+    if state:
+        where.append("state=?"); args.append(str(state))
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY tag, amount DESC, user_id"
+    with db() as conn:
+        return [dict(r) for r in conn.execute(sql, tuple(args)).fetchall()]
+
+
+def investor_legs_tally(tag: str) -> dict:
+    """{paid, counts:{state:n}, unresolved} for one distribution tag."""
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT state, COUNT(*) n, COALESCE(SUM(amount),0) amt "
+            "FROM investor_payout_claims WHERE tag=? GROUP BY state", (str(tag),)).fetchall()
+    counts = {r["state"]: int(r["n"]) for r in rows}
+    amounts = {r["state"]: int(r["amt"]) for r in rows}
+    return {"paid": amounts.get("applied", 0), "counts": counts, "amounts": amounts,
+            "unresolved": sum(counts.get(s, 0) for s in ("claimed", "refused", "unknown"))}
 
 
 def replace_investors(rows: list, total_shares: float = None) -> int:
@@ -1611,48 +2226,252 @@ def _csn_source_profile(items_json: str) -> dict:
             for k, v in d.items() if isinstance(v, dict)}
 
 
-def _csn_supersedes(legacy_json: str, shop_json: str) -> bool:
-    """True when `legacy` is an EARLIER SNAPSHOT of the same shop as `shop`.
+def _csn_dominates(small_json: str, big_json: str,
+                   small_income=None, big_income=None) -> bool:
+    """LOOSE test: `big` covers everything `small` reports, and at least as much of it.
 
-    Test: every item in the legacy row also appears in the shop row, and every
-    quantity is <= the shop row's. A scan only ever grows within a month, so an
-    earlier snapshot of the same shop always satisfies this, while a genuinely
-    different shop fails it — either it sells something the other doesn't, or it
-    has sold MORE of something. Verified against the live 2026-08 data: it retires
-    the three duplicated rows and keeps the one legacy shop that has no stamped
-    twin yet."""
-    L, S = _csn_source_profile(legacy_json), _csn_source_profile(shop_json)
+    Items a subset, every quantity <=, and (when given) income <=. True of an
+    earlier snapshot of the same shop — and ALSO true of a corner shop next to a
+    flagship, which is why this is never on its own grounds to delete a row."""
+    L, S = _csn_source_profile(small_json), _csn_source_profile(big_json)
     if not L or not S or not set(L) <= set(S):
         return False
-    return all(L[k][0] <= S[k][0] and L[k][1] <= S[k][1] for k in L)
+    if not all(L[k][0] <= S[k][0] and L[k][1] <= S[k][1] for k in L):
+        return False
+    if small_income is not None and big_income is not None:
+        return float(small_income or 0) <= float(big_income or 0)
+    return True
+
+
+def _csn_supersedes(legacy_json: str, shop_json: str,
+                    legacy_income=None, shop_income=None) -> bool:
+    """True when `legacy` is an EARLIER SNAPSHOT OF THE SAME SHOP as `shop`.
+
+    STRICT (audit fix, MARKETS_VERIFY_R1 CSN-6). The old test was only
+    subset-of-items + every-quantity-<=, and that is the ORDINARY relationship
+    between a corner shop and a flagship in one market: a legacy transport-keyed
+    row holding a real second shop's 40,000 coins was DELETEd by an unrelated
+    shop's routine stamped upload, the month rolled up 260,000 instead of
+    300,000, and nothing recorded that it had happened.
+
+    A snapshot of the same shop and a smaller neighbouring shop are only
+    distinguishable by the SHAPE of the catalogue, so the test now demands the
+    same catalogue: identical item-name sets, every quantity <=, and income <=.
+    An earlier snapshot of one shop still satisfies all three (a scan grows in
+    quantity within a month); a different shop that merely sells a subset of the
+    flagship's lines does not, because its item set is a strict subset.
+
+    The cost, stated rather than hidden: a pre-stamp snapshot taken before the
+    shop started selling a NEW line is no longer auto-retired, so it keeps
+    contributing to the month until someone removes it. That direction leaves a
+    stale figure that an operator can see and delete; the old direction silently
+    destroyed a live one. `csn_retire_superseded_sources` logs those cases by
+    name (`_csn_dominates` but not `_csn_supersedes`) instead of acting on them,
+    and retirement is now reversible either way."""
+    L, S = _csn_source_profile(legacy_json), _csn_source_profile(shop_json)
+    if not L or not S or set(L) != set(S):
+        return False
+    if not all(L[k][0] <= S[k][0] and L[k][1] <= S[k][1] for k in L):
+        return False
+    if legacy_income is not None and shop_income is not None:
+        return float(legacy_income or 0) <= float(shop_income or 0)
+    return True
+
+
+def _csn_archive_source(conn, market_id: str, month: str, row, superseded_by: str,
+                        reason: str) -> None:
+    """Move ONE source row to csn_month_sources_retired. Archive-then-delete inside
+    the CALLER's transaction, so the row can never be gone from both tables."""
+    conn.execute(
+        "INSERT INTO csn_month_sources_retired (market_id, month, source_key, income,"
+        " spent, items_json, superseded_by, reason, retired_at)"
+        " VALUES (?,?,?,?,?,?,?,?,?)",
+        (str(market_id), str(month), str(row["source_key"]),
+         float(row["income"] or 0), float(row["spent"] or 0), row["items_json"],
+         str(superseded_by), str(reason),
+         datetime.now(timezone.utc).isoformat()))
+    conn.execute("DELETE FROM csn_month_sources "
+                 "WHERE market_id=? AND month=? AND source_key=?",
+                 (str(market_id), str(month), str(row["source_key"])))
+
+
+def _csn_is_retirable_key(key: str) -> bool:
+    """Only LEGACY TRANSPORT keys are candidates for shop-stamp retirement.
+
+    `shop:` rows are the stamped identities themselves. `export:` rows are the
+    per-sale export ledger's own contribution to the month — a different KIND of
+    source, not an earlier snapshot of a shop's monthly, and retiring one would
+    delete revenue the monthly file never described."""
+    k = str(key or "")
+    return not (k.startswith("shop:") or k.startswith("export:"))
 
 
 def csn_retire_superseded_sources(market_id: str, month: str) -> list:
-    """Drop legacy TRANSPORT-keyed source rows that a `shop:` row now supersedes.
+    """Retire legacy TRANSPORT-keyed source rows that a `shop:` row supersedes.
 
     Month sources used to be keyed by the Discord channel/poster a file arrived
     from. The mod's `# SHOP` stamp changed the key to shop:<ign>, so every shop that
     re-scanned with the new jar started contributing TWICE — once under its old
-    numeric key, once under its shop name. Returns the retired keys."""
+    numeric key, once under its shop name. Returns the retired keys.
+
+    Retirement MOVES the row to csn_month_sources_retired (it used to DELETE it),
+    and the supersession test is now strict — see `_csn_supersedes`. A row that is
+    merely DOMINATED by a stamped row is left alone and logged, because that is
+    also what a real smaller shop looks like."""
     retired = []
     with db() as conn:
         rows = conn.execute(
-            "SELECT source_key, items_json FROM csn_month_sources WHERE market_id=? AND month=?",
+            "SELECT source_key, income, spent, items_json FROM csn_month_sources "
+            "WHERE market_id=? AND month=?",
             (str(market_id), str(month))).fetchall()
         shops = [r for r in rows if str(r["source_key"]).startswith("shop:")
-                 and str(r["source_key"]) != "shop:unstamped"]
+                 and not str(r["source_key"]).startswith("shop:unstamped")]
         if not shops:
             return retired          # nothing stamped yet — legacy rows are all we have
         for r in rows:
             key = str(r["source_key"])
-            if key.startswith("shop:"):
+            if not _csn_is_retirable_key(key):
                 continue
-            if any(_csn_supersedes(r["items_json"], s["items_json"]) for s in shops):
-                conn.execute("DELETE FROM csn_month_sources "
-                             "WHERE market_id=? AND month=? AND source_key=?",
-                             (str(market_id), str(month), key))
+            winner = next((s for s in shops if _csn_supersedes(
+                r["items_json"], s["items_json"], r["income"], s["income"])), None)
+            if winner is not None:
+                _csn_archive_source(conn, market_id, month, r,
+                                    str(winner["source_key"]), "shop-stamp")
                 retired.append(key)
+                continue
+            near = next((s for s in shops if _csn_dominates(
+                r["items_json"], s["items_json"], r["income"], s["income"])), None)
+            if near is not None:
+                log.warning(
+                    "[csn] %s %s: legacy source %s (income %.0f) is covered by "
+                    "stamped %s but sells a SUBSET of its lines — keeping it. If it "
+                    "is the same shop pre-stamp, remove it by hand; if it is a real "
+                    "second shop, this is correct.",
+                    market_id, month, key, float(r["income"] or 0),
+                    str(near["source_key"]))
     return retired
+
+
+def _csn_unstamped_key(items: dict) -> str:
+    """The bucket an UNSTAMPED monthly file belongs in: `shop:unstamped:<hash>`.
+
+    Files from mod builds older than the `# SHOP` stamp used to share ONE key,
+    `shop:unstamped`, and that key REPLACES. Two different shops on old builds
+    therefore annihilated each other: 500,000 then 300,000 read as 300,000, and
+    because the month moved DOWN no anomaly fired (MARKETS_VERIFY_R1 CSN-5).
+
+    An unstamped file carries no shop identity at all, so the strongest one
+    available is the shape of its catalogue: the set of item names it reports.
+    Two shops selling different lines now land in different buckets and SUM;
+    the same shop rescanning lands in the same bucket and REPLACES. Growth that
+    adds a new line changes the hash, which is handled by the rescan merge in
+    `csn_set_unstamped_month_source` — never by adding a second row."""
+    import hashlib
+    names = sorted({str(k).strip().lower() for k in (items or {}) if str(k).strip()})
+    if not names:
+        return "shop:unstamped"
+    return "shop:unstamped:" + hashlib.sha1(
+        "\x00".join(names).encode("utf-8")).hexdigest()[:12]
+
+
+def csn_set_unstamped_month_source(market_id: str, month: str, income: float,
+                                   spent: float, items: dict) -> str:
+    """Record an UNSTAMPED monthly file's figures and return the source key used.
+
+    Two jobs, in one transaction:
+
+    1. Bucket by catalogue hash so two different unstamped shops cannot collide
+       (`_csn_unstamped_key`).
+    2. Retire any EARLIER unstamped snapshot this file strictly covers — items a
+       superset, every quantity >=, income >= — so a rescan that picked up a new
+       line replaces its predecessor instead of adding to it. Without this,
+       changing the hash would DOUBLE-BOOK the month, which is the one direction
+       that invents coins.
+
+    The retired row is archived, never deleted, so the ambiguous case (a flagship
+    that happens to cover a smaller unstamped shop entirely) is recoverable and
+    logged rather than silent. That is strictly better than the previous
+    behaviour, where ANY second unstamped file annihilated the first whether it
+    covered it or not."""
+    key = _csn_unstamped_key(items)
+    new_json = json.dumps(items or {}, ensure_ascii=False)
+    now = datetime.now(timezone.utc).isoformat()
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT source_key, income, spent, items_json FROM csn_month_sources "
+            "WHERE market_id=? AND month=? AND source_key LIKE 'shop:unstamped%'",
+            (str(market_id), str(month))).fetchall()
+        for r in rows:
+            if str(r["source_key"]) == key:
+                continue                      # same bucket — the UPSERT replaces it
+            if _csn_dominates(r["items_json"], new_json, r["income"], income):
+                log.info("[csn] %s %s: unstamped rescan %s covers earlier %s "
+                         "(income %.0f) — retiring it into the archive",
+                         market_id, month, key, str(r["source_key"]),
+                         float(r["income"] or 0))
+                _csn_archive_source(conn, market_id, month, r, key, "unstamped-rescan")
+        conn.execute(
+            "INSERT INTO csn_month_sources (market_id, month, source_key, income, spent,"
+            " items_json, updated_at) VALUES (?,?,?,?,?,?,?) "
+            "ON CONFLICT(market_id, month, source_key) DO UPDATE SET "
+            "income=excluded.income, spent=excluded.spent, items_json=excluded.items_json,"
+            " updated_at=excluded.updated_at",
+            (str(market_id), str(month), key, float(income or 0), float(spent or 0),
+             new_json, now))
+    return key
+
+
+def csn_add_export_source(market_id: str, month: str, income: float, spent: float,
+                          items: dict, shop: str = "") -> str:
+    """ACCUMULATE one export file's contribution into the market-month rollup.
+
+    Exports never wrote `csn_month_sources` at all. `csn_history` was merged into
+    directly, so a later monthly file — which REPLACES the month with the rollup
+    across sources — erased every export that came before it: export 1,000 then a
+    disjoint monthly 7,000 read as 7,000, not 8,000 (MARKETS_VERIFY_R1 CSN-4).
+    The export's coins were real, per-sale, already in `csn_transactions`, and
+    they left the month anyway.
+
+    ACCUMULATE, not replace, because an export carries ONE period's partials while
+    a monthly re-aggregates the whole month. That is the same semantics
+    `_record_to_market_history(merge=True)` already applies to csn_history, so the
+    two stores agree. It is idempotent for free: a re-uploaded export's rows are
+    already claimed by the `earn` consumer, so it arrives here with income 0."""
+    add_json = json.dumps(items or {}, ensure_ascii=False)
+    key = "export:" + (str(shop).strip() or "unstamped")
+    now = datetime.now(timezone.utc).isoformat()
+    with db() as conn:
+        row = conn.execute(
+            "SELECT income, spent, items_json FROM csn_month_sources "
+            "WHERE market_id=? AND month=? AND source_key=?",
+            (str(market_id), str(month), key)).fetchone()
+        if row is None:
+            conn.execute(
+                "INSERT INTO csn_month_sources (market_id, month, source_key, income,"
+                " spent, items_json, updated_at) VALUES (?,?,?,?,?,?,?)",
+                (str(market_id), str(month), key, float(income or 0),
+                 float(spent or 0), add_json, now))
+            return key
+        try:
+            merged = json.loads(row["items_json"] or "{}") or {}
+        except Exception:
+            merged = {}
+        for item, v in (items or {}).items():
+            if not isinstance(v, dict):
+                continue
+            e = merged.setdefault(item, {"sold_qty": 0, "bought_qty": 0, "net_coins": 0.0})
+            e["sold_qty"] = int(e.get("sold_qty", 0) or 0) + int(v.get("sold_qty", 0) or 0)
+            e["bought_qty"] = int(e.get("bought_qty", 0) or 0) + int(v.get("bought_qty", 0) or 0)
+            e["net_coins"] = round(float(e.get("net_coins", 0) or 0)
+                                   + float(v.get("net_coins", 0) or 0), 2)
+        conn.execute(
+            "UPDATE csn_month_sources SET income=?, spent=?, items_json=?, updated_at=? "
+            "WHERE market_id=? AND month=? AND source_key=?",
+            (round(float(row["income"] or 0) + float(income or 0), 2),
+             round(float(row["spent"] or 0) + float(spent or 0), 2),
+             json.dumps(merged, ensure_ascii=False), now,
+             str(market_id), str(month), key))
+    return key
 
 
 def csn_set_month_source(market_id: str, month: str, source_key: str,
@@ -1676,10 +2495,15 @@ def csn_set_month_source(market_id: str, month: str, source_key: str,
                 "SELECT 1 FROM csn_month_sources WHERE market_id=? AND month=? AND source_key=?",
                 (str(market_id), str(month), str(source_key))).fetchone()
             if not mine and conn_items not in ("{}", "null"):
+                # `export:` rows are excluded: an export is a DIFFERENT KIND of
+                # source (one period's per-sale partials) from a monthly, so a
+                # month with a single sale, where the two happen to carry the same
+                # figures, is not one file arriving twice. Treating it as one would
+                # silently drop the monthly and leave the month short.
                 twin = conn.execute(
                     "SELECT source_key FROM csn_month_sources "
                     "WHERE market_id=? AND month=? AND items_json=? "
-                    "AND income=? AND spent=?",
+                    "AND income=? AND spent=? AND source_key NOT LIKE 'export:%'",
                     (str(market_id), str(month), conn_items,
                      float(income or 0), float(spent or 0))).fetchone()
                 if twin:
@@ -1702,11 +2526,43 @@ def csn_set_month_source(market_id: str, month: str, source_key: str,
              float(spent or 0), conn_items, now))
     # A stamped shop row supersedes whatever that same shop was filed under before the
     # `# SHOP` stamp existed. Outside the connection above so the DELETE sees this row.
-    if str(source_key).startswith("shop:") and str(source_key) != "shop:unstamped":
+    # `shop:unstamped*` covers both the legacy single bucket and the per-catalogue
+    # hashed buckets: an unstamped file names no shop, so it can never be the stamped
+    # identity that retires a legacy row.
+    if str(source_key).startswith("shop:") and not str(source_key).startswith("shop:unstamped"):
         try:
             csn_retire_superseded_sources(market_id, month)
         except Exception:
             pass
+        # A shop's MONTHLY re-aggregates that shop's whole month, so it supersedes
+        # that shop's own export slices for the month. Retiring them is what keeps
+        # the two file types from double-counting their overlap; a later export
+        # re-opens the row with only the sales this monthly could not have seen.
+        try:
+            csn_retire_export_source(market_id, month, str(source_key)[len("shop:"):])
+        except Exception:
+            pass
+
+
+def csn_retire_export_source(market_id: str, month: str, shop: str) -> bool:
+    """Archive `export:<shop>` for a market-month, because `shop:<shop>`'s own
+    monthly file now covers it. Returns True if a row was retired."""
+    key = "export:" + str(shop or "").strip()
+    if key == "export:":
+        return False
+    with db() as conn:
+        row = conn.execute(
+            "SELECT source_key, income, spent, items_json FROM csn_month_sources "
+            "WHERE market_id=? AND month=? AND source_key=? COLLATE NOCASE",
+            (str(market_id), str(month), key)).fetchone()
+        if row is None:
+            return False
+        log.info("[csn] %s %s: monthly from %s supersedes its own export slice "
+                 "(income %.0f) — archived, not added",
+                 market_id, month, shop, float(row["income"] or 0))
+        _csn_archive_source(conn, market_id, month, row, "shop:" + str(shop),
+                            "monthly-supersedes-export")
+    return True
 
 
 def csn_month_totals(market_id: str, month: str) -> dict:
@@ -1738,27 +2594,28 @@ def csn_month_totals(market_id: str, month: str) -> dict:
             "items": items, "sources": n}
 
 
+def csn_retired_sources(market_id: str, month: str = "") -> list:
+    """Everything retirement took out of a market's rollup, newest first.
+
+    The undo half of `csn_retire_superseded_sources` / the unstamped rescan merge:
+    a month that reads low can be explained without a backup, and a wrongly
+    retired shop can be put back with its own figures."""
+    sql = ("SELECT id, market_id, month, source_key, income, spent, items_json,"
+           " superseded_by, reason, retired_at FROM csn_month_sources_retired "
+           "WHERE market_id=?")
+    args = [str(market_id)]
+    if month:
+        sql += " AND month=?"
+        args.append(str(month))
+    with db() as conn:
+        return [dict(r) for r in conn.execute(sql + " ORDER BY id DESC", args).fetchall()]
+
+
 def csn_all_market_ids() -> list:
     with db() as conn:
         return [r[0] for r in conn.execute(
             "SELECT DISTINCT market_id FROM csn_history").fetchall()]
 
-
-def csn_last_report_at() -> dict:
-    """{market_id: latest recorded_at} — the last time ANY CSN report from that market
-    landed, across every month row it has.
-
-    Only markets that have reported at least once appear, which is exactly the set the
-    silence watchdog should watch: a market that has never reported has nothing to have
-    stopped doing. Rows with a blank recorded_at are skipped rather than read as the
-    epoch, which would call every such market decades quiet.
-    """
-    with db() as conn:
-        rows = conn.execute(
-            "SELECT market_id, MAX(recorded_at) AS last_at FROM csn_history "
-            "WHERE recorded_at IS NOT NULL AND TRIM(recorded_at) <> '' "
-            "GROUP BY market_id").fetchall()
-        return {r["market_id"]: r["last_at"] for r in rows}
 
 
 def get_config(key, default=None):
@@ -1933,18 +2790,23 @@ def list_bonds(market_id: str = None, status: str = None) -> list[dict]:
         return [dict(r) for r in conn.execute(q, args).fetchall()]
 
 
-def update_bond(bond_id: int, **fields) -> None:
+def update_bond(bond_id: int, *, conn=None, **fields) -> None:
+    """Pass `conn=` to update the bond inside the caller's transaction — a bond
+    that flips to `active` because a purchase filled the series must flip in the
+    same commit as the coins that filled it."""
     if not fields:
         return
     cols = ", ".join(f"{k}=?" for k in fields)
-    with db() as conn:
+    with db_in(conn) as conn:
         conn.execute(f"UPDATE bonds SET {cols} WHERE id=?",
                      (*fields.values(), int(bond_id)))
 
 
 def adjust_bond_holding(bond_id: int, user_id: str, d_units: float, d_invested: float,
-                        name: str = None) -> None:
-    with db() as conn:
+                        name: str = None, *, conn=None) -> None:
+    """Pass `conn=` to record the units in the same transaction as the coins that
+    bought them (see `db_in`)."""
+    with db_in(conn) as conn:
         conn.execute(
             "INSERT INTO bond_holdings (bond_id, user_id, units, invested, name) "
             "VALUES (?,?,?,?,?) "
@@ -1974,7 +2836,15 @@ def get_user_bonds(user_id: str) -> list[dict]:
 
 
 def get_config_prefix(prefix: str) -> dict:
-    """All bot_config rows whose key starts with prefix → {key: value}."""
+    """All bot_config rows whose key starts with prefix → {key: value}.
+
+    Used to enumerate bindings stored as one key per channel, e.g.
+    `hive_feed:<channel_id>` → market_id.
+
+    (There were two identical definitions of this in the module; the second
+    shadowed this one and carried the better docstring, which is now here. They
+    behaved the same, so nothing changed but the reading — unlike
+    `list_futures_orders`, whose shadow silently dropped two parameters.)"""
     with db() as conn:
         rows = conn.execute("SELECT key, value FROM bot_config WHERE key LIKE ?",
                             (str(prefix) + "%",)).fetchall()
@@ -1988,6 +2858,32 @@ def set_config(key, value) -> None:
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             (str(key), None if value is None else str(value)),
         )
+
+
+def adjust_config_number(key, delta: float, *, floor: float = 0.0, conn=None) -> float:
+    """CLAIM-FIRST on a numeric `bot_config` value: add `delta` in ONE relative
+    UPDATE and return the value afterwards, read inside the same transaction.
+
+    Exists because the exchange insurance fund is a coin pot stored as a config
+    key, and `get_config` -> add -> `set_config` is the same lost update
+    `adjust_treasury` just stopped being. Measured after that fix landed: two
+    concurrent buys each skimmed 52 coins out of their treasuries (correctly,
+    relatively) and the pot recorded ONE of them — 52 coins destroyed, no error.
+    Coins do not stop needing a claim because they are kept in a string column.
+
+    `floor` clamps the stored value (the pot must not go negative); the returned
+    number is what the row now holds, not what the caller asked for."""
+    with db_in(conn) as conn:
+        conn.execute("INSERT OR IGNORE INTO bot_config (key, value) VALUES (?, '0')",
+                     (str(key),))
+        conn.execute(
+            "UPDATE bot_config SET value = CAST(MAX(?, CAST(COALESCE(value,'0') AS REAL) + ?) "
+            "AS TEXT) WHERE key=?", (float(floor), float(delta), str(key)))
+        row = conn.execute("SELECT value FROM bot_config WHERE key=?", (str(key),)).fetchone()
+        try:
+            return float(row["value"]) if row else float(floor)
+        except (TypeError, ValueError):
+            return float(floor)
 
 
 def delete_config(key) -> None:
@@ -2167,11 +3063,16 @@ def get_etf_holders() -> list:
         return [dict(r) for r in rows]
 
 
-def adjust_etf_units(user_id: str, delta_units: float, delta_cost: float) -> float:
+def adjust_etf_units(user_id: str, delta_units: float, delta_cost: float,
+                     *, conn=None) -> float:
     """Apply +/- units & cost to a holder; clamps tiny/negative remainders to 0.
-    Returns the new unit total."""
+    Returns the new unit total.
+
+    Pass `conn=` so a redemption burns the units in the SAME transaction that
+    pays for them — two commits meant a death between them paid the redeemer and
+    left the units in their name, which is a mint on the next redemption."""
     now = datetime.now(timezone.utc).isoformat()
-    with db() as conn:
+    with db_in(conn) as conn:
         conn.execute(
             "INSERT INTO etf_holdings (user_id, units, cost_basis, updated_at) VALUES (?,?,?,?) "
             "ON CONFLICT(user_id) DO UPDATE SET units=units+excluded.units, "
@@ -2181,8 +3082,27 @@ def adjust_etf_units(user_id: str, delta_units: float, delta_cost: float) -> flo
                            (str(user_id),)).fetchone()
         u = float(row["units"]) if row else 0.0
         if u <= 0.0000001:
-            conn.execute("UPDATE etf_holdings SET units=0, cost_basis=0 WHERE user_id=?", (str(user_id),))
-            u = 0.0
+            # COMPARE-AND-SWAP, not a blind zero, AND THE ROWCOUNT IS THE ANSWER.
+            # `SET units=0, cost_basis=0 WHERE user_id=?` stored a value computed
+            # from the SELECT above, so a concurrent investment landing between
+            # the read and the write had its whole stake wiped — coins taken,
+            # units gone, no error. Gated on BOTH figures just read (the clamp
+            # zeroes both columns, so both have to still be the ones it decided
+            # about), a writer that got in first simply wins.
+            #
+            # Losing the race does NOT mean "zero". It means the row moved, so
+            # the caller is told what it now holds rather than the dust reading
+            # this call arrived with — returning 0.0 there would report a live
+            # stake as burned.
+            cb = float(row["cost_basis"] or 0.0) if row else 0.0
+            cur = conn.execute("UPDATE etf_holdings SET units=0, cost_basis=0 "
+                               "WHERE user_id=? AND units = ? AND cost_basis = ?",
+                               (str(user_id), u, cb))
+            if cur.rowcount:
+                return 0.0
+            fresh = conn.execute("SELECT units FROM etf_holdings WHERE user_id=?",
+                                 (str(user_id),)).fetchone()
+            return float(fresh["units"]) if fresh else 0.0
         return u
 
 
@@ -2476,12 +3396,17 @@ def get_loyalty(user_id: str) -> dict:
         return {"user_id": str(user_id), "points": 0.0, "total_earned": 0.0, "last_activity": None}
 
 
-def add_loyalty_points(user_id: str, points: float, *, update_activity: bool = True) -> float:
+def add_loyalty_points(user_id: str, points: float, *, update_activity: bool = True,
+                       conn=None) -> float:
     """Add points to a user. Returns new point total.
     total_earned only ever GROWS: negative deltas (redemption deductions) reduce the balance
-    but must not shrink the all-time-earned stat shown in /loyalty stats."""
+    but must not shrink the all-time-earned stat shown in /loyalty stats.
+
+    Pass `conn=` to run inside the caller's transaction — a bare `+= points` is
+    not idempotent, so a retried reversal has to commit the points move and its
+    idempotency row together (see `db_in`)."""
     now = datetime.now(timezone.utc).isoformat()
-    with db() as conn:
+    with db_in(conn) as conn:
         conn.execute("""
             INSERT INTO loyalty (user_id, points, total_earned, last_activity, updated_at)
             VALUES (?, ?, ?, ?, ?)
@@ -2541,12 +3466,14 @@ def get_market_loyalty(user_id: str, market_id: str) -> dict:
 
 
 def add_market_loyalty_points(user_id: str, market_id: str, points: float,
-                              *, update_activity: bool = True) -> float:
+                              *, update_activity: bool = True, conn=None) -> float:
     """Add points to a user's ledger for ONE market — each market owner's own reward
     currency, independent of every other market and of the shared V Tech pool (the
-    `loyalty` table). Returns the new point total for that (user, market) pair."""
+    `loyalty` table). Returns the new point total for that (user, market) pair.
+
+    Pass `conn=` to run inside the caller's transaction (see `db_in`)."""
     now = datetime.now(timezone.utc).isoformat()
-    with db() as conn:
+    with db_in(conn) as conn:
         conn.execute("""
             INSERT INTO market_loyalty_ledger (user_id, market_id, points, total_earned, last_activity, updated_at)
             VALUES (?, ?, ?, ?, ?, ?)
@@ -3012,16 +3939,6 @@ def get_futures_bulk_line(line_id: int) -> Optional[dict]:
         return dict(row) if row else None
 
 
-def list_futures_orders(status: str = None) -> list:
-    with db() as conn:
-        if status:
-            rows = conn.execute("SELECT * FROM futures_orders WHERE status=? ORDER BY id",
-                                (str(status),)).fetchall()
-        else:
-            rows = conn.execute("SELECT * FROM futures_orders ORDER BY id").fetchall()
-        return [dict(r) for r in rows]
-
-
 def get_futures_bulk_lines_all() -> list:
     """Every bulk line with its bulk's status — for backfills that must know whether the
     deal is live before touching its pricing."""
@@ -3148,13 +4065,38 @@ def set_item_worker_cost(name: str, worker_cost) -> None:
 
 def add_hive_harvest(market_id: str, ign: str, user_id, item: str, qty: int,
                      unit_value: float, msg_id: str, line_no: int, sale_ts: str = None,
-                     wage_value: float = None):
+                     wage_value: float = None, sale_sig: str = None):
     """Record one parsed harvest line. Returns the new row id if it was NEW, else None.
-    Idempotent two ways: per message+line (re-ingesting the same Discord message never
-    double-counts), and — when a sale timestamp is present — per real sale identity
-    (market+ign+item+qty+sale_ts via the uq_hive_sale index), so the same sale posted or
-    re-scanned any number of times still pays exactly once. The id lets auto-payout settle
-    exactly the rows it just created."""
+    The id lets auto-payout settle exactly the rows it just created.
+
+    TWO DEDUP REGIMES, chosen by whether the caller can identify the sale exactly:
+
+    `sale_sig` GIVEN (CSN export path) — the caller has a csn_sig content signature,
+    which is exactly reproducible from the sale's own content. Uniqueness against other
+    SIGNED rows is that signature (uq_hive_sig) and nothing else: the ±120s heuristic
+    is not consulted between two signed rows, because there it is not a safety net, it
+    is a bug — two genuinely separate harvests of the same item and quantity by the
+    same player inside two minutes are indistinguishable to it, so the second was
+    dropped and that harvester was never paid for it. Exactly-once is already
+    guaranteed upstream: the caller claims the row's `hive_state` in csn_ingest before
+    calling (claim-first), so this is reached at most once per (market, signature) even
+    across bot instances.
+
+    A signed row IS still checked against UNSIGNED rows by the window, and that half is
+    load-bearing twice over:
+      - MIGRATION. Every wage already in this table predates signatures and has
+        sale_sig NULL. The first export uploaded after the upgrade re-presents the
+        whole append-only period file, so without this check every one of those sales
+        would arrive as a brand-new signed row and be PAID A SECOND TIME. Caught by
+        test_csn_migration.py check 6.
+      - THE OTHER FEED. The csn-hive webhook posts the same physical sales as unsigned
+        rows. A signed export row for a sale the feed already paid must lose.
+
+    `sale_sig` OMITTED (csn-hive webhook feed) — unchanged behaviour, and the window
+    still sees every row, signed or not, so a feed line for a sale the export already
+    paid is refused. A feed line carries no seller, verb or amount and cannot be
+    signed, so it keeps the msg+line key, the market+ign+item+qty+sale_ts identity
+    index, and the window that covers this path's real drift."""
     with db() as conn:
         # NEAR-DUPLICATE GUARD. uq_hive_sale keys on the EXACT sale_ts, but the mod
         # reconstructs that timestamp from "Xh Ym ago" — minute precision — so the SAME
@@ -3179,20 +4121,28 @@ def add_hive_harvest(market_id: str, ign: str, user_id, item: str, qty: int,
         if sale_ts:
             mine = _csn_ts_seconds(sale_ts)
             if mine is not None:
+                # A SIGNED row compares itself only against UNSIGNED rows. Two signed
+                # rows are told apart exactly by uq_hive_sig, so letting this fuzzy
+                # window arbitrate between them is what silently swallowed a real
+                # second harvest. Against unsigned rows the window is all there is.
+                sql = ("SELECT sale_ts FROM hive_harvests WHERE ign=? COLLATE NOCASE "
+                       "AND item=? AND qty=? AND sale_ts IS NOT NULL")
+                if sale_sig:
+                    sql += " AND sale_sig IS NULL"
                 for row in conn.execute(
-                        "SELECT sale_ts FROM hive_harvests WHERE ign=? COLLATE NOCASE "
-                        "AND item=? AND qty=? AND sale_ts IS NOT NULL",
-                        (str(ign), str(item), int(qty))).fetchall():
+                        sql, (str(ign), str(item), int(qty))).fetchall():
                     other = _csn_ts_seconds(row[0])
                     if other is not None and abs(other - mine) <= 120:
                         return None            # already ingested — never pay twice
         cur = conn.execute(
             "INSERT OR IGNORE INTO hive_harvests "
-            "(market_id, ign, user_id, item, qty, unit_value, wage_value, msg_id, line_no, sale_ts) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            "(market_id, ign, user_id, item, qty, unit_value, wage_value, msg_id, line_no, "
+            " sale_ts, sale_sig) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             (str(market_id), str(ign), (str(user_id) if user_id else None), str(item),
              int(qty), float(unit_value or 0), float(wage_value or 0), str(msg_id), int(line_no),
-             (str(sale_ts) if sale_ts else None)))
+             (str(sale_ts) if sale_ts else None),
+             (str(sale_sig) if sale_sig else None)))
         return int(cur.lastrowid) if cur.rowcount > 0 else None
 
 
@@ -3361,18 +4311,6 @@ def get_hive_months(market_id: str) -> dict:
         return {r["month"]: float(r["net"] or 0) for r in rows}
 
 
-def get_config_prefix(prefix: str) -> dict:
-    """Every bot_config row whose key starts with `prefix` → {key: value}.
-
-    Used to enumerate bindings that are stored as one key per channel, e.g.
-    `hive_feed:<channel_id>` → market_id.
-    """
-    with db() as conn:
-        rows = conn.execute("SELECT key, value FROM bot_config WHERE key LIKE ?",
-                            (f"{prefix}%",)).fetchall()
-        return {r["key"]: r["value"] for r in rows}
-
-
 def get_hive_harvest_summary(market_id: str) -> dict:
     """Per-month harvest rollup for one hive site.
 
@@ -3431,20 +4369,377 @@ def _csn_ts_seconds(ts: str):
         return None
 
 
+CSN_CONSUMERS = ("txn", "earn", "hive", "feed")
+
+
+def _csn_ingest_row_payload(market_id: str, r: dict) -> dict:
+    """Canonicalise one parsed CSV row into what `csn_ingest` stores.
+
+    Raises csn_sig.SigError when the row cannot be signed. That is deliberately
+    not caught here: a row we cannot sign is a row we cannot dedup, and quietly
+    dropping it is exactly how a market's revenue goes missing without a trace.
+    The caller reports it and counts it."""
+    import csn_sig
+
+    occ = r.get("occ")
+    legacy = 0 if occ else 1
+    if not occ:
+        # Pre-v3 mod (no occ column). csn_sig.assign_occurrences has already
+        # numbered the batch; a single row arriving alone is simply occurrence 1.
+        occ = 1
+    sale_date = r.get("sale_date") or (str(r.get("sale_ts") or "")[:10])
+    coins_src = r.get("coins_str", r.get("coins"))
+    payload = {
+        "link_id":      str(market_id),
+        "seller":       csn_sig.norm_name(r.get("seller")),
+        "actor":        csn_sig.norm_name(r.get("actor")),
+        "verb":         str(r.get("verb") or "").strip().lower(),
+        "item_raw":     csn_sig.norm_item(r.get("item_raw") or r.get("item") or ""),
+        "item_display": str(r.get("item") or "").strip(),
+        # Cleaned (colour codes, whitespace) but NOT case-folded — this is the name a
+        # human reads. norm_item does exactly that shaping and nothing else.
+        "actor_display":  csn_sig.norm_item(r.get("actor")),
+        "seller_display": csn_sig.norm_item(r.get("seller")),
+        "qty":          int(r.get("qty") or 0),
+        "coins_centi":  csn_sig.coins_to_centi(coins_src),
+        "sale_date":    sale_date,
+        "occ":          int(occ),
+        "sale_ts":      str(r.get("sale_ts") or "") or None,
+        "source_key":   str(r.get("source_key") or "") or None,
+        "source_file":  str(r.get("source_file") or "") or None,
+        "legacy":       legacy,
+    }
+    # Signed through `csn_sig.sig_for_row` — the SAME row-dict marshalling the
+    # parity tests exercise — rather than by unpacking the eight fields here.
+    # Both spellings produce the identical digest today (the normalisers are
+    # idempotent), but they were two copies of one rule: the tests proved
+    # `sig_for_row` agreed with the mod while production hand-rolled its own
+    # argument order, so a change to either could drift without a failing test.
+    # `sig_for_row` had no production caller at all before this.
+    payload["sig"] = csn_sig.sig_for_row({
+        "seller":    payload["seller"],
+        "actor":     payload["actor"],
+        "verb":      payload["verb"],
+        "qty":       payload["qty"],
+        "item_raw":  payload["item_raw"],
+        "coins_str": _centi_to_decimal_str(payload["coins_centi"]),
+        "sale_date": payload["sale_date"],
+        "occ":       payload["occ"],
+    })
+    return payload
+
+
+def _centi_to_decimal_str(centi: int) -> str:
+    """Integer centi-coins back to the canonical 2dp decimal string the signature
+    hashes. Round-trips exactly: `coins_to_centi(_centi_to_decimal_str(n)) == n`."""
+    sign = "-" if centi < 0 else ""
+    whole, frac = divmod(abs(int(centi)), 100)
+    return f"{sign}{whole}.{frac:02d}"
+
+
+def csn_ingest_record(market_id: str, rows: list) -> dict:
+    """Land parsed CSN rows in the ONE durable store. Insert-and-catch IS the dedup.
+
+    Returns {"new": n, "dup": n, "bad": n, "ids": [...], "errors": [...]} where
+    `ids` are the csn_ingest row ids for EVERY row that is now stored — new or
+    already-present — so a caller can drive the consumers over a re-uploaded file
+    and still have each consumer act exactly once (its own flag decides, not this
+    function's notion of "new").
+
+    Midnight edge: a row whose reconstructed time-of-day falls within
+    csn_sig.DRIFT_SECONDS of midnight could have been filed under either of two
+    dates on a previous walk, so before inserting we probe the adjacent date for
+    the same content. That is a bounded, exact, two-key lookup over a 60-second
+    band — not the ±90s fuzzy window it replaces, which fired on every row and
+    could merge two genuinely distinct sales."""
+    import csn_sig
+
+    out = {"new": 0, "dup": 0, "bad": 0, "ids": [], "errors": []}
+    if not rows:
+        return out
+    now = _utcnow_iso()
+    with db() as conn:
+        for r in rows:
+            try:
+                p = _csn_ingest_row_payload(market_id, r)
+            except Exception as exc:                       # unsignable row
+                out["bad"] += 1
+                out["errors"].append(f"{r.get('item') or '?'}: {exc}")
+                continue
+
+            # Exact hit first — the overwhelmingly common case.
+            hit = conn.execute(
+                "SELECT id FROM csn_ingest WHERE link_id=? AND sig=?",
+                (p["link_id"], p["sig"])).fetchone()
+
+            # Midnight boundary: the same sale may already be stored under the
+            # previous date. Probe by CONTENT (not by time proximity) on exactly
+            # the dates csn_sig says are reachable for this row.
+            if hit is None:
+                alts = csn_sig.boundary_dates(p["sale_date"], p.get("sale_ts"))
+                for alt_date in alts[1:]:
+                    alt_sig = csn_sig.sale_sig(
+                        p["seller"], p["actor"], p["verb"], p["qty"], p["item_raw"],
+                        _centi_to_decimal_str(p["coins_centi"]), alt_date, p["occ"])
+                    hit = conn.execute(
+                        "SELECT id FROM csn_ingest WHERE link_id=? AND sig=?",
+                        (p["link_id"], alt_sig)).fetchone()
+                    if hit is not None:
+                        break
+
+            if hit is not None:
+                out["dup"] += 1
+                out["ids"].append(int(hit[0]))
+                conn.execute(
+                    "UPDATE csn_ingest SET seen_count = seen_count + 1, last_seen_at=? "
+                    "WHERE id=?", (now, int(hit[0])))
+                continue
+
+            try:
+                cur = conn.execute("""
+                    INSERT INTO csn_ingest
+                        (link_id, sig, seller, actor, verb, item_raw, item_display,
+                         actor_display, seller_display,
+                         qty, coins_centi, sale_date, occ, sale_ts, source_key,
+                         source_file, legacy, first_seen_at, last_seen_at)
+                    VALUES (:link_id, :sig, :seller, :actor, :verb, :item_raw,
+                            :item_display, :actor_display, :seller_display,
+                            :qty, :coins_centi, :sale_date, :occ,
+                            :sale_ts, :source_key, :source_file, :legacy, :now, :now)
+                """, dict(p, now=now))
+                out["new"] += 1
+                out["ids"].append(int(cur.lastrowid))
+            except sqlite3.IntegrityError:
+                # Lost a race with another instance on the SAME gateway event.
+                # The unique index is the arbiter; this is a duplicate, not an error.
+                dup = conn.execute(
+                    "SELECT id FROM csn_ingest WHERE link_id=? AND sig=?",
+                    (p["link_id"], p["sig"])).fetchone()
+                out["dup"] += 1
+                if dup:
+                    out["ids"].append(int(dup[0]))
+                    conn.execute(
+                        "UPDATE csn_ingest SET seen_count = seen_count + 1, "
+                        "last_seen_at=? WHERE id=?", (now, int(dup[0])))
+    return out
+
+
+def csn_claim(consumer: str, row_ids: list) -> list:
+    """Claim rows for one consumer, claim-first. Returns the ids actually WON.
+
+    One atomic `UPDATE ... WHERE <consumer>_state='pending'` per row; the caller
+    acts only on the ids this returns. Two bot instances, a manual re-drop racing
+    the loop, or an impatient double-click cannot both win the same row, so the
+    effect runs once even though both callers saw it as pending.
+
+    The claim is written BEFORE the effect (rule 1) and per row (rule 2): a crash
+    mid-effect leaves that row 'claimed', which `csn_stuck_claims` surfaces, and
+    every other row's progress stands. Nothing replays."""
+    if consumer not in CSN_CONSUMERS:
+        raise ValueError(f"unknown CSN consumer {consumer!r}")
+    if not row_ids:
+        return []
+    col = f"{consumer}_state"
+    won = []
+    now = _utcnow_iso()
+    with db() as conn:
+        for rid in row_ids:
+            cur = conn.execute(
+                f"UPDATE csn_ingest SET {col}='claimed', {consumer}_at=? "
+                f"WHERE id=? AND {col}='pending'", (now, int(rid)))
+            if cur.rowcount:
+                won.append(int(rid))
+    return won
+
+
+def csn_settle(consumer: str, row_ids: list, state: str = "done") -> int:
+    """Mark claimed rows finished ('done') or not-applicable ('skip'). Per row.
+
+    Only moves rows this consumer is holding, so a settle can never overwrite a
+    claim another instance won in between."""
+    if consumer not in CSN_CONSUMERS:
+        raise ValueError(f"unknown CSN consumer {consumer!r}")
+    if state not in ("done", "skip", "pending"):
+        raise ValueError(f"bad settle state {state!r}")
+    if not row_ids:
+        return 0
+    col = f"{consumer}_state"
+    now = _utcnow_iso()
+    n = 0
+    with db() as conn:
+        for rid in row_ids:
+            cur = conn.execute(
+                f"UPDATE csn_ingest SET {col}=?, {consumer}_at=? "
+                f"WHERE id=? AND {col}='claimed'", (state, now, int(rid)))
+            n += cur.rowcount
+    return n
+
+
+def csn_ingest_rows(row_ids: list) -> list:
+    """Fetch stored rows by id, oldest sale first — the order a consumer books in."""
+    if not row_ids:
+        return []
+    ids = [int(i) for i in row_ids]
+    marks = ",".join("?" * len(ids))
+    with db() as conn:
+        return [dict(r) for r in conn.execute(
+            f"SELECT * FROM csn_ingest WHERE id IN ({marks}) "
+            f"ORDER BY sale_date, COALESCE(sale_ts,''), occ, id", ids).fetchall()]
+
+
+def csn_pending(consumer: str, market_id: str = None, limit: int = 500) -> list:
+    """Rows this consumer has not processed. Drives catch-up without a second store."""
+    if consumer not in CSN_CONSUMERS:
+        raise ValueError(f"unknown CSN consumer {consumer!r}")
+    col = f"{consumer}_state"
+    sql = f"SELECT * FROM csn_ingest WHERE {col}='pending'"
+    args = []
+    if market_id:
+        sql += " AND link_id=?"
+        args.append(str(market_id))
+    sql += " ORDER BY sale_date, COALESCE(sale_ts,''), occ, id LIMIT ?"
+    args.append(int(limit))
+    with db() as conn:
+        return [dict(r) for r in conn.execute(sql, args).fetchall()]
+
+
+def csn_stuck_claims(older_than_minutes: int = 30) -> list:
+    """Rows left 'claimed' — a consumer died mid-effect. The operator surface.
+
+    These are NOT auto-released: releasing one would replay an effect that may
+    have already landed, which is the double-book this whole design exists to
+    prevent. They are reported so a human decides, with the row's real figures in
+    front of them."""
+    cutoff = _utcnow_iso(minutes_ago=int(older_than_minutes))
+    out = []
+    with db() as conn:
+        for consumer in CSN_CONSUMERS:
+            col = f"{consumer}_state"
+            rows = conn.execute(
+                f"SELECT * FROM csn_ingest WHERE {col}='claimed' "
+                f"AND COALESCE({consumer}_at,'') < ? ORDER BY id", (cutoff,)).fetchall()
+            for r in rows:
+                d = dict(r)
+                d["stuck_consumer"] = consumer
+                out.append(d)
+    return out
+
+
+def _utcnow_iso(minutes_ago: int = 0) -> str:
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    return (_dt.now(_tz.utc) - _td(minutes=minutes_ago)).strftime("%Y-%m-%d %H:%M:%S")
+
+
 def add_csn_transactions_detailed(market_id: str, rows: list) -> tuple:
     """Bulk-insert per-transaction sales. Returns (new_count, new_rows).
 
-    `rows` are dicts with actor/seller/verb/item/qty/coins/sale_ts and (mod v2.1+)
-    sale_uid. Dedup, in order of strength:
-      1. sale_uid — the mod's own stable per-sale identity (uq_csn_txn_uid);
-      2. near-duplicate window — same (actor, seller, verb, item, qty, coins) within
-         ±90s. The mod reconstructs sale_ts from "Xm ago" with minute precision, so the
-         SAME sale re-scanned lands up to a minute away; the old exact-sale_ts key
-         called that a new sale and double-counted it;
-      3. uq_csn_txn (exact identity) as the final index-level backstop.
+    `rows` are dicts with actor/seller/verb/item/qty/coins/sale_ts and (mod v3+)
+    item_raw/sale_date/occ.
+
+    DEDUP LIVES IN `csn_ingest` NOW. This function records every row into that one
+    durable store (insert-and-catch on UNIQUE(link_id, sig)), claims the `txn`
+    consumer for the rows it wins, and writes csn_transactions for exactly those.
+    It is not a second, parallel implementation: `csn_transactions` remains the
+    per-sale reporting table, but it is no longer the thing that decides what is a
+    duplicate.
+
+    What this replaces, and why:
+      - `sale_uid` was minted in the mod from a MINUTE BUCKET of a timestamp
+        reconstructed as `now - "Xm ago"`. That is walk-dependent: the same sale
+        re-read lands in a different bucket about one time in three and hashed to
+        a different uid, so a re-scan re-booked it as fresh revenue.
+      - the ±90s near-duplicate window bolted on to cover that fired on EVERY row
+        and could not tell "one sale read twice" from "two identical sales 40
+        seconds apart" — so it fixed double-counting by introducing
+        under-counting.
+    `csn_sig.sale_sig` is exactly reproducible from the row's own content, so
+    neither error is reachable. See csn_sig for what is in the signature and what
+    is deliberately not.
+
+    Rows from a PRE-v3 mod (no `occ`) are still accepted: `csn_sig.assign_occurrences`
+    numbers the batch bot-side and the row is flagged `legacy=1`. Such a row can
+    only be matched against other legacy readings of the same file, which is why
+    the mod ships `occ` — but a mixed fleet keeps working during a rollout.
 
     Returning the rows that were actually NEW lets the caller book earnings from
     exactly what entered the ledger — a re-uploaded file books nothing twice."""
+    if not rows:
+        return 0, []
+
+    import csn_sig
+    csn_sig.assign_occurrences(rows)
+    landed = csn_ingest_record(market_id, rows)
+    if landed["bad"]:
+        log.warning("[csn ingest] %s: %d row(s) could not be signed and were NOT "
+                    "stored: %s", market_id, landed["bad"], "; ".join(landed["errors"][:5]))
+
+    claimed = csn_claim("txn", landed["ids"])
+    if not claimed:
+        return 0, []
+
+    new = 0
+    new_rows = []
+    now = _utcnow_iso()
+    for src in csn_ingest_rows(claimed):
+        ts = src.get("sale_ts") or f"{src['sale_date']}T00:00:00+00:00"
+        coins = src["coins_centi"] / 100.0   # csn_transactions column is REAL (legacy)
+        try:
+            # ONE transaction per row: the ledger insert and this row's progress
+            # marker commit together, so a crash can never leave the effect
+            # applied with the row still pending (replay) or the row settled with
+            # no effect (silent loss). Per row, never after the loop (rule 2).
+            with db() as conn:
+                cur = conn.execute("""
+                    INSERT OR IGNORE INTO csn_transactions
+                        (market_id, actor, seller, verb, item, qty, coins, sale_ts,
+                         sale_day, sale_uid)
+                    VALUES (?,?,?,?,?,?,?,?,?,?)
+                """, (str(market_id),
+                      # DISPLAY names, not the canonical ones. This table feeds the
+                      # per-customer ledger and the website; a customer called
+                      # JesseNapoleon must not appear there as jessenapoleon just
+                      # because the signature happens to fold case.
+                      src["actor_display"] or src["actor"],
+                      src["seller_display"] or src["seller"], src["verb"],
+                      src["item_display"] or src["item_raw"], int(src["qty"]),
+                      coins, ts, src["sale_date"], src["sig"]))
+                # An IGNOREd insert means some index in csn_transactions overruled
+                # the signature. That used to be invisible — the row vanished and the
+                # coins with it. Settle it as 'skip', not 'done', and say so: 'done'
+                # would claim an effect that never happened.
+                ignored = (cur.rowcount == 0)
+                conn.execute(
+                    "UPDATE csn_ingest SET txn_state=?, txn_at=? "
+                    "WHERE id=? AND txn_state='claimed'",
+                    ("skip" if ignored else "done", now, int(src["id"])))
+            if ignored:
+                log.error("[csn txn] %s: ledger REFUSED sig %s (%s %dx %s for %s) — "
+                          "an index in csn_transactions rejected a row csn_ingest "
+                          "accepted. Not counted as booked.",
+                          market_id, src["sig"][:12], src["actor"], int(src["qty"]),
+                          src["item_display"] or src["item_raw"],
+                          _centi_to_decimal_str(src["coins_centi"]))
+                continue
+        except Exception as exc:
+            log.warning("[csn txn] insert failed for sig %s: %s", src["sig"][:12], exc)
+            continue
+        new += 1
+        new_rows.append({
+                # Display names again — callers of this put them straight into embeds.
+                "actor": src["actor_display"] or src["actor"],
+                "seller": src["seller_display"] or src["seller"], "verb": src["verb"],
+                "item": src["item_display"] or src["item_raw"], "qty": int(src["qty"]),
+                "coins": coins, "coins_centi": int(src["coins_centi"]),
+                "sale_ts": ts, "sale_uid": src["sig"], "sig": src["sig"],
+                "ingest_id": int(src["id"]), "item_raw": src["item_raw"],
+                "sale_date": src["sale_date"], "occ": int(src["occ"]),
+            })
+    return new, new_rows
+
+
+def _add_csn_transactions_legacy(market_id: str, rows: list) -> tuple:
+    """The pre-`csn_ingest` implementation, kept ONLY as executable documentation of
+    what was wrong with it. Not called. See add_csn_transactions_detailed."""
     if not rows:
         return 0, []
     new = 0
@@ -3791,6 +5086,10 @@ _LAND_LISTING_FIELDS = (
     "min_increment_pct", "commission_pct", "listing_fee", "starts_at", "ends_at",
     "anti_snipe_minutes", "status", "channel_id", "message_id", "sold_price",
     "sold_to", "closed_at",
+    # Escrow progress markers (LAND_ESCROW_PLAN §2.1/§2.6). Listed here so
+    # `update_land_listing` can write them; the CLAIMS on them are not written
+    # through that function, because a claim needs a WHERE clause it does not have.
+    "settle_stage", "settling_at", "fee_stage", "fee_paid",
 )
 
 
@@ -3812,17 +5111,29 @@ def get_land_listing(listing_id: int) -> Optional[dict]:
         return dict(row) if row else None
 
 
-def update_land_listing(listing_id: int, **kwargs) -> None:
-    """Partial update — only columns passed are touched. Always bumps updated_at."""
+def update_land_listing(listing_id: int, _if_status: str = None, **kwargs) -> int:
+    """Partial update — only columns passed are touched. Always bumps updated_at.
+
+    `_if_status` makes it a CLAIM: the write lands only while the row still says
+    that status, and the return is the number of rows written (0 = we lost it, and
+    the caller must not act as though it landed). Land's settle path needs this —
+    an unconditional `status='sold'` overwrites whatever somebody else wrote
+    underneath a settlement in flight, which is how a `rolled_back` lot came back
+    as sold. Every other caller keeps the old unconditional behaviour by not
+    passing it; the leading underscore keeps it out of the `_LAND_LISTING_FIELDS`
+    namespace so it can never be mistaken for a column.
+    """
     cols = [k for k in kwargs if k in _LAND_LISTING_FIELDS]
     if not cols:
-        return
+        return 0
     set_clause = ", ".join(f"{c}=?" for c in cols) + ", updated_at=datetime('now')"
+    sql = f"UPDATE land_listings SET {set_clause} WHERE id=?"
+    params = [kwargs[k] for k in cols] + [int(listing_id)]
+    if _if_status is not None:
+        sql += " AND status=?"
+        params.append(str(_if_status))
     with db() as conn:
-        conn.execute(
-            f"UPDATE land_listings SET {set_clause} WHERE id=?",
-            [kwargs[k] for k in cols] + [int(listing_id)],
-        )
+        return conn.execute(sql, params).rowcount
 
 
 def get_active_land_listings(mode: str = None) -> list[dict]:
@@ -3860,11 +5171,64 @@ def get_expired_active_listings() -> list[dict]:
         return [dict(r) for r in rows]
 
 
-def add_land_bid(listing_id: int, bidder_id: str, amount: float) -> int:
+def get_part_settled_active_listings(limit: int = 200) -> list[dict]:
+    """Active lots whose ESCROW says somebody has already paid — due for RESUME.
+
+    The companion to `get_expired_active_listings`, and deliberately NOT gated on
+    `ends_at`. A lot with a `captured`, `capturing` or `capture_unknown` row is
+    PART-SETTLED regardless of when it was due: its buyer's coins are in
+    `treasury:estates` (or may be), the seller has not been paid, and the lot is
+    still `active`. On a 7-day auction the deadline sweep never looked at it, so
+    the only escape was the buyer clicking Buy again — and with
+    `realestate:bidding_frozen` on, that escape is closed too. A ledger incident
+    is both why the switch gets thrown and why captures get interrupted, so the
+    two co-occur by construction.
+
+    An interrupted instant buy is INVISIBLE on `land_listings` — it writes no
+    `current_bid`/`current_bidder` — which is why this asks `land_bids` instead.
+
+    A `held` row is selected ONLY when it is a BUY row (`kind='buy'`), because
+    that is a purchase whose settlement did not finish rather than a bid. A
+    standing auction bid is `kind` NULL/`bid` and is never selected here: an
+    auction that has not reached `ends_at` must not be closed by this sweep. The
+    caller decides what to do with the row; this only narrows the candidates so
+    the sweep is one indexed EXISTS rather than a walk of every live lot.
+    """
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT l.* FROM land_listings l WHERE l.status='active' AND EXISTS ("
+            "SELECT 1 FROM land_bids b WHERE b.listing_id=l.id AND ("
+            "b.status IN ('captured','capturing','capture_unknown') OR "
+            "(b.status='held' AND b.kind='buy'))) ORDER BY l.id ASC LIMIT ?",
+            (int(limit),)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def add_land_bid(listing_id: int, bidder_id: str, amount: float, *,
+                 kind: Optional[str] = None, hold_amount: Optional[int] = None,
+                 status: Optional[str] = None) -> int:
+    """Insert a bid row and return its id — the domain sequence number.
+
+    That returned id is what every idempotency key for this bid is minted from
+    (`land:listing:<lid>:bid:<id>`), which is why the row is written BEFORE any
+    money call and why the id is not optional. It has always been returned here
+    and `_place_bid_core` has always discarded it.
+
+    The escrow kwargs are keyword-only and all default to None so the two-year-old
+    call shape (`add_land_bid(lid, uid, amt)`) still means exactly what it meant:
+    a display row, `status` taking the schema's `'legacy'` default, which no
+    escrow sweep will ever touch.
+    """
+    cols = ["listing_id", "bidder_id", "amount"]
+    vals: list[Any] = [int(listing_id), str(bidder_id), float(amount)]
+    for name, val in (("kind", kind), ("hold_amount", hold_amount), ("status", status)):
+        if val is not None:
+            cols.append(name)
+            vals.append(int(val) if name == "hold_amount" else str(val))
     with db() as conn:
         cur = conn.execute(
-            "INSERT INTO land_bids (listing_id, bidder_id, amount) VALUES (?,?,?)",
-            (int(listing_id), str(bidder_id), float(amount)))
+            f"INSERT INTO land_bids ({', '.join(cols)}) "
+            f"VALUES ({', '.join('?' * len(cols))})", vals)
         return int(cur.lastrowid)
 
 
@@ -3874,6 +5238,181 @@ def get_land_bids(listing_id: int, limit: int = 20) -> list[dict]:
             "SELECT * FROM land_bids WHERE listing_id=? ORDER BY ts DESC LIMIT ?",
             (int(listing_id), limit)).fetchall()
         return [dict(r) for r in rows]
+
+
+def claim_listing_stage(listing_id: int, expect: Optional[str], to: str) -> bool:
+    """`settle_stage: expect -> to` in one atomic UPDATE. True only if we won it.
+
+    `expect=None` claims a row whose stage has never been set, which is every
+    listing created before this migration and every listing that has not started
+    settling. `IS ?` is used rather than `= ?` so NULL compares equal — with `=`
+    the first claim on every legacy listing silently matched nothing and the
+    settle never started.
+    """
+    with db() as conn:
+        cur = conn.execute(
+            "UPDATE land_listings SET settle_stage=?, settling_at=datetime('now'), "
+            "updated_at=datetime('now') WHERE id=? AND settle_stage IS ?",
+            (str(to), int(listing_id), expect))
+        return cur.rowcount == 1
+
+
+def claim_listing_fee_stage(listing_id: int, expect: Optional[str], to: str) -> bool:
+    """`fee_stage: expect -> to`, same contract as `claim_listing_stage`."""
+    with db() as conn:
+        cur = conn.execute(
+            "UPDATE land_listings SET fee_stage=?, updated_at=datetime('now') "
+            "WHERE id=? AND fee_stage IS ?",
+            (str(to), int(listing_id), expect))
+        return cur.rowcount == 1
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Leases and rent
+# ══════════════════════════════════════════════════════════════════════════
+
+def create_land_lease(parcel_id: str, tenant_id: str, owner_id: str, amount: int,
+                      *, period_days: int = 30, next_due_at: Optional[str] = None) -> int:
+    """Record a rent agreement. Ownership is NOT recorded here — see the schema note."""
+    with db() as conn:
+        cur = conn.execute(
+            "INSERT INTO land_leases (parcel_id, tenant_id, owner_id, amount, "
+            "period_days, next_due_at) VALUES (?,?,?,?,?,?)",
+            (str(parcel_id), str(tenant_id), str(owner_id), int(amount),
+             int(period_days), next_due_at))
+        return int(cur.lastrowid)
+
+
+def get_land_lease(lease_id: int) -> Optional[dict]:
+    with db() as conn:
+        row = conn.execute("SELECT * FROM land_leases WHERE id=?", (int(lease_id),)).fetchone()
+        return dict(row) if row else None
+
+
+def land_leases_due(now_sql: Optional[str] = None, limit: int = 100) -> list[dict]:
+    """Active leases whose next payment is due. Read-only; the sweep decides."""
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM land_leases WHERE status='active' AND next_due_at IS NOT NULL "
+            "AND next_due_at <= COALESCE(?, datetime('now')) ORDER BY id ASC LIMIT ?",
+            (now_sql, int(limit))).fetchall()
+        return [dict(r) for r in rows]
+
+
+def open_rent_charge(lease: dict, period: str, idem_key: str) -> Optional[int]:
+    """Create the charge row for one (parcel, period), or None if it already exists.
+
+    THE FIRST OF THE THREE THINGS THAT STOP A DOUBLE CHARGE, and the only one that
+    works before any code has run: `idx_land_rent_period` is UNIQUE on
+    `(parcel_id, period)`, so a second attempt to bill February cannot be written
+    down at all, whatever the sweep believes about its own progress. The other two
+    are the row claim (`claim_rent_charge`) and the ledger key — three
+    independent mechanisms, because rent is a scheduled job and a scheduled job
+    is retried by things nobody remembers configuring.
+    """
+    try:
+        with db() as conn:
+            cur = conn.execute(
+                "INSERT INTO land_rent_charges (lease_id, parcel_id, period, tenant_id, "
+                "owner_id, amount, idem_key) VALUES (?,?,?,?,?,?,?)",
+                (int(lease["id"]), str(lease["parcel_id"]), str(period),
+                 str(lease["tenant_id"]), str(lease["owner_id"]),
+                 int(lease["amount"]), str(idem_key)))
+            return int(cur.lastrowid)
+    except sqlite3.IntegrityError:
+        return None
+
+
+def get_rent_charge(charge_id: int) -> Optional[dict]:
+    with db() as conn:
+        row = conn.execute("SELECT * FROM land_rent_charges WHERE id=?",
+                           (int(charge_id),)).fetchone()
+        return dict(row) if row else None
+
+
+def find_rent_charge(parcel_id: str, period: str) -> Optional[dict]:
+    with db() as conn:
+        row = conn.execute(
+            "SELECT * FROM land_rent_charges WHERE parcel_id=? AND period=?",
+            (str(parcel_id), str(period))).fetchone()
+        return dict(row) if row else None
+
+
+def claim_rent_charge(charge_id: int) -> Optional[dict]:
+    """`pending -> claimed` in one atomic UPDATE. Returns the row iff WE won it."""
+    with db() as conn:
+        cur = conn.execute(
+            "UPDATE land_rent_charges SET status='claimed', claimed_at=datetime('now'), "
+            "attempts=attempts+1 WHERE id=? AND status='pending'", (int(charge_id),))
+        if cur.rowcount != 1:
+            return None
+        row = conn.execute("SELECT * FROM land_rent_charges WHERE id=?",
+                           (int(charge_id),)).fetchone()
+        return dict(row) if row else None
+
+
+def settle_rent_charge(charge_id: int, *, ledger_ref: Optional[str] = None,
+                       replayed: bool = False) -> bool:
+    """`claimed -> paid`, and advance the lease's period marker in the SAME transaction.
+
+    The two writes are one transaction because they are one fact. If they were
+    two, a crash between them leaves a paid charge and a lease that still thinks
+    the period is owed — and the next sweep bills it again. Committing together
+    means: if this returns True the parcel can never be charged for that period
+    again; if it does not commit, the charge stays `claimed` and is retried,
+    where the ledger key makes the retry a replay rather than a payment.
+    """
+    with db() as conn:
+        row = conn.execute("SELECT * FROM land_rent_charges WHERE id=?",
+                           (int(charge_id),)).fetchone()
+        if row is None:
+            return False
+        cur = conn.execute(
+            "UPDATE land_rent_charges SET status='paid', settled_at=datetime('now'), "
+            "ledger_ref=?, replayed=?, last_error=NULL WHERE id=? AND status='claimed'",
+            (ledger_ref, 1 if replayed else 0, int(charge_id)))
+        if cur.rowcount != 1:
+            return False
+        conn.execute(
+            "UPDATE land_leases SET last_period=?, "
+            "next_due_at=datetime(COALESCE(next_due_at, datetime('now')), "
+            "                     '+' || period_days || ' days'), "
+            "updated_at=datetime('now') WHERE id=?",
+            (row["period"], int(row["lease_id"])))
+        return True
+
+
+def release_rent_charge(charge_id: int, error: str, *, permanent: bool = False,
+                        max_attempts: int = 5) -> None:
+    """Hand the row back: transient -> `pending` (retried), permanent -> `failed`.
+
+    A row that has burned `max_attempts` parks as `failed` rather than being
+    retried once a minute forever. Parked is visible; a hot loop against a
+    permanently-refused charge is not.
+    """
+    with db() as conn:
+        row = conn.execute("SELECT attempts FROM land_rent_charges WHERE id=?",
+                           (int(charge_id),)).fetchone()
+        if row is None:
+            return
+        exhausted = int(row["attempts"] or 0) >= int(max_attempts)
+        conn.execute(
+            "UPDATE land_rent_charges SET status=?, last_error=? WHERE id=? AND status='claimed'",
+            ("failed" if (permanent or exhausted) else "pending",
+             str(error)[:500], int(charge_id)))
+
+
+def park_rent_charge_unknown(charge_id: int, error: str) -> None:
+    """The outcome is unknown, so the row goes to `unknown` and NOT back to `pending`.
+
+    A `pending` row is one the sweep will charge. An unknown one may already have
+    been charged, so it must be asked about, not retried blind. Same rule as
+    `LAND_BID_UNKNOWN`, for the same reason.
+    """
+    with db() as conn:
+        conn.execute(
+            "UPDATE land_rent_charges SET status='unknown', last_error=? "
+            "WHERE id=? AND status='claimed'", (str(error)[:500], int(charge_id)))
 
 
 def delete_note(note_id: int):
@@ -3912,8 +5451,39 @@ def upsert_market_shares(market_id: str, **kwargs) -> dict:
     is a brand-new listing. Returns the resulting row.
 
     Recognised kwargs: active, shares_outstanding, pe_multiplier, share_price,
-    last_priced_at, last_priced_month.
+    last_priced_at, last_priced_month, dividend_pct, last_dividend_month.
+
+    `treasury_coins` IS NOT ONE OF THEM, and the refusal below is deliberate.
+    This function's update arm is a full-row read-modify-write: it SELECTs the
+    row, builds a value dict from that read, and stores it back. For the
+    listing's descriptive fields that is harmless — the last writer of a price
+    genuinely is the right price. For `treasury_coins` it is a LOST UPDATE, and
+    `treasury_coins` is the pot the whole markets engine's coins live in.
+
+    Measured on the shape this refusal removes: `_persist_price` called this on
+    the success path of every buy and every sell, immediately after the trade's
+    own transaction committed, so every trade rewrote the treasury from a read
+    it took after its own commit. Eight concurrent sells against a 30,000-coin
+    treasury MINTED +29,625; eight concurrent buys DESTROYED 60,261 of the
+    80,824 those buyers had paid in; a dividend run racing four sells minted
+    +27,653. Nothing errored, every buyer got their shares, and the treasury
+    figure was simply wrong.
+
+    The treasury has exactly two writers now, and neither of them is here:
+      * `adjust_treasury` — relative, claim-first, returns what it applied.
+        Every money path uses this.
+      * `set_market_treasury_absolute` — the staff override behind
+        `/market treasury set`, which is absolute because "store the number I
+        typed" is what was asked for. No money path reaches it, and
+        `tests/test_money_tx_contract.py` section 7e asserts that mechanically
+        rather than taking a waiver's word for it.
     """
+    if kwargs.get("treasury_coins") is not None:
+        raise ValueError(
+            "upsert_market_shares does not write treasury_coins — it would be a "
+            "lost update against adjust_treasury. Use adjust_treasury(...) for a "
+            "delta, or set_market_treasury_absolute(...) for the staff override."
+        )
     with db() as conn:
         existing_row = conn.execute(
             "SELECT * FROM market_shares WHERE market_id=?", (market_id,)
@@ -3934,7 +5504,9 @@ def upsert_market_shares(market_id: str, **kwargs) -> dict:
             "listed_at": existing.get("listed_at") or datetime.now(timezone.utc).isoformat(),
             "last_priced_at": field("last_priced_at", None),
             "last_priced_month": field("last_priced_month", None),
-            "treasury": float(field("treasury_coins", 0.0)),
+            # INSERT arm only — the seed for a listing that does not exist yet.
+            # The DO UPDATE arm below deliberately does not carry it across.
+            "treasury": float(existing.get("treasury_coins") or 0.0),
             "div_pct": field("dividend_pct", None),
             "last_div_month": field("last_dividend_month", None),
         }
@@ -3956,12 +5528,44 @@ def upsert_market_shares(market_id: str, **kwargs) -> dict:
                 share_price=excluded.share_price,
                 last_priced_at=excluded.last_priced_at,
                 last_priced_month=excluded.last_priced_month,
-                treasury_coins=excluded.treasury_coins,
                 dividend_pct=excluded.dividend_pct,
                 last_dividend_month=excluded.last_dividend_month
         """, values)
         row = conn.execute("SELECT * FROM market_shares WHERE market_id=?", (market_id,)).fetchone()
         return dict(row)
+
+
+def set_market_treasury_absolute(market_id: str, coins: float) -> bool:
+    """THE STAFF OVERRIDE, and the only absolute write to `treasury_coins` in the
+    tree. `/market treasury set` reads the old figure, shows `old -> new` on
+    screen and stores exactly what was typed, so an absolute write is what was
+    asked for — there is no delta to apply.
+
+    It lives in a function of its own rather than as a kwarg of
+    `upsert_market_shares` for one reason: an absolute write to an accumulator
+    is only safe if nothing that moves coins can reach it, and "nothing that
+    moves coins can reach it" is a property of a FUNCTION, not of a keyword
+    argument. As a kwarg it was reachable from `_persist_price`, on the success
+    path of every trade, while a hand-written waiver in the contract test said
+    the trading paths never came through there. Split out, the claim is
+    mechanically checkable and `tests/test_money_tx_contract.py` section 7e
+    checks it: `ABSOLUTE_OK` must name every money-path function that reaches
+    this, and today that list is empty.
+
+    THE RESIDUAL, STATED RATHER THAN HIDDEN: this is still a lost update if an
+    admin types a figure while a trade is landing — measured at 9,653-19,306
+    coins created, 3/3 runs. That is accepted, because a human is choosing the
+    number with the market in front of them; it is not accepted silently, and
+    the command's confirmation says so.
+
+    Returns True if a listing was updated, False if there is no such row.
+    """
+    with db() as conn:
+        cur = conn.execute(
+            "UPDATE market_shares SET treasury_coins=? WHERE market_id=?",
+            (float(coins), market_id),
+        )
+        return cur.rowcount > 0
 
 
 def get_holding(user_id: str, market_id: str) -> Optional[dict]:
@@ -3993,12 +5597,18 @@ def get_holders(market_id: str) -> list[dict]:
         return [dict(r) for r in rows]
 
 
-def adjust_holding(user_id: str, market_id: str, delta_shares: float, delta_cost_basis: float):
+def adjust_holding(user_id: str, market_id: str, delta_shares: float,
+                   delta_cost_basis: float, *, conn=None):
     """Apply a buy (+shares/+cost) or sell (-shares/-cost) to a user's holding,
     creating the row if needed. Caller is responsible for checking that a sell
-    doesn't take shares negative."""
+    doesn't take shares negative.
+
+    Pass `conn=` to run inside the caller's transaction, so the share movement and
+    the coin movement that pays for it commit together (see `db_in`). A sell that
+    wants the share claim itself to be the gate should use `claim_holding_tx`,
+    which refuses on the rowcount instead of trusting a preceding read."""
     now = datetime.now(timezone.utc).isoformat()
-    with db() as conn:
+    with db_in(conn) as conn:
         conn.execute("""
             INSERT INTO stock_holdings (user_id, market_id, shares, cost_basis, updated_at)
             VALUES (?, ?, ?, ?, ?)
@@ -4009,9 +5619,37 @@ def adjust_holding(user_id: str, market_id: str, delta_shares: float, delta_cost
         """, (str(user_id), market_id, delta_shares, delta_cost_basis, now))
 
 
+def claim_holding_tx(conn, user_id: str, market_id: str, shares: float,
+                     cost_basis_removed: float) -> bool:
+    """CLAIM-FIRST SELL: remove `shares` from a holding in ONE atomic UPDATE gated
+    on the believed state (`shares >= ?`), and return whether we won the row.
+
+    The read-then-write form this replaces (`get_holding` -> compare ->
+    `adjust_holding(-shares)`) is only safe because every caller happens to be
+    serialized on the bot's event loop today. That is an accident of deployment,
+    not an invariant, and the accident is load-bearing for a money path: two
+    concurrent sells of the same 100 shares both pass the read and both get paid,
+    and the holding goes negative with no error. Here the WHERE clause is the
+    check, the rowcount is the answer, and losing the race is a clean refusal.
+
+    Returns False without touching anything if the holder no longer has the
+    shares. Must be called inside the caller's transaction — the whole point is
+    that the share claim and the coin credit commit together."""
+    now = datetime.now(timezone.utc).isoformat()
+    cur = conn.execute(
+        "UPDATE stock_holdings SET shares = shares - ?, cost_basis = cost_basis - ?, "
+        "updated_at = ? WHERE user_id = ? AND market_id = ? AND shares >= ?",
+        (float(shares), float(cost_basis_removed), now,
+         str(user_id), str(market_id), float(shares)))
+    return cur.rowcount > 0
+
+
 def log_stock_trade(user_id: str, market_id: str, side: str, shares: float,
-                     price_per_share: float, total_coins: float):
-    with db() as conn:
+                     price_per_share: float, total_coins: float, *, conn=None):
+    """Append the trade to the audit log. Pass `conn=` to write it in the same
+    transaction as the trade, so "the coins moved but no trade was logged" stops
+    being a reachable state."""
+    with db_in(conn) as conn:
         conn.execute("""
             INSERT INTO stock_trade_log (user_id, market_id, side, shares, price_per_share, total_coins)
             VALUES (?, ?, ?, ?, ?, ?)
@@ -4069,25 +5707,83 @@ def get_treasury(market_id: str) -> float:
         return float(row["treasury_coins"] or 0.0) if row else 0.0
 
 
-def adjust_treasury(market_id: str, delta: float, allow_negative: bool = True) -> float:
-    """Add (delta>0, e.g. a buy paying in) or remove (delta<0, e.g. funding a
-    sell) coins from a market's treasury. When allow_negative is False the
-    treasury is only drawn down to zero and the actually-applied delta is
-    returned, so the caller can detect (and mint) any shortfall."""
-    with db() as conn:
+def adjust_treasury(market_id: str, delta: float, allow_negative: bool = True,
+                    *, conn=None) -> float:
+    """CLAIM-FIRST TREASURY. Add (delta>0, e.g. a buy paying in) or remove
+    (delta<0, e.g. funding a sell) coins from a market's treasury in ONE relative
+    UPDATE gated on the believed state, and return the delta that was ACTUALLY
+    applied — read from the rowcount, never from a preceding SELECT.
+
+    WHY THIS IS NOT READ-THEN-WRITE ANY MORE
+    ----------------------------------------
+    This was `SELECT treasury_coins` -> compute -> `UPDATE treasury_coins = <abs>`,
+    and every one of its neighbours (`adjust_balance_tx`, `claim_holding_tx`,
+    `dividend_leg_claim`) was made relative and claim-first while this one was
+    not. It is the primitive all of them rest on, so the miss was load-bearing:
+
+      * two concurrent sells against a treasury that can fund one both passed the
+        `allow_negative=False` check and both were paid — 9,653 coins MINTED from
+        nothing, measured, deterministic over three runs;
+      * twenty concurrent `+1000` credits left the treasury holding 3,000 —
+        17,000 coins DESTROYED, with zero errors, because an absolute UPDATE
+        computed from a stale read silently discards every delta it did not see.
+
+    Nothing errored in either case, which is the point: a lost update is not an
+    exception, it is a wrong number. The `SELECT` also ran OUTSIDE the write
+    transaction (sqlite3's legacy isolation opens the transaction at the first
+    DML statement, not the first read), so SQLite had nothing to complain about.
+
+    The sell path's whole correctness rests on reading `applied` back from here:
+    the unfunded-sell mint was closed by claiming the treasury BEFORE touching
+    the holding and refusing when the claim came up short. If the claim itself is
+    not atomic, that fix is standing on sand. Now the WHERE clause is the check
+    and the rowcount is the answer.
+
+    `allow_negative` KEEPS ITS MEANING. True (the default) lets the treasury go
+    negative — an admin correction, a compensating move — and always applies the
+    full delta. False refuses to take the treasury below zero and DRAWS DOWN TO
+    ZERO instead, returning the smaller amount actually taken, so a caller can
+    tell a full claim from a short one and say how short. Every live
+    `allow_negative=False` caller refuses on that number rather than part-paying,
+    and the short figure is what tells a refused seller the size that WOULD work.
+
+    Returns 0.0 when there is no `market_shares` row (delisted): `action_log`
+    distinguishes "the correction applied" from "the market is gone" on exactly
+    that, and a 0-row UPDATE gives the same answer the old missing-row SELECT did.
+
+    Pass `conn=` to run inside the caller's transaction, so the treasury claim and
+    the credit it funds commit together (see `db_in`)."""
+    d = float(delta)
+    with db_in(conn) as conn:
+        # The claim: relative, guarded, all-or-nothing. The guard only bites when
+        # coins are LEAVING and the caller asked not to go negative.
+        cur = conn.execute(
+            "UPDATE market_shares SET treasury_coins = treasury_coins + ? "
+            "WHERE market_id=? AND (? OR ? >= 0 OR treasury_coins + ? >= 0)",
+            (d, market_id, 1 if allow_negative else 0, d, d))
+        if cur.rowcount:
+            return d
+        if allow_negative or d >= 0:
+            return 0.0                      # no such market_shares row
+        # Short treasury, and the caller allows a partial draw-down: the result
+        # is "take what is there", so the amount taken has to be read. It is read
+        # inside the transaction the UPDATE above opened, and the drain is ITSELF
+        # claim-first — gated on the exact value just read — so a concurrent
+        # writer either loses the race (rowcount 0 -> 0.0, a clean refusal) or
+        # invalidates our snapshot and SQLite raises. Neither one part-pays
+        # against a stale number, which is the only outcome that could mint.
         row = conn.execute(
             "SELECT treasury_coins FROM market_shares WHERE market_id=?", (market_id,)
         ).fetchone()
         if not row:
             return 0.0
-        cur = float(row["treasury_coins"] or 0.0)
-        applied = float(delta)
-        if not allow_negative and (cur + applied) < 0:
-            applied = -cur
-        conn.execute(
-            "UPDATE market_shares SET treasury_coins=? WHERE market_id=?", (cur + applied, market_id)
-        )
-        return applied
+        held = float(row["treasury_coins"] or 0.0)
+        if held <= 0:
+            return 0.0
+        took = conn.execute(
+            "UPDATE market_shares SET treasury_coins = 0 "
+            "WHERE market_id=? AND treasury_coins = ?", (market_id, held))
+        return -held if took.rowcount else 0.0
 
 
 
@@ -4134,13 +5830,59 @@ def get_user_limit_orders(user_id: str, include_resolved: bool = False) -> list[
         return [dict(r) for r in rows]
 
 
-def mark_limit_order_filled(order_id: int, fill_price: float, fill_total: float) -> None:
+def mark_limit_order_filled(order_id: int, fill_price: float, fill_total: float) -> bool:
+    """Resolve an OPEN order to `filled`. Returns True if THIS caller won the row.
+
+    It used to return None and discard the rowcount. The UPDATE is conditional on
+    `status='open'`, so an order already resolved by another pass silently
+    changed nothing while the caller — which has just EXECUTED A REAL TRADE —
+    carried on as though the order were now closed. A claim whose answer nobody
+    reads is not a claim; the trade is what needs the receipt."""
     with db() as conn:
-        conn.execute(
+        cur = conn.execute(
             "UPDATE stock_limit_orders SET status='filled', fill_price=?, fill_total=?, "
             "resolved_at=datetime('now') WHERE id=? AND status='open'",
             (float(fill_price), float(fill_total), int(order_id)),
         )
+        return cur.rowcount > 0
+
+
+def note_limit_order_refusal(order_id: int, reason: str) -> int:
+    """Record that this OPEN order triggered and was refused, and return how many
+    times it now has. 0 means the order was not open — nothing was recorded.
+
+    THE THIRD OUTCOME. `_check_limit_orders` had two: fill it, or cancel it on a
+    terminal refusal. A `no_liquidity` or `credit_refused` was neither — the
+    order stayed open, nothing was written down, and it was retried on every
+    price tick for ever. Silently, because there was no log line either. This is
+    where that outcome goes, so "still open, refused 40 times, no_liquidity" is a
+    thing an operator can see and the order can eventually give up.
+
+    Claim-first: one relative UPDATE gated on `status='open'`, and the count is
+    read back inside the same transaction. It is not merely tidiness — the caller
+    CANCELS on the number this returns, so a lost increment is an order that
+    never gives up."""
+    with db() as conn:
+        cur = conn.execute(
+            "UPDATE stock_limit_orders SET refusals = refusals + 1, last_refusal=?, "
+            "last_refused_at=datetime('now') WHERE id=? AND status='open'",
+            (str(reason or "")[:80], int(order_id)))
+        if not cur.rowcount:
+            return 0
+        row = conn.execute("SELECT refusals FROM stock_limit_orders WHERE id=?",
+                           (int(order_id),)).fetchone()
+        return int(row["refusals"]) if row else 0
+
+
+def get_refused_limit_orders(min_refusals: int = 1, limit: int = 50) -> list[dict]:
+    """Open orders that have triggered and been refused — the operator's view of
+    "why is this order still sitting there". Newest refusal first."""
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM stock_limit_orders WHERE status='open' AND refusals >= ? "
+            "ORDER BY last_refused_at DESC, id DESC LIMIT ?",
+            (int(min_refusals), int(limit))).fetchall()
+        return [dict(r) for r in rows]
 
 
 def cancel_limit_order(order_id: int, user_id: str = None, reason: str = None) -> bool:
@@ -4171,6 +5913,225 @@ def log_dividend(market_id: str, month: str, total_paid: float,
             "VALUES (?,?,?,?,?)",
             (market_id, month, float(total_paid), float(per_share), int(holders)),
         )
+
+
+# ── Dividend runs: per-holder progress markers ──────────────────────────────
+#
+# THE RULE THESE EXIST TO ENFORCE: the marker for a holder is committed BEFORE
+# that holder's credit is attempted. Everything else here follows from that.
+
+def dividend_run_id(market_id: str, month: str, source: str = "auto") -> str:
+    return f"div:{market_id}:{month}:{source}"
+
+
+def dividend_run_open(market_id: str, month: str, source: str, plan: list,
+                      *, pool: int, per_share: float,
+                      charge_treasury: bool = True) -> dict:
+    """Open (or re-attach to) the run for this (market, month, source).
+
+    `plan` is [(user_id, shares, amount)]. THE FIRST PLAN WINS. If a run already
+    exists its legs are returned untouched, because those legs are what a crashed
+    predecessor already acted on — re-planning from today's holder list would let
+    somebody who bought shares after the crash collect a dividend the run was
+    never sized for, and would silently drop a holder who has since sold and is
+    genuinely owed their leg. The plan is pinned exactly as split_rules pins its
+    leg expansion, and for the same reason.
+
+    Returns {run_id, resumed, legs:[{user_id,shares,amount,state,detail}], ...}."""
+    rid = dividend_run_id(market_id, month, source)
+    with db() as conn:
+        row = conn.execute("SELECT * FROM stock_dividend_runs WHERE run_id=?",
+                           (rid,)).fetchone()
+        resumed = row is not None
+        if row is None:
+            conn.execute(
+                "INSERT INTO stock_dividend_runs (run_id, market_id, month, source, pool, "
+                " per_share, holders, charge_treasury) VALUES (?,?,?,?,?,?,?,?)",
+                (rid, str(market_id), str(month), str(source), int(pool), float(per_share),
+                 len(plan), 1 if charge_treasury else 0))
+            for uid, sh, amt in plan:
+                if int(amt) <= 0:
+                    continue
+                conn.execute(
+                    "INSERT OR IGNORE INTO stock_dividend_legs (run_id, user_id, shares, amount) "
+                    "VALUES (?,?,?,?)", (rid, str(uid), float(sh), int(amt)))
+            row = conn.execute("SELECT * FROM stock_dividend_runs WHERE run_id=?",
+                               (rid,)).fetchone()
+        legs = [dict(r) for r in conn.execute(
+            "SELECT * FROM stock_dividend_legs WHERE run_id=? ORDER BY amount DESC, user_id",
+            (rid,)).fetchall()]
+    out = dict(row)
+    out["resumed"] = resumed
+    out["legs"] = legs
+    return out
+
+
+def dividend_leg_claim(run_id: str, user_id: str, *, conn=None) -> int:
+    """Claim-first: mark this holder's leg 'claimed' and COMMIT, before any coin
+    moves. Returns the leg amount if we won the row, else 0.
+
+    One atomic UPDATE gated on the believed state, and the ROWCOUNT is what
+    decides — not a preceding SELECT. A leg already claimed/applied/unknown by
+    another attempt returns 0 and is skipped, which is the whole double-pay
+    defence.
+
+    Pass `conn=` to claim inside the caller's transaction. That is a STRONGER
+    guarantee than the separate commit, not a weaker one: with the claim, the
+    treasury debit and the credit in one transaction there is no window in which
+    a leg is claimed and unpaid, so a process death leaves it 'planned' and
+    retryable rather than 'claimed' and UNKNOWN. `dividend_run_adopt_stale_claims`
+    then has nothing to adopt on the closed path — it stays because legs written
+    by an older build, or by the `conn=None` form, can still be sitting there."""
+    with db_in(conn) as conn:
+        cur = conn.execute(
+            "UPDATE stock_dividend_legs SET state='claimed', updated_at=datetime('now') "
+            "WHERE run_id=? AND user_id=? AND state='planned'",
+            (str(run_id), str(user_id)))
+        if not cur.rowcount:
+            return 0
+        row = conn.execute(
+            "SELECT amount FROM stock_dividend_legs WHERE run_id=? AND user_id=?",
+            (str(run_id), str(user_id))).fetchone()
+        return int(row["amount"]) if row else 0
+
+
+def dividend_leg_settle(run_id: str, user_id: str, state: str, detail: str = "",
+                        *, conn=None) -> bool:
+    """Resolve a claimed leg to applied / refused / unknown. Returns True if it moved.
+
+    Pass `conn=` to settle in the same transaction as the money it describes."""
+    if state not in ("applied", "refused", "unknown"):
+        raise ValueError(f"bad dividend leg state {state!r}")
+    with db_in(conn) as conn:
+        cur = conn.execute(
+            "UPDATE stock_dividend_legs SET state=?, detail=?, updated_at=datetime('now') "
+            "WHERE run_id=? AND user_id=? AND state='claimed'",
+            (state, str(detail)[:400], str(run_id), str(user_id)))
+        return cur.rowcount > 0
+
+
+def dividend_leg_state(run_id: str, user_id: str) -> Optional[str]:
+    """The leg's current state, or None if it cannot be read.
+
+    This is how an UNKNOWN gets RESOLVED rather than merely recorded. Once the
+    leg marker and the coin credit commit in ONE transaction, the marker is no
+    longer a hint about the money — it IS the money's receipt. So a caller whose
+    `commit()` failed ambiguously can come back afterwards and ask: 'applied'
+    means the credit is on disk, 'planned' means the whole transaction rolled
+    back and nothing moved. Only an unreadable database leaves a genuine UNKNOWN,
+    and that is why this returns None instead of guessing."""
+    try:
+        with db() as conn:
+            row = conn.execute(
+                "SELECT state FROM stock_dividend_legs WHERE run_id=? AND user_id=?",
+                (str(run_id), str(user_id))).fetchone()
+            return str(row["state"]) if row else None
+    except Exception:
+        return None
+
+
+def dividend_leg_mark_unknown(run_id: str, user_id: str, detail: str = "") -> bool:
+    """Park a leg in `unknown` from EITHER 'planned' or 'claimed'.
+
+    `dividend_leg_settle` only moves a leg out of 'claimed', which is right for
+    the normal path. This exists for the one case that atomicity cannot answer:
+    the database could not be re-read at all, so the leg's own state is no help.
+    Deliberately gated on `state IN ('planned','claimed')` so it can never
+    overwrite an 'applied' leg — writing "we don't know" over a receipt would
+    turn a paid holder into a candidate for being paid again."""
+    with db() as conn:
+        cur = conn.execute(
+            "UPDATE stock_dividend_legs SET state='unknown', detail=?, "
+            "updated_at=datetime('now') WHERE run_id=? AND user_id=? "
+            "AND state IN ('planned','claimed')",
+            (str(detail)[:400], str(run_id), str(user_id)))
+        return cur.rowcount > 0
+
+
+def dividend_run_adopt_stale_claims(run_id: str) -> int:
+    """Any leg still 'claimed' when a run STARTS belongs to an attempt that died
+    holding it. Its outcome is UNKNOWN — the credit may or may not have landed —
+    so it is recorded as unknown and never automatically re-credited. Re-crediting
+    is precisely the mint this whole mechanism exists to stop; the cost of the
+    honest answer is that a human has to look at these. Returns how many."""
+    with db() as conn:
+        cur = conn.execute(
+            "UPDATE stock_dividend_legs SET state='unknown', updated_at=datetime('now'), "
+            " detail=CASE WHEN detail='' THEN 'claimed by an attempt that did not finish; "
+            "outcome unknown — check the coin ledger before paying' ELSE detail END "
+            "WHERE run_id=? AND state='claimed'", (str(run_id),))
+        return int(cur.rowcount or 0)
+
+
+def dividend_run_rearm_refused(run_id: str) -> int:
+    """Put `refused` legs back to `planned` at the START of a fresh attempt.
+
+    `refused` is the DEFINITE negative — the credit provably did not happen and
+    any treasury coins taken for it were put back — so the holder is still owed
+    and a later attempt must pick them up. Re-arming happens once, when an attempt
+    begins, and never inside its own loop: a leg that fails again this pass is
+    refused again and waits for the next one, instead of spinning. `unknown` is
+    deliberately NOT re-armed; that is the whole point of having a third state."""
+    with db() as conn:
+        cur = conn.execute(
+            "UPDATE stock_dividend_legs SET state='planned', updated_at=datetime('now') "
+            "WHERE run_id=? AND state='refused'", (str(run_id),))
+        return int(cur.rowcount or 0)
+
+
+def dividend_run_legs(run_id: str, state: str = None) -> list:
+    with db() as conn:
+        if state:
+            rows = conn.execute(
+                "SELECT * FROM stock_dividend_legs WHERE run_id=? AND state=? "
+                "ORDER BY amount DESC, user_id", (str(run_id), str(state))).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM stock_dividend_legs WHERE run_id=? ORDER BY amount DESC, user_id",
+                (str(run_id),)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def dividend_run_tally(run_id: str) -> dict:
+    """{paid, counts:{state:n}, unresolved} — `paid` sums ONLY applied legs, so
+    the treasury is debited by what definitely reached wallets and nothing else."""
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT state, COUNT(*) n, COALESCE(SUM(amount),0) amt "
+            "FROM stock_dividend_legs WHERE run_id=? GROUP BY state", (str(run_id),)).fetchall()
+    counts = {r["state"]: int(r["n"]) for r in rows}
+    amounts = {r["state"]: int(r["amt"]) for r in rows}
+    unresolved = sum(counts.get(s, 0) for s in ("planned", "claimed", "unknown", "refused"))
+    return {"paid": amounts.get("applied", 0), "counts": counts,
+            "amounts": amounts, "unresolved": unresolved}
+
+
+def dividend_run_close(run_id: str, *, paid: int, treasury_charged: int,
+                       complete: bool) -> None:
+    with db() as conn:
+        conn.execute(
+            "UPDATE stock_dividend_runs SET state=?, paid=?, treasury_charged=?, "
+            " settled_at=datetime('now') WHERE run_id=?",
+            ("complete" if complete else "partial", int(paid), int(treasury_charged),
+             str(run_id)))
+
+
+def dividend_runs_unfinished(limit: int = 50) -> list:
+    """Runs that are not complete — the operator surface for "who is still owed a
+    dividend, and whose outcome nobody knows"."""
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM stock_dividend_runs WHERE state<>'complete' "
+            "ORDER BY created_at DESC LIMIT ?", (int(limit),)).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            t = conn.execute(
+                "SELECT state, COUNT(*) n FROM stock_dividend_legs WHERE run_id=? GROUP BY state",
+                (d["run_id"],)).fetchall()
+            d["leg_counts"] = {x["state"]: int(x["n"]) for x in t}
+            out.append(d)
+        return out
 
 
 def dividend_paid(market_id: str, month: str) -> bool:

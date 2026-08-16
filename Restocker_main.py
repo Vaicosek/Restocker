@@ -6,6 +6,8 @@ import io
 import os
 import math
 import re
+import sqlite3      # for `except sqlite3.IntegrityError` in add_coins/deduct_coins —
+                    # the escrow trigger's abort must propagate, not fall to YAML
 import sys
 import time
 from datetime import datetime, timezone, timedelta
@@ -120,6 +122,16 @@ def _env_bool(name: str, default: bool) -> bool:
 
 
 STOCK_SPREAD_PCT = _env_float("STOCK_SPREAD_PCT", 1.0)
+# ── Slippage bound: the figure a trader confirmed must be the figure they get ──
+# There was no cap anywhere — not in the engine, not in the web route, not in the
+# bank API. Measured: a whale moves the mid 100 -> 120 between the quote the ticket
+# rendered and the moment the order executes, and the trader is charged 1.22x what
+# they were shown, silently. In basis points, integer, because this is a money path.
+# 200 bps = 2%: comfortably wider than ordinary drift, far inside the 2,200 bps that
+# repro moved. A caller that passes no reference price gets the old unbounded
+# behaviour by construction — there is nothing to compare against — which is why
+# every surface that SHOWS a price before it trades passes one.
+STOCK_MAX_SLIPPAGE_BPS = _env_int("STOCK_MAX_SLIPPAGE_BPS", 200)
 STOCK_TREASURY_ENABLED = _env_bool("STOCK_TREASURY_ENABLED", True)
 STOCK_INSURANCE_PCT = _env_float("STOCK_INSURANCE_PCT", 0.5)   # % of each buy skimmed into the central exchange fund
 # OWNER'S RULE (2026-07): the backing target is 50% of cap — this is a hard-collateral
@@ -174,6 +186,12 @@ ORDER_BULK_CARD_THRESHOLD = _env_int("ORDER_BULK_CARD_THRESHOLD", 12)
 DIVIDEND_REPORTS_CHANNEL_ID = _env_int("DIVIDEND_REPORTS_CHANNEL_ID", 1500543246718206002)
 INVESTOR_CHAT_CHANNEL_ID    = _env_int("INVESTOR_CHAT_CHANNEL_ID",    1500543251202052218)
 STOCK_LIMIT_ORDERS_ENABLED = _env_bool("STOCK_LIMIT_ORDERS_ENABLED", True)
+#: How many times a triggered limit order may be REFUSED (no_liquidity,
+#: credit_refused, slippage) before it is cancelled and the owner told why.
+#: Bounded rather than infinite: the refusals it covers can clear on their own,
+#: so giving up on the first is wrong, but an order that can never fill used to
+#: be retried on every price tick for ever with nothing written down.
+STOCK_LIMIT_MAX_REFUSALS = _env_int("STOCK_LIMIT_MAX_REFUSALS", 25)
 
 FUNDS_REPORT_GUILD_ID = _env_int("FUNDS_REPORT_GUILD_ID", 1447833151329009726)
 FUNDS_REPORT_CHANNEL_ID = _env_int("FUNDS_REPORT_CHANNEL_ID", 1451856048510996545)
@@ -2289,6 +2307,13 @@ def add_coins(uid: int, amount: int, *, counts_as_principal: bool = True, reason
             uid, amt, counts_as_principal=counts_as_principal)
         _db.record_coin_ledger(str(uid), applied, coins, _why)
         return coins, principal
+    except sqlite3.IntegrityError:
+        # ESCROW. Do NOT fall through to the YAML rewrite — see the long note in
+        # `deduct_coins` below; the reasoning is identical and the fallback is
+        # shared. A credit can trip this too, because `ledger_balances_respect_holds_ins`
+        # is an AFTER INSERT guard and `set_balance`'s `INSERT … ON CONFLICT`
+        # reaches it.
+        raise
     except Exception as e:
         log.warning("[add_coins] single-row path failed, using whole-table: %s", e)
         data = _load_balances()
@@ -2323,6 +2348,42 @@ def deduct_coins(uid: int, amount: int, *, reduce_principal: bool = True, reason
         # `applied` is the real (negative) coin delta actually removed.
         _db.record_coin_ledger(str(uid), applied, coins, reason)
         return coins, principal
+    except sqlite3.IntegrityError:
+        # ── THE ESCROW GUARD MUST NOT BE SWALLOWED BY THIS HANDLER ───────────
+        #
+        # `ledger_migrate.py` installs `ledger_balances_respect_holds`, a BEFORE
+        # UPDATE trigger on `balances` that aborts any write which would deepen
+        # the gap between a wallet's coins and what its OPEN holds have reserved.
+        # It surfaces as `sqlite3.IntegrityError: insufficient: would spend coins
+        # reserved by an open hold (ledger_holds)`.
+        #
+        # Until this clause existed, that abort landed in the `except Exception`
+        # below, which logs a warning and then rewrites the WHOLE balances table
+        # from YAML via `_save_balances(data)` — bypassing SQLite entirely and
+        # therefore bypassing the trigger. The result was the worst of both
+        # worlds: the guard fires, the error handler catches it, the coins move
+        # anyway, and the wallet and `ledger_holds` now disagree with nothing in
+        # the log but a warning. An escrow guard defeated by the error handler of
+        # the function it was installed to constrain is not a guard.
+        #
+        # So it propagates. `Restocker_db.adjust_balance` does not catch
+        # IntegrityError either, so the caller's `with db()` block rolls back and
+        # the shop purchase / hive payout / admin command fails LOUDLY with the
+        # escrow intact. That is the intended change (LEDGER_API_v2 §5.1) and it
+        # is why P0 item 3 ships BEFORE the trigger is installed in P2 — the
+        # other order moves coins past a guard that thinks it stopped them.
+        #
+        # This is deliberately narrow. Every other failure the fallback was
+        # written for — a locked database, a missing file, a corrupt row — still
+        # reaches it and still gets the whole-table rewrite. What changed is that
+        # a deliberate, correct refusal is no longer treated as a malfunction.
+        #
+        # Callers that must keep working while a user has escrow should read
+        # `available` from the ledger and refuse early with a human sentence, so
+        # the user is told "1,000 of your coins are reserved by your bid on lot
+        # 412" rather than seeing a generic error. The trigger is the backstop,
+        # not the UX.
+        raise
     except Exception as e:
         log.warning("[deduct_coins] single-row path failed, using whole-table: %s", e)
         data = _load_balances()
@@ -2455,7 +2516,11 @@ async def _open_assist_ticket(
         )
         if can_ping_role:
             mention_prefix = f"{mgr_role.mention} 🔔 "
-            allowed = discord.AllowedMentions(roles=[mgr_role], users=[member])
+            # everyone=False spelled out: an UNSET `everyone` is the truthy
+            # `default` sentinel, so even this explicit role/user LIST form
+            # yields parse=['everyone'] on discord.py 2.7.1.
+            allowed = discord.AllowedMentions(everyone=False, roles=[mgr_role],
+                                              users=[member])
 
     if kind == "trust":
         ign = ""
@@ -3012,8 +3077,52 @@ def _pay_manager_override(worker_id, base_amount, reason: str = "", market_id=No
                 amount = int(max(0, _avail))
             if amount <= 0:
                 return int(mgr), 0
-            _db.adjust_treasury(market_id, -float(amount), allow_negative=False)
-        add_coins(int(mgr), amount, counts_as_principal=True)
+            # ONE TRANSACTION: the company's treasury pays and the manager is
+            # credited together, or neither happens. Two commits meant a death
+            # between them either minted the override (credit first) or destroyed
+            # it (debit first); there is no ordering that fixes that, only one
+            # transaction. `applied` is read, not assumed — a treasury that moved
+            # since the read above yields a short claim and the whole thing rolls
+            # back rather than part-paying.
+            #
+            # The reason was EMPTY here, so every one of these landed in the
+            # ledger as `unlabelled: Restocker_main.py:NNNN _pay_manager_override`
+            # — a frame name standing in for an explanation.
+            _reached_commit = False
+            try:
+                with _db.db() as _c:
+                    _ap = float(_db.adjust_treasury(market_id, -float(amount),
+                                                    allow_negative=False, conn=_c))
+                    if int(round(-_ap)) < amount:
+                        raise _TradeRefused("treasury_short", int(round(-_ap)))
+                    _db.adjust_balance_tx(_c, str(int(mgr)), int(amount),
+                                          counts_as_principal=True,
+                                          reason=f"manager-override {market_id} {reason}"[:200])
+                    _reached_commit = True
+                return int(mgr), amount
+            except _TradeRefused as _mr:
+                log.warning("[override] %s treasury holds %s of the %s override owed to %s "
+                            "— rolled back, nothing paid.", market_id,
+                            f"{int(_mr.detail or 0):,}", f"{amount:,}", mgr)
+                return int(mgr), 0
+            except Exception as _me:  # noqa: BLE001
+                if _reached_commit:
+                    log.error("[override] %s: commit of %s to manager %s FAILED (%s) — the "
+                              "payment may or may not have landed. Not retrying; check the "
+                              "coin ledger for `manager-override %s`.",
+                              market_id, f"{amount:,}", mgr, _me, market_id)
+                else:
+                    log.warning("[override] %s: override for %s rolled back (%s) — nothing "
+                                "moved.", market_id, mgr, _me)
+                return int(mgr), 0
+        # No market to charge: the override is an explicit mint from the platform,
+        # which is the pre-existing behaviour when the order's market is unknown.
+        # Still one transaction — a mint with no ledger row is a mint nobody can
+        # find later, and that is how 31 unlabelled rows got into this ledger.
+        with _db.db() as _c:
+            _db.adjust_balance_tx(_c, str(int(mgr)), int(amount),
+                                  counts_as_principal=True,
+                                  reason=f"manager-override (unfunded) {reason}"[:200])
         log.info("[override] manager %s +%s from worker %s (%s)", mgr, amount, worker_id, reason)
         return int(mgr), amount
     except Exception as e:
@@ -3048,21 +3157,45 @@ def _pay_manager_sales_override(worker_id, net_delta, reason: str = ""):
     """Pay a worker's manager an override on the worker's chest-shop SALES net:
     coins (MANAGER_OVERRIDE_SALES_PCT) and/or loyalty points
     (MANAGER_OVERRIDE_SALES_POINTS_PER_1K per 1,000 net coins). Both default OFF
-    because CSN net is large. Returns (manager_id, coins, points) or (None,0,0)."""
+    because CSN net is large.
+
+    Returns (manager_id, coins, points, settled).
+
+    `settled` is the fourth value and the reason this function changed. It used to
+    TRUNCATE — treasury holds 200 of a 1,000 override, so it paid 200, returned
+    "200", and its caller had already written a marker saying the whole month's net
+    was settled. Measured: due 1,000, paid 200, marker 10,000, and the remaining 800
+    permanently unpayable even after the treasury was funded. Same defect class as
+    the dividend month marked paid after 60 of 200 holders.
+
+    So a coins override the treasury cannot cover in FULL is REFUSED, not part-paid,
+    and `settled` is False — the caller then leaves the delta owed instead of
+    recording it as done. The points leg is refused with it, deliberately: it is
+    priced off the same delta, so paying points now and coins on the retry would
+    award the points twice.
+
+    A refusal here is definite because the debit and the credit are ONE
+    transaction: a refusal means the block rolled back and the treasury was never
+    touched, rather than meaning a compensating write is believed to have
+    succeeded. The one case that is NOT definite is a failure raised by `commit()`
+    itself, and that returns `settled=False` with an ERROR naming the ledger tag,
+    because the caller acting on `settled=False` is a retry and a retry is the
+    one thing that must not happen while the answer is unknown.
+    """
     try:
         import Restocker_db as _db
         mgr = _db.get_manager_of(str(worker_id))
         if not mgr or str(mgr) == str(worker_id):
-            return None, 0, 0
+            return None, 0, 0, True
         coins = int(round(float(net_delta) * float(MANAGER_OVERRIDE_SALES_PCT) / 100.0)) if MANAGER_OVERRIDE_SALES_PCT > 0 else 0
         points = int(round(float(net_delta) / 1000.0 * float(MANAGER_OVERRIDE_SALES_POINTS_PER_1K))) if MANAGER_OVERRIDE_SALES_POINTS_PER_1K > 0 else 0
         if coins <= 0 and points <= 0:
-            return int(mgr), 0, 0
+            return int(mgr), 0, 0, True
+        taken = 0
         if coins > 0:
             # OWNER'S RULE (audit fix): the company pays the override — it comes out of
             # the market's treasury, never minted from thin air. The market id rides in
-            # `reason` as "csn:<mid>:<month>" / "hiveharvest:...", so extract it; if the
-            # treasury can't cover the full override, pay what it can and log the short.
+            # `reason` as "csn:<mid>:<month>" / "hiveharvest:...", so extract it.
             _mid = None
             try:
                 _parts = str(reason).split(":")
@@ -3070,24 +3203,56 @@ def _pay_manager_sales_override(worker_id, net_delta, reason: str = ""):
                     _mid = _parts[1]
             except Exception:
                 _mid = None
-            if _mid:
-                _avail = float(_db.get_treasury(_mid) or 0)
-                if coins > _avail:
-                    log.warning("[override-sales] %s treasury %s < override %s — paying what's covered",
-                                _mid, int(_avail), coins)
-                    coins = int(max(0, _avail))
-                if coins > 0:
-                    _db.adjust_treasury(_mid, -float(coins), allow_negative=False)
-            if coins > 0:
-                add_coins(int(mgr), coins, counts_as_principal=True)
+            # ONE TRANSACTION: claim the treasury and credit the manager together.
+            # The compensating `adjust_treasury(+taken)` this replaces was correct
+            # and could not be complete — it was a third commit for the same crash
+            # to land in, and its own error branch had to say "treasury short,
+            # nobody paid, fix by hand". A rolled-back debit needs no putting back.
+            # `applied` is still READ, because a short claim must refuse rather
+            # than part-pay: this function's whole reason for existing is that
+            # truncating a payment while the caller records the full figure left
+            # 800 coins permanently unpayable.
+            _reached_commit = False
+            try:
+                with _db.db() as _c:
+                    if _mid:
+                        applied = float(_db.adjust_treasury(
+                            _mid, -float(coins), allow_negative=False, conn=_c))
+                        taken = int(round(-applied))
+                        if taken < coins:
+                            raise _TradeRefused("treasury_short", taken)
+                    _db.adjust_balance_tx(_c, str(int(mgr)), int(coins),
+                                          counts_as_principal=True,
+                                          reason=f"sales-override:{reason}"[:200])
+                    _reached_commit = True
+            except _TradeRefused as _sr:
+                log.warning("[override-sales] %s treasury holds %s of the %s override "
+                            "owed to %s — REFUSED, rolled back, nothing paid, the net "
+                            "stays owed and is retried on the next import.",
+                            _mid, f"{int(_sr.detail or 0):,}", f"{coins:,}", mgr)
+                return int(mgr), 0, 0, False
+            except Exception as e:  # noqa: BLE001
+                if _reached_commit:
+                    # The commit failed: the payment may be on disk. Reporting
+                    # `settled=False` would have the caller pay it again, so this
+                    # is the one branch that must NOT claim to know.
+                    log.error("[override-sales] %s: commit of %s to manager %s FAILED (%s) "
+                              "— it may or may not have landed. The month is left UNSETTLED "
+                              "and a human must check the coin ledger for "
+                              "`sales-override:%s` BEFORE the next import retries it.",
+                              _mid, f"{coins:,}", mgr, e, reason)
+                    return int(mgr), 0, 0, False
+                log.warning("[override-sales] credit of %s to manager %s rolled back (%s) — "
+                            "nothing moved, the net stays owed.", f"{coins:,}", mgr, e)
+                return int(mgr), 0, 0, False
         if points > 0:
             _award_loyalty_points(int(mgr), points, reason=f"sales-override:{reason}")
         log.info("[override-sales] manager %s +%s coins +%s pts from worker %s (%s)",
                  mgr, coins, points, worker_id, reason)
-        return int(mgr), coins, points
+        return int(mgr), coins, points, True
     except Exception as e:
         log.warning("[override-sales] pay failed: %s", e)
-        return None, 0, 0
+        return None, 0, 0, False
 
 
 def _credit_manager_on_csn(market_id, month, net):
@@ -3110,20 +3275,52 @@ def _credit_manager_on_csn(market_id, month, net):
         delta = float(net) - prev
         # AUDIT FIX (critical): the marker must be MONOTONIC. It used to be set to the
         # latest net even when LOWER — so alternating a big export with a small one
-        # re-armed the override and minted the payment repeatedly. Now it only ratchets
+        # re-armed the override and minted the payment repeatedly. It only ratchets
         # upward: a smaller re-post pays nothing and lowers nothing.
+        #
+        # CLAIM FIRST, THEN COMPENSATE IF NOTHING WAS PAID. The marker is written
+        # before the payment on purpose — a crash between them must not re-pay an
+        # override that already landed. But writing it and walking away was the bug:
+        # `_pay_manager_sales_override` used to truncate to whatever the treasury
+        # covered while this marker recorded the FULL net as settled (due 1,000, paid
+        # 200, marker 10,000, 800 permanently unpayable). The payment is now all-or-
+        # nothing and says which it was, so a refusal rolls the marker back to `prev`
+        # and the delta is owed again on the next import. `settled` False after a
+        # payment that DID move coins is not possible: the refusal paths return
+        # before crediting, or return the coins to the treasury.
         _db.set_config(paid_key, max(prev, float(net)))
         if delta <= 0:
             return None
         # log the worker's sales for the team leaderboard (no-op if they have no manager)
         _log_team_event(owner, "sales", coins=delta, detail=f"{market_id}:{month}")
-        mgr, coins, points = _pay_manager_sales_override(owner, delta, f"csn:{market_id}:{month}")
+        mgr, coins, points, settled = _pay_manager_sales_override(
+            owner, delta, f"csn:{market_id}:{month}")
+        if not settled:
+            try:
+                _db.set_config(paid_key, prev)
+            except Exception as e:  # noqa: BLE001
+                log.error("[override-sales] %s %s: the override was not paid and the paid "
+                          "marker could NOT be rolled back to %s (%s) — %s of net is now "
+                          "recorded as settled that nobody was paid for. Lower "
+                          "`%s` by hand to re-arm it.",
+                          market_id, month, prev, e, f"{delta:,.0f}", paid_key)
+            else:
+                log.warning("[override-sales] %s %s: override of %s net NOT paid — marker "
+                            "rolled back to %s, it stays owed and the next import retries it.",
+                            market_id, month, f"{delta:,.0f}", f"{prev:,.0f}")
+            return {"mgr": int(mgr) if mgr else None, "coins": 0, "points": 0,
+                    "owner": owner, "delta": float(delta), "settled": False}
         if mgr and (coins > 0 or points > 0):
             _log_team_event(owner, "override", coins=coins, points=points, detail=f"{market_id}:{month}")
         return {"mgr": int(mgr) if mgr else None, "coins": int(coins) if mgr else 0,
-                "points": int(points) if mgr else 0, "owner": owner, "delta": float(delta)}
+                "points": int(points) if mgr else 0, "owner": owner, "delta": float(delta),
+                "settled": True}
     except Exception as e:
-        log.warning("[override-sales] credit failed: %s", e)
+        # The marker may already be forward with nothing paid. Say so — and say which
+        # config key re-arms it — rather than returning None and losing the fact.
+        log.error("[override-sales] credit failed for %s %s: %s — if the override did not "
+                  "land, lower `mgr_sales_paid:%s:%s` to re-arm it.",
+                  market_id, month, e, market_id, month)
         return None
 
 # ── Team performance: ledger logging, summaries, and webhook/channel delivery ──
@@ -3753,40 +3950,76 @@ async def _pay_honey_harvesters(rows: list, market_id: str, report_channel):
     return paid_lines
 
 
-async def _pay_honey_from_export(txns: list, market_id: str, report_channel):
-    """Record (and pay) hive-harvest wages from an export's parsed transactions.
+async def _pay_honey_from_export(ingest_ids: list, market_id: str, report_channel):
+    """Record (and pay) hive-harvest wages for CSN rows this consumer has WON.
 
-    ONE LEDGER: every 'sold hive item' row is inserted into hive_harvests, deduped by
-    real sale identity (uq_hive_sale on market+ign+item+qty+sale_ts) — the exact same
-    ledger the csn-hive webhook feed writes to. The old engine here was entirely
-    separate: it compared a DRIFTING reconstructed timestamp against a forward-only
-    `harvest_last_ts` marker (+30s drift double-paid a whole period, −30s drift made
-    newer sales invisible forever) and paid 64/76 coins/piece — ~80× the hive engine's
-    value×17% wage, because it read the STACK price as a per-piece price.
+    THE `hive` CONSUMER. `ingest_ids` are csn_ingest row ids; this function claims
+    each one on the `hive_state` flag before doing anything with it, and settles it
+    per row afterwards. It no longer takes the raw parsed `txns` list, and that is the
+    whole point:
+
+      - It used to be handed EVERY parsed row on EVERY upload and rely on
+        hive_harvests' own dedup to sort out what was already paid. That dedup was a
+        ±120s window over a timestamp reconstructed from "Xh Ym ago" — the same
+        walk-dependent value the content signature exists to replace. It papered over
+        double-pays (76 duplicate rows, 63,211 coins overpaid before it was added) at
+        the cost of the opposite error: two genuinely separate harvests of 64 honey by
+        the same player two minutes apart look identical to it, so the second was
+        dropped and that harvester was simply never paid for it. Silently.
+      - Now the signature decides, exactly, and the claim decides who acts. Each sale
+        is offered to the hive consumer exactly once, whatever happens upstream — the
+        ledger booking failing, a re-uploaded file, two bot instances on one gateway
+        event, the mod never having cleared anything.
+
+    ONE LEDGER still: rows go into hive_harvests, the same table the csn-hive webhook
+    feed writes to. Rows from here carry `sale_sig`, which routes them to the
+    uq_hive_sig index; feed rows have no signature and keep the old index and window.
 
     Payment goes through the hive cog's claim-based settle (per-row paid flags, credits
     guarded, value booked to the hive ledger), so a mid-run failure can never re-pay
     earlier harvesters. Payout is immediate unless `hive_autopay:<mid>` is explicitly
     "0" — then rows sit recorded-unpaid for /hive settings (or the 6h sweep)."""
     import Restocker_db as _db
-    rows = []
-    for t in (txns or []):
-        if (t.get("verb") or "").lower() != "sold":
+    if not ingest_ids:
+        return []
+
+    # CLAIM FIRST, THEN ACT (rule 1). Anything not won here is somebody else's row and
+    # must not be touched — not even to look at whether it was paid.
+    claimed = _db.csn_claim("hive", ingest_ids)
+    if not claimed:
+        return []
+
+    rows = []                 # rows that are actually hive wages
+    not_applicable = []       # won, but nothing for this consumer to do
+    for src in _db.csn_ingest_rows(claimed):
+        item = (src.get("item_display") or src.get("item_raw") or "").strip()
+        # The harvester's IGN as they spell it. hive_harvests.ign is shown on the hive
+        # panel, in payout lines and in DMs, and it is what a manager matches against
+        # when linking an account — so it must be JesseNapoleon, not jessenapoleon.
+        actor = (src.get("actor_display") or src.get("actor") or "").strip()
+        qty = int(src.get("qty") or 0)
+        ts = (src.get("sale_ts") or "").strip()
+        if ((src.get("verb") or "").lower() != "sold" or _hive_item_value(item) <= 0
+                or not actor or qty <= 0 or not ts):
+            not_applicable.append(int(src["id"]))
             continue
-        item = (t.get("item") or "").strip()
-        if _hive_item_value(item) <= 0:
-            continue
-        actor = (t.get("actor") or "").strip()
-        qty = int(t.get("qty") or 0)
-        ts = (t.get("sale_ts") or "").strip()
-        if actor and qty > 0 and ts:
-            rows.append((actor, item, qty, ts))
+        rows.append((actor, item, qty, ts, str(src.get("sig") or ""), int(src["id"])))
+
+    # 'skip', not 'done'. A purchase of iron is not an unpaid wage and never will be,
+    # and at 2am "we decided this one isn't a wage" must stay tellable apart from "we
+    # paid this one".
+    if not_applicable:
+        try:
+            _db.csn_settle("hive", not_applicable, "skip")
+        except Exception as e:
+            log.warning("[hiveharvest] could not settle %d non-wage row(s): %s",
+                        len(not_applicable), e)
     if not rows:
         return []
 
     msg_id = f"export:{market_id}:{int(time.time() * 1000)}"
     new_ids = []
-    for line_no, (actor, item, qty, ts) in enumerate(rows):
+    for line_no, (actor, item, qty, ts, sig, ingest_id) in enumerate(rows):
         uid = None
         try:
             uid = _db.get_user_id_by_ign(actor)
@@ -3795,11 +4028,24 @@ async def _pay_honey_from_export(txns: list, market_id: str, report_channel):
         try:
             rid = _db.add_hive_harvest(market_id, actor, uid, item, qty,
                                        _hive_item_value(item), msg_id, line_no, sale_ts=ts,
-                                       wage_value=_hive_item_wage_value(item))
+                                       wage_value=_hive_item_wage_value(item),
+                                       sale_sig=sig or None)
             if rid:
                 new_ids.append(rid)
+            # Settled per row, immediately after that row's effect — never after the
+            # loop (rule 2). A crash at row 40 of 200 leaves rows 1-39 'done', row 40
+            # 'claimed' and visible in csn_stuck_claims, and 41-200 still 'pending' for
+            # the next upload to pick up. Nothing replays, nothing is stranded.
+            #
+            # `rid is None` means the wage ledger already held this sale — recorded on
+            # an earlier upload under a different market id, or by the webhook feed.
+            # That is a real, final outcome for this consumer, so it settles too;
+            # leaving it pending would re-offer the same sale forever.
+            _db.csn_settle("hive", [ingest_id], "done")
         except Exception as e:
-            log.warning("[hiveharvest] ledger insert failed (%s x%s %s): %s", actor, qty, item, e)
+            log.warning("[hiveharvest] ledger insert failed (%s x%s %s): %s — csn_ingest "
+                        "row %s stays claimed for an operator to look at", actor, qty,
+                        item, e, ingest_id)
     if not new_ids:
         return []            # every sale was already in the ledger — nothing owed
     log.info("[hiveharvest] %s: %d new harvest row(s) recorded from export", market_id, len(new_ids))
@@ -4418,133 +4664,6 @@ async def report_csn_setup_problem(kind: str, *, market_id=None, channel=None,
         await ch.send(embed=e, allowed_mentions=discord.AllowedMentions.none())
     except Exception as _e:
         log.warning("[csn] could not report the setup problem: %s", _e)
-
-
-# ── CSN silence watchdog ─────────────────────────────────────────────────────
-# Every alert above is ARRIVAL-triggered: a file has to reach Discord and be refused
-# before anyone hears about it. Nothing at all fires when a shop simply stops sending,
-# which is the failure that actually costs money. Amazonia filed 16 reports in June, 3
-# in July, then nothing — six weeks of a live market's earnings were missing before its
-# owner happened to mention it in chat. So going quiet is now itself an alert.
-CSN_SILENCE_DAYS_KEY = "csn_silence_days"
-CSN_SILENCE_DAYS_DEFAULT = 3.0
-
-
-def _csn_silence_days(market_id=None) -> float:
-    """Days of silence before a market gets called out. `csn_silence_days:<mid>` wins
-    over the global `csn_silence_days`; setting either to 0 turns the check off for that
-    scope — a market that is *meant* to be dormant is not a fault, and nagging about one
-    is how people learn to ignore the channel."""
-    import Restocker_db as _db
-    keys = ([f"{CSN_SILENCE_DAYS_KEY}:{market_id}"] if market_id else []) + [CSN_SILENCE_DAYS_KEY]
-    for key in keys:
-        try:
-            raw = str(_db.get_config(key) or "").strip()
-        except Exception:
-            continue
-        if not raw:
-            continue
-        try:
-            return max(0.0, float(raw))
-        except ValueError:
-            # A typo'd threshold must not silently disable the watchdog — say so and
-            # fall through to the next scope.
-            log.warning("[csn silence] ignoring non-numeric %s=%r", key, raw)
-    return float(CSN_SILENCE_DAYS_DEFAULT)
-
-
-async def check_csn_silence(apply: bool = True, days=None) -> list:
-    """Which markets used to report and have now gone quiet.
-
-    Returns [{market_id, name, last_at, days_quiet, threshold}], longest silence first.
-
-    `apply=False` computes the list and posts NOTHING — so the same code answers "who is
-    quiet right now?" on demand without putting anything in the errors channel.
-    `days` overrides the configured threshold for this call only (an ad-hoc "who has been
-    quiet a fortnight?"); it does not change anyone's settings.
-    """
-    import Restocker_db as _db
-    try:
-        last_seen = _db.csn_last_report_at() or {}
-    except Exception as e:
-        log.warning("[csn silence] could not read last report times: %s", e)
-        return []
-
-    now = utcnow_dt()
-    fallback = str(FALLBACK_MARKET_ID).strip().lower()
-    quiet = []
-    for mid, last_at in last_seen.items():
-        if str(mid).strip().lower() == fallback:
-            continue                      # TEST is the unattributed-upload bin, not a shop
-        m = _get_market(mid)
-        if m is None:
-            continue                      # history for a market that no longer exists
-        if not m.get("active", True):
-            continue                      # deliberately retired — silence is correct
-        threshold = _csn_silence_days(mid) if days is None else max(0.0, float(days))
-        if threshold <= 0:
-            continue                      # switched off for this market
-        # NOT `days` — that is the caller's override, and reusing the name here reassigns
-        # it on the first market, so every later market silently got the PREVIOUS one's
-        # elapsed time as its threshold.
-        days_quiet = (now - parse_iso(last_at)).total_seconds() / 86400.0
-        if days_quiet < threshold:
-            continue
-        quiet.append({
-            "market_id": str(mid),
-            "name":      m.get("name", mid),
-            "last_at":   last_at,
-            "days_quiet": round(days_quiet, 1),
-            "threshold": threshold,
-        })
-
-    quiet.sort(key=lambda r: r["days_quiet"], reverse=True)
-    if not apply or not quiet:
-        return quiet
-
-    log.warning("[csn silence] %d market(s) quiet: %s", len(quiet),
-                ", ".join(f"{r['market_id']}={r['days_quiet']}d" for r in quiet))
-
-    # ONE digest, not one embed per market. When several shops stop at once — which is
-    # what a bad mod build or a Discord outage looks like — N separate alerts bury the
-    # pattern that they all stopped together. The rows carry who to chase, so nothing
-    # the per-market alert said is lost.
-    cid = _csn_error_channel_id()
-    if not cid:
-        return quiet
-    try:
-        ch = bot.get_channel(int(cid)) or await bot.fetch_channel(int(cid))
-        if ch is None:
-            return quiet
-        e = discord.Embed(
-            title="🔇 Markets that have stopped reporting",
-            description=("These markets have filed CSN reports before and have now gone "
-                         "quiet. Whatever they have sold since is missing from their "
-                         "earnings, their share price and their harvesters' pay."),
-            colour=0xC94F4F)
-        for row in quiet[:20]:
-            e.add_field(
-                name=f"{row['name']} · quiet {row['days_quiet']:.0f}d",
-                value=(f"`{row['market_id']}` — last report "
-                       f"{human_duration_since(parse_iso(row['last_at']))} ago\n"
-                       f"Ask: {_ign_for_market(row['market_id'])}"),
-                inline=False)
-        if len(quiet) > 20:
-            e.add_field(name="…", value=f"and {len(quiet) - 20} more", inline=False)
-        e.add_field(
-            name="What to check",
-            value=("Have them press the scan key in game and watch this channel. If the "
-                   "scan says it posted but nothing lands here, the mod's webhook post is "
-                   "failing — check the CSN settings screen for a blank webhook, and "
-                   "check whether `.minecraft/sales/` still holds un-posted "
-                   "`csn_export_*.csv` files worth importing by hand."),
-            inline=False)
-        e.set_footer(text="Once a day. A market meant to be dormant: set "
-                          "csn_silence_days:<market> to 0.")
-        await ch.send(embed=e, allowed_mentions=discord.AllowedMentions.none())
-    except Exception as _e:
-        log.warning("[csn silence] could not post the digest: %s", _e)
-    return quiet
 
 
 # ── land ledger: the same event stored under several inbox numbers ───────────
@@ -5179,59 +5298,175 @@ async def _process_csn_attachment(attachment: discord.Attachment, report_channel
     # csn_history only keeps monthly per-item totals, so this is the only place that
     # detail survives. Stored against the SAME resolved market as the earnings, and
     # deduped on sale_uid (mod v2.1+) / near-duplicate identity so re-scans are free.
+    # csn_ingest row ids for everything this file landed, new or already held. Defined
+    # before the export branch because the report card below reads it too, and a MONTHLY
+    # file never enters that branch at all — an undefined name there would be a NameError
+    # on the one path that carries the headline figures.
+    _landed_ids = []
+    # Per-seller slices of an export's earnings, filled in the export branch and read
+    # by the month-source rollup below. Defined here for the same reason as
+    # `_landed_ids`: a monthly file never enters that branch, and an ingest failure
+    # can leave the branch early, so a name that only exists on the happy path would
+    # be a NameError on the paths that carry the headline figures.
+    _export_by_seller = {}
     if csv_type == "export":
         _new_txns = []
+        _earn_rows = []
         try:
             if txns:
                 import Restocker_db as _db_txn
-                _new, _new_txns = _db_txn.add_csn_transactions_detailed(effective_market_id, txns)
+                import csn_sig as _csn_sig
+                # Land every parsed row in the ONE durable store first. This is
+                # insert-and-catch on UNIQUE(link_id, sig): whatever happens below,
+                # each sale now exists exactly once and every consumer can find it
+                # again. `_landed["ids"]` covers rows that were ALREADY stored as
+                # well as new ones — that is the point, because a consumer that
+                # failed on an earlier delivery must get another chance without
+                # anything else having to remember that it failed.
+                _csn_sig.assign_occurrences(txns)
+                _landed = _db_txn.csn_ingest_record(effective_market_id, txns)
+                _landed_ids = list(_landed["ids"])
+                if _landed["bad"]:
+                    log.error("[csn ingest] %s: %d row(s) from %s could not be "
+                              "signed and were NOT stored: %s", effective_market_id,
+                              _landed["bad"], filename, "; ".join(_landed["errors"][:5]))
+                log.info("[csn ingest] %s: %d new, %d already held, from %s",
+                         effective_market_id, _landed["new"], _landed["dup"], filename)
+
+                # Consumer 1 — the per-sale ledger.
+                _new, _new_txns = _db_txn.add_csn_transactions_detailed(
+                    effective_market_id, txns)
                 log.info("[csn txn] %s: %d/%d transaction(s) recorded from %s",
                          effective_market_id, _new, len(txns), filename)
+
+                # Consumer 2 — the earnings/items roll-up. Claimed on its OWN flag
+                # against ALL landed rows, NOT against what the ledger just booked.
+                # It used to iterate `_new_txns`, which silently made earnings a
+                # side effect of the ledger's dedup: if the ledger had already
+                # booked a sale but the earnings write then failed, that sale's
+                # coins could never be recovered, because the next upload found the
+                # ledger row present and reported nothing new. Each consumer now
+                # decides for itself, exactly once.
+                _earn_rows = _db_txn.csn_ingest_rows(
+                    _db_txn.csn_claim("earn", _landed["ids"]))
         except Exception as _te:
             log.warning("[csn txn] ingest failed for %s: %s", filename, _te)
 
-        # Earnings/items from ONLY the newly-recorded transactions — a re-uploaded (or
-        # partially-overlapping) export books exactly the sales the ledger didn't already
-        # hold. 'sold' rows now also fill the ITEM side (bought_qty/net_coins), so the
-        # expense per item and the comb/free-stock valuation below work on exports.
-        for _t in _new_txns:
-            _it = _t.get("item") or ""
+        # Earnings/items from the rows THIS consumer won. 'sold' rows also fill the
+        # ITEM side (bought_qty/net_coins), so the expense per item and the
+        # comb/free-stock valuation below work on exports.
+        #
+        # Money is summed as INTEGER centi-coins and converted once, at the boundary
+        # with the (legacy REAL) csn_history columns — so no intermediate total is a
+        # float sum, and 0.1 + 0.2 can never become 0.30000000000000004 in a running
+        # earnings figure.
+        _income_centi = 0
+        _spent_centi = 0
+        # …and the SAME figures split by SELLER, for the month-source rollup.
+        # An export's contribution has to be filed under the shop that made the
+        # sales, not under the file: a monthly file re-aggregates ONE shop's whole
+        # month, so it supersedes that shop's exports and only that shop's. Split
+        # per seller and the two file types compose — see `csn_add_export_source`.
+        for _t in _earn_rows:
+            _it = _t.get("item_display") or _t.get("item_raw") or ""
             _q = int(_t.get("qty") or 0)
-            _c = float(_t.get("coins") or 0)
+            _cc = int(_t.get("coins_centi") or 0)
+            _c = _cc / 100.0
             _v = (_t.get("verb") or "").lower()
             if not _it:
                 continue
+            _sel = (_t.get("seller_display") or _t.get("seller") or "").strip()
+            _sl = _export_by_seller.setdefault(
+                _sel, {"income": 0.0, "spent": 0.0, "items": {}})
+            _si = _sl["items"].setdefault(
+                _it, {"sold_qty": 0, "bought_qty": 0, "net_coins": 0.0})
             _d = items.setdefault(_it, {"sold_qty": 0, "bought_qty": 0, "net_coins": 0.0})
             if _v == "bought":
                 _d["sold_qty"] = _d.get("sold_qty", 0) + _q
                 _d["net_coins"] = _d.get("net_coins", 0.0) + _c
-                income += _c
+                _income_centi += _cc
+                _si["sold_qty"] += _q
+                _si["net_coins"] = round(_si["net_coins"] + _c, 2)
+                _sl["income"] = round(_sl["income"] + _c, 2)
             elif _v == "sold":
                 _d["bought_qty"] = _d.get("bought_qty", 0) + _q
                 _d["net_coins"] = _d.get("net_coins", 0.0) + _c
-                spent += abs(_c)
+                _spent_centi += abs(_cc)
+                _si["bought_qty"] += _q
+                _si["net_coins"] = round(_si["net_coins"] + _c, 2)
+                _sl["spent"] = round(_sl["spent"] + abs(_c), 2)
+
+        # Convert ONCE, at the boundary with the legacy REAL columns.
+        income += _income_centi / 100.0
+        spent += _spent_centi / 100.0
+
+        # Settle the earn consumer per row. The CLAIM above is the progress marker
+        # that makes this exactly-once (rule 1: claim first, then act); this closes
+        # the rows out. A crash between the two leaves them 'claimed', which
+        # `csn_stuck_claims` reports to an operator — it does NOT silently replay.
+        try:
+            if _earn_rows:
+                import Restocker_db as _db_earn
+                for _t in _earn_rows:
+                    _db_earn.csn_settle("earn", [int(_t["id"])], "done")
+        except Exception as _ee:
+            log.warning("[csn earn] settle failed for %s: %s", filename, _ee)
 
         # Month attribution from the SALES' OWN timestamps (majority month), not "now":
         # a 35-day export used to file last month's sales into the current month.
+        # Prefers each row's `sale_date` (the mod's own day attribution, and what the
+        # signature was built on) over the drifting reconstructed instant.
+        #
+        # WEIGHTED BY VALUE, NOT BY ROW COUNT (audit fix, MARKETS_VERIFY_R1 CSN-7).
+        # A vote by row count lets three 1,000-coin sales outvote one 100,000-coin
+        # sale: measured, a 100,000-coin July sale was filed into August and the
+        # per-sale ledger (`csn_transactions`, which keys off each row's own
+        # sale_day) permanently contradicted the month row. That is not a rounding
+        # difference — July's dividend never sees the 100,000, and the permanent
+        # per-month dividend guard means it can never be paid to July's
+        # shareholders even after the figure is corrected. The month a file belongs
+        # to is the month most of its MONEY was earned in.
+        _mvalue = {}
         _mcounts = {}
-        for _t in (_new_txns or txns):
-            _mk = (_t.get("sale_ts") or "")[:7]
-            if len(_mk) == 7:
-                _mcounts[_mk] = _mcounts.get(_mk, 0) + 1
-        if _mcounts:
-            month_key = max(_mcounts.items(), key=lambda kv: kv[1])[0]
+        for _t in (_earn_rows or _new_txns or txns):
+            _mk = (_t.get("sale_date") or _t.get("sale_ts") or "")[:7]
+            if len(_mk) != 7:
+                continue
+            _cc = _t.get("coins_centi")
+            _val = abs(float(_cc or 0)) / 100.0 if _cc is not None else abs(
+                float(_t.get("coins") or _t.get("amount_coins") or 0))
+            _mvalue[_mk] = _mvalue.get(_mk, 0.0) + _val
+            _mcounts[_mk] = _mcounts.get(_mk, 0) + 1
+        if _mvalue:
+            # Value first; row count only breaks a tie (a 0-coin-only file still has
+            # to land somewhere), then the month key so the choice is deterministic.
+            month_key = max(_mvalue.items(),
+                            key=lambda kv: (kv[1], _mcounts.get(kv[0], 0), kv[0]))[0]
+            _minority = round(sum(v for k, v in _mvalue.items() if k != month_key), 2)
+            if _minority > 0:
+                log.warning(
+                    "[csn] %s: %s spans %d month(s); filed under %s, which leaves "
+                    "%.0f coins booked in the wrong month. The per-sale ledger "
+                    "(csn_transactions) keeps each sale's own month — reconcile from "
+                    "there before paying a dividend on either month.",
+                    effective_market_id, filename, len(_mvalue), month_key, _minority)
             try:
                 from datetime import date as _date
                 month_label = _date(int(month_key[:4]), int(month_key[5:7]), 1).strftime("%B %Y")
             except Exception:
                 month_label = month_key
 
-        # HiveHarvesting payout — BEFORE the txn_only/no-items gates, so purchase-only
-        # exports and monthly-accompanied exports still pay wages. All parsed rows go in
-        # (not just new ones): the hive ledger dedups on real sale identity itself, so
-        # a line that failed to pay on an earlier upload gets another chance here.
+        # Consumer 3 — hive wages. BEFORE the txn_only/no-items gates, so purchase-only
+        # exports and monthly-accompanied exports still pay.
+        #
+        # ALL landed ids go in, not just the ones that were new to this file. A sale
+        # whose wage failed to pay on an earlier upload is still 'pending' on
+        # `hive_state`, so re-offering it is how it finally gets paid — and one that
+        # already paid is 'done' and cannot be won again. That is the difference between
+        # this and the old arrangement, which re-offered every parsed row on every
+        # upload and asked a ±120s timestamp window to work out which were new.
         try:
-            await _pay_honey_from_export(txns, effective_market_id, report_channel)
+            await _pay_honey_from_export(_landed_ids, effective_market_id, report_channel)
         except Exception as _e:
             log.warning("[hiveharvest] export hook failed: %s", _e)
 
@@ -5273,6 +5508,24 @@ async def _process_csn_attachment(attachment: discord.Attachment, report_channel
                 _v["net_coins"] = _nc + _val
                 _v["acquired_value"] = round(_val, 2)
                 _acq_total += _val
+                # The same valuation, on the per-seller slices that feed the
+                # month-source rollup. Allocated by each seller's OWN bought_qty
+                # (exact, not pro-rata: the valuation is qty x rate), so the
+                # rollup and csn_history agree. Without this the comb value would
+                # be in csn_history and missing from the rollup, and the next
+                # monthly file — which restates the month FROM the rollup — would
+                # quietly drop it.
+                for _sl in _export_by_seller.values():
+                    _si = (_sl.get("items") or {}).get(_it)
+                    if not _si:
+                        continue
+                    _sbq = int(_si.get("bought_qty", 0) or 0)
+                    if _sbq <= 0:
+                        continue
+                    _sval = _sbq * _pp
+                    _si["net_coins"] = round(float(_si.get("net_coins", 0) or 0) + _sval, 2)
+                    _si["acquired_value"] = round(_sval, 2)
+                    _sl["income"] = round(float(_sl.get("income", 0) or 0) + _sval, 2)
         if _acq_total > 0:
             income = float(income) + _acq_total
             log.info("[csn] valued %.0f coins of free-deposited stock (combs) as profit for %s",
@@ -5311,20 +5564,69 @@ async def _process_csn_attachment(attachment: discord.Attachment, report_channel
         # became 1,110,717). Adding up files that describe the same sales invents money,
         # and that number drives share price, dividends and platform fees.
         #
-        # So: sum only when the mod's `# SHOP` stamp names a distinct shop. Files from
-        # older builds carry no stamp, so they all share ONE bucket and REPLACE each
-        # other — the pre-rollup behaviour, which can undercount a genuinely multi-shop
-        # market but can never fabricate coins. Rebuild the mod on every alt and true
-        # multi-shop markets start summing correctly again.
+        # So: sum only when the mod's `# SHOP` stamp names a distinct shop.
+        #
+        # Files from older builds carry no stamp. They used to share ONE bucket,
+        # `shop:unstamped`, which REPLACES — and that annihilated real revenue:
+        # two unstamped shops uploading 500,000 and then 300,000 left the month
+        # reading 300,000, with 500,000 gone and no anomaly, because the month
+        # moved DOWN (MARKETS_VERIFY_R1 CSN-5). Unstamped files are now bucketed by
+        # the hash of their catalogue (`csn_set_unstamped_month_source`), so two
+        # shops selling different lines SUM while the same shop's rescan still
+        # replaces — including a rescan that picked up a new line, which is merged
+        # rather than added. Rebuild the mod on every alt and the stamped path
+        # takes over.
         _src = f"shop:{_shop}" if _shop else "shop:unstamped"
         if not _shop:
-            log.info("[csn] %s %s: no `# SHOP` stamp (old mod build) — this file REPLACES "
-                     "the unstamped figures for the month instead of adding to them",
-                     effective_market_id, month_key)
+            log.info("[csn] %s %s: no `# SHOP` stamp (old mod build) — bucketing this "
+                     "file by its catalogue hash so it cannot collide with another "
+                     "unstamped shop's figures", effective_market_id, month_key)
+        # ── Who does this shop belong to? ────────────────────────────────────
+        # The `# SHOP` stamp is written by the mod from its own config, not typed
+        # by whoever posted the file — the closest thing this transport has to
+        # CorpNode's "read the name off the session object". Record it as
+        # EVIDENCE (ign_links.observe never writes ign_registry; a CSV is
+        # editable and auto-binding a wage-routing row from one would be worse
+        # than the manual step it replaced), then run the ownership check the
+        # comment above _run_goblin_misdelivery_20260811 says is unusable.
+        #
+        # Advisory only. It warns on `foreign` and is silent on `unknown`, and it
+        # never rejects — the hard rejections in this function guard the market
+        # CODE, which is a secret; this guards a text stamp, which is not.
+        if _shop:
+            try:
+                import ign_links as _ignl
+                _ignl.observe(_shop, source_key or f"channel:{source_channel_id}",
+                              market_id=effective_market_id)
+                _att = _ignl.check_attribution(effective_market_id, _shop)
+                if _att.get("verdict") == "foreign":
+                    log.warning("[csn] %s %s: shop stamp `%s` is attributed elsewhere — %s",
+                                effective_market_id, month_key, _shop, _att.get("reason"))
+                    try:
+                        await report_channel.send(
+                            f"⚠️ Attribution check: this monthly file is stamped "
+                            f"`# SHOP,{_shop}` and {_att.get('reason')}.\n"
+                            f"• If the scan really is for `{effective_market_id}`, ignore this.\n"
+                            f"• If it was delivered to the wrong market, a manager should "
+                            f"remove the month source `{_src}` before it moves share price "
+                            f"and platform fees.\n"
+                            f"_Recorded either way — nothing was rejected._",
+                            allowed_mentions=discord.AllowedMentions.none())
+                    except Exception:
+                        pass
+            except Exception as _ie:
+                # Attribution is advisory; it must never cost an ingest.
+                log.warning("[csn] attribution check skipped: %s", _ie)
         try:
             import Restocker_db as _db_src
-            _db_src.csn_set_month_source(effective_market_id, month_key, _src,
-                                         income, spent, items)
+            if _shop:
+                _db_src.csn_set_month_source(effective_market_id, month_key, _src,
+                                             income, spent, items)
+            else:
+                # Unstamped: the bucket is decided from the file's own catalogue, and
+                # the write + any rescan retirement happen in ONE transaction.
+                _src = _db_src.csn_set_unstamped_month_source(
+                    effective_market_id, month_key, income, spent, items)
             _roll = _db_src.csn_month_totals(effective_market_id, month_key)
             if _roll.get("sources", 0) > 1:
                 log.info("[csn] %s %s: rolled up %d uploader(s) -> income %.0f",
@@ -5333,11 +5635,64 @@ async def _process_csn_attachment(attachment: discord.Attachment, report_channel
         except Exception as _se:
             log.warning("[csn] month-source rollup failed (using this file alone): %s", _se)
 
+    # ONE WRITE PER UPLOAD. There used to be a second call here —
+    # `_record_to_history(...)` under `if effective_market_id == DEFAULT_MARKET_ID`.
+    # It was not a second store: `_record_to_history` -> `_load_csn_history` ->
+    # `_load_csn_for_market("main")` is the SAME row set `_record_to_market_history`
+    # just wrote, so with DEFAULT_MARKET_ID="main" every upload booked the month
+    # twice (measured: a 1,500-coin file became 3,000; with merge=True, 4,500). And
+    # there was no correct value for the env var: setting it to "greyhames" made the
+    # guard match while the mirror still hardcoded "main", so market `main` was
+    # CREATED FROM NOTHING on the first upload. `_load_markets()` auto-creates a
+    # market named DEFAULT_MARKET_ID on an empty DB, so a fresh install was born in
+    # this state. The doubled month drives share price, dividends and platform fees:
+    # the mirrored market's fundamental tracked exactly 2x and minted 1.70x more on
+    # the same real-world sales. Do not add a second recorder here.
+    # An EXPORT contributes to the month-source rollup too, under ITS SELLER's key.
+    #
+    # It used to contribute to csn_history only. A monthly file REPLACES the month
+    # with the rollup across `csn_month_sources`, so any export that landed first
+    # was erased by the next unrelated monthly: export 1,000 then a disjoint
+    # monthly 7,000 read as 7,000, not 8,000 (MARKETS_VERIFY_R1 CSN-4). Those
+    # coins are real and per-sale — they are still sitting in `csn_transactions`
+    # — and they left the month anyway.
+    #
+    # PER SELLER, and not per file, because the erasure was only ever wrong for a
+    # DIFFERENT shop's monthly. A monthly from the same shop re-aggregates that
+    # shop's whole month, including the sales this export already carried, so it
+    # SHOULD supersede it — adding the two would invent the overlap, which is the
+    # one direction that mints coins. `csn_set_month_source` retires
+    # `export:<ign>` when `shop:<ign>`'s own monthly lands; an export that arrives
+    # AFTER that monthly opens the row again with only the sales the monthly could
+    # not have seen, which is also right.
+    #
+    # ACCUMULATE within a seller, matching `merge=True` below: an export carries
+    # one period's partials. Idempotent for free — a re-uploaded export's rows are
+    # already claimed by the `earn` consumer, so it arrives here with income 0.
+    if csv_type == "export" and _export_by_seller:
+        for _sel, _slice in _export_by_seller.items():
+            if not (float(_slice["income"] or 0) or float(_slice["spent"] or 0)):
+                continue
+            try:
+                import Restocker_db as _db_exp
+                _db_exp.csn_add_export_source(
+                    effective_market_id, month_key, _slice["income"],
+                    _slice["spent"], _slice["items"], shop=_sel)
+            except Exception as _ee:
+                # The month-source row is what stops a later monthly erasing this
+                # export. Losing it is not fatal to the coins (csn_history and
+                # csn_transactions both still hold them) but it IS the failure mode
+                # above, so say so loudly rather than at debug level.
+                log.error("[csn] %s %s: export source row for seller %r NOT written "
+                          "(%s) — a later monthly from another shop will overwrite "
+                          "this export's %.0f income in the rollup. Re-upload the "
+                          "export after the monthly, or restate the month from "
+                          "csn_transactions.",
+                          effective_market_id, month_key, _sel, _ee,
+                          float(_slice["income"] or 0))
+
     _record_to_market_history(effective_market_id, month_key, month_label, filename,
                               income, spent, items, merge=_merge_month)
-    if effective_market_id == DEFAULT_MARKET_ID:
-        _record_to_history(month_key, month_label, filename, income, spent, items,
-                           merge=_merge_month)
 
     try:
         _mgr_sales = _credit_manager_on_csn(effective_market_id, month_key, float(income) - float(spent))
@@ -5444,18 +5799,21 @@ async def _process_csn_attachment(attachment: discord.Attachment, report_channel
         _xlsx_name = f"report_{effective_market_id}_{month_key}.xlsx"
         files.append(discord.File(io.BytesIO(_xb), filename=_xlsx_name))
 
-    # Deliver the report where the person who ran the scan is looking: the channel the
-    # upload ARRIVED in, then the market's bound channel, then the central one.
-    #
-    # This used to prefer the market's registered report_channel_id over the source
-    # channel, which is the falrija bug in a second place. A shop uploading into channel
-    # A had its file ingested and (once every attachment was clean) DELETED from A, while
-    # the card announcing it went to channel B — so from A it looked exactly like "the bot
-    # stopped sending the report, it just uploads". _market_dest_channel already encodes
-    # the right order for stock scans; routing both through it makes one rule instead of
-    # two that disagree.
-    dest_channel = await _market_dest_channel(
-        effective_market_id, report_channel, source_channel_id=source_channel_id)
+    # Deliver the finished report to the market it belongs to: prefer THAT market's
+    # own bound channel, so per-market reports land in per-market channels instead of
+    # all piling into the central CSN_REPORT_CHANNEL_ID. Falls back to the channel this
+    # was posted in / the central channel when a market has no bound channel of its own.
+    dest_channel = report_channel
+    try:
+        if effective_market_id and effective_market_id != DEFAULT_MARKET_ID:
+            _mrow = _get_market(effective_market_id)
+            _rc = (_mrow or {}).get("report_channel_id")
+            if _rc:
+                dest_channel = (bot.get_channel(int(_rc))
+                                or await bot.fetch_channel(int(_rc))
+                                or report_channel)
+    except Exception as _e:
+        log.debug("[csn] market-channel routing fell back to default: %s", _e)
 
     # Components-V2 layout when the library supports it (accent container + media gallery
     # + file card + link button); embed fallback otherwise. A LayoutView can't carry
@@ -5467,16 +5825,39 @@ async def _process_csn_attachment(attachment: discord.Attachment, report_channel
     # they haven't changed since the last card for this market+month, the data is still
     # ingested — the card is just not re-posted. Config csn_always_card=1 restores the
     # old always-post behaviour.
+    #
+    # Consumer 4 — the announcement feed. Claimed on its OWN flag, like every other
+    # consumer, so "has this sale ever been announced" is answered by the row itself
+    # rather than inferred from a fingerprint of the month's totals.
+    #
+    # Why that matters: the fingerprint is `income|spent|item_count`, and those are
+    # sums. A market that sold 500c of iron and bought 500c of iron since the last card
+    # has a byte-identical fingerprint and real, unannounced activity — the card was
+    # suppressed and the movement never surfaced. The claim below cannot be fooled that
+    # way, because it counts ROWS, not totals.
+    #
+    # It can only ever make the bot post MORE, never less: suppression still requires
+    # the fingerprint to match, and now ALSO requires that nothing new landed. His
+    # "quiet by default" tuning is untouched — five alts re-uploading the same file
+    # land zero new rows and still say nothing.
+    _feed_claimed = []
+    try:
+        import Restocker_db as _db_feed
+        _feed_claimed = _db_feed.csn_claim("feed", _landed_ids)
+    except Exception as _fe:
+        log.debug("[csn] feed claim skipped: %s", _fe)
+
     _card_ok = True
     try:
         import Restocker_db as _db_card
         _fp = f"{round(float(income), 2)}|{round(float(spent), 2)}|{len(items)}"
         _fp_key = f"csn_card_fp:{effective_market_id}:{month_key}"
         if (str(_db_card.get_config("csn_always_card") or "") != "1"
+                and not _feed_claimed
                 and str(_db_card.get_config(_fp_key) or "") == _fp):
             _card_ok = False
-            log.info("[csn] %s %s unchanged (%s) — report card suppressed",
-                     effective_market_id, month_key, _fp)
+            log.info("[csn] %s %s unchanged (%s, 0 unannounced sales) — report card "
+                     "suppressed", effective_market_id, month_key, _fp)
         else:
             _db_card.set_config(_fp_key, _fp)
     except Exception as _ce:
@@ -5494,23 +5875,43 @@ async def _process_csn_attachment(attachment: discord.Attachment, report_channel
     except Exception:
         pass
 
-    if _card_ok and _full_card:
-        _layout = _build_csn_layout(embed, footer, _report_url,
-                                    chart_filename=_chart_name, xlsx_filename=_xlsx_name)
-        if _layout is not None:
-            await dest_channel.send(view=_layout, files=files)
-        else:
-            await dest_channel.send(content="📥 **CSN report received:**", embed=embed, files=files)
-    elif _card_ok:
-        try:
-            _net = float(income) - float(spent)
-            await dest_channel.send(
-                f"📊 **{month_label}** · `{effective_market_id}` · "
-                f"{float(income):,.0f} in · {float(spent):,.0f} out · "
-                f"**{_net:+,.0f}** net · <{_report_url}>")
-        except Exception as _1e:
-            log.warning("[csn] one-line summary failed, falling back to the card: %s", _1e)
-            await dest_channel.send(content="📥 **CSN report received:**", embed=embed, files=files)
+    _announced = False
+    try:
+        if _card_ok and _full_card:
+            _layout = _build_csn_layout(embed, footer, _report_url,
+                                        chart_filename=_chart_name, xlsx_filename=_xlsx_name)
+            if _layout is not None:
+                await dest_channel.send(view=_layout, files=files)
+            else:
+                await dest_channel.send(content="📥 **CSN report received:**", embed=embed, files=files)
+            _announced = True
+        elif _card_ok:
+            try:
+                _net = float(income) - float(spent)
+                await dest_channel.send(
+                    f"📊 **{month_label}** · `{effective_market_id}` · "
+                    f"{float(income):,.0f} in · {float(spent):,.0f} out · "
+                    f"**{_net:+,.0f}** net · <{_report_url}>")
+            except Exception as _1e:
+                log.warning("[csn] one-line summary failed, falling back to the card: %s", _1e)
+                await dest_channel.send(content="📥 **CSN report received:**", embed=embed, files=files)
+            _announced = True
+    finally:
+        # Settle the feed consumer per row.
+        #   posted   -> 'done'    (these sales have now been announced)
+        #   not      -> 'pending' (release the claim: suppressed, or the send raised).
+        # Releasing rather than settling is the important half. Marking them 'done'
+        # when nothing was actually posted would claim an announcement that never
+        # happened, and these sales could then never be announced by any later card —
+        # the same class of error as the ledger's old act-then-mark, one layer up.
+        if _feed_claimed:
+            try:
+                import Restocker_db as _db_feed2
+                _db_feed2.csn_settle("feed", _feed_claimed,
+                                     "done" if _announced else "pending")
+            except Exception as _fse:
+                log.warning("[csn feed] settle failed (%d row(s) stay claimed): %s",
+                            len(_feed_claimed), _fse)
     if _mgr_sales and _mgr_sales.get("owner"):
         try:
             await _team_live(
@@ -7340,7 +7741,11 @@ async def _open_payout_ticket(interaction: discord.Interaction, member: discord.
                          or mgr_role.mentionable)
         if can_ping_role:
             mention_prefix = f"{mgr_role.mention} 🔔 "
-            allowed = discord.AllowedMentions(roles=[mgr_role], users=[member])
+            # everyone=False spelled out: an UNSET `everyone` is the truthy
+            # `default` sentinel, so even this explicit role/user LIST form
+            # yields parse=['everyone'] on discord.py 2.7.1.
+            allowed = discord.AllowedMentions(everyone=False, roles=[mgr_role],
+                                              users=[member])
 
     body = (
         f"{mention_prefix}💳 **Coins Withdrawal Request**\n"
@@ -7859,15 +8264,12 @@ def _market_id_by_code(market_code: str) -> str | None:
     return matches[0] if len(matches) == 1 else None
 
 
-def _load_csn_history() -> dict:
-    # Same store and the SAME YAML fallback file as _load_csn_for_market("main") — the
-    # two used to back up "main" to two different files (csn_history.yml vs
-    # csn_history_main.yml), each holding half the truth.
-    return _load_csn_for_market("main")
-
-
-def _save_csn_history(data: dict) -> bool:
-    return _save_csn_for_market("main", data)
+# REMOVED: _load_csn_history / _save_csn_history.
+# They were thin aliases for _load_csn_for_market("main") / _save_csn_for_market("main")
+# — the same store, not a second one — and their only caller was _record_to_history,
+# the duplicate CSN recorder deleted from _handle_csn_upload. Every market, including
+# "main", is read and written through the _*_for_market pair. Re-introducing a
+# "main"-specific alias is how the double-booking got in.
 
 
 def _merge_month_entry(months: dict, month_key: str, label: str, source: str,
@@ -7904,37 +8306,12 @@ def _merge_month_entry(months: dict, month_key: str, label: str, source: str,
     }
 
 
-def _record_to_history(month_key: str, label: str, source: str,
-                        income: float, spent: float,
-                        items: dict, merge: bool = False) -> None:
-    history = _load_csn_history()
-    if history.get("_degraded"):
-        log.error("[csn] REFUSING to record 'main' history: the load fell back to a "
-                  "possibly-stale source (DB read failed). Booking now would overwrite "
-                  "real months with the fallback's contents on save.")
-        return
-    months = history.setdefault("months", {})
-    if merge:
-        months[month_key] = _merge_month_entry(months, month_key, label, source,
-                                               income, spent, items)
-    else:
-        months[month_key] = {
-            "label":       label,
-            "source":      source,
-            "recorded_at": utcnow_iso(),
-            "income":      round(income, 2),
-            "spent":       round(spent, 2),
-            "net":         round(income - spent, 2),
-            "items": {
-                item: {
-                    "sold_qty":   v.get("sold_qty", 0),
-                    "bought_qty": v.get("bought_qty", 0),
-                    "net_coins":  round(v.get("net_coins", 0.0), 2),
-                }
-                for item, v in items.items()
-            },
-        }
-    _save_csn_history(history)
+# REMOVED: _record_to_history — the duplicate CSN recorder.
+# It wrote the month a SECOND time into the very rows _record_to_market_history
+# had just written (via _load_csn_history -> _load_csn_for_market("main")), and it
+# hardcoded "main" while its caller's guard tested DEFAULT_MARKET_ID, so no value of
+# that env var was correct. Markets are recorded once, by
+# _record_to_market_history(effective_market_id, ...), and only that.
 
 
 def _find_latest_csv(pattern_name: str) -> Optional[str]:
@@ -7973,9 +8350,27 @@ def _parse_period_transactions(csv_text: str) -> list:
     throwing away `actor` and `timestamp_iso` — the two columns that make daily and
     per-customer reporting possible. This keeps them.
 
-    Returns [{actor, seller, verb, item, qty, coins, sale_ts, sale_uid}]; rows without a
-    usable timestamp are dropped (they can't be deduped or placed on a day) — with a log
-    line counting them, so the loss is visible.
+    Returns [{actor, seller, verb, item, item_raw, qty, coins, coins_str, sale_ts,
+    sale_date, occ, sale_uid}].
+
+    `item_raw`, `sale_date` and `occ` are the mod v3 columns that make the content
+    signature reproducible on this side (see csn_sig):
+      - item_raw keeps the "#aFe" variant code the `item` column strips, so two
+        different brews at two different prices stop hashing to one identity;
+      - sale_date is the mod's own day attribution, read rather than re-derived,
+        so the two ends cannot disagree about which day a near-midnight sale is on;
+      - occ is the mod-minted occurrence ordinal that distinguishes two genuinely
+        identical sales without involving the clock at all.
+    All three are read by NAME and default to empty, so a pre-v3 file still parses
+    and `csn_sig.assign_occurrences` numbers it bot-side.
+
+    `coins_str` preserves the amount as the mod WROTE it. The signature hashes an
+    integer derived from that decimal string via Decimal; going through the float
+    in `coins` would make the hash depend on repr() and differ between Python and
+    the JVM. `coins` is kept for the existing callers that do arithmetic on it.
+
+    Rows without a usable timestamp are dropped (they can't be deduped or placed on
+    a day) — with a log line counting them, so the loss is visible.
     """
     out, header = [], None
     dropped_no_ts = 0
@@ -8001,19 +8396,32 @@ def _parse_period_transactions(csv_text: str) -> list:
         if not ts or not item or len(ts) < 10:
             dropped_no_ts += 1
             continue
+        coins_str = (rec.get("amount_coins") or "0").strip()
         try:
             qty = int((rec.get("quantity") or "0").strip())
-            coins = float((rec.get("amount_coins") or "0").strip())
+            coins = float(coins_str.replace(",", ""))
         except Exception:
             continue
+        # v3 columns. Appended to the CSV header, so a pre-v3 file yields "" here
+        # and the bot mints `occ` itself (flagged legacy=1 in csn_ingest).
+        try:
+            occ = int((rec.get("occ") or "0").strip() or 0) or None
+        except Exception:
+            occ = None
         out.append({
             "actor":  (rec.get("actor") or "?").strip(),
             "seller": (rec.get("seller") or "").strip(),
             "verb":   (rec.get("verb") or "").strip().lower(),
             "item":   item,
+            # Fall back to the display name only for pre-v3 files; noted because
+            # that is exactly when two #code variants cannot be told apart.
+            "item_raw": (rec.get("item_raw") or "").strip() or item,
             "qty":    qty,
             "coins":  coins,
+            "coins_str": coins_str,
             "sale_ts": ts,
+            "sale_date": (rec.get("sale_date") or "").strip() or ts[:10],
+            "occ":    occ,
             "sale_uid": uid or None,
         })
     if dropped_no_ts:
@@ -9873,13 +10281,47 @@ def _distribute_investor_profit(market_id: str, month_key: str, net: float) -> l
     share_pct, paid STRAIGHT TO BOT COINS (add_coins → ledger-tagged, auditable). Only V Tech
     group markets' profit counts, only positive months, and it's idempotent per
     (market, month) — a re-ingested CSN month can never pay twice. Returns
-    [(user_id, amount)] actually paid; [] when nothing was distributed."""
+    [(user_id, amount)] actually paid; [] when nothing was distributed.
+
+    IDEMPOTENT PER (INVESTOR, MARKET, MONTH) — NOT PER MONTH. It used to check the
+    month tag ONCE, before the loop, and write that same tag per investor. The
+    first investor paid therefore made the tag exist, so every later attempt
+    returned [] at the guard and the rest were never paid: measured, 7 of 10
+    investors permanently unpaid after one mid-loop failure, with the outer
+    `except` returning [] so the caller could not tell. The guard is now one
+    claim-first row per investor, checked INSIDE the loop and decided by its
+    rowcount (`investor_leg_claim`).
+
+    ONE TRANSACTION PER INVESTOR: marker, credit and receipt commit together or
+    not at all. They used to be two commits — the claim, then `add_coins` — and a
+    hard kill in the gap left the leg `claimed`, adopted as `unknown` on the next
+    run and never automatically re-credited, because re-crediting an unknown is
+    how coins get minted. Coins were conserved; one investor needed a human,
+    permanently. There is no such gap now: a death rolls the leg back to
+    unclaimed and the next run pays it. Measured: a hard `os._exit(9)` between
+    the marker and the credit leaves 0 legs `unknown`.
+
+    THREE OUTCOMES PER INVESTOR, NEVER TWO — and the third is now usually
+    ANSWERABLE. The wallet re-read that used to decide it is gone with the thing
+    that needed it: an exception before commit means rolled back, full stop. The
+    only residue is a failure raised BY `commit()`, and because the marker
+    committed WITH the money the leg's own state is the receipt — `applied` means
+    it landed, unclaimed/`refused` means it did not, and only a leg that cannot
+    be read at all is a genuine `unknown` left for a human. Legs left `claimed`
+    by an OLDER build are still adopted as `unknown`; this loop cannot create one.
+
+    WHAT THIS FUNCTION STILL DOES NOT DO — and it is a separate question, not an
+    oversight hidden in a docstring: it does not DEBIT anything. The pool is
+    credited to investors from nothing, so a CSN month of net N raises system
+    supply by `N * pool_pct%`. Whether that is intended issuance for the GEX.PR
+    preferred shares or should be funded from the market treasury is the owner's
+    call; the transaction above is neutral to it, and a treasury claim would be
+    one more statement inside the same block.
+    """
     import Restocker_db as _db
+    tag = f"vtech:{market_id}:{month_key}"
     try:
         if net <= 0 or not _is_vtech_market(market_id):
-            return []
-        tag = f"vtech:{market_id}:{month_key}"
-        if _db.investor_payout_exists(tag):
             return []
         pool_pct = _investor_pool_pct()
         if pool_pct <= 0:
@@ -9888,6 +10330,12 @@ def _distribute_investor_profit(market_id: str, month_key: str, net: float) -> l
                      if float(i.get("share_pct") or 0) > 0]
         if not investors:
             return []
+        stale = _db.investor_legs_adopt_stale(tag)
+        if stale:
+            log.error("[investors] %s: %d leg(s) were left CLAIMED by an attempt that did "
+                      "not finish. Their outcome is UNKNOWN — they may or may not hold the "
+                      "coins. They are NOT being paid again; check the coin ledger for "
+                      "`investor:%s:<uid>` and settle them by hand.", tag, stale, tag)
         pool = float(net) * pool_pct / 100.0
         paid = []
         for inv in investors:
@@ -9895,13 +10343,98 @@ def _distribute_investor_profit(market_id: str, month_key: str, net: float) -> l
             amt = int(round(pool * float(inv["share_pct"]) / 100.0))
             if amt <= 0:
                 continue
-            add_coins(int(uid), amt, counts_as_principal=False, reason=f"investor:{tag}")
-            _db.add_investor_payout(uid, amt, note=tag)
-            paid.append((uid, amt))
+            # ── ONE TRANSACTION PER INVESTOR: claim marker, credit, receipt. ──
+            # These were two commits — `investor_leg_claim` committed, then
+            # `add_coins` committed — so a hard kill in between left the leg
+            # `claimed`, which the next run adopts as `unknown` and never
+            # re-credits (re-crediting an unknown is how coins get minted). Coins
+            # were conserved and a HUMAN was required, for one investor, forever.
+            # That is the seam `_execute_dividend_run` no longer has, and this is
+            # the same `with _db.db()` shape it uses — read that function, not a
+            # second invention. A death anywhere in here rolls the leg back to
+            # unclaimed (or to `refused`, where it came from), so the next run
+            # simply pays it.
+            #
+            # THE CLAIM IS STILL FIRST and its ROWCOUNT still decides — that is
+            # what stops two concurrent runs paying the same investor. It is just
+            # no longer load-bearing against crashes, only against races.
+            #
+            # NOT CHANGED HERE, DELIBERATELY: how this payout is FUNDED. There is
+            # still no treasury debit on this path — the pool is credited from
+            # nothing. That is a separate finding and a design question for the
+            # owner (is the GEX.PR profit share issuance, or is it paid out of the
+            # market treasury?), and this change is neutral to either answer: a
+            # treasury claim would be one more statement inside this same block.
+            _reached_commit = False
+            owed = 0
             try:
-                _drip_reinvest(uid, amt, _db.get_config("gexpr_drip_market") or "main")
+                with _db.db() as _c:
+                    owed = _db.investor_leg_claim(tag, uid, amt, conn=_c)
+                    if not owed:
+                        # Already paid, in flight, or unknown — not paid again.
+                        raise _TradeRefused("leg_taken", None)
+                    # The reason is per-investor. It used to be identical for all
+                    # of them, so the ledger could not say who a row belonged to.
+                    _db.adjust_balance_tx(_c, uid, int(owed),
+                                          counts_as_principal=False,
+                                          reason=f"investor:{tag}:{uid}")
+                    _db.add_investor_payout(uid, owed, note=f"{tag}:{uid}", conn=_c)
+                    _db.investor_leg_settle(tag, uid, "applied", conn=_c)
+                    _reached_commit = True
+            except _TradeRefused:
+                continue
+            except sqlite3.IntegrityError as e:
+                # The escrow trigger refused the credit: a hold reserves the
+                # wallet. DEFINITE — the whole block rolled back, the leg is
+                # unclaimed again, nothing moved, it is retried next run.
+                log.warning("[investors] %s: credit for %s refused by an open hold (%s) — "
+                            "rolled back, the leg is owed again and is retried on the next "
+                            "run.", tag, uid, e)
+                continue
+            except Exception as e:  # noqa: BLE001
+                if not _reached_commit:
+                    log.warning("[investors] %s: leg for %s rolled back (%s) — nothing "
+                                "moved, it is still owed and is retried on the next run.",
+                                tag, uid, e)
+                    continue
+                # Every statement ran, so the failure came from `commit()`. THREE
+                # OUTCOMES, NEVER TWO — and here the third is usually answerable,
+                # because the marker committed WITH the money and is the receipt.
+                # `None` (no row) and `"unreadable"` are deliberately NOT the same
+                # answer: the first says the claim rolled back with the credit, the
+                # second says nobody knows, and paying an unknown again is a mint.
+                _state = _db.investor_leg_state(tag, uid)
+                if _state == "applied":
+                    log.warning("[investors] %s: commit for %s reported an error (%s) but "
+                                "the leg is APPLIED — the transaction landed. Recorded as "
+                                "paid.", tag, uid, e)
+                elif _state is None or _state == "refused":
+                    log.warning("[investors] %s: commit for %s failed (%s) and the leg is "
+                                "unclaimed — nothing moved, it is retried on the next run.",
+                                tag, uid, e)
+                    continue
+                else:
+                    # `claimed` from an older build, or `unreadable`. Park it.
+                    _db.investor_leg_settle(tag, uid, "unknown",
+                                            f"commit outcome unreadable: {e}")
+                    log.error("[investors] %s: commit of %s for %s failed (%s) AND the leg "
+                              "state could not be read, so nobody knows whether the coins "
+                              "moved. NOT retrying and NOT reversing — check the coin "
+                              "ledger for `investor:%s:%s`.",
+                              tag, f"{owed:,}", uid, e, tag, uid)
+                    continue
+            paid.append((uid, owed))
+            try:
+                _drip_reinvest(uid, owed, _db.get_config("gexpr_drip_market") or "main")
             except Exception:
                 pass
+        _tally = _db.investor_legs_tally(tag)
+        if _tally["unresolved"]:
+            log.error("[investors] %s: INCOMPLETE — %d of %d leg(s) unresolved (%s). The "
+                      "month is not recorded as fully distributed; re-running pays exactly "
+                      "the legs that are still owed and nothing else.",
+                      tag, _tally["unresolved"], sum(_tally["counts"].values()),
+                      _tally["counts"])
         if paid:
             log.info("[investors] %s %s: pool %.0f (%.1f%% of %.0f net) → %d investor(s)",
                      market_id, month_key, pool, pool_pct, net, len(paid))
@@ -9912,7 +10445,17 @@ def _distribute_investor_profit(market_id: str, month_key: str, net: float) -> l
             })
         return paid
     except Exception as e:
-        log.warning("[investors] distribution failed for %s %s: %s", market_id, month_key, e)
+        # An empty list used to be this function's answer to BOTH "nothing was owed"
+        # and "it blew up half way through", so the caller could not tell a quiet
+        # month from a broken distribution. The legs now carry the truth; this says
+        # so at ERROR and names what is outstanding.
+        try:
+            _t = _db.investor_legs_tally(tag)
+        except Exception:
+            _t = {"unresolved": "?", "counts": {}}
+        log.error("[investors] distribution FAILED for %s %s: %s — %s leg(s) unresolved "
+                  "(%s). Nothing is marked paid that was not; re-run to finish it.",
+                  market_id, month_key, e, _t.get("unresolved"), _t.get("counts"))
         return []
 
 
@@ -10310,10 +10853,48 @@ def _repair_june_20260728() -> None:
     log.info("[june repair] %s", "; ".join(summary) or "nothing to repair (already clean)")
 
 
+CSN_BACKFILL_MAIN_FLAG = "csn_backfill_main_yaml"
+
+
+def _archive_legacy_csn_history(reason: str) -> Optional[str]:
+    """Move `csn_history.yml` out of the way and return the new name (or None).
+
+    It cannot simply be deleted: `_save_csn_for_market("main", ...)` writes this
+    exact path as a write-only YAML backup on every save, so the file legitimately
+    reappears. Archiving is for the operator's benefit — the resurrection is
+    stopped by the flag below, not by the absence of the file."""
+    try:
+        if not os.path.exists(CSN_HISTORY_FILE):
+            return None
+        dest = f"{CSN_HISTORY_FILE}.archived-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}"
+        os.replace(CSN_HISTORY_FILE, dest)
+        log.warning("[csn backfill] archived %s -> %s (%s)", CSN_HISTORY_FILE, dest, reason)
+        return dest
+    except Exception as e:  # noqa: BLE001 — archiving is housekeeping, never fatal
+        log.warning("[csn backfill] could not archive %s: %s", CSN_HISTORY_FILE, e)
+        return None
+
+
 def _backfill_csn_to_db() -> None:
     """One-time import of CSN months that exist only in the legacy YAML files into
     the DB. Idempotent: inserts only months absent from the DB, so it never
-    clobbers DB-authored data and self-heals if the DB is ever rebuilt."""
+    clobbers DB-authored data and self-heals if the DB is ever rebuilt.
+
+    THE "main" LEG IS OFF BY DEFAULT AND THAT IS THE POINT. It used to merge
+    `csn_history.yml` into market `main` unconditionally on EVERY boot. Combined
+    with `_save_csn_for_market("main")` rewriting that same YAML on every save and
+    nothing ever deleting it, market `main` was self-resurrecting: the CSN repair
+    tool would purge the duplicate rows and one restart put them back. Measured —
+    `after repair: [greyhames]`, `after ONE boot: [greyhames, main]`. Deleting the
+    duplicate WRITER (the old `_record_to_history` call in `_handle_csn_upload`)
+    does not close this; the backfill re-imports the mirror the writer left behind.
+
+    A deployment that genuinely has legacy months living ONLY in `csn_history.yml`
+    — an old single-market install whose DB was rebuilt — sets
+    `bot_config['csn_backfill_main_yaml'] = '1'` for one boot. The import then runs
+    once, ARCHIVES the YAML, and clears its own flag, so it cannot become a
+    standing behaviour again. Per-market files (`csn_history_<mid>.yml`) are
+    unaffected: those are the real store for their market and always backfill."""
     try:
         import Restocker_db as _db
     except Exception:
@@ -10335,9 +10916,41 @@ def _backfill_csn_to_db() -> None:
 
     total = 0
     try:
-        total += _merge("main", load_yaml(CSN_HISTORY_FILE, {"months": {}}))
+        _flag = str(_db.get_config(CSN_BACKFILL_MAIN_FLAG, "") or "").strip().lower()
+        _want_main = _flag in ("1", "true", "yes", "on")
     except Exception as e:
-        log.warning("[csn backfill] main failed: %s", e)
+        _want_main = False
+        log.warning("[csn backfill] could not read %s (treating as off): %s",
+                    CSN_BACKFILL_MAIN_FLAG, e)
+    if _want_main:
+        try:
+            _added = _merge("main", load_yaml(CSN_HISTORY_FILE, {"months": {}}))
+            total += _added
+            log.warning("[csn backfill] %s was set: imported %d legacy month(s) from %s "
+                        "into market 'main'. Archiving the file and clearing the flag so "
+                        "this does not repeat on the next boot.",
+                        CSN_BACKFILL_MAIN_FLAG, _added, CSN_HISTORY_FILE)
+            _archive_legacy_csn_history("one-shot import completed")
+            try:
+                _db.set_config(CSN_BACKFILL_MAIN_FLAG, "0")
+            except Exception as e:
+                log.error("[csn backfill] IMPORTED but could not clear %s: %s — clear it "
+                          "by hand or the next boot re-imports the archive's successor.",
+                          CSN_BACKFILL_MAIN_FLAG, e)
+        except Exception as e:
+            log.warning("[csn backfill] main failed: %s", e)
+    else:
+        # Not an error and not silent: say once per boot that the file is being
+        # ignored, so nobody spends an afternoon wondering where those months went.
+        try:
+            if os.path.exists(CSN_HISTORY_FILE):
+                log.info("[csn backfill] %s exists but the 'main' leg is OFF — NOT importing "
+                         "it. This file is a write-only mirror of market 'main'; importing it "
+                         "every boot is what kept resurrecting the duplicate market. Set "
+                         "bot_config['%s']='1' for one boot only if these months really do "
+                         "exist nowhere else.", CSN_HISTORY_FILE, CSN_BACKFILL_MAIN_FLAG)
+        except Exception:
+            pass
     try:
         for mid in (_load_markets().get("markets", {}) or {}):
             if mid == "main":
@@ -11288,6 +11901,65 @@ def _quote_trade(price, shares, shares_out, side):
     return round(fill, 2), round(new_mid, 2)
 
 
+def _slippage_check(side, quote_price, live_price, max_bps):
+    """Has the market moved against the trader since the figure they confirmed?
+
+    Returns (ok, moved_bps, cap_bps). `ok` is True when there is nothing to check
+    (no reference price was supplied) or the move is within the cap — and a move in
+    the trader's FAVOUR is never refused, because "you paid less than you agreed"
+    is not a complaint.
+
+    Basis points, integer, per the house rule; the comparison itself is done in
+    integers too so a float epsilon can never be the difference between refusing a
+    trade and not.
+    """
+    cap = STOCK_MAX_SLIPPAGE_BPS if max_bps is None else int(max_bps)
+    try:
+        q = float(quote_price)
+    except (TypeError, ValueError):
+        return True, 0, cap
+    if q <= 0 or cap < 0:
+        return True, 0, cap
+    # Adverse direction only: a buy is hurt when the price ROSE, a sell when it FELL.
+    delta = (float(live_price) - q) if side == "buy" else (q - float(live_price))
+    if delta <= 0:
+        return True, 0, cap
+    moved = int(round(delta * 10_000 / q))
+    return (moved <= cap), moved, cap
+
+
+def _max_sellable_shares(price, want_shares, shares_out, budget) -> int:
+    """Largest whole share count in [1, want_shares] whose sell proceeds fit in
+    `budget`. Used only to turn a `no_liquidity` refusal into an actionable number.
+
+    Proceeds are not monotone in size for arbitrarily large blocks (the fill price
+    falls as the block walks the price down), so this never assumes monotonicity:
+    the bisection keeps the largest candidate it has actually PRICED and found
+    affordable. A non-monotone region can make it under-report, never over-report,
+    and an under-report is a hint the seller can beat, not a trade that fails."""
+    try:
+        budget = int(budget)
+        hi = int(want_shares)
+    except (TypeError, ValueError):
+        return 0
+    if budget <= 0 or hi <= 0:
+        return 0
+
+    def _cost(n: int) -> int:
+        f, _ = _quote_trade(price, n, shares_out, "sell")
+        return int(round(f * n))
+
+    best, lo = 0, 1
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        if _cost(mid) <= budget:
+            best = max(best, mid)
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    return best
+
+
 def _persist_price(market_id, price, reason):
     import Restocker_db as _db
     try:
@@ -11430,11 +12102,16 @@ def _get_insurance_fund() -> float:
 
 
 def _add_insurance_fund(amount: float) -> float:
+    """Add to the exchange insurance pot with a CLAIM, not a read-then-write.
+
+    This was `get_config` -> add -> `set_config`, the same lost update
+    `adjust_treasury` carried. It only became visible once the treasury side was
+    fixed: two concurrent buys then each skimmed 52 coins out of their treasuries
+    correctly, and the pot recorded one of them — 52 coins destroyed, silently.
+    `_skim_insurance` is still two commits and still listed OPEN in the money
+    transaction contract; this closes the RACE, not that seam."""
     import Restocker_db as _db
-    cur = _get_insurance_fund()
-    new = max(0.0, cur + float(amount))
-    _db.set_config("exchange_insurance_fund", new)
-    return new
+    return _db.adjust_config_number("exchange_insurance_fund", float(amount), floor=0.0)
 
 
 def _skim_insurance(market_id, trade_total) -> int:
@@ -11449,9 +12126,22 @@ def _skim_insurance(market_id, trade_total) -> int:
     cut = min(cut, int(_db.get_treasury(market_id)))
     if cut <= 0:
         return 0
-    _db.adjust_treasury(market_id, -float(cut), allow_negative=False)
-    _add_insurance_fund(cut)
-    return cut
+    # THE POT IS CREDITED WITH WHAT THE TREASURY ACTUALLY GAVE UP. `cut` is sized
+    # from a `get_treasury` read taken outside the write, so it is a belief; the
+    # figure `adjust_treasury` returns is the fact. Crediting `cut` while the
+    # treasury only surrendered part of it mints the difference into the
+    # insurance fund — the same discarded-`applied` shape as the unfunded sell,
+    # one pot over. A short draw is not an error here: the skim is a percentage
+    # of a trade, so taking less is a smaller skim, not a failed one.
+    taken = int(round(-float(_db.adjust_treasury(
+        market_id, -float(cut), allow_negative=False))))
+    if taken <= 0:
+        return 0
+    if taken != cut:
+        log.info("[insurance] %s: skim asked %s, treasury gave %s — crediting the pot "
+                 "with what actually left the treasury.", market_id, f"{cut:,}", f"{taken:,}")
+    _add_insurance_fund(taken)
+    return taken
 
 
 def _market_asset_value(market_id) -> float:
@@ -11612,6 +12302,92 @@ def _bond_coverage(market_id, extra_face: float = 0.0):
     return pct, col, face
 
 
+def _pay_bondholder(market_id: str, user_id, amount: int, tag: str,
+                    legacy_tag: str = "") -> tuple[bool, str]:
+    """Pay one bondholder from the market treasury: debit and credit, ONE
+    transaction, with a namespaced idempotency reason the database enforces.
+
+    THE ORDER WAS BACKWARDS. Both bond paths credited the holder and THEN debited
+    the treasury as a separate commit, so a process death between them minted the
+    payment outright — the same shape as the dividend's 300,000-coin mint, on a
+    path that runs unattended from a loop. Source first, one transaction, so the
+    two states a crash can leave are "paid and charged" and "neither".
+
+    THE GUARD IS NOW THE DATABASE, NOT A PRECEDING READ. `coin_ledger_has(uid,
+    tag)` is a check-then-act: correct while everything serialises on the bot
+    loop, and worth nothing against a second process. `tag` is namespaced `mk:`
+    and derived from durable rows (the bond id, and the month for a coupon), so
+    the partial UNIQUE index on `coin_ledger(user_id, reason) WHERE reason LIKE
+    'mk:%'` refuses the duplicate INSERT — and because `adjust_balance_tx` writes
+    that row in the same transaction and does not swallow the IntegrityError, the
+    refusal takes the credit and the treasury debit down with it. The pre-read
+    stays as a cheap skip, not as the guarantee.
+
+    `legacy_tag` is the un-namespaced reason an earlier build wrote (`bond:12:
+    principal`). It is checked too, and only checked — never written — so a bond
+    already paid before this change is not paid a second time by the rename. It
+    can be deleted once no live database holds rows with the old shape.
+
+    Returns (paid, why). `paid` False with why='already' means the holder has the
+    coins from an earlier attempt; False with anything else means nothing moved
+    and this holder is retried on the next tick."""
+    import Restocker_db as _db
+    amt = int(amount)
+    if amt <= 0:
+        return False, "zero"
+    uid = str(user_id)
+    if _db.coin_ledger_has(uid, tag) or (legacy_tag and _db.coin_ledger_has(uid, legacy_tag)):
+        return False, "already"
+    _reached_commit = False
+    try:
+        with _db.db() as _c:
+            applied = float(_db.adjust_treasury(market_id, -float(amt),
+                                                allow_negative=False, conn=_c))
+            if int(round(-applied)) < amt:
+                # Short treasury. Roll back rather than part-pay a bond: a
+                # bondholder owed 5,000 who receives 3,200 with the leg recorded
+                # as settled is the manager-override defect wearing a bond.
+                raise _TradeRefused("treasury_short", int(round(-applied)))
+            _db.adjust_balance_tx(_c, uid, amt, counts_as_principal=False, reason=tag)
+            _reached_commit = True
+        return True, "paid"
+    except _TradeRefused as _br:
+        log.warning("[bonds] %s treasury holds %s of the %s owed to %s (%s) — rolled back, "
+                    "nothing paid, retried next tick.",
+                    market_id, f"{int(_br.detail or 0):,}", f"{amt:,}", uid, tag)
+        return False, "treasury_short"
+    except sqlite3.IntegrityError as e:
+        # Either the uniqueness index (already paid, by a racing process this
+        # time rather than a previous tick) or the escrow trigger (the wallet
+        # cannot accept coins). Distinguish, because one means "done" and the
+        # other means "try later".
+        if _db.coin_ledger_has(uid, tag):
+            log.warning("[bonds] %s: %s already holds %s for `%s` (%s) — not paid twice.",
+                        market_id, uid, f"{amt:,}", tag, e)
+            return False, "already"
+        log.warning("[bonds] %s: credit of %s to %s refused by an open hold (%s) — rolled "
+                    "back, retried next tick.", market_id, f"{amt:,}", uid, e)
+        return False, "refused"
+    except Exception as e:  # noqa: BLE001
+        if _reached_commit:
+            # THREE OUTCOMES, NEVER TWO: the commit itself failed, so the payment
+            # may be on disk. The ledger row committed with the money, so the
+            # ledger answers it — and only an unreadable database leaves an
+            # UNKNOWN, which never retries.
+            if _db.coin_ledger_has(uid, tag):
+                log.warning("[bonds] %s: commit for %s reported an error (%s) but the ledger "
+                            "row for `%s` is there — the payment landed.",
+                            market_id, uid, e, tag)
+                return True, "paid"
+            log.error("[bonds] %s: commit of %s to %s FAILED and the ledger could not "
+                      "confirm `%s` (%s). NOT retrying — settle by hand.",
+                      market_id, f"{amt:,}", uid, tag, e)
+            return False, "unknown"
+        log.warning("[bonds] %s: payment of %s to %s rolled back (%s) — nothing moved, "
+                    "retried next tick.", market_id, f"{amt:,}", uid, e)
+        return False, "failed"
+
+
 def _service_bonds() -> None:
     """Monthly coupons + maturity, run from the bond loop. Coupons come out of the
     market treasury; a treasury that can't pay logs a MISSED coupon; at maturity a
@@ -11644,15 +12420,11 @@ def _service_bonds() -> None:
                     amt = int(round(float(h["units"]) * float(b["unit_price"])))
                     if amt <= 0:
                         continue
-                    _tag = f"bond:{bid}:principal"
-                    try:
-                        if _db.coin_ledger_has(str(h["user_id"]), _tag):
-                            continue                      # already paid in a prior attempt
-                        add_coins(h["user_id"], amt, counts_as_principal=False, reason=_tag)
-                        _db.adjust_treasury(mid, -float(amt))
-                    except Exception as _pe:
+                    _ok, _why = _pay_bondholder(
+                        mid, h["user_id"], amt, f"mk:bond:{bid}:principal",
+                        legacy_tag=f"bond:{bid}:principal")
+                    if not _ok and _why not in ("already", "zero"):
                         all_ok = False
-                        log.warning("[bonds] principal pay failed for %s: %s", h.get("user_id"), _pe)
                 if not all_ok:
                     continue                              # retry remaining holders next tick
                 _db.update_bond(bid, status="repaid")
@@ -11668,9 +12440,10 @@ def _service_bonds() -> None:
                               f"Bondholders hold FIRST CLAIM on the market's items — "
                               f"collateral `{int(col):,}` 🪙 on record."]})
             continue
-        # ---- monthly coupon (same idempotency scheme: unique ledger tag per
-        # holder+month checked BEFORE paying; month marker written only after a
-        # fully successful run; treasury debited per actual payment) ----
+        # ---- monthly coupon (same scheme as principal: `_pay_bondholder` moves
+        # the treasury debit and the credit in ONE transaction under a `mk:` tag
+        # the UNIQUE index enforces; month marker written only after a fully
+        # successful run) ----
         issued_month = str(b.get("issued_at") or "")[:7]
         if sold_face > 0 and holders and b.get("last_coupon_month") != cur_month and issued_month < cur_month:
             coupon = sold_face * float(b["coupon_pct"]) / 100.0
@@ -11686,16 +12459,13 @@ def _service_bonds() -> None:
                                     * float(b["coupon_pct"]) / 100.0))
                     if amt <= 0:
                         continue
-                    _tag = f"bond:{bid}:coupon:{cur_month}"
-                    try:
-                        if _db.coin_ledger_has(str(h["user_id"]), _tag):
-                            continue
-                        add_coins(h["user_id"], amt, counts_as_principal=False, reason=_tag)
-                        _db.adjust_treasury(mid, -float(amt))
+                    _ok, _why = _pay_bondholder(
+                        mid, h["user_id"], amt, f"mk:bond:{bid}:coupon:{cur_month}",
+                        legacy_tag=f"bond:{bid}:coupon:{cur_month}")
+                    if _ok:
                         paid_now += amt
-                    except Exception as _pe:
+                    elif _why not in ("already", "zero"):
                         all_ok = False
-                        log.warning("[bonds] coupon pay failed for %s: %s", h.get("user_id"), _pe)
                 if not all_ok:
                     continue                              # unpaid holders retry next tick
                 _db.update_bond(bid, last_coupon_month=cur_month)
@@ -11974,19 +12744,156 @@ def _market_quality(market_id) -> dict:
     return out
 
 
-def _do_stock_trade(side, user_id, market_id, shares, name=None):
+class _TradeRefused(Exception):
+    """Raised INSIDE a trade's transaction to roll the whole thing back.
+
+    A refusal decided halfway through — the treasury is short, the shares are
+    gone, the wallet did not have the coins — used to need a compensating write
+    for every effect already applied, and each of those writes was its own
+    commit that could itself fail. Raising instead makes the rollback the
+    database's job: one `with db()` block, one `conn.rollback()`, nothing to undo
+    by hand and nothing to get wrong. `code` is the trade result code the caller
+    should return; `detail` carries whatever figure the human-facing message
+    needs (e.g. how much the treasury actually holds)."""
+
+    def __init__(self, code: str, detail=None):
+        super().__init__(code)
+        self.code = code
+        self.detail = detail
+
+
+def _transfer_coins_tx(src, dst, amount: int, reason: str) -> dict:
+    """Move `amount` coins from one wallet to another in ONE transaction.
+
+    Returns {"ok": True, "applied": n} or raises. Synchronous by design — it is
+    meant to be handed to `run_on_bot_loop` as a single unit of work.
+
+    WHY IT EXISTS. `bank_api.h_transfer` was `deduct_coins` on one trip to the bot
+    loop and `add_coins` on a second, with a compensating `add_coins` back to the
+    sender if the credit raised. That is three commits for one transfer and it has
+    the shape this whole round was about: a process death between the debit and
+    the credit DESTROYS the coins outright, with no marker anywhere saying a
+    credit was owed — the same failure that destroyed 9,653 coins on the sell
+    path. The compensating refund does not fix it; it is a THIRD commit for the
+    same death to land in, and its own error branch had to say "sender refunded"
+    about a refund that may not have happened either.
+
+    Here the debit, the credit and both ledger rows commit together or not at all,
+    so the only two states a crash can leave are "the transfer happened" and "it
+    did not". There is nothing to compensate for and no refund path.
+
+    THE DEBIT IS THE CLAIM, and its applied delta is READ. `adjust_balance_tx`
+    clamps a debit at zero rather than going negative, so a caller that assumes it
+    took the full amount and credits the full amount MINTS the difference. Short
+    debit -> rollback -> `insufficient`, which is a definite refusal: nothing
+    moved, and the caller may hand its idempotency key back.
+
+    `reason` is required and namespaced by the caller, because these rows used to
+    land in the ledger as `unlabelled: bank_api.py:NNN h_transfer`."""
+    import Restocker_db as _db
+    amt = int(amount)
+    if amt <= 0:
+        raise ValueError("transfer amount must be positive")
+    if str(src) == str(dst):
+        raise ValueError("cannot transfer to the same account")
+    with _db.db() as _c:
+        _, _, _applied = _db.adjust_balance_tx(
+            _c, str(src), -amt, reduce_principal=True,
+            reason=f"{reason} -> {dst}"[:200])
+        if int(-_applied) != amt:
+            raise _TradeRefused("insufficient", int(-_applied))
+        _db.adjust_balance_tx(
+            _c, str(dst), amt, counts_as_principal=True,
+            reason=f"{reason} <- {src}"[:200])
+    return {"ok": True, "applied": amt}
+
+
+def _do_stock_trade(side, user_id, market_id, shares, name=None, *,
+                    quote_price=None, max_slippage_bps=None,
+                    max_total=None, min_total=None):
     """Core buy/sell engine shared by the slash commands, the panel, limit-order
     fills and the bank API. Returns a structured dict:
         {ok, code, msg, side, shares, fill, total, new_price}
-    Coins are debited/credited and the holding updated with compensation on
-    failure; since all callers run on the bot's single event loop these run
-    serialized, so the supply check and the writes can't interleave."""
+    ATOMIC. Every coin and share movement on both sides is ONE transaction —
+    treasury, holding, wallet and trade log commit together or not at all — so
+    the only two states a crash can leave are "the trade happened" and "it did
+    not". There is no compensation path any more, because there is nothing to
+    compensate for; the previous design's undo-on-failure is now `rollback()`.
+    Callers still run on the bot's single event loop, but that serialisation is
+    no longer what makes the money safe: the treasury claim reads its applied
+    delta and the share claim reads its rowcount, so losing a race is a clean
+    refusal rather than a silent overdraw.
+
+    THAT SENTENCE WAS FALSE WHEN IT WAS FIRST WRITTEN, and it is worth saying so
+    rather than quietly deleting it. Reading `applied` back only helps if the
+    write that produced it was itself a claim, and `adjust_treasury` was still
+    `SELECT` -> compute -> absolute `UPDATE` — so two concurrent sells against a
+    treasury that could fund one both read "fully funded" and both got paid:
+    9,653 coins minted, no error, reproducible. The docstring certified the
+    property; the primitive underneath did not have it. `adjust_treasury` is now
+    a relative UPDATE with a WHERE guard and a rowcount, and the claim is real.
+
+    WHAT IS STILL CHECK-THEN-ACT, AND THEREFORE STILL LEANS ON THE LOOP. Read
+    the next two paragraphs together; the first is a hand-written list and the
+    second is a derived one, and the difference is the whole lesson.
+
+    Hand-written, and true only of the reads: the buy-side float read (`held` vs
+    `shares_outstanding`) and the price and shares-outstanding reads that size
+    the fill. Losing those races oversells the float or prices a fill off a
+    stale mid. They move no coins.
+
+    DERIVED, AND ENFORCED — do not edit this list by hand. Every helper this
+    function reaches that in turn reaches a database function writing a QUANTITY
+    column: `_add_insurance_fund`, `_check_limit_orders`, `_persist_price`,
+    `_skim_insurance`. `tests/test_money_tx_contract.py` section 7f computes
+    that set from the call graph and fails if this docstring does not name all
+    of it, so a helper added tomorrow appears here or the board goes red.
+
+    THE PREVIOUS VERSION OF THIS PARAGRAPH WAS WRITTEN BY HAND AND WAS FALSE,
+    and it is worth leaving the wreck visible rather than quietly deleting it.
+    It named `_skim_insurance` and the two reads, omitted `_persist_price`, and
+    concluded "None of those can mint or destroy a coin." `_persist_price` runs
+    on the success path of every buy and every sell, and it rewrote
+    `treasury_coins` from a full-row read taken after the trade's own commit:
+    eight concurrent sells MINTED +29,625 against a 30,000-coin treasury, eight
+    concurrent buys DESTROYED 60,261 of the 80,824 those buyers paid in, a
+    dividend racing four sells minted +27,653 — nothing errored, every buyer got
+    their shares. That paragraph had been added the round before to stop the
+    docstring certifying a property the code did not have, and it did it again
+    one clause down. A LIST ABOUT A MECHANISM GOES STALE; THE MECHANISM DOES
+    NOT. Hence the derived list above, and hence section 7f.
+
+    So the honest sentence, now that the list is derived: `upsert_market_shares`
+    no longer writes `treasury_coins` at all, `_skim_insurance` moves coins
+    between two pots through the relative `adjust_treasury`, and
+    `_check_limit_orders` writes counters. None of them is race-proof and a
+    caller that moves this engine off the bot loop still has to close them —
+    but none of them can now create or erase a coin, and that clause is checked
+    rather than asserted.
+
+    SLIPPAGE BOUND (optional, and any surface that shows a price should use it):
+      * `quote_price`      — the mid price the trader was actually shown. If the
+                             live price has moved against them by more than
+                             `max_slippage_bps` (default STOCK_MAX_SLIPPAGE_BPS)
+                             the trade is refused `slippage`, naming BOTH figures.
+      * `max_total`        — a buy will not spend more than this many coins.
+      * `min_total`        — a sell will not accept less than this many coins.
+    The totals are the strong form and need no model agreement: the trader
+    confirmed a number, and that number binds. All three are checked BEFORE any
+    coin or share moves, so `slippage` is a definite refusal — nothing happened —
+    which is why it is in `bank_api.DEFINITE_STOCK_REFUSALS`. Passing none of them
+    keeps the previous behaviour exactly; there is no reference figure to hold the
+    trade to, and inventing one would refuse trades nobody quoted."""
     import Restocker_db as _db
     res = {"ok": False, "code": "error", "msg": "", "side": side,
            "shares": 0, "fill": 0.0, "total": 0, "new_price": None}
     try:
         shares = int(shares)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        # OverflowError is what `int(float('inf'))` raises, and without it here
+        # the engine threw a raw exception past every caller instead of the
+        # `bad_shares` refusal it has for exactly this. Both sides took it: the
+        # sell path was measured (`c_edge.py` C1) and `buy` has the same line.
         return {**res, "code": "bad_shares", "msg": "❌ Shares must be a whole number."}
     if shares <= 0:
         return {**res, "code": "bad_shares", "msg": "❌ Shares must be a positive number."}
@@ -12010,6 +12917,19 @@ def _do_stock_trade(side, user_id, market_id, shares, name=None):
     market = _get_market(market_id) or {}
     mname = market.get("name", market_id)
 
+    # ── The confirmed figure must be the figure. Checked before anything moves.
+    _slip_ok, _moved, _cap = _slippage_check(side, quote_price, price, max_slippage_bps)
+    if not _slip_ok:
+        log.info("[stock %s] %s refused for %s: price moved %d bps (cap %d) from the "
+                 "quoted %.2f to %.2f. Nothing moved.",
+                 side, market_id, user_id, _moved, _cap, float(quote_price), price)
+        return {**res, "code": "slippage",
+                "msg": (f"❌ **{mname}** moved while you were confirming — you were shown "
+                        f"`{float(quote_price):,.2f}` 🪙/share and it is now "
+                        f"`{price:,.2f}` 🪙/share ({_moved / 100:.2f}% against you, limit "
+                        f"{_cap / 100:.2f}%). Nothing was traded. Refresh the quote and "
+                        f"decide again.")}
+
     if side == "buy":
         held = sum(float(h.get("shares") or 0) for h in _db.get_holders(market_id))
         available = shares_out - held
@@ -12021,24 +12941,86 @@ def _do_stock_trade(side, user_id, market_id, shares, name=None):
                     "msg": f"❌ Only `{available:,.0f}` shares of `{market_id}` are available. Try `{available:,.0f}` or fewer."}
         fill, new_mid = _quote_trade(price, shares, shares_out, "buy")
         total = int(round(fill * shares))
+        if max_total is not None and total > int(max_total):
+            log.info("[stock buy] %s refused for %s: costs %d, ceiling %d. Nothing moved.",
+                     market_id, user_id, total, int(max_total))
+            return {**res, "code": "slippage",
+                    "msg": (f"❌ That would cost `{total:,}` 🪙 — more than the `{int(max_total):,}` "
+                            f"🪙 you confirmed (`{fill:,.2f}` 🪙/share). Nothing was bought.")}
         data = _load_balances()
         bal = _get_user_bal(data["users"], user_id)
         if bal["coins"] < total:
             return {**res, "code": "insufficient_funds",
                     "msg": f"❌ Need `{total:,}` 🪙 to buy `{shares:,}` shares of `{market_id}` (`{fill:,.2f}` 🪙/share). You have `{bal['coins']:,}` 🪙."}
-        deduct_coins(user_id, total, reduce_principal=True, reason=f"stock buy {market_id}")
+        # ── ONE TRANSACTION: debit, shares, trade log, treasury. ─────────────
+        # This used to be a `deduct_coins` commit followed by a separate
+        # `adjust_holding` commit, with a compensating `add_coins` refund if the
+        # second one raised. That refund only ever covered an *exception*: a
+        # process death between the two commits took the coins and delivered no
+        # shares, with nothing written down saying the buyer was owed anything.
+        # Compensation cannot close that, because the compensation is itself a
+        # third commit that the same death lands in. One transaction can, and
+        # deletes the refund path with it.
+        #
+        # The debit reads its own rowcount. `adjust_balance_tx` clamps a deduction
+        # at zero and returns what it ACTUALLY applied, so a wallet that lost the
+        # race between the balance check above and this statement yields
+        # `applied != -total` and the trade rolls back — instead of the old shape,
+        # where `deduct_coins` discarded `applied` and a short debit bought a full
+        # position with coins that were never there.
+        _reached_commit = False
         try:
-            _db.adjust_holding(user_id, market_id, delta_shares=float(shares), delta_cost_basis=float(total))
-        except Exception as e:
-            add_coins(user_id, total, counts_as_principal=True, reason="stock buy refund")
-            log.warning("[_do_stock_trade buy] holding update failed, refunded: %s", e)
-            return {**res, "code": "error", "msg": "❌ Trade failed; your coins were refunded."}
-        _db.log_stock_trade(user_id, market_id, "buy", shares, fill, total)
-        if STOCK_TREASURY_ENABLED:
-            try:
-                _db.adjust_treasury(market_id, float(total))
-            except Exception:
-                pass
+            with _db.db() as _c:
+                _, _, _applied = _db.adjust_balance_tx(
+                    _c, str(user_id), -int(total), reduce_principal=True,
+                    reason=f"stock buy {market_id}")
+                if int(-_applied) != int(total):
+                    raise _TradeRefused("insufficient_funds", int(-_applied))
+                _db.adjust_holding(user_id, market_id, delta_shares=float(shares),
+                                   delta_cost_basis=float(total), conn=_c)
+                _db.log_stock_trade(user_id, market_id, "buy", shares, fill, total, conn=_c)
+                if STOCK_TREASURY_ENABLED:
+                    _db.adjust_treasury(market_id, float(total), conn=_c)
+                _reached_commit = True
+        except _TradeRefused as _tr:
+            log.info("[stock buy] %s refused for %s: wallet covered %s of the %s needed. "
+                     "Rolled back, nothing moved.", market_id, user_id,
+                     f"{int(_tr.detail or 0):,}", f"{total:,}")
+            return {**res, "code": "insufficient_funds",
+                    "msg": (f"❌ Need `{total:,}` 🪙 to buy `{shares:,}` shares of "
+                            f"`{market_id}` (`{fill:,.2f}` 🪙/share). Your wallet covered "
+                            f"`{int(_tr.detail or 0):,}` 🪙 — nothing was bought.")}
+        except sqlite3.IntegrityError as e:
+            # The escrow trigger (`ledger_balances_respect_holds`) refused the
+            # debit: the coins are reserved by an open hold. A DEFINITE refusal —
+            # the trigger fires BEFORE the row changes and the block rolled back —
+            # so say so with the reason a human can act on, instead of letting a
+            # raw IntegrityError escape to the slash command as a generic failure.
+            log.info("[stock buy] %s: debit for %s refused by an open hold (%s). "
+                     "Rolled back, nothing moved.", market_id, user_id, e)
+            return {**res, "code": "credit_refused",
+                    "msg": ("❌ Those coins are reserved by an open hold (a land bid or an "
+                            "escrow), so the purchase couldn't be paid for. Nothing was "
+                            "bought. Cancel or settle the hold and try again.")}
+        except Exception as e:  # noqa: BLE001
+            if _reached_commit:
+                # THREE OUTCOMES, NEVER TWO. Every statement ran and the failure
+                # came out of `commit()`, so the transaction may or may not be on
+                # disk. Do not refund (that mints if it committed) and do not tell
+                # the buyer it failed (that invites a retry that buys twice).
+                log.error("[stock buy] %s: the buy transaction for %s FAILED AT COMMIT (%s). "
+                          "%s coins and %s share(s) either all landed or none did — read "
+                          "`stock_trade_log` for this user before touching anything.",
+                          market_id, user_id, e, f"{total:,}", f"{shares:,}")
+                return {**res, "code": "trade_unknown", "shares": shares, "fill": fill,
+                        "total": total,
+                        "msg": ("⚠️ Your purchase reached the commit step and the result "
+                                "could not be read. **Do not retry it** — check your "
+                                "balance and holdings; staff have the exact figures.")}
+            log.warning("[stock buy] %s: transaction rolled back for %s (%s) — nothing moved.",
+                        market_id, user_id, e)
+            return {**res, "code": "error",
+                    "msg": "❌ Trade failed and was rolled back — nothing moved. Try again."}
         try:
             _skim_insurance(market_id, total)
         except Exception:
@@ -12058,20 +13040,135 @@ def _do_stock_trade(side, user_id, market_id, shares, name=None):
                 "msg": f"❌ You only own `{owned:,.0f}` shares of `{market_id}`."}
     fill, new_mid = _quote_trade(price, shares, shares_out, "sell")
     proceeds = int(round(fill * shares))
+    if min_total is not None and proceeds < int(min_total):
+        log.info("[stock sell] %s refused for %s: pays %d, floor %d. Nothing moved.",
+                 market_id, user_id, proceeds, int(min_total))
+        return {**res, "code": "slippage",
+                "msg": (f"❌ That would pay `{proceeds:,}` 🪙 — less than the `{int(min_total):,}` "
+                        f"🪙 you confirmed (`{fill:,.2f}` 🪙/share). Nothing was sold and your "
+                        f"shares are untouched.")}
     cost_basis_removed = (float(holding["cost_basis"]) * (shares / owned)) if owned > 0 else 0.0
-    _db.adjust_holding(user_id, market_id, delta_shares=-float(shares), delta_cost_basis=-cost_basis_removed)
-    if STOCK_TREASURY_ENABLED:
-        try:
-            applied = _db.adjust_treasury(market_id, -float(proceeds), allow_negative=False)
-            shortfall = float(proceeds) + float(applied)  # applied is negative or 0
-            if shortfall > 0.5:
-                log.warning("[stock sell] %s treasury short by %d coins — minted to fund the sell "
-                            "(watch for repeated occurrences: that's inflation)",
-                            market_id, int(shortfall))
-        except Exception:
-            pass
-    add_coins(user_id, proceeds, counts_as_principal=True, reason=f"stock sell {market_id}")
-    _db.log_stock_trade(user_id, market_id, "sell", shares, fill, proceeds)
+
+    # ── ONE TRANSACTION: shares out, treasury debited, wallet credited. ──────
+    # THE MINT (finding 1). This used to run `adjust_holding(-shares)` first, then
+    # `adjust_treasury(-proceeds, allow_negative=False)`, and then credit the FULL
+    # `proceeds` no matter how little the treasury actually covered. The old log
+    # line named it — "minted to fund the sell". An owner buys into their own
+    # market, declares a dividend that drains the treasury to zero (the ordinary
+    # automatic month-close shape), then sells: 200,000 coins of capital became
+    # 254,140 of system supply, +27% per cycle, repeatable, requiring no privilege
+    # beyond owning the market. So the treasury is claimed FIRST, with
+    # `allow_negative=False`, and the RETURN VALUE — what was actually applied — is
+    # what decides. Read the number; do not assume the write did what was asked.
+    #
+    # THE DESTRUCTION (finding 4). Ordering alone did not close it. With the three
+    # writes as three separate commits, a process death between the holding write
+    # and the credit destroyed 9,653 coins and the seller's whole position, with
+    # nothing in the database recording that a credit was owed — reproduced with a
+    # hard `os._exit(9)`, no injected exception. The previous round answered that
+    # with compensation: read the wallet before and after, unwind on a definite
+    # refusal, report UNKNOWN when the reads themselves failed. Correct as far as
+    # it went, and it could not go far enough, because every compensating write is
+    # itself another commit for the same death to land in. Its own comment said so:
+    # "COMPENSATION, NOT ATOMICITY ... the structural answer is one transaction".
+    #
+    # This is that transaction. Treasury, shares and wallet move in one
+    # `with db()` block, so the two states a crash can leave are "the sale
+    # happened" and "the sale did not happen". Everything the compensation
+    # existed for is now `conn.rollback()`, which is why ~90 lines of unwinding
+    # went with it: there is nothing to unwind.
+    #
+    # REFUSE, NOT PART-PAY, is unchanged and still deliberate. Crediting only what
+    # the treasury covered also conserves coins, but it turns a full sale into a
+    # silent partial one — the seller hands over 500 shares, is paid for 300, and
+    # nothing records the rest. Sizing the sale to the treasury instead needs a
+    # fixpoint solve (the fill price depends on the size, so the affordable size
+    # depends on the fill) inside a money path, which is the shape this project has
+    # already been burned by twice. A refusal is one outcome, legible, and leaves
+    # the position intact to retry or resize — so it names how much the market CAN
+    # pay rather than stopping at "no".
+    _reached_commit = False
+    treasury_taken = 0
+    try:
+        with _db.db() as _c:
+            if STOCK_TREASURY_ENABLED and proceeds > 0:
+                applied = float(_db.adjust_treasury(
+                    market_id, -float(proceeds), allow_negative=False, conn=_c))
+                treasury_taken = int(round(-applied))   # applied is negative or 0
+                if treasury_taken < proceeds:
+                    raise _TradeRefused("no_liquidity", treasury_taken)
+            # CLAIM-FIRST on the shares too: one UPDATE gated on `shares >= ?`,
+            # and the rowcount is the answer. The `owned < shares` read above is
+            # now only there to produce a friendly message early — it is no longer
+            # what makes the sale safe.
+            if not _db.claim_holding_tx(_c, user_id, market_id, shares, cost_basis_removed):
+                raise _TradeRefused("insufficient_shares", None)
+            # Money and the record of it, one statement apart, same transaction.
+            _db.adjust_balance_tx(_c, str(user_id), int(proceeds),
+                                  counts_as_principal=True,
+                                  reason=f"stock sell {market_id}")
+            _db.log_stock_trade(user_id, market_id, "sell", shares, fill, proceeds, conn=_c)
+            _reached_commit = True
+    except _TradeRefused as _tr:
+        if _tr.code == "insufficient_shares":
+            log.info("[stock sell] %s refused for %s: the %s share(s) were no longer "
+                     "there when the sale claimed them. Rolled back, nothing moved.",
+                     market_id, user_id, f"{shares:,}")
+            return {**res, "code": "insufficient_shares",
+                    "msg": (f"❌ You no longer own `{shares:,}` shares of `{market_id}` — "
+                            f"nothing was sold.")}
+        _held = int(_tr.detail or 0)
+        _sellable = _max_sellable_shares(price, shares, shares_out, _held)
+        if _sellable > 0:
+            _hint = (f" It can cover about `{_sellable:,}` share(s) right now — "
+                     f"try `{_sellable:,}` or fewer.")
+        else:
+            _hint = (" It can't cover even one share at the moment — the market has to "
+                     "take in coins (share purchases or CSN revenue) before holders can "
+                     "cash out.")
+        log.warning("[stock sell] %s REFUSED %s share(s) for %s: treasury holds %s of the "
+                    "%s needed. The transaction rolled back — nothing was sold, nothing "
+                    "was minted, and no coins had to be put back by hand.",
+                    market_id, f"{shares:,}", user_id, f"{_held:,}", f"{proceeds:,}")
+        return {**res, "code": "no_liquidity",
+                "msg": (f"❌ **{mname}**'s treasury can't fund that sale — it holds "
+                        f"`{_held:,}` 🪙 of the `{proceeds:,}` 🪙 needed, and your "
+                        f"shares are untouched.{_hint}")}
+    except sqlite3.IntegrityError as e:
+        # The escrow trigger (`ledger_balances_respect_holds_ins`) refused the
+        # credit. DEFINITE: the trigger aborts the statement, the block rolls back,
+        # the shares and the treasury are exactly as they were. No wallet re-read
+        # is needed to know that any more — which is the whole point.
+        log.warning("[stock sell] %s: credit for %s refused by an open hold (%s) — "
+                    "transaction rolled back, nothing sold.", market_id, user_id, e)
+        return {**res, "code": "credit_refused",
+                "msg": ("❌ Your wallet couldn't accept the proceeds — coins reserved by "
+                        "an open hold (a land bid or an escrow) block the credit. "
+                        "Nothing was sold and your shares are untouched. Cancel or "
+                        "settle the hold and try again.")}
+    except Exception as e:  # noqa: BLE001
+        if _reached_commit:
+            # THREE OUTCOMES, NEVER TWO. Every statement ran, so this came out of
+            # `commit()` and the transaction may or may not be on disk. Do not
+            # retry (that sells twice) and do not report it refused (that is a lie
+            # the caller acts on). `trade_unknown` is deliberately absent from
+            # `bank_api.DEFINITE_STOCK_REFUSALS`, so the idempotency key stays held.
+            log.error("[stock sell] %s: the sell transaction for %s FAILED AT COMMIT (%s). "
+                      "%s share(s), %s coins out of the treasury and %s coins into the "
+                      "wallet either ALL landed or NONE did — read the coin ledger for "
+                      "`stock sell %s` and `stock_trade_log` before touching anything.",
+                      market_id, user_id, e, f"{shares:,}", f"{treasury_taken:,}",
+                      f"{proceeds:,}", market_id)
+            return {**res, "code": "trade_unknown", "shares": shares, "fill": fill,
+                    "total": proceeds,
+                    "msg": ("⚠️ Your sale reached the commit step and the result could not "
+                            "be read. **Do not retry it** — your shares may or may not be "
+                            f"sold and the `{proceeds:,}` 🪙 may or may not be in your "
+                            "balance. Check your balance; staff have the exact figures.")}
+        log.warning("[stock sell] %s: transaction rolled back for %s (%s) — nothing moved.",
+                    market_id, user_id, e)
+        return {**res, "code": "error",
+                "msg": "❌ Couldn't complete the sale — nothing moved. Try again."}
     _remember_holder_name(user_id, name)
     new_price = _persist_price(market_id, new_mid, "trade:sell")
     _check_limit_orders(market_id)
@@ -12081,9 +13178,13 @@ def _do_stock_trade(side, user_id, market_id, shares, name=None):
             "msg": f"✅ Sold `{shares:,}` shares of **{mname}** at `{fill:,.2f}` 🪙/share — `{proceeds:,}` 🪙 credited.{drift}"}
 
 
-def exec_stock_trade(side, user_id, market_id, shares, name=None):
-    """Public structured entry point (used by the bank API)."""
-    return _do_stock_trade(side, user_id, market_id, shares, name)
+def exec_stock_trade(side, user_id, market_id, shares, name=None, **bounds):
+    """Public structured entry point (used by the bank API and the website).
+
+    `bounds` forwards the slippage guard — quote_price / max_slippage_bps /
+    max_total / min_total — so a caller that showed a figure to a human can hold
+    the trade to it. See `_do_stock_trade`."""
+    return _do_stock_trade(side, user_id, market_id, shares, name, **bounds)
 
 
 def _resolve_person(query, guild=None) -> dict:
@@ -12245,15 +13346,25 @@ def _liquidate_holdings(holder_id, market_id=None, recipient_id=None, apply: boo
             # proceeds — a negative-equity account, or a balance spent by a limit order
             # that filled between the sale and the transfer — had less taken off than
             # the recipient was given. That difference was newly minted coins.
+            #
+            # ONE TRANSACTION, and `applied` instead of a before/after pair. The
+            # audit fix above was right about WHAT to credit and had to measure it
+            # by reading the wallet twice around a separate commit — a measurement
+            # that is only correct because everything serialises on the bot loop,
+            # and that is silently wrong if anything else moves that wallet in
+            # between. `adjust_balance_tx` returns the applied delta read INSIDE
+            # the transaction, so the debit and the credit cannot disagree, and a
+            # death between them cannot destroy the proceeds.
             import Restocker_db as _db_liq
-            _before = int((_db_liq.get_balance(str(holder_id)) or {}).get("coins") or 0)
-            deduct_coins(holder_id, total, reduce_principal=True,
-                         reason=f"liquidation transfer -> {recipient_id}")
-            _after = int((_db_liq.get_balance(str(holder_id)) or {}).get("coins") or 0)
-            moved = max(0, _before - _after)
-            if moved > 0:
-                add_coins(recipient_id, moved, counts_as_principal=True,
-                          reason=f"liquidation of <@{holder_id}>")
+            with _db_liq.db() as _c:
+                _, _, _ap = _db_liq.adjust_balance_tx(
+                    _c, str(holder_id), -int(total), reduce_principal=True,
+                    reason=f"liquidation transfer -> {recipient_id}")
+                moved = max(0, int(-_ap))
+                if moved > 0:
+                    _db_liq.adjust_balance_tx(
+                        _c, str(recipient_id), moved, counts_as_principal=True,
+                        reason=f"liquidation of <@{holder_id}>")
             out["lines"].append(f"➡️ Transferred `{moved:,}` 🪙 to <@{recipient_id}>.")
             if moved < total:
                 out["notes"].append(
@@ -12272,9 +13383,12 @@ def _do_bond_buy(user_id, bond_id, units, name=None) -> dict:
 
     Returns {ok, msg, cost, units, coupon_monthly, coverage_pct}.
 
-    Like _do_stock_trade this is NOT atomic — it debits coins, credits the issuer's
-    treasury, writes the holding and may close the series. Callers off the bot's event
-    loop (i.e. the web thread) MUST go through run_on_bot_loop().
+    Like `_do_stock_trade`, the money is now ATOMIC: the debit, the issuer's
+    treasury credit, the units and the series' status change are one transaction,
+    so a purchase either happened or did not. Callers off the bot's event loop
+    (i.e. the web thread) must still go through run_on_bot_loop() — the coverage
+    and units-left checks above are reads, and serialising them is what stops two
+    buyers oversubscribing the last unit of a series.
     """
     import Restocker_db as _db
     res = {"ok": False, "msg": "", "cost": 0, "units": 0,
@@ -12311,11 +13425,44 @@ def _do_bond_buy(user_id, bond_id, units, name=None) -> dict:
                       f"(rule: >= {BOND_MIN_ITEM_COVER:g}%). The issuer must add collateral.")
         res["coverage_pct"] = pct
         return res
-    deduct_coins(uid, cost, reduce_principal=True)
-    _db.adjust_treasury(b["market_id"], cost)
-    _db.adjust_bond_holding(b["id"], uid, float(units), float(cost), name=name)
-    if units >= left:
-        _db.update_bond(b["id"], status="active")
+    # ── ONE TRANSACTION: debit, treasury, bond holding. ─────────────────────
+    # Three separate commits, no marker between any of them, and the debit's
+    # `applied` discarded: a death after the first left the buyer poorer with no
+    # bond and nothing recording the sale, and a wallet that lost the race
+    # between the balance check above and the debit bought a bond with coins it
+    # did not have. The debit now reads its own rowcount, and if the whole thing
+    # cannot be done, none of it is.
+    #
+    # The reason is deliberately NOT in the `mk:` idempotency namespace. A bond
+    # buy is a per-attempt event — buying 5 units twice in an evening is two real
+    # purchases — so a uniqueness index over it would refuse the second one. What
+    # must not happen twice is the CALLER's retry, and that belongs to the
+    # command surface's idempotency key, not to this row.
+    try:
+        with _db.db() as _c:
+            _, _, _applied = _db.adjust_balance_tx(
+                _c, uid, -int(cost), reduce_principal=True,
+                reason=f"bond buy {b['id']}")
+            if int(-_applied) != int(cost):
+                raise _TradeRefused("insufficient_funds", int(-_applied))
+            _db.adjust_treasury(b["market_id"], float(cost), conn=_c)
+            _db.adjust_bond_holding(b["id"], uid, float(units), float(cost),
+                                    name=name, conn=_c)
+            if units >= left:
+                _db.update_bond(b["id"], status="active", conn=_c)
+    except _TradeRefused as _br:
+        res["msg"] = (f"Costs {cost:,} coins — your wallet covered "
+                      f"{int(_br.detail or 0):,}. Nothing was bought.")
+        return res
+    except sqlite3.IntegrityError as e:
+        log.info("[bonds] buy refused for %s: %s", uid, e)
+        res["msg"] = ("Those coins are reserved by an open hold (a land bid or an escrow), "
+                      "so the purchase couldn't be paid for. Nothing was bought.")
+        return res
+    except Exception as e:  # noqa: BLE001
+        log.warning("[bonds] buy rolled back for %s: %s", uid, e)
+        res["msg"] = "Couldn't complete the purchase — nothing moved. Try again."
+        return res
     monthly = units * float(b["unit_price"]) * float(b["coupon_pct"]) / 100.0
     res.update({
         "ok": True, "cost": cost, "units": units,
@@ -12446,8 +13593,36 @@ def _etf_invest(user_id, coins, name=None):
     if bal < coins:
         return {**res, "msg": f"You need {coins:,} coins but have {bal:,}."}
     nav_before = _etf_nav()["nav"]
-    deduct_coins(user_id, coins, reduce_principal=True)
-    add_coins(ETF_FUND_ID, coins, counts_as_principal=True)
+    units_issued = (coins / nav_before) if nav_before > 0 else float(coins)
+    # ONE TRANSACTION for the transfer leg. Two commits — debit the investor,
+    # credit the fund — with nothing between them meant a death in the gap
+    # destroyed the investor's whole stake: coins gone, fund never funded, no
+    # units issued, nothing written down. Both reasons were EMPTY, so the ledger
+    # recorded the two halves of one transfer under two frame-name labels.
+    # `applied` is read: a short debit must not fund the basket.
+    try:
+        with _db.db() as _c:
+            _, _, _ap = _db.adjust_balance_tx(_c, str(user_id), -int(coins),
+                                              reduce_principal=True,
+                                              reason="etf invest")
+            if int(-_ap) != int(coins):
+                raise _TradeRefused("insufficient_funds", int(-_ap))
+            _db.adjust_balance_tx(_c, str(ETF_FUND_ID), int(coins),
+                                  counts_as_principal=True,
+                                  reason=f"etf invest from {user_id}")
+            # The units are issued in the SAME transaction as the coins that buy
+            # them. They can be, because they are priced off `nav_before`, which
+            # is known here — so there is no reason for "paid the fund, holds no
+            # units" to be a state the database can be in. The basket buys below
+            # stay outside: undeployed coins are fund CASH and cash is in the NAV,
+            # so a buy that does not happen is a valuation, not a broken invariant.
+            _db.adjust_etf_units(str(user_id), units_issued, float(coins), conn=_c)
+    except _TradeRefused as _er:
+        return {**res, "msg": (f"You need {coins:,} coins — your wallet covered "
+                               f"{int(_er.detail or 0):,}. Nothing was taken.")}
+    except Exception as _ee:  # noqa: BLE001
+        log.warning("[etf] invest transfer rolled back for %s: %s", user_id, _ee)
+        return {**res, "msg": "Couldn't move your coins into the fund — nothing was taken."}
     spent = 0
     bought = []
     for c in cons:
@@ -12464,11 +13639,38 @@ def _etf_invest(user_id, coins, name=None):
             spent += int(r["total"])
             bought.append((c["mid"], shares, int(r["total"])))
     if spent <= 0:
-        deduct_coins(ETF_FUND_ID, coins, reduce_principal=True)
-        add_coins(user_id, coins, counts_as_principal=True)
+        # The reverse transfer, also one transaction. As two commits this was the
+        # same destruction pointed the other way: the fund debited, the investor
+        # never credited, and the message on screen says "No coins taken".
+        try:
+            with _db.db() as _c:
+                # THE FUND'S DEBIT IS READ. `adjust_balance_tx` clamps a deduction
+                # at zero and returns what it applied; crediting the investor the
+                # full `coins` when the fund wallet only had part of it MINTS the
+                # difference. Same sentence as the buy path two functions up, and
+                # the only reason it was not here is that nobody looked at the
+                # reverse leg. A short fund is a staff problem, not a silent one.
+                _, _, _rap = _db.adjust_balance_tx(
+                    _c, str(ETF_FUND_ID), -int(coins),
+                    reduce_principal=True,
+                    reason=f"etf invest return to {user_id}")
+                if int(-_rap) != int(coins):
+                    raise RuntimeError(
+                        f"fund wallet covered {int(-_rap):,} of the {int(coins):,} "
+                        f"being returned")
+                _db.adjust_balance_tx(_c, str(user_id), int(coins),
+                                      counts_as_principal=True,
+                                      reason="etf invest returned")
+                _db.adjust_etf_units(str(user_id), -units_issued, -float(coins), conn=_c)
+        except Exception as _ee:  # noqa: BLE001
+            log.error("[etf] could not return %s coins to %s after an undeployable "
+                      "investment (%s) — the coins are sitting in the fund wallet "
+                      "(%s) and the investor holds no units. Return them by hand.",
+                      f"{coins:,}", user_id, _ee, ETF_FUND_ID)
+            return {**res, "msg": ("Couldn't deploy into the index and couldn't return your "
+                                   "coins automatically — staff have been alerted with the "
+                                   "exact figures.")}
         return {**res, "msg": "Couldn't deploy into the index (float caps / no available shares). No coins taken."}
-    units_issued = (coins / nav_before) if nav_before > 0 else float(coins)
-    _db.adjust_etf_units(str(user_id), units_issued, float(coins))
     try:
         _remember_holder_name(user_id, name)
     except Exception:
@@ -12519,12 +13721,42 @@ def _etf_redeem(user_id, units, name=None):
             sold.append((mid, sell_sh, int(r["total"])))
     cash_share = int(nav["cash"] * frac)
     payout = proceeds + cash_share
-    if payout > 0:
-        deduct_coins(ETF_FUND_ID, payout, reduce_principal=True)
-        add_coins(user_id, payout, counts_as_principal=True)
     rec = _db.get_etf_holding(str(user_id)) or {}
     cost_removed = float(rec.get("cost_basis") or 0) * (units / held) if held > 0 else 0.0
-    _db.adjust_etf_units(str(user_id), -units, -cost_removed)
+    # ONE TRANSACTION: the fund pays, the redeemer is credited, the units are
+    # BURNED. As three commits, a death after the credit left the redeemer paid
+    # and still holding the units — they redeem again and the fund pays twice for
+    # the same stake. The basket sells above are deliberately outside it: each is
+    # its own completed market trade with its own price impact, and rolling them
+    # back is not a transaction, it is a series of new trades at new prices.
+    try:
+        with _db.db() as _c:
+            if payout > 0:
+                # THE FUND PAYS WHAT THE FUND HAS, or nothing happens. The debit's
+                # applied figure is read: `payout` is `proceeds + cash_share`,
+                # sized from a NAV snapshot taken before the basket sells, so a
+                # concurrent redemption can empty the wallet underneath it. A
+                # clamped debit beside a full credit is a mint, and it rolls the
+                # whole redemption back rather than paying out of thin air.
+                _, _, _pap = _db.adjust_balance_tx(
+                    _c, str(ETF_FUND_ID), -int(payout),
+                    reduce_principal=True,
+                    reason=f"etf redeem to {user_id}")
+                if int(-_pap) != int(payout):
+                    raise RuntimeError(
+                        f"fund wallet covered {int(-_pap):,} of the {int(payout):,} payout")
+                _db.adjust_balance_tx(_c, str(user_id), int(payout),
+                                      counts_as_principal=True,
+                                      reason="etf redeem")
+            _db.adjust_etf_units(str(user_id), -units, -cost_removed, conn=_c)
+    except Exception as _ee:  # noqa: BLE001
+        log.error("[etf] redemption for %s rolled back (%s). The basket was ALREADY sold "
+                  "(%s coins realised into the fund) but no payout was made and no units "
+                  "were burned — the fund now holds cash against unburned units. Settle "
+                  "by hand; do not let the holder redeem again first.",
+                  user_id, _ee, f"{proceeds:,}")
+        return {**res, "msg": ("Your redemption could not be completed. No coins were paid "
+                               "and your units are untouched — staff have been alerted.")}
     nav_after = _etf_nav()["nav"]
     msg = (f"Redeemed {units:,.4f} ABX Index units for {payout:,} coins "
            f"({proceeds:,} from selling the basket + {cash_share:,} cash). "
@@ -12638,9 +13870,41 @@ def _check_limit_orders(market_id):
                     continue
                 r = _do_stock_trade(oside, int(o["user_id"]), market_id, int(o["shares"]), name=None)
                 if r.get("ok"):
-                    _db.mark_limit_order_filled(o["id"], r.get("fill") or 0, r.get("total") or 0)
+                    if not _db.mark_limit_order_filled(o["id"], r.get("fill") or 0,
+                                                       r.get("total") or 0):
+                        # The trade HAPPENED. If the order row would not move to
+                        # `filled`, another pass already resolved it and this is a
+                        # duplicate execution — say so with the figures, because
+                        # nothing else will.
+                        log.error("[limit] order %s executed (%s %s @ %s) but the row was "
+                                  "no longer open — it may have been filled twice. Check "
+                                  "stock_trade_log for %s before refunding anything.",
+                                  o.get("id"), oside, o.get("shares"), r.get("fill"),
+                                  o.get("user_id"))
                 elif r.get("code") in ("insufficient_funds", "insufficient_shares", "no_shares_available"):
                     _db.cancel_limit_order(o["id"], reason=r.get("code"))
+                else:
+                    # THREE OUTCOMES, NEVER TWO. `no_liquidity`, `credit_refused`
+                    # and `slippage` are refusals that MAY clear on their own — the
+                    # treasury refills, the hold is settled — so they are not
+                    # cancelled on the first one. But "retry for ever, silently"
+                    # is not an outcome either: it was neither filled nor
+                    # cancelled nor logged, and an order that can never fill sat
+                    # in the book being re-attempted on every price tick with
+                    # nobody able to tell.
+                    code = str(r.get("code") or "refused")
+                    n = _db.note_limit_order_refusal(o["id"], code)
+                    if n and n >= STOCK_LIMIT_MAX_REFUSALS:
+                        _db.cancel_limit_order(
+                            o["id"], reason=f"{code} x{n} — gave up")
+                        log.warning("[limit] order %s (%s %s %s) cancelled after %s "
+                                    "refusals, last was %s.", o.get("id"), oside,
+                                    o.get("shares"), market_id, n, code)
+                    elif n == 1 or (n and n % 10 == 0):
+                        log.info("[limit] order %s (%s %s %s) triggered and was refused "
+                                 "(%s) — attempt %s of %s before it is cancelled.",
+                                 o.get("id"), oside, o.get("shares"), market_id, code,
+                                 n, STOCK_LIMIT_MAX_REFUSALS)
             except Exception as e:
                 log.warning("[_check_limit_orders] order %s: %s", o.get("id"), e)
     finally:
@@ -12667,6 +13931,194 @@ def _group_net_for_month(market_id: str, month: str) -> float:
     except Exception as e:
         log.warning("[dividend] group net for %s %s failed: %s", market_id, month, e)
     return total
+
+
+def _execute_dividend_run(run: dict, market_id: str, month_key: str, *,
+                          reason: str, drip: bool = True) -> dict:
+    """Pay the outstanding legs of an already-opened dividend run, resumably.
+
+    THE ONE INVARIANT, RESTATED: a holder's leg marker, the treasury debit that
+    funds them and the credit that pays them are ONE TRANSACTION. Without any
+    marker at all, a run killed at holder 61 of 200 restarted at holder 1 and paid
+    the first 60 twice — measured, on a 1,000,000-coin pool, 300,000 coins created
+    from nothing. A per-leg marker written in its own commit fixed the double-pay
+    and left a seam one holder wide: a death between the marker and the credit
+    left a leg `claimed` and unpaid, which is an UNKNOWN and needs a human. There
+    is no such seam here. A death anywhere in the leg rolls the whole thing back
+    to `planned` — nothing claimed, nothing taken, nothing paid — and the next
+    tick simply pays it.
+
+    The claim is still the first statement inside the transaction and its ROWCOUNT
+    still decides, because that is what stops two concurrent runs paying the same
+    leg; it is no longer load-bearing against crashes, only against races.
+
+    THREE OUTCOMES PER HOLDER, NEVER TWO — and the third one is now usually
+    ANSWERABLE. The failure that used to be ambiguous (`add_coins` raised; did the
+    coins land?) was answered by re-reading the wallet and comparing. That
+    comparison is gone with the thing that needed it: an exception before commit
+    means rolled back, full stop. The only residue is a failure raised BY
+    `commit()`, where the transaction may be on disk — and because the leg marker
+    committed WITH the money, the leg's own state is the receipt:
+      * leg `applied` -> the commit landed; recorded as paid
+      * leg `planned` -> it rolled back; nothing moved, retried next run
+      * leg unreadable -> a genuine UNKNOWN, parked and left for a human
+    Legs left `claimed` by an OLDER build that died mid-run are still adopted as
+    `unknown` (`dividend_run_adopt_stale_claims`); this loop cannot create one.
+
+    THE TREASURY IS CHARGED PER LEG, NOT PER RUN, AND BEFORE THE CREDIT. Charging
+    once after the loop meant a run killed at holder 61 had credited 300,000 coins
+    that the treasury was never debited for — the double-pay was only half of that
+    finding; the other half was a 300,000-coin mint from the crash alone, and it
+    survived a per-holder marker that still batched the debit. Debit first is kept
+    because it is what makes a short treasury a REFUSAL rather than a mint; what
+    is gone is the compensating refund it used to need, since a rolled-back debit
+    needs no putting back.
+
+    Returns {paid, treasury_charged, credited, dripped, tally, complete, ...}.
+    `paid` is the sum of `applied` legs ONLY.
+    """
+    import Restocker_db as _db
+    rid = str(run["run_id"])
+    charge = bool(run.get("charge_treasury", 1)) and STOCK_TREASURY_ENABLED
+
+    # A leg that DEFINITELY did not get paid last time is owed again this time.
+    # Re-armed once, here, before the loop — never inside it. The loop below no
+    # longer WRITES `refused` (a definite non-payment now rolls back to `planned`
+    # and needs no re-arming), so this is for legs left by an older build.
+    rearmed = _db.dividend_run_rearm_refused(rid)
+    if rearmed:
+        log.info("[dividend] %s %s: retrying %d leg(s) that were definitely refused by an "
+                 "earlier attempt.", market_id, month_key, rearmed)
+
+    stale = _db.dividend_run_adopt_stale_claims(rid)
+    if stale:
+        log.error("[dividend] %s %s: %d holder leg(s) were left CLAIMED by an attempt that "
+                  "did not finish. Their outcome is UNKNOWN — they may or may not hold the "
+                  "coins. They are NOT being paid again (that is how coins get minted); "
+                  "check the coin ledger for `%s` and settle them by hand.",
+                  market_id, month_key, stale, reason)
+
+    # A leg's reason string is namespaced and derived from a DURABLE ROW — the
+    # run id — so the partial UNIQUE index on `coin_ledger(user_id, reason) WHERE
+    # reason LIKE 'mk:%'` covers it. That matters because `adjust_balance_tx`
+    # does not swallow the resulting IntegrityError: a second credit for the same
+    # (holder, run) is refused by the DATABASE and takes the balance delta down
+    # with it, rather than relying on this function remembering to look first.
+    # The old automatic path passed `reason=f"dividend {market_id}"` with no
+    # month in it at all, so every month's rows were indistinguishable in the
+    # ledger; the run id fixes that too.
+    _leg_reason = f"mk:div:{rid} {reason}"
+
+    credited, dripped = [], []
+    charged = 0
+    for leg in _db.dividend_run_legs(rid, "planned"):
+        uid = str(leg["user_id"])
+        amt, taken = 0, 0
+        _reached_commit = False
+        # ── ONE TRANSACTION PER LEG: claim marker, treasury debit, credit,
+        # receipt. Every one of these was its own commit, with the marker
+        # written first so a death could at worst cost ONE holder's certainty.
+        # That was the right answer while they were separate; it is not needed
+        # now that they are not. A death anywhere in here rolls the leg back to
+        # `planned` — nothing claimed, nothing taken, nothing paid — so the cost
+        # of a crash drops from "one holder is UNKNOWN and needs a human" to
+        # "one holder is retried on the next tick". The claim is still first
+        # INSIDE the transaction, and its rowcount still decides, because that is
+        # what stops two concurrent runs both paying the same leg.
+        try:
+            with _db.db() as _c:
+                amt = _db.dividend_leg_claim(rid, uid, conn=_c)
+                if not amt:
+                    raise _TradeRefused("leg_taken", None)   # another attempt owns it
+                if charge:
+                    applied = float(_db.adjust_treasury(
+                        market_id, -float(amt), allow_negative=False, conn=_c))
+                    taken = int(round(-applied))
+                    if taken < amt:
+                        raise _TradeRefused("treasury_short", taken)
+                _db.adjust_balance_tx(_c, uid, int(amt), counts_as_principal=True,
+                                      reason=_leg_reason)
+                _db.dividend_leg_settle(rid, uid, "applied", conn=_c)
+                _reached_commit = True
+        except _TradeRefused as _lr:
+            if _lr.code == "treasury_short":
+                # Rolled back whole: the claim is released, the coins never left.
+                # No `_return_to_treasury` compensation, because nothing was taken.
+                log.warning("[dividend] %s %s: treasury holds %s of the %s owed to %s — "
+                            "leg rolled back to planned and retried on the next run. The "
+                            "treasury moved after this run was planned.",
+                            market_id, month_key, f"{int(_lr.detail or 0):,}", f"{amt:,}", uid)
+            continue
+        except sqlite3.IntegrityError as e:  # noqa: PERF203
+            # Two shapes land here and they need opposite answers.
+            #  * The `mk:` uniqueness index fired: this holder ALREADY has a
+            #    credit for this run. The money is theirs and must not be sent
+            #    again — record the receipt this attempt failed to write.
+            #  * The escrow trigger fired: the wallet cannot accept coins while a
+            #    hold reserves them. Definite refusal, rolled back, retryable.
+            if "uq_coin_ledger_mk" in str(e) or "coin_ledger" in str(e):
+                _db.dividend_leg_settle(rid, uid, "applied", f"already credited: {e}")
+                log.warning("[dividend] %s %s: %s already holds the credit for this run "
+                            "(%s) — not paid twice, leg recorded as applied.",
+                            market_id, month_key, uid, e)
+            else:
+                log.warning("[dividend] %s %s: credit for %s refused by an open hold (%s) "
+                            "— rolled back, leg stays planned and is retried.",
+                            market_id, month_key, uid, e)
+            continue
+        except Exception as e:  # noqa: BLE001
+            if not _reached_commit:
+                log.warning("[dividend] %s %s: leg for %s rolled back (%s) — nothing "
+                            "moved, it stays planned and is retried.",
+                            market_id, month_key, uid, e)
+                continue
+            # Every statement ran, so the failure came from `commit()`. THREE
+            # OUTCOMES, NEVER TWO — but here the third one is usually ANSWERABLE,
+            # and that is the dividend's share of what atomicity bought: the leg
+            # marker committed with the money, so the leg's own state says which
+            # way the commit went. Only a database we cannot read at all leaves a
+            # real UNKNOWN for a human.
+            _state = _db.dividend_leg_state(rid, uid)
+            if _state == "applied":
+                log.warning("[dividend] %s %s: commit for %s reported an error (%s) but the "
+                            "leg is APPLIED — the transaction landed. Recorded as paid.",
+                            market_id, month_key, uid, e)
+            elif _state == "planned":
+                log.warning("[dividend] %s %s: commit for %s failed (%s) and the leg is back "
+                            "to PLANNED — nothing moved, it is retried on the next run.",
+                            market_id, month_key, uid, e)
+                continue
+            else:
+                _db.dividend_leg_mark_unknown(rid, uid, f"commit outcome unreadable: {e}")
+                log.error("[dividend] %s %s: commit for %s failed (%s) AND the leg state "
+                          "could not be read, so nobody knows whether %s coins moved. NOT "
+                          "retrying and NOT refunding — check the coin ledger for `%s`.",
+                          market_id, month_key, uid, e, f"{amt:,}", _leg_reason)
+                continue
+        credited.append((uid, int(amt)))
+        charged += taken
+        if drip:
+            try:
+                _shares, _spent = _drip_reinvest(uid, amt, market_id)   # opt-in: dividend → shares
+                if _shares:
+                    dripped.append((uid, int(_shares), int(_spent)))
+            except Exception:
+                pass
+
+    tally = _db.dividend_run_tally(rid)
+    counts = tally["counts"]
+    return {
+        "paid": int(tally["paid"]),
+        "treasury_charged": charged,
+        "credited": credited,
+        "dripped": dripped,
+        "tally": tally,
+        "complete": tally["unresolved"] == 0,
+        "unknown": counts.get("unknown", 0),
+        "refused": counts.get("refused", 0),
+        "planned_left": counts.get("planned", 0) + counts.get("claimed", 0),
+        "stale": stale,
+    }
 
 
 def _pay_dividend_now(market_id: str, pool: float, month_key: str, apply: bool,
@@ -12732,53 +14184,221 @@ def _pay_dividend_now(market_id: str, pool: float, month_key: str, apply: bool,
         out["ok"] = True
         out["treasury_after"] = (treasury - pool) if charge_treasury else treasury
         return out
-    if _db.dividend_paid(market_id, month_key):
+    # An UNFINISHED run for this month is work in progress, not a second dividend:
+    # it must get past the already-paid guard, because finishing it is exactly what
+    # the guard is there to make possible. Only a run with nothing outstanding
+    # blocks a new one.
+    _rid = _db.dividend_run_id(market_id, month_key, "manual")
+    _open = [r for r in _db.dividend_runs_unfinished(200) if r["run_id"] == _rid]
+    if not _open and _db.dividend_paid(market_id, month_key):
         out["note"] = f"{month_key} has already had a dividend — refusing to pay it twice"
         return out
-    paid = 0
-    for uid, _sh, amt in plan:
-        try:
-            add_coins(int(uid), amt, counts_as_principal=True,
-                      reason=f"dividend {market_id} {month_key} (manual)")
-            paid += amt
-            try:
-                _drip_reinvest(uid, amt, market_id)   # opt-in: dividend → more shares
-            except Exception:
-                pass
-        except Exception as e:
-            log.warning("[dividend] credit failed for %s: %s", uid, e)
-    if charge_treasury and STOCK_TREASURY_ENABLED and paid > 0:
-        try:
-            _db.adjust_treasury(market_id, -float(paid), allow_negative=False)
-        except Exception as e:
-            log.warning("[dividend] treasury deduct failed for %s: %s", market_id, e)
-    elif paid > 0:
+    prev_dividend_month = (listing or {}).get("last_dividend_month")
+
+    # SAME MACHINERY AS THE AUTOMATIC PATH. This function had the identical hole:
+    # the credit ran before the treasury debit with no per-holder marker, so a
+    # crash mid-loop paid the already-credited holders again on the next attempt.
+    # It gets per-holder legs, a per-leg treasury debit taken BEFORE each credit,
+    # and a month stamped paid only when every leg has resolved.
+    run = _db.dividend_run_open(market_id, month_key, "manual", plan,
+                                pool=int(round(pool)), per_share=per_share,
+                                charge_treasury=bool(charge_treasury and STOCK_TREASURY_ENABLED))
+    res = _execute_dividend_run(run, market_id, month_key,
+                                reason=f"dividend {market_id} {month_key} (manual)",
+                                drip=True)
+    paid = res["paid"]
+    credited, dripped = res["credited"], res["dripped"]
+
+    if paid > 0 and not (charge_treasury and STOCK_TREASURY_ENABLED):
         log.info("[dividend] %s %s: %s paid WITHOUT debiting the treasury — these coins "
                  "were created, bounded by the month's net. Backing left intact on "
                  "purpose.", market_id, month_key, f"{paid:,}")
-    # Claim the month so the automatic hook cannot pay it a second time.
-    try:
-        _db.upsert_market_shares(market_id, last_dividend_month=month_key)
-        _db.log_dividend(market_id, month_key, paid, per_share, len(plan))
-    except Exception as e:
-        log.warning("[dividend] logging failed for %s: %s", market_id, e)
+
+    _db.dividend_run_close(
+        rid := str(run["run_id"]), paid=paid,
+        treasury_charged=int(run.get("treasury_charged") or 0) + res["treasury_charged"],
+        complete=res["complete"])
+
+    if res["complete"]:
+        # Claim the month so the automatic hook cannot pay it a second time — but
+        # ONLY once every holder's leg has resolved. Stamping it over a partial run
+        # is what turned "60 of 200 paid" into "140 permanently unpayable".
+        try:
+            _db.upsert_market_shares(market_id, last_dividend_month=month_key)
+            _db.log_dividend(market_id, month_key, paid, per_share, len(plan))
+        except Exception as e:
+            log.warning("[dividend] logging failed for %s: %s", market_id, e)
+    else:
+        out["note"] = (f"PARTIAL — paid {paid:,} to "
+                       f"{res['tally']['counts'].get('applied', 0)} of {len(plan)} holder(s). "
+                       f"{res['planned_left']} still to pay, {res['refused']} retryable, "
+                       f"{res['unknown']} with an UNKNOWN outcome. {month_key} is NOT marked "
+                       f"paid; run `/dividend` again to finish it.")
+        out["lines"].append("⚠️ " + out["note"])
+        log.error("[dividend] MANUAL %s %s: %s", market_id, month_key, out["note"])
+
     out["ok"] = True
     out["paid"] = paid
+    out["complete"] = res["complete"]
+    out["unknown"] = res["unknown"]
+    out["run_id"] = rid
     out["treasury_after"] = float(_db.get_treasury(market_id) or 0.0)
-    log.info("[dividend] MANUAL %s %s: %s paid to %d holder(s) at %.4f/share",
-             market_id, month_key, f"{paid:,}", len(plan), per_share)
+    out["action_key"] = _record_dividend_action(
+        market_id, month_key, credited, dripped,
+        treasury_charged=res["treasury_charged"],
+        prev_dividend_month=prev_dividend_month, per_share=per_share)
+    log.info("[dividend] MANUAL %s %s: %s paid to %d of %d holder(s) at %.4f/share",
+             market_id, month_key, f"{paid:,}",
+             res["tally"]["counts"].get("applied", 0), len(plan), per_share)
     return out
+
+
+def _record_dividend_action(market_id, month_key, credited, dripped, *,
+                            treasury_charged: int, prev_dividend_month,
+                            per_share: float):
+    """Audit row + reverse ops for a hand-declared dividend. Returns its action key.
+
+    WHY THIS ACTION AND NOT EVERY ACTION. A manual dividend is the largest single
+    coin movement a human can trigger in this bot: an owner types one number and
+    it lands, pro-rata, in every holder's balance at once, comes out of the
+    treasury that backs the share price, and stamps the month so the automatic
+    hook will never revisit it. It moves coins between people, it has no
+    user-facing undo, and its exact reverse is known the moment it runs — which
+    is the whole test for earning a Rollback button. The automatic month-close
+    dividend is deliberately NOT wired: it is derived from a computed net, runs
+    unattended, and undoing it means undoing the month close around it.
+
+    Written after the coins are on the ledger, from `credited` — the list of
+    payments that actually succeeded — never from `plan`, which includes holders
+    whose credit raised.
+
+    Best-effort: a dividend that paid must not fail because its audit row could
+    not be written. It logs loudly instead.
+    """
+    try:
+        import action_log as _al
+    except Exception as e:  # noqa: BLE001
+        log.warning("[dividend] no audit row for %s %s: %s", market_id, month_key, e)
+        return None
+    if not credited:
+        return None
+    key = f"dividend:manual:{market_id}:{month_key}"
+    ops = [{"t": "coins", "user_id": uid, "amount": -amt, "principal": True,
+            "why": f"unwind {month_key} dividend"} for uid, amt in credited]
+    if treasury_charged:
+        ops.append({"t": "treasury", "market_id": str(market_id),
+                    "delta": int(treasury_charged)})
+    # NOT an un-stamp of last_dividend_month, though it used to be — that op is
+    # the only one in the whole vocabulary that can REMOVE a payment guard, and
+    # it bought nothing.
+    #
+    # `_payout_share_dividends` refuses a month on two guards, in order:
+    # (1) `last_dividend_month == month_key`, the single slot this op used to
+    # clear, and (2) `_db.dividend_paid()`, a permanent `stock_dividend_log` row
+    # per (market, month) added precisely because guard 1 is one slot and
+    # re-importing an old month double-paid everyone. The rollback does not — and
+    # must not — delete that log row, so guard 2 holds and the automatic hook was
+    # already blocked. Clearing guard 1 achieved literally nothing.
+    #
+    # Except in one state, which is why this is now a task instead. `_declare_
+    # dividend` writes the stamp and the log row inside ONE try/except (:12841):
+    # if `log_dividend` raises, the stamp lands and the permanent row does not,
+    # and guard 1 is the only thing holding. Rolling back then cleared it and the
+    # next CSN month ingest would pay the whole month again — dividends paid
+    # without a treasury debit are minted coins by this function's own admission
+    # (:12836). Proven by execution: /tmp/atk/atk_siblings.py §E.
+    #
+    # So the month stays stamped, the log row stays, and a human is told what
+    # that means for re-declaring it.
+    ops.append({"t": "manual",
+                "what": f"{month_key} is still recorded as paid for "
+                        f"{_market_stock_label(market_id)}",
+                "hint": f"The coins are back (above), but the dividend log still holds a "
+                        f"{month_key} row and `last_dividend_month` still reads "
+                        f"`{month_key}` — deliberately. Both are what stop the automatic "
+                        f"month-close hook re-paying the whole "
+                        f"{sum(a for _u, a in credited):,} coins the next time a CSN "
+                        f"report for {month_key} lands, and a rollback that cleared them "
+                        f"would re-arm exactly that. `/dividend` will refuse {month_key} "
+                        f"until someone deletes the `stock_dividend_log` row by hand. "
+                        f"Before this action the slot read `{prev_dividend_month or '—'}`."})
+    if dripped:
+        # Their cash became shares at market inside the same call, so a clawback
+        # finds an empty balance. That already opens a short-clawback task with
+        # figures; this names the reason so nobody spends an hour finding it.
+        ops.append({"t": "manual",
+                    "what": f"{len(dripped)} holder(s) auto-reinvested this dividend",
+                    "hint": "Their coins bought shares from the float at market the "
+                            "instant they landed, so the clawback above will come up "
+                            "short by that much. Shares bought: "
+                            + "; ".join(f"{u} → {s} share(s) for {c:,} coins"
+                                        for u, s, c in dripped[:15])})
+    try:
+        _al.record(
+            "dividend_manual",
+            f"Paid a {sum(a for _u, a in credited):,}-coin dividend for {month_key} · "
+            f"{_market_stock_label(market_id)} ({per_share:,.4f}/share, "
+            f"{len(credited)} holder(s))",
+            ops, action_key=key)
+        return key
+    except Exception as e:  # noqa: BLE001
+        log.warning("[dividend] audit row failed for %s %s: %s", market_id, month_key, e)
+        return None
+
+
+async def _post_audit_row(action_key) -> bool:
+    """Put the ops-log embed + ↩ Rollback button up for a row a sync core recorded.
+
+    The bridge between the money cores (synchronous, no Discord client — the web
+    layer and the satellite call them too) and cogs/rollback.py. Returns True if a
+    message went out.
+
+    Best-effort on purpose: the money is already committed by the time anything
+    calls this, so a missing ops-log channel must not turn a completed payout into
+    an error. The audit row is durable either way; this only decides whether a
+    button appears today. Rolling back is still reachable from the row itself.
+    """
+    if not action_key:
+        return False
+    rb = sys.modules.get("cogs.rollback")
+    if rb is None:
+        log.warning("[audit] cogs.rollback is not loaded — %s recorded but has no "
+                    "button", action_key)
+        return False
+    try:
+        return bool(await rb.post_by_key(bot, str(action_key)))
+    except Exception as e:  # noqa: BLE001
+        log.warning("[audit] could not post %s: %s", action_key, e)
+        return False
 
 
 def _payout_share_dividends(market_id, month_key, net_profit):
     """Pay a slice of a month's net profit to current shareholders pro-rata.
     Rate is the per-market dividend_pct override or the global STOCK_DIVIDEND_PCT.
     Idempotent per month; no-op when off, not public, non-positive profit, or the
-    month was already paid."""
+    month was already paid.
+
+    RESUMABLE PER HOLDER. The payout is a `stock_dividend_runs` run with one leg
+    per shareholder, each leg marked before its credit is attempted, so a restart
+    picks up exactly where the last attempt stopped and pays nobody twice. See
+    `_execute_dividend_run`. The month is only stamped paid when EVERY leg has
+    resolved to `applied` — a partial run stays open, because a month recorded as
+    complete after 60 of 200 holders is how the other 140 lost their dividend
+    permanently."""
     import Restocker_db as _db
     listing = _db.get_market_shares(market_id)
     if not listing or not listing.get("active"):
         return None
+
+    # ── RESUME BEFORE ANY GUARD. An unfinished run for this month is work in
+    # progress, not a fresh request, so it must not be turned away by the
+    # already-paid guards below — those exist to stop a SECOND dividend, and
+    # finishing the first one is the opposite of that.
+    _rid = _db.dividend_run_id(market_id, month_key, "auto")
+    _open = [r for r in _db.dividend_runs_unfinished(200) if r["run_id"] == _rid]
+    if _open:
+        return _resume_share_dividend_run(market_id, month_key, _open[0])
+
     ov = listing.get("dividend_pct")
     pct = float(ov) if ov is not None else STOCK_DIVIDEND_PCT
     if pct <= 0:
@@ -12815,32 +14435,73 @@ def _payout_share_dividends(market_id, month_key, net_profit):
             log.info("[dividends] %s: treasury empty — dividend skipped for %s", market_id, month_key)
             return None
     per_share = pool / total_shares
-    paid = 0
+    plan = []
     for h in holders:
         amt = int(round(per_share * float(h.get("shares") or 0)))
         if amt > 0:
-            try:
-                add_coins(int(h["user_id"]), amt, counts_as_principal=True, reason=f"dividend {market_id}")
-                paid += amt
-                _drip_reinvest(h["user_id"], amt, market_id)   # opt-in: dividend → more shares
-            except Exception as e:
-                log.warning("[dividends] credit failed for %s: %s", h.get("user_id"), e)
-    if STOCK_TREASURY_ENABLED and paid > 0:
+            plan.append((str(h["user_id"]), float(h.get("shares") or 0), amt))
+    if not plan:
+        _db.upsert_market_shares(market_id, last_dividend_month=month_key)
+        return None
+    # Open the run and its per-holder legs BEFORE a single coin moves. From here on
+    # the legs are the record of what has and has not been done.
+    run = _db.dividend_run_open(market_id, month_key, "auto", plan,
+                                pool=int(round(pool)), per_share=per_share,
+                                charge_treasury=bool(STOCK_TREASURY_ENABLED))
+    return _resume_share_dividend_run(market_id, month_key, run)
+
+
+def _resume_share_dividend_run(market_id, month_key, run) -> dict:
+    """Drive an automatic dividend run to whatever conclusion it can reach today.
+
+    Reached both from a fresh `_payout_share_dividends` and from a restart that
+    found the run unfinished. It is the same code either way — a resume is not a
+    special case, it is the ordinary case with most legs already `applied`."""
+    import Restocker_db as _db
+    rid = str(run["run_id"])
+    charge = bool(run.get("charge_treasury", 1)) and STOCK_TREASURY_ENABLED
+    per_share = float(run.get("per_share") or 0.0)
+    holders_n = int(run.get("holders") or 0)
+
+    # No bulk treasury debit here: `_execute_dividend_run` charges the treasury
+    # per leg, before each credit. A single debit after the loop is what let a
+    # crash at holder 61 leave 300,000 credited coins that the treasury was never
+    # charged for.
+    out = _execute_dividend_run(run, market_id, month_key,
+                                reason=f"dividend {market_id}", drip=True)
+    paid = out["paid"]
+
+    _db.dividend_run_close(
+        rid, paid=paid,
+        treasury_charged=int(run.get("treasury_charged") or 0) + out["treasury_charged"],
+        complete=out["complete"])
+
+    if out["complete"]:
+        # ONLY NOW is the month closed. Stamping it while legs were still
+        # outstanding is what made a 60-of-200 run unrepeatable and stranded the
+        # other 140 permanently.
+        _db.upsert_market_shares(market_id, last_dividend_month=month_key)
         try:
-            _db.adjust_treasury(market_id, -float(paid), allow_negative=False)
-        except Exception as e:
-            log.warning("[dividends] treasury deduct failed for %s: %s", market_id, e)
-    _db.upsert_market_shares(market_id, last_dividend_month=month_key)
-    try:
-        _db.log_dividend(market_id, month_key, paid, per_share, len(holders))
-    except Exception:
-        pass
-    if paid > 0:
+            _db.log_dividend(market_id, month_key, paid, per_share, holders_n)
+        except Exception:
+            pass
+    else:
+        log.error("[dividends] %s %s: PARTIAL — paid %s to %d holder(s); %d still to pay, "
+                  "%d refused (will retry), %d UNKNOWN (need a human). The month is NOT "
+                  "marked paid and the run stays open so the next pass finishes it.",
+                  market_id, month_key, f"{paid:,}", out["tally"]["counts"].get("applied", 0),
+                  out["planned_left"], out["refused"], out["unknown"])
+
+    if out["credited"]:
         _queue_dividend_post({
             "type": "share_dividend", "market_id": market_id, "month": month_key,
-            "total": int(paid), "per_share": float(per_share), "holders": len(holders),
+            "total": int(paid), "per_share": float(per_share),
+            "holders": out["tally"]["counts"].get("applied", 0),
         })
-    return {"paid": paid, "per_share": per_share, "holders": len(holders), "month": month_key}
+    return {"paid": paid, "per_share": per_share,
+            "holders": out["tally"]["counts"].get("applied", 0), "month": month_key,
+            "complete": out["complete"], "unknown": out["unknown"],
+            "outstanding": out["planned_left"] + out["refused"], "run_id": rid}
 
 
 
@@ -13559,6 +15220,21 @@ _AI_TOOLS = [
         "input_schema": {"type": "object", "properties": {}, "required": []}
     },
     {
+        "name": "manage_ign_links",
+        "description": "Review, bind or unbind Minecraft in-game names. CSN monthly uploads carry a `# SHOP,<name>` stamp written by the mod, and the bot records every one it sees as evidence — this is where a manager turns that evidence into a real binding. Managers only, because a binding decides who gets paid for hive harvests. Use for 'who is <name>', 'link <name> to @x', 'unlink <name>', 'what in-game names are waiting', or when a CSN attribution warning names a shop.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["list", "whois", "confirm", "reject", "revoke"], "description": "Default list — the unreviewed names seen on uploads."},
+                "ign": {"type": "string", "description": "The exact in-game name."},
+                "user_id": {"type": "string", "description": "Discord id or @mention to bind it to (confirm)."},
+                "source_ref": {"type": "string", "description": "Which deliverer's observation, as shown in the list (reject; optional on confirm)."},
+                "reason": {"type": "string", "description": "Free text recorded on the audit row."}
+            },
+            "required": ["action"]
+        }
+    },
+    {
         "name": "manage_team",
         "description": "Name a team, add or remove members, or show a roster. Managers act on their own team. Naming matters: an unnamed team appears as the manager's Discord name in the /me join list, so workers told to join by team name can't find it.",
         "input_schema": {
@@ -13734,17 +15410,6 @@ _AI_TOOLS = [
             "properties": {
                 "confirm": {"type": "boolean", "description": "false (default) = count only. true = delete."},
                 "limit": {"type": "integer", "description": "How many messages to scan (default 200)."}
-            },
-            "required": []
-        }
-    },
-    {
-        "name": "csn_silence",
-        "description": "Which markets used to send CSN reports and have stopped. Read-only — answers 'is anyone's shop not reporting?' without waiting for the daily alert. Anyone can ask.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "days": {"type": "integer", "description": "Call a market quiet after this many days without a report (default: the configured threshold, normally 3)."}
             },
             "required": []
         }
@@ -13935,6 +15600,30 @@ _AI_TOOLS = [
                 "limit_per_user": {"type": "integer", "description": "employee_dms only — messages scanned per user (0 = all)."}
             },
             "required": ["target"]
+        }
+    },
+    {
+        "name": "csn_ingest_health",
+        "description": "Read-only health of the CSN ingest store: how many sales are held, and how far each consumer (ledger, earnings, hive wages, announcements) has got through them. Its real job is surfacing STUCK CLAIMS — rows a consumer claimed and then died holding, which are never released automatically because releasing one could re-run an effect that already landed. Managers only. Use when sales look missing, a report card didn't appear, a harvester says they weren't paid, or after a crash/restart during an upload. Moves nothing.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "market": {"type": "string", "description": "Market id to scope to. Omit for every market."},
+                "stuck_minutes": {"type": "integer", "description": "Only report claims held longer than this many minutes (default 30)."}
+            },
+            "required": []
+        }
+    },
+    {
+        "name": "markets_health",
+        "description": "Read-only operator view of the markets engine's part-finished work: dividend runs that started and did not complete (and how many holders are still owed, or UNKNOWN), revenue slices that supersession RETIRED out of a market's monthly rollup (which is why a month can read low — archived, reversible, with the figures), and open limit orders that keep triggering and being refused for liquidity. Managers only. Use when a shareholder says they were not paid a dividend, when a month's revenue looks too low, or when a limit order never fills. Moves nothing.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "market": {"type": "string", "description": "Market id to scope to. Required for the retired-revenue section, which is per market."},
+                "month": {"type": "string", "description": "YYYY-MM, to scope the retired-revenue section to one month."}
+            },
+            "required": []
         }
     },
     {
@@ -14218,25 +15907,6 @@ async def _ai_tool_get_open_orders(guild, channel, user, args):
         for o in open_orders[:15]
     ]
     return "\n".join(lines)
-
-
-async def _ai_tool_csn_silence(guild, channel, user, args):
-    """Read-only, so anyone may ask. apply=False — asking must never post the daily
-    digest to the errors channel as a side effect."""
-    days = args.get("days")
-    try:
-        days = None if days in (None, "") else max(1, int(days))
-    except (TypeError, ValueError):
-        return f"`days` needs to be a whole number of days, not {days!r}."
-    quiet = await check_csn_silence(apply=False, days=days)
-    if not quiet:
-        thr = days if days is not None else int(_csn_silence_days())
-        return f"Every market that has ever reported has reported within the last {thr} days."
-    lines = [f"{r['name']} (`{r['market_id']}`) — quiet {r['days_quiet']:.0f}d, "
-             f"last report {r['last_at'][:10]}" for r in quiet[:20]]
-    if len(quiet) > 20:
-        lines.append(f"…and {len(quiet) - 20} more")
-    return "Markets not reporting:\n" + "\n".join(lines)
 
 
 async def _ai_tool_get_user_balance(guild, channel, user, args):
@@ -15237,9 +16907,15 @@ async def _ai_tool_set_market_finances(guild, channel, user, args):
         old = float(listing.get("treasury_coins") or 0)
 
         def _do():
-            _db.upsert_market_shares(mid, treasury_coins=float(tre))
+            _db.set_market_treasury_absolute(mid, float(tre))
         await run_on_bot_loop(_do)
         out.append(f"treasury `{old:,.0f}` → **`{tre:,.0f}`**")
+        # Say the accepted race out loud instead of leaving it in a test file's
+        # waiver: this stores the typed figure over whatever the row holds, so a
+        # trade landing in the same instant has its treasury delta overwritten.
+        out.append("(this stores the figure exactly as typed — if a trade lands "
+                   "in the same instant its treasury movement is overwritten, so "
+                   "set it when the market is quiet)")
         # The share price is floored by asset_value/shares; say so rather than let the
         # next repricing surprise them.
         try:
@@ -15395,7 +17071,13 @@ async def _ai_tool_repair_after_update(guild, channel, user, args):
     # so they were invisible to consignment. Give them one before pricing anything.
     adopted = []
     try:
-        for fo in (_db.list_futures_orders() or []):
+        # `limit=` is passed EXPLICITLY. There were two live `list_futures_orders`
+        # in Restocker_db; the second shadowed the first, took only `status`, and
+        # returned every row. Deleting the shadow restores the real signature —
+        # which defaults to `limit=50`. This is an orphan-adoption sweep over the
+        # whole table, so leaving the default in place would silently have adopted
+        # the newest 50 and reported success.
+        for fo in (_db.list_futures_orders(limit=1_000_000) or []):
             if fo.get("bulk_line_id"):
                 continue
             if str(fo.get("status") or "").lower() not in ("approved", "fulfilled"):
@@ -15583,6 +17265,103 @@ async def _ai_tool_resend_order_cards(guild, channel, user, args):
             + ("\n⚠️ " + " · ".join(errs[:5]) if errs else ""))
 
 
+async def _ai_tool_manage_ign_links(guild, channel, user, args):
+    """Review the in-game names the CSN transport has seen, and bind/unbind them.
+
+    This is the confirm surface for ign_links. Without it the observation store
+    is a mechanism and not a feature: nothing would ever leave 'observed', and
+    `check_attribution` would answer 'unknown' forever.
+
+    Managers only, deliberately. A binding decides who `add_coins` pays for a
+    hive harvest, so promoting one is a privileged act even though the evidence
+    behind it arrived automatically.
+    """
+    if not _ai_is_manager(user):
+        return "❌ Managers only — an IGN binding decides who gets paid."
+    import ign_links as _ignl
+    actor = str(getattr(user, "id", 0))
+    action = str(args.get("action") or "list").strip().lower()
+    ign = str(args.get("ign") or "").strip()
+    uid = str(args.get("user_id") or "").strip().strip("<@!>")
+
+    if action == "list":
+        rows = _ignl.pending(25)
+        if not rows:
+            return ("No unreviewed in-game names. They appear here on their own the next "
+                    "time a market uploads a monthly CSN file stamped `# SHOP,<name>`.")
+        out = [f"**{len(rows)} in-game name(s) seen on uploads, not yet bound**",
+               "_Evidence, not proof — a CSV can be edited. Confirm only names you recognise._"]
+        for r in rows:
+            line = (f"• `{r['ign']}` — {r['hits']} upload(s), market `{r.get('market_id') or '?'}`, "
+                    f"delivered by `{r['source_ref']}`")
+            if r.get("registry_user"):
+                line += f" · ⚠️ already bound to <@{r['registry_user']}>"
+            out.append(line)
+        out.append("\nBind one with: confirm, ign=`<name>`, user_id=`<discord id>`.")
+        return "\n".join(out)
+
+    if action == "whois":
+        if not ign:
+            return "❌ Which in-game name?"
+        import Restocker_db as _db
+        holder = _db.get_user_id_by_ign(ign)
+        hist = _ignl.history(ign)
+        head = (f"`{ign}` is bound to <@{holder}>." if holder
+                else f"`{ign}` is not bound to anyone.")
+        if not hist:
+            return head + "\n_No bind/unbind history — it predates the audit log, or was "\
+                          "written straight into the registry by `manage_team`._"
+        lines = [f"• {h['at'][:19]} **{h['event']}** <@{h['user_id']}> by <@{h['actor']}>"
+                 + (f" — {h['reason']}" if h.get("reason") else "") for h in hist]
+        return head + "\n**History**\n" + "\n".join(lines)
+
+    if action == "confirm":
+        if not ign or not uid.isdigit():
+            return "❌ I need both ign and the member's Discord id."
+        if not re.match(r"^[A-Za-z0-9_]{3,16}$", ign):
+            return "❌ IGN must be 3-16 characters: letters, numbers, underscores."
+        res = _ignl.confirm(ign, uid, actor,
+                            reason=str(args.get("reason") or "manager confirm"),
+                            source_ref=str(args.get("source_ref") or "") or None)
+        if res == "taken":
+            import Restocker_db as _db
+            return (f"❌ `{ign}` is already bound to <@{_db.get_user_id_by_ign(ign)}>. "
+                    f"Unbind it first (action=revoke) if that is wrong.")
+        if res == "exists":
+            return f"✅ <@{uid}> already held `{ign}` — evidence marked reviewed, nothing changed."
+        # Late registration: back-harvests recorded while this IGN was unattributed
+        # are payable now. Only UNPAID rows move, so this cannot re-pay anything.
+        attached = 0
+        try:
+            import Restocker_db as _db
+            attached = _db.set_hive_harvest_user(ign, uid)
+        except Exception as _e:
+            log.warning("[ign] back-harvest attach failed for %s: %s", ign, _e)
+        return (f"✅ `{ign}` bound to <@{uid}> and written to the audit log."
+                + (f"\n📦 {attached} unpaid back-harvest row(s) now credit them."
+                   if attached else ""))
+
+    if action == "reject":
+        ref = str(args.get("source_ref") or "").strip()
+        if not ign or not ref:
+            return "❌ I need ign and source_ref (the deliverer shown in the list)."
+        ok = _ignl.reject(ign, ref, actor, reason=str(args.get("reason") or ""))
+        return (f"✅ `{ign}` from `{ref}` marked not-a-binding. Further uploads still count "
+                f"toward its evidence, they just stop asking."
+                if ok else f"Nothing to reject — no undecided observation for `{ign}` / `{ref}`.")
+
+    if action == "revoke":
+        if not ign:
+            return "❌ Which in-game name?"
+        freed = _ignl.revoke(ign, actor, reason=str(args.get("reason") or "manager revoke"))
+        if freed is None:
+            return f"`{ign}` was not bound to anyone — nothing to revoke."
+        return (f"✅ `{ign}` unbound from <@{freed}>. The audit log keeps the fact that they "
+                f"held it, so past payments stay explainable.")
+
+    return "❌ action must be list, whois, confirm, reject or revoke."
+
+
 async def _ai_tool_manage_team(guild, channel, user, args):
     """Name a team, add/remove members, or show a roster.
 
@@ -15641,10 +17420,18 @@ async def _ai_tool_manage_team(guild, channel, user, args):
         if ign:
             if not re.match(r"^[A-Za-z0-9_]{3,16}$", ign):
                 return "❌ IGN must be 3-16 characters: letters, numbers, underscores."
-            owner = _db.get_user_id_by_ign(ign)
-            if owner and str(owner) != raw:
-                return f"❌ `{ign}` is already linked to <@{owner}>."
-            _db.set_ign(raw, ign)
+            # Was `get_user_id_by_ign` -> compare -> `set_ign`: a read-then-write
+            # whose own docstring promises a 'taken' result it cannot deliver
+            # under a race (two managers, same IGN, different members — both pass
+            # the check, the loser's INSERT raises out of the tool). ign_links
+            # .confirm is claim-first on the registry's primary key and reads the
+            # rowcount, and it writes the audit row in the same transaction, so
+            # this binding is explainable later like every other one.
+            import ign_links as _ignl
+            _res = _ignl.confirm(ign, raw, str(getattr(user, "id", 0)),
+                                 reason=f"manage_team add by {me}")
+            if _res == "taken":
+                return f"❌ `{ign}` is already linked to <@{_db.get_user_id_by_ign(ign)}>."
             _db.delete_ign_pending(raw)
         _db.set_team_member(raw, mgr)
         return (f"✅ <@{raw}> added to your team"
@@ -15966,7 +17753,8 @@ async def _ai_tool_create_futures_bulk(guild, channel, user, args):
             msg = await post_ch.send(
                 content=(f"{ping} — new futures order!" if ping else "New futures order!"),
                 embed=emb, view=FuturesOrderView(oid),
-                allowed_mentions=discord.AllowedMentions(roles=True))
+                allowed_mentions=discord.AllowedMentions(
+                    everyone=False, roles=True, users=False))
             _db.update_futures_order_status(oid, status="pending", reviewed_by=None,
                                             notify_msg_id=str(msg.id))
             filed.append(oid)
@@ -16649,12 +18437,31 @@ async def _ai_tool_pay_dividend(guild, channel, user, args):
                 f"Tell the user these numbers and ask them to confirm before re-running "
                 f"with confirm=true. Booking it against {month} also stops the automatic "
                 f"month-close dividend paying that month a second time.")
+    # The dividend is on the ledger; put its audit row + ↩ Rollback button in the
+    # ops channel. `_pay_dividend_now` records the row synchronously (it runs on
+    # the bot loop via run_on_bot_loop and has no client of its own); this is the
+    # only async caller, so this is where it gets posted.
+    await _post_audit_row(res.get("action_key"))
+    if not res.get("complete", True):
+        # NEVER REPORT A PARTIAL RUN AS A COMPLETED ONE. The run stays open, the
+        # month is not stamped, and re-running finishes it without paying anyone
+        # twice — but the manager has to be told that, not left with a tick.
+        return (f"⚠️ **{label} dividend for {month} is PART-PAID**\n"
+                f"`{res['paid']:,}` 🪙 went out. {res.get('note')}\n"
+                + (f"Treasury `{res['treasury_before']:,.0f}` → `{res['treasury_after']:,.0f}`."
+                   if charge else
+                   f"Treasury untouched at `{res['treasury_before']:,.0f}`.")
+                + (f"\n⛔ {res['unknown']} holder(s) ended UNKNOWN — they may or may not hold "
+                   f"their coins and will NOT be paid automatically. Check the coin ledger "
+                   f"before paying them by hand." if res.get("unknown") else "")
+                + f"\nRun the same command again to pay the rest (run `{res.get('run_id')}`).")
     return (f"**{label} dividend paid — {month}**\n"
             f"`{res['paid']:,}` 🪙 to {res['holders']} holder(s) at "
             f"`{res['per_share']:,.4f}` per share.\n"
             + (f"Treasury `{res['treasury_before']:,.0f}` → `{res['treasury_after']:,.0f}`."
                if charge else
-               f"Treasury untouched at `{res['treasury_before']:,.0f}` — paid from earnings."))
+               f"Treasury untouched at `{res['treasury_before']:,.0f}` — paid from earnings.")
+            + "\nThe ops log now carries this payout with a ↩ Rollback button on it.")
 
 
 async def _ai_tool_stock_buyback(guild, channel, user, args):
@@ -17187,6 +18994,212 @@ async def _ai_tool_run_hive_payout(guild, channel, user, args):
             f"V Tech keeps {res['net']:,.0f}. Booked to the {res['month']} hive ledger.{held}")
 
 
+async def _ai_tool_csn_ingest_health(guild, channel, user, args):
+    """The operator surface for the CSN ingest store — and specifically for rows a
+    consumer claimed and then died holding.
+
+    A stuck claim is the ONE state this design can end up in that a human has to
+    resolve, and it is deliberately never auto-released: releasing one would replay an
+    effect that may already have landed, which is the double-book the whole store
+    exists to prevent. So it must not be silent either — "cannot be automated" is not
+    the same as "say nothing", and an invisible stuck row is a sale nobody ever books.
+
+    Read-only by design. It shows FIGURES (rule 4) so the decision is made on numbers,
+    and it names the consumer and the real item name rather than internal ids."""
+    import Restocker_db as _db
+    if not _ai_is_manager(user):
+        return "❌ Only Managers can inspect the CSN ingest store."
+
+    mid = str(args.get("market") or "").strip().lower() or None
+    try:
+        mins = int(args.get("stuck_minutes") or 30)
+    except Exception:
+        mins = 30
+
+    lines = []
+    try:
+        with _db.db() as conn:
+            sql = "SELECT COUNT(*) AS n, COALESCE(SUM(coins_centi),0) AS c FROM csn_ingest"
+            args_sql = []
+            if mid:
+                sql += " WHERE link_id=?"
+                args_sql.append(mid)
+            tot = conn.execute(sql, args_sql).fetchone()
+        scope = f"`{mid}`" if mid else "all markets"
+        if not tot or not int(tot["n"]):
+            # Empty states are EMPTY. No table of zeroes, no decoration.
+            return f"No CSN sales have been ingested for {scope} yet."
+        lines.append(f"**CSN ingest — {scope}**")
+        lines.append(f"{int(tot['n']):,} sale(s) held, "
+                     f"{int(tot['c'])/100:,.2f} coins of turnover.")
+
+        for consumer, label in (("txn", "ledger"), ("earn", "earnings"),
+                                ("hive", "hive wages"), ("feed", "announcements")):
+            with _db.db() as conn:
+                q = (f"SELECT {consumer}_state AS s, COUNT(*) AS n FROM csn_ingest"
+                     + (" WHERE link_id=?" if mid else "")
+                     + f" GROUP BY {consumer}_state")
+                got = {r["s"]: int(r["n"]) for r in conn.execute(
+                    q, ([mid] if mid else [])).fetchall()}
+            bits = [f"{got[k]:,} {k}" for k in ("pending", "claimed", "done", "skip")
+                    if got.get(k)]
+            lines.append(f"• {label}: " + ", ".join(bits))
+    except Exception as e:
+        return f"❌ Could not read the CSN ingest store: {e}"
+
+    try:
+        stuck = _db.csn_stuck_claims(older_than_minutes=mins) or []
+    except Exception as e:
+        stuck = []
+        lines.append(f"⚠️ Stuck-claim check failed: {e}")
+    if mid:
+        stuck = [r for r in stuck if str(r.get("link_id")) == mid]
+
+    if not stuck:
+        lines.append(f"\nNo stuck claims older than {mins} min. Nothing needs a human.")
+        return "\n".join(lines)
+
+    lines.append(f"\n⚠️ **{len(stuck)} stuck claim(s)** — a consumer won these rows and "
+                 f"then died before finishing. They are NOT released automatically: "
+                 f"releasing one would re-run an effect that may already have landed.")
+    for r in stuck[:15]:
+        name = r.get("item_display") or r.get("item_raw") or "?"
+        lines.append(
+            f"• #{r['id']} `{r['link_id']}` — {r.get('stuck_consumer')} — "
+            f"{r.get('actor_display') or r.get('actor') or '?'} "
+            f"{r.get('verb') or '?'} {int(r.get('qty') or 0):,}× "
+            f"{name} for {int(r.get('coins_centi') or 0)/100:,.2f}c "
+            f"on {r.get('sale_date') or '?'} (held since "
+            f"{str(r.get(str(r.get('stuck_consumer')) + '_at') or '')[:19]})")
+    if len(stuck) > 15:
+        lines.append(f"…and {len(stuck) - 15} more.")
+    lines.append("\nCheck whether that effect actually landed (the ledger row, the wage "
+                 "payment) before deciding. There is no button here on purpose.")
+    return "\n".join(lines)
+
+
+async def _ai_tool_markets_health(guild, channel, user, args):
+    """The operator surface for the three markets mechanisms that were BUILT AND
+    NEVER WIRED — a part-paid dividend, a retired revenue slice, and a limit
+    order that keeps being refused.
+
+    "A mechanism built is not a mechanism wired" is this project's own named
+    pattern and it landed three more times here. All three of these had a
+    perfectly good database function and NO reader anywhere in the tree:
+
+      * `dividend_runs_unfinished()` — a dividend run that stopped part way
+        through. The money is safe (every leg is atomic and the month is only
+        stamped when every leg resolved), so nothing is lost — but a holder who
+        has not been paid yet is indistinguishable from one who has, unless
+        somebody can see the run. The mints round named this itself as "the one
+        thing standing between 'recorded honestly' and 'someone will notice'".
+      * `csn_retired_sources()` — the undo half of revenue supersession. The
+        claim that "retirement is reversible" had no reader, so a month that
+        reads low could not be explained without a backup, which makes the claim
+        untrue in practice whatever the table contains.
+      * `get_refused_limit_orders()` — an order that triggers and is refused for
+        liquidity now records the refusal instead of retrying silently for ever.
+
+    Read-only. It moves nothing and offers no buttons: every one of these states
+    needs a person to decide, and the decision is made on figures."""
+    import Restocker_db as _db
+    if not _ai_is_manager(user):
+        return "❌ Only Managers can read markets health."
+
+    mid = str(args.get("market") or "").strip().lower() or None
+    month = str(args.get("month") or "").strip() or ""
+    out = []
+
+    # ── 1. dividend runs that did not finish ────────────────────────────────
+    try:
+        runs = _db.dividend_runs_unfinished(50) or []
+    except Exception as e:
+        runs = []
+        out.append(f"⚠️ Could not read dividend runs: {e}")
+    if mid:
+        runs = [r for r in runs if str(r.get("market_id") or "").lower() == mid]
+    if runs:
+        out.append(f"⚠️ **{len(runs)} unfinished dividend run(s)** — started and not "
+                   f"complete. No coin is lost and nobody is paid twice: each leg "
+                   f"commits with its own marker, so an unresolved leg simply has not "
+                   f"been paid yet and the month is NOT stamped.")
+        for r in runs[:12]:
+            lc = r.get("leg_counts") or {}
+            bits = ", ".join(f"{v:,} {k}" for k, v in sorted(lc.items())) or "no legs"
+            owed = int(lc.get("planned", 0)) + int(lc.get("claimed", 0))
+            out.append(
+                f"• `{r.get('market_id')}` {r.get('month')} ({r.get('kind') or '?'}) — "
+                f"state `{r.get('state')}`, pool {float(r.get('pool') or 0):,.0f} 🪙 — "
+                f"{bits}." + (f" **{owed:,} holder(s) still owed.**" if owed else "")
+                + (f" ⚠️ {lc['unknown']:,} UNKNOWN — check the coin ledger before "
+                   f"paying." if lc.get("unknown") else ""))
+        if len(runs) > 12:
+            out.append(f"…and {len(runs) - 12} more.")
+        out.append("A `planned` or `claimed` leg is picked up by the next run for that "
+                   "month — re-running the dividend finishes it and pays nobody twice. "
+                   "An `unknown` leg is the only one that needs a human.")
+    else:
+        out.append("✅ No unfinished dividend runs.")
+
+    # ── 2. revenue slices retirement took out of a rollup ───────────────────
+    if mid:
+        try:
+            ret = _db.csn_retired_sources(mid, month) or []
+        except Exception as e:
+            ret = []
+            out.append(f"⚠️ Could not read retired sources: {e}")
+        if ret:
+            tot = sum(float(r.get("income") or 0) for r in ret)
+            out.append(f"\n**{len(ret)} retired revenue slice(s)** for `{mid}`"
+                       + (f" in {month}" if month else "")
+                       + f" — {tot:,.0f} 🪙 of income NOT in the rollup the share price, "
+                       f"the dividend and the platform fee are read from. Archived, not "
+                       f"deleted: every figure below can be put back.")
+            for r in ret[:12]:
+                out.append(
+                    f"• {r.get('month')} `{r.get('source_key')}` — "
+                    f"income {float(r.get('income') or 0):,.0f} 🪙, "
+                    f"spent {float(r.get('spent') or 0):,.0f} 🪙 — "
+                    f"{r.get('reason') or 'no reason recorded'}"
+                    + (f" (superseded by `{r.get('superseded_by')}`)"
+                       if r.get("superseded_by") else "")
+                    + f" — retired {str(r.get('retired_at') or '')[:19]}")
+            if len(ret) > 12:
+                out.append(f"…and {len(ret) - 12} more.")
+        else:
+            out.append(f"\n✅ Nothing retired from `{mid}`'s rollup"
+                       + (f" in {month}" if month else "") + ".")
+    else:
+        out.append("\n(Give a `market` to see what revenue retirement has taken out of "
+                   "its rollup — that list is per market.)")
+
+    # ── 3. limit orders that trigger and keep being refused ─────────────────
+    try:
+        refused = _db.get_refused_limit_orders(1, 50) or []
+    except Exception as e:
+        refused = []
+        out.append(f"⚠️ Could not read limit orders: {e}")
+    if mid:
+        refused = [o for o in refused if str(o.get("market_id") or "").lower() == mid]
+    if refused:
+        out.append(f"\n**{len(refused)} open limit order(s) triggering and being "
+                   f"refused.** They are retried as the price moves and cancelled "
+                   f"after {STOCK_LIMIT_MAX_REFUSALS}.")
+        for o in refused[:12]:
+            out.append(
+                f"• #{o.get('id')} `{o.get('market_id')}` {o.get('side')} "
+                f"{int(o.get('shares') or 0):,} @ {float(o.get('limit_price') or 0):,.2f} "
+                f"for <@{o.get('user_id')}> — refused {int(o.get('refusals') or 0):,}× "
+                f"({o.get('last_refusal') or '?'}), last "
+                f"{str(o.get('last_refused_at') or '')[:19]}")
+        if len(refused) > 12:
+            out.append(f"…and {len(refused) - 12} more.")
+    else:
+        out.append("\n✅ No limit orders are being refused.")
+
+    return "\n".join(out)
+
+
 async def _ai_tool_get_hive_harvester_detail(guild, channel, user, args):
     import Restocker_db as _db
     ign = str(args.get("ign") or "").strip()
@@ -17602,12 +19615,13 @@ _AI_TOOL_MAP = {
     "list_aliases":         _ai_tool_list_aliases,
     "get_market_code":      _ai_tool_get_market_code,
     "get_hive_harvester_detail": _ai_tool_get_hive_harvester_detail,
+    "csn_ingest_health":     _ai_tool_csn_ingest_health,
+    "markets_health":       _ai_tool_markets_health,
     "run_hive_payout":      _ai_tool_run_hive_payout,
     "rebuild_market_channel": _ai_tool_rebuild_market_channel,
     "rebuild_hive_channel": _ai_tool_rebuild_hive_channel,
     "purge_channel":        _ai_tool_purge_channel,
     "csn_cleanup":          _ai_tool_csn_cleanup,
-    "csn_silence":          _ai_tool_csn_silence,
     "admin_wipe":           _ai_tool_admin_wipe,
     "get_market_holders":   _ai_tool_get_market_holders,
     "settle_unlinked_harvests": _ai_tool_settle_unlinked_harvests,
@@ -17639,6 +19653,7 @@ _AI_TOOL_MAP = {
     "repair_after_update":   _ai_tool_repair_after_update,
     "sweep_batch_dms":       _ai_tool_sweep_batch_dms,
     "resend_order_cards":    _ai_tool_resend_order_cards,
+    "manage_ign_links":      _ai_tool_manage_ign_links,
     "manage_team":           _ai_tool_manage_team,
     "credit_team_work":      _ai_tool_credit_team_work,
     "manage_outages":        _ai_tool_manage_outages,
@@ -18169,10 +20184,31 @@ async def _notify_network_land(listing_id, note: str = "", res: dict = None):
     except Exception as e:
         log.warning("[network] land notify failed: %s", e)
 
-async def run_on_bot_loop(fn, *args, _timeout: float = 20.0, **kwargs):
+async def run_on_bot_loop(fn, *args, _timeout: float = 20.0, _late=None, **kwargs):
     """Await a synchronous, state-mutating fn on the bot's event loop even when
     called from the web thread. Non-blocking for the caller's loop. Falls back to a
-    direct call if the bot loop isn't set yet or we're already running on it."""
+    direct call if the bot loop isn't set yet or we're already running on it.
+
+    `_late` IS HOW A TIMEOUT STOPS BEING PERMANENTLY UNKNOWN. `fn` is synchronous,
+    so once the scheduled task takes its first step it cannot be cancelled: giving
+    up after `_timeout` tells the caller nothing about whether the work committed.
+    The future still finishes moments later, and IT knows. Pass `_late` and it is
+    called with that future exactly once, when the work ends and only if this
+    request had already given up — so an idempotency key claimed by a timed-out
+    request gets resolved from the real answer instead of sitting unresolved until
+    a human reads a log. `_late` must not raise and must not block.
+
+    WHEN `_late` IS GIVEN, THE WORK IS SHIELDED FROM THE TIMEOUT. It has to be.
+    Measured here: with a plain `wait_for`, a trade queued behind a one-second stall
+    reports `CancelledError` on its future — `concurrent.futures.Future.cancel()`
+    succeeds while the coroutine is still merely *queued* — and then the loop drains
+    and runs it anyway. The wallet was charged 5,113 coins by a call whose future
+    says it was cancelled. So "cancelled" is not evidence that nothing happened, and
+    anything that treats it as a definite refusal (releasing an idempotency key, for
+    instance) is wrong in the expensive direction. Shielding removes the lie: the
+    call always completes and always reports what it did. Callers that pass no
+    `_late` keep the exact previous behaviour.
+    """
     loop = _BOT_LOOP
     try:
         current = asyncio.get_running_loop()
@@ -18185,7 +20221,37 @@ async def run_on_bot_loop(fn, *args, _timeout: float = 20.0, **kwargs):
         return fn(*args, **kwargs)
 
     cfut = asyncio.run_coroutine_threadsafe(_call(), loop)
-    return await asyncio.wait_for(asyncio.wrap_future(cfut), _timeout)
+    if _late is None:
+        return await asyncio.wait_for(asyncio.wrap_future(cfut), _timeout)
+
+    import threading as _th
+    _guard = _th.Lock()
+    _state = {"gave_up": False, "fired": False}
+
+    def _fire(f):
+        with _guard:
+            if not _state["gave_up"] or _state["fired"]:
+                return
+            _state["fired"] = True
+        try:
+            _late(f)
+        except Exception as e:  # noqa: BLE001
+            log.error("[run_on_bot_loop] late-result callback failed: %s", e)
+
+    try:
+        cfut.add_done_callback(_fire)
+    except Exception as e:  # noqa: BLE001
+        log.error("[run_on_bot_loop] could not attach late-result callback: %s", e)
+    try:
+        return await asyncio.wait_for(asyncio.shield(asyncio.wrap_future(cfut)), _timeout)
+    except BaseException:
+        with _guard:
+            _state["gave_up"] = True
+        # It may have finished in the gap between the timeout and the flag, in which
+        # case the done-callback already ran and declined. Fire it here instead.
+        if cfut.done():
+            _fire(cfut)
+        raise
 
 
 CONFIGURABLE_CHANNELS = {
@@ -18309,7 +20375,18 @@ async def _main():
                  "cogs.shop", "cogs.orders", "cogs.money", "cogs.reports", "cogs.misc",
                  "cogs.loops", "cogs.events", "cogs.config", "cogs.team",  
                  "cogs.devassist", "cogs.hive", "cogs.lands", "cogs.bonds", "cogs.voting",
-                 "cogs.land_exchange"):
+                 "cogs.land_exchange",
+                 # `/splits` — the CONFIGURATION surface for split_rules.py. Its
+                 # execution path (land_settle -> run_split, cogs.loops -> the resume
+                 # sweep) shipped wired; without this line the rules it executes can
+                 # only be written with hand-typed SQL, which is also the one route
+                 # that bypasses the over-100% guard.
+                 "cogs.splits",
+                 # Panel SKU addressing + rollback ops. panel_skus MUST load AFTER every
+                 # cog that owns a panel: its setup() wraps those panels' embed builders
+                 # so each one prints its own address, and it can only wrap a module that
+                 # has already been imported.
+                 "cogs.panel_skus", "cogs.rollback"):
         try:
             await bot.load_extension(_ext)
         except Exception as e:

@@ -3153,22 +3153,43 @@ document.querySelectorAll('.chips button').forEach(b=>b.onclick=()=>{document.ge
 // Real order. The site used to only COPY a /stock command; sessions give us per-user
 // auth, so the trade executes here. Server-side it is marshalled onto the bot's event
 // loop so a web trade can't interleave with a Discord one.
+// One ticket = one request_id, held until the order RESOLVES. Clicking again after
+// "it failed" is a retry of the same intent, not a second order — the server keys on
+// this id, so the retry replays the first answer instead of buying the shares twice
+// (measured before this: 50 shares intended, 100 held, 10,354 charged). A definite
+// outcome clears the id, so the next click is genuinely a new order.
+const TKEY={};
+function tkeyFor(k){if(!TKEY[k]){TKEY[k]=(crypto.randomUUID?crypto.randomUUID()
+ :(Date.now()+'-'+Math.random().toString(36).slice(2)));}return TKEY[k];}
 document.getElementById('cmd').onclick=async()=>{
  const el=document.getElementById('cmd'), hint=document.getElementById('tkHint');
  const me=window.OWNERINFO;
  if(!me||!me.logged_in){hint.textContent='Log in (top right) to trade here.';return;}
  const sh=+el.dataset.shares||0, mid=el.dataset.mid;
  if(!mid||sh<1){hint.textContent='Pick a market and an amount first.';return;}
- if(!confirm((side=='buy'?'Buy ':'Sell ')+sh+' share(s) of '+mid+'?'))return;
+ const mk=MK.find(x=>x.mid===mid), qp=mk?mk.price:0;
+ // The figures shown are the figures sent. The server refuses if the market has
+ // moved past them rather than filling at whatever the price became.
+ const est=Math.round(qp*sh), band=Math.ceil(est*0.05);
+ if(!confirm((side=='buy'?'Buy ':'Sell ')+sh+' share(s) of '+mid+
+   ' at about '+qp.toFixed(2)+' c/share (~'+est.toLocaleString()+' c)?'))return;
+ const intent=side+':'+mid+':'+sh, rid=tkeyFor(intent);
  el.textContent='working…'; el.style.pointerEvents='none';
  try{
+  const body={action:side,market_id:mid,shares:sh,request_id:rid,quote_price:qp};
+  if(side=='buy')body.max_total=est+band; else body.min_total=Math.max(0,est-band);
   const r=await fetch('/api/trade',{method:'POST',
     headers:{'Content-Type':'application/json','X-CSRF-Token':me.csrf||''},
-    body:JSON.stringify({action:side,market_id:mid,shares:sh})});
+    body:JSON.stringify(body)});
   const j=await r.json();
   hint.textContent=(j&&j.message)?j.message:((j&&j.error)||'Trade failed.');
   el.textContent=(j&&j.ok)?'done ✓':'failed';
- }catch(e){hint.textContent='Network error.';el.textContent='failed';}
+  // Keep the id ONLY while the outcome is unknown; anything decided retires it.
+  const undecided=(j&&(j.code=='outcome_unknown'||j.code=='idempotency_in_progress'||
+                       j.code=='idempotency_unresolved'));
+  if(!undecided)delete TKEY[intent];
+ }catch(e){hint.textContent='Network error — do not re-send; check your holdings.';
+  el.textContent='failed';}
  setTimeout(()=>{el.style.pointerEvents='';calc();},1400);};
 document.querySelectorAll('#ranges button').forEach(b=>b.onclick=()=>{
  document.querySelectorAll('#ranges button').forEach(x=>x.classList.remove('on'));b.classList.add('on');
@@ -3207,14 +3228,20 @@ function renderBonds(bonds){
     const u=+inp.value||0; if(u<1)return;
     if(!confirm('Buy '+u+' unit(s) of '+b.name+'?'))return;
     btn.disabled=true; btn.textContent='...';
+    // Same one-ticket-one-id rule as the share ticket: a retry after "it failed"
+    // must be recognisable as the SAME purchase, or it debits the wallet twice.
+    const bintent='bond:'+b.id+':'+u, brid=tkeyFor(bintent);
     try{
      const r=await fetch('/api/trade',{method:'POST',
        headers:{'Content-Type':'application/json','X-CSRF-Token':(ME&&ME.csrf)||''},
-       body:JSON.stringify({action:'bond_buy',bond_id:b.id,units:u})});
+       body:JSON.stringify({action:'bond_buy',bond_id:b.id,units:u,request_id:brid})});
      const j=await r.json();
      alert((j&&j.message)||(j&&j.error)||'Failed.');
+     const undecided=(j&&(j.code=='outcome_unknown'||j.code=='idempotency_in_progress'||
+                          j.code=='idempotency_unresolved'));
+     if(!undecided)delete TKEY[bintent];
      if(j&&j.ok){const s2=await (await fetch('/api/stocks')).json();renderBonds(s2.bonds||[]);}
-    }catch(e){alert('Network error.');}
+    }catch(e){alert('Network error — do not re-send; check your balance.');}
     btn.disabled=false; btn.textContent='Buy';};
    wrap.appendChild(inp); wrap.appendChild(btn); row.appendChild(wrap);
   }
@@ -3715,6 +3742,230 @@ async def _handle_api_vote(request):
         + ". Re-vote any time before it closes."})
 
 
+import logging as _logging
+_weblog = _logging.getLogger("restocker.web")
+
+
+def _bank():
+    """The idempotency machinery lives in bank_api and is already correct there.
+    Imported lazily so the web server still starts if that module is unavailable —
+    `_claim_key` and friends work with BANK_API_TOKEN unset; the token only gates
+    bank_api's own HTTP routes, not its bookkeeping."""
+    import bank_api
+    return bank_api
+
+
+def _trade_key(uid: str, body: dict) -> str:
+    """The idempotency key for one order ticket.
+
+    Built from a client-supplied `request_id`, which the site keeps STABLE across
+    retries of the same ticket and regenerates once an order resolves. That is the
+    only thing that can distinguish "the user clicked Buy again because we told
+    them it failed" from "the user wants to buy 50 more" — the server cannot tell
+    those apart from (user, market, shares) alone, and guessing either way is a
+    bug: guess retry and you swallow a real second order, guess new and you charge
+    twice. No request_id -> no key -> the previous unprotected behaviour, for
+    third-party callers.
+    """
+    rid = str(body.get("request_id") or "").strip()[:64]
+    if not rid:
+        return ""
+    safe = "".join(ch for ch in rid if ch.isalnum() or ch in "-_:.")
+    return f"web:trade:{uid}:{safe}" if safe else ""
+
+
+def _trade_busy(kind: str, key: str, age: float, uid: str):
+    """409 for a ticket whose earlier attempt still owns the key. `in_progress`
+    means "still pending, ask again shortly"; `unresolved` means an attempt never
+    recorded its outcome and a human has to look — neither is "it failed", and
+    neither may be retried as a fresh order."""
+    if kind == "unresolved":
+        _weblog.error("[trade] key %r unresolved after %.0fs (wallet %s) — an earlier "
+                      "attempt never recorded its outcome; check the stock ledger and "
+                      "delete the key by hand if nothing landed", key, age, uid)
+        return web.json_response({
+            "ok": False, "code": "idempotency_unresolved",
+            "error": ("An earlier attempt at this order never reported back. It has NOT "
+                      "been repeated. Check your holdings — staff can settle it."),
+        }, status=409)
+    return web.json_response({
+        "ok": False, "code": "idempotency_in_progress",
+        "error": "That order is still being processed — give it a moment, don't re-send it.",
+    }, status=409)
+
+
+def _resolve_trade_key(key: str, claim, r, payload: dict) -> None:
+    """Record / release / hold the key, by the same three-outcome rule bank_api uses.
+
+    ok -> store the response so a repeat REPLAYS it. A code in
+    `DEFINITE_STOCK_REFUSALS` -> release, because core provably moved nothing and a
+    corrected order must get through. Anything else (`error`, `trade_unknown`, an
+    unreadable answer) -> keep the claim and log at ERROR: it MAY have committed.
+    """
+    if not key:
+        return
+    b = _bank()
+    try:
+        if payload.get("ok"):
+            b._complete_key(key, payload, 200, claim)
+        elif isinstance(r, dict) and r.get("code") in b.DEFINITE_STOCK_REFUSALS:
+            b._release_key(key, claim)
+        else:
+            _weblog.error("[trade] key %r left UNRESOLVED (answer: %r) — the trade may "
+                          "have committed; check the stock ledger before releasing it",
+                          key, r)
+    except Exception as e:  # noqa: BLE001
+        _weblog.error("[trade] could not resolve key %r (%s) — leaving it claimed, which "
+                      "is the safe direction", key, e)
+
+
+def _trade_payload(r) -> dict:
+    """One shape for the trade answer, built in one place — so the response a
+    caller gets live and the response a REPLAY gets are identical by construction
+    rather than by two pieces of code agreeing."""
+    r = r if isinstance(r, dict) else {}
+    return {
+        "ok": bool(r.get("ok")), "error": None if r.get("ok") else r.get("msg"),
+        "message": r.get("msg"), "code": r.get("code"), "shares": r.get("shares"),
+        "fill": r.get("fill"), "total": r.get("total"), "new_price": r.get("new_price"),
+    }
+
+
+def _late_trade_result(key: str, claim, fut) -> None:
+    """Resolve a key whose request already gave up waiting.
+
+    `_do_stock_trade` is synchronous: once the bot loop starts it, it runs to
+    completion whether or not anyone is still listening. So a timeout is UNKNOWN
+    *to the request* — but the future knows the answer a moment later, and this is
+    the moment it becomes knowable:
+
+      * returned  -> record it exactly like a live answer, so the retry REPLAYS the
+        real result (including "you bought 50 shares") instead of being told to
+        wait 15 minutes for a stale claim.
+      * raised or cancelled -> still UNKNOWN. Keep the claim, log at ERROR.
+
+    A CANCELLED FUTURE IS NOT A REFUSAL, and the first draft of this function had it
+    the other way round. Measured: the trade queued behind a stalled bot loop
+    reported `CancelledError` — and had charged the wallet 5,113 coins anyway, because
+    `concurrent.futures.Future.cancel()` succeeds against a coroutine that is merely
+    queued and the loop then runs it regardless. Releasing the key on that signal
+    re-opened the exact double-charge this route was fixed for. `run_on_bot_loop`
+    now shields the call when `_late` is passed, so this branch should be
+    unreachable; it stays, refusing to guess, because "should be unreachable" is
+    what the last version of this belief was too.
+
+    Without this the key was correct but inert: right answer, 900 seconds late, via
+    an operator.
+    """
+    import concurrent.futures as _cf
+    if not key:
+        return
+    try:
+        r = fut.result()
+    except _cf.CancelledError:
+        _weblog.error("[trade] key %r still UNRESOLVED — the queued trade reports "
+                      "CANCELLED, which does NOT mean it did not run. Check the stock "
+                      "ledger before releasing it.", key)
+        return
+    except Exception as e:  # noqa: BLE001
+        _weblog.error("[trade] key %r still UNRESOLVED — the queued trade raised (%s). "
+                      "Check the stock ledger before releasing it.", key, e)
+        return
+    _resolve_trade_key(key, claim, r, _trade_payload(r))
+    _weblog.warning("[trade] key %r resolved late (code %s) — the request had already "
+                    "given up waiting; the retry will replay this answer.",
+                    key, (r or {}).get("code") if isinstance(r, dict) else None)
+
+
+async def _keyed_money_call(m, key, uid, label, fields, fn, *args):
+    """Run one money-moving engine call under the same claim/replay/late rules as
+    the share-trade branch, for the actions whose engine functions return no machine
+    code: bond purchase and ETF invest/redeem.
+
+    THE RULE FOR THOSE: an answer that came BACK is definite. Every non-ok return in
+    `_do_bond_buy`, `_etf_invest` and `_etf_redeem` is a pre-flight validation —
+    series closed, not enough units, not enough coins, coverage floor, no units held
+    — decided before anything moves, so it releases the key and a corrected request
+    goes straight through. Only a timeout or a raise is UNKNOWN, and that keeps the
+    claim. These were three more copies of the bare `except Exception -> 500 "it
+    failed"` the share route was fixed for; a bond purchase that timed out and was
+    clicked again debited the wallet twice exactly the same way.
+
+    `fields` are the extra result keys this action reports, so a replay is
+    byte-identical to the live answer.
+    """
+    def _payload(r):
+        r = r if isinstance(r, dict) else {}
+        out = {"ok": bool(r.get("ok")), "message": r.get("msg"),
+               "error": None if r.get("ok") else r.get("msg")}
+        for f in fields:
+            out[f] = r.get(f)
+        return out
+
+    def _resolve(r):
+        if not key:
+            return
+        b = _bank()
+        try:
+            if isinstance(r, dict) and r.get("ok"):
+                b._complete_key(key, _payload(r), 200, _resolve.claim)
+            elif isinstance(r, dict):
+                b._release_key(key, _resolve.claim)
+            else:
+                _weblog.error("[%s] key %r left UNRESOLVED (answer: %r)", label, key, r)
+        except Exception as e:  # noqa: BLE001
+            _weblog.error("[%s] could not resolve key %r (%s) — leaving it claimed",
+                          label, key, e)
+
+    kind, claim, stored = _bank()._claim_key(key)
+    _resolve.claim = claim
+    if kind == "replay":
+        status, payload = stored
+        return web.json_response(payload, status=int(status))
+    if kind in ("in_progress", "unresolved"):
+        return _trade_busy(kind, key, claim, uid)
+
+    def _late(fut):
+        try:
+            r = fut.result()
+        except Exception as e:  # noqa: BLE001
+            _weblog.error("[%s] key %r still UNRESOLVED (%s) — check the ledger before "
+                          "releasing it", label, key, e)
+            return
+        _resolve(r)
+
+    try:
+        r = await m.run_on_bot_loop(fn, *args, _late=(_late if key else None))
+    except Exception as e:  # noqa: BLE001
+        _weblog.error("[%s] %s left key %r UNRESOLVED (%s) — it may have committed",
+                      label, uid, key, e)
+        return web.json_response({
+            "ok": False, "code": "outcome_unknown",
+            "error": ("That didn't answer in time. It may or may not have gone through — "
+                      "do NOT send it again; check your balance in a moment."),
+        }, status=409)
+    _resolve(r)
+    return web.json_response(_payload(r))
+
+
+def _trade_bounds(body: dict) -> dict:
+    """Pull the trader's confirmed figures out of the request: the price the ticket
+    showed and the ceiling/floor they agreed to. Passed straight into the engine,
+    which refuses `slippage` if the market has moved past them — there was no cap
+    anywhere before this, and a whale moving the mid 100 -> 120 between quote and
+    execute silently charged 1.22x the displayed figure.
+
+    ONE IMPLEMENTATION, IN `bank_api`. This was a byte-for-byte second copy of
+    `bank_api._trade_bounds` for two rounds, flagged as a duplicate in R2 and
+    again in R3. Two copies of a parser for the SAME wire format is how the
+    website and the bank end up disagreeing about what a trader confirmed — add
+    a bound to one and the other silently ignores it, which is a slippage cap
+    that is enforced on one surface and not the other. `Restocker_web` already
+    imports `bank_api` (it registers its routes), so the collapse costs nothing."""
+    import bank_api
+    return bank_api._trade_bounds(body)
+
+
 async def _handle_api_trade(request):
     """Buy/sell shares, or invest/redeem ABX Index units, as the logged-in user.
 
@@ -3725,6 +3976,26 @@ async def _handle_api_trade(request):
     is only safe because every caller shares the bot's loop — its supply check and its
     writes are not atomic. So every mutation goes through run_on_bot_loop(), which is what
     keeps a web trade from interleaving with a Discord one.
+
+    A TIMEOUT HERE IS UNKNOWN, NOT FAILED. This route used to wrap the dispatch in a
+    bare `except Exception` and answer `{"ok": false, "error": "trade failed: ..."}`
+    with HTTP 500 and no idempotency key at all. `_do_stock_trade` is fully
+    synchronous, so once `run_on_bot_loop`'s task takes its first step it CANNOT be
+    cancelled: the only outcomes are "never started" and "committed in full", and
+    `wait_for` cannot tell them apart. Measured — a 20-second bot-loop stall, user
+    clicks Buy(50) once, is told it failed, clicks again: 100 shares held, 10,354
+    coins charged, two indistinguishable ledger rows.
+
+    So the trade paths here now run through the SAME claim/replay machinery the bank
+    API already had right (`bank_api._claim_key` / `_complete_key` / `_release_key` /
+    `DEFINITE_STOCK_REFUSALS`) instead of a third implementation of it. The browser
+    sends a `request_id` that is stable across retries of ONE order ticket, so:
+      * a repeat of a completed order replays the stored answer — 200, no second trade
+      * a repeat while the first attempt is unresolved gets 409, not another trade
+      * a definite refusal releases the key so a corrected order goes straight through
+      * a timeout keeps the key and answers 409 `outcome_unknown`
+    A caller that sends no `request_id` gets the old unprotected behaviour, so
+    third-party clients keep working — but the site always sends one.
     """
     import Restocker_main as m
     sess = _session_user(request)
@@ -3751,15 +4022,35 @@ async def _handle_api_trade(request):
             return web.json_response({"ok": False, "error": "shares must be a whole number."}, status=400)
         if not (1 <= shares <= 1_000_000):
             return web.json_response({"ok": False, "error": "shares must be 1..1,000,000."}, status=400)
+        bounds = _trade_bounds(body)
+        key = _trade_key(uid, body)
+        kind, claim, stored = _bank()._claim_key(key)
+        if kind == "replay":
+            status, payload = stored
+            return web.json_response(payload, status=int(status))
+        if kind in ("in_progress", "unresolved"):
+            return _trade_busy(kind, key, claim, uid)
         try:
-            r = await m.run_on_bot_loop(m._do_stock_trade, action, uid, mid, shares, name)
+            r = await m.run_on_bot_loop(
+                m._do_stock_trade, action, uid, mid, shares, name,
+                _late=(lambda f, _k=key, _c=claim: _late_trade_result(_k, _c, f)),
+                **bounds)
         except Exception as e:
-            return web.json_response({"ok": False, "error": f"trade failed: {e}"}, status=500)
-        return web.json_response({
-            "ok": bool(r.get("ok")), "error": None if r.get("ok") else r.get("msg"),
-            "message": r.get("msg"), "shares": r.get("shares"), "fill": r.get("fill"),
-            "total": r.get("total"), "new_price": r.get("new_price"),
-        })
+            # UNKNOWN *to this request*. The key is NOT released — releasing it here
+            # is exactly what let the retry charge a second time — and `_late` above
+            # will resolve it the moment the queued trade actually finishes.
+            _weblog.error("[trade] %s %s x%s for %s left key %r UNRESOLVED (%s) — the "
+                          "trade may have committed; check the stock ledger before "
+                          "releasing the key", action, mid, shares, uid, key, e)
+            return web.json_response({
+                "ok": False, "code": "outcome_unknown",
+                "error": ("The exchange didn't answer in time. Your order may or may not "
+                          "have gone through — do NOT place it again. Refresh your "
+                          "holdings in a moment; if it didn't land you can re-order then."),
+            }, status=409)
+        payload = _trade_payload(r)
+        _resolve_trade_key(key, claim, r, payload)
+        return web.json_response(payload)
 
     if action == "bond_buy":
         bid = str(body.get("bond_id") or "").strip()
@@ -3771,16 +4062,10 @@ async def _handle_api_trade(request):
             return web.json_response({"ok": False, "error": "units must be a whole number."}, status=400)
         if not (1 <= units <= 10_000_000):
             return web.json_response({"ok": False, "error": "units must be 1..10,000,000."}, status=400)
-        try:
-            r = await m.run_on_bot_loop(m._do_bond_buy, uid, int(bid), units, name)
-        except Exception as e:
-            return web.json_response({"ok": False, "error": f"bond purchase failed: {e}"}, status=500)
-        return web.json_response({
-            "ok": bool(r.get("ok")), "message": r.get("msg"),
-            "error": None if r.get("ok") else r.get("msg"),
-            "cost": r.get("cost"), "units": r.get("units"),
-            "coupon_monthly": r.get("coupon_monthly"), "coverage_pct": r.get("coverage_pct"),
-        })
+        return await _keyed_money_call(
+            m, _trade_key(uid, body), uid, "bond_buy",
+            ("cost", "units", "coupon_monthly", "coverage_pct"),
+            m._do_bond_buy, uid, int(bid), units, name)
 
     if action == "invest_index":
         try:
@@ -3789,12 +4074,9 @@ async def _handle_api_trade(request):
             return web.json_response({"ok": False, "error": "coins must be a whole number."}, status=400)
         if not (1 <= coins <= 1_000_000_000):
             return web.json_response({"ok": False, "error": "coins out of range."}, status=400)
-        try:
-            r = await m.run_on_bot_loop(m._etf_invest, uid, coins, name)
-        except Exception as e:
-            return web.json_response({"ok": False, "error": f"invest failed: {e}"}, status=500)
-        return web.json_response({"ok": bool(r.get("ok")), "message": r.get("msg"),
-                                  "error": None if r.get("ok") else r.get("msg")})
+        return await _keyed_money_call(
+            m, _trade_key(uid, body), uid, "invest_index", (),
+            m._etf_invest, uid, coins, name)
 
     if action == "sell_index":
         units = body.get("units")
@@ -3807,12 +4089,14 @@ async def _handle_api_trade(request):
                 return web.json_response({"ok": False, "error": "units must be a number or 'all'."}, status=400)
             if units <= 0:
                 return web.json_response({"ok": False, "error": "units must be positive."}, status=400)
-        try:
-            r = await m.run_on_bot_loop(m._etf_redeem, uid, units, name)
-        except Exception as e:
-            return web.json_response({"ok": False, "error": f"redeem failed: {e}"}, status=500)
-        return web.json_response({"ok": bool(r.get("ok")), "message": r.get("msg"),
-                                  "error": None if r.get("ok") else r.get("msg")})
+        # `_etf_redeem` is the one here that can end PARTWAY: it sells the basket
+        # market by market and pays the total. Its non-ok returns are still all
+        # pre-flight (no units held, bad number, empty fund), so the release rule
+        # holds — but a timeout mid-basket is genuinely unknown, which is exactly
+        # what keeping the claim says.
+        return await _keyed_money_call(
+            m, _trade_key(uid, body), uid, "sell_index", (),
+            m._etf_redeem, uid, units, name)
 
     return web.json_response({"ok": False, "error": "action must be buy, sell, invest_index or sell_index."},
                              status=400)
@@ -4548,11 +4832,24 @@ async def _handle_network_land_buy(request):
     if res.get("ok"):
         try:
             loop = getattr(_m, "_BOT_LOOP", None)
-            if loop is not None:
+            # Same truncation as the bid note: _instant_buy_core deducts
+            # int(round(price)), so report int(round(price)), not int(price).
+            price_i = int(round(float(res.get("price") or 0)))
+            if price_i <= 0:
+                # THE CONTRACT, from the reader's side. `_instant_buy_core` returns a
+                # completed purchase carrying a `price` or a refusal — but `or 0` is
+                # exactly the shape that turns a broken contract into a quiet lie
+                # rather than a loud failure. It used to post "🏡 #N bought via the
+                # network for `0` 🪙" into a partner channel and open a deal room
+                # between the seller and somebody who had not bought anything,
+                # because `settle_listing`'s `in_doubt` came back `ok: True` with no
+                # price in it. The core cannot produce that any more; if it ever does
+                # again, SAY SO instead of announcing a sale.
+                print(f"⚠️ network land buy #{lid}: ok with no price ({res!r}) — "
+                      f"not announcing a sale and not opening a deal room")
+            elif loop is not None:
                 import asyncio as _a
-                # Same truncation as the bid note: _instant_buy_core deducts
-                # int(round(price)), so report int(round(price)), not int(price).
-                note = f"🏡 **#{lid}** bought via the network by `{uname}` for `{int(round(float(res.get('price') or 0))):,}` 🪙."
+                note = f"🏡 **#{lid}** bought via the network by `{uname}` for `{price_i:,}` 🪙."
                 _a.run_coroutine_threadsafe(_m._notify_network_land(lid, note, res), loop)
         except Exception as e:
             print(f"⚠️ network land buy notify failed: {e}")
@@ -4646,7 +4943,27 @@ async def _handle_network_land_close(request):
             loop = getattr(_m, "_BOT_LOOP", None)
             if loop is not None:
                 import asyncio as _a
-                note = f"🔨 Listing **#{lid}** closed by <@{rid}> ({res.get('outcome')})."
+                # The escrow retrofit added outcomes the hotfix's copy did not know
+                # about. `already_settling` and `in_doubt` come back {"ok": True} —
+                # they mean "somebody else owns this settlement / core has not said
+                # where the coins are", NOT "closed". Announcing them as a close in
+                # the partner channel tells a manager the hammer fell when it did not.
+                outcome = str(res.get("outcome") or "")
+                if outcome == "already_closed":
+                    # NOT "a settlement is in flight". This lot is OVER — sold,
+                    # expired, cancelled or rolled back — and nothing is coming
+                    # to finish it. Telling a manager to wait for a settlement
+                    # that already happened is how a closed lot gets watched for
+                    # an hour instead of read.
+                    note = (f"ℹ️ Listing **#{lid}** is already closed "
+                            f"(`{res.get('status') or 'closed'}`) — <@{rid}>'s close "
+                            f"did nothing and nothing is pending. Nothing to wait for.")
+                elif outcome in ("already_settling", "in_doubt"):
+                    note = (f"⏳ Listing **#{lid}**: a settlement is already in flight "
+                            f"({outcome}) — <@{rid}>'s close did nothing. It finishes "
+                            f"on its own; check the board before trying again.")
+                else:
+                    note = f"🔨 Listing **#{lid}** closed by <@{rid}> ({outcome})."
                 _a.run_coroutine_threadsafe(_m._notify_network_land(lid, note, res), loop)
         except Exception:
             pass
@@ -4789,6 +5106,24 @@ async def start_webserver(port: int = 8080):
         bank_api.register_bank_routes(app)
     except Exception as _e:
         print(f"⚠️  Bank API not registered: {_e}")
+
+    # Hub sections. Each is independent: one failing to import must not take the others
+    # or the core site down with it, so they are registered one at a time and a failure
+    # is a named warning rather than a dead web server. A section that does not register
+    # is simply absent from the nav — the pages it owns 404, nothing else changes.
+    for _mod_name, _fn_name, _label in (
+        ("hub_web",      "register_hub_routes",      "Hub"),
+        ("banking_web",  "register_banking_routes",  "Banking"),
+        ("estates_web",  "register_estates_routes",  "Estates"),
+        ("messages_web", "register_messages_routes", "Messages"),
+        ("history_web",  "register_history_routes",  "History"),
+    ):
+        try:
+            _mod = __import__(_mod_name)
+            getattr(_mod, _fn_name)(app)
+            print(f"     {_label} section registered")
+        except Exception as _e:
+            print(f"⚠️  {_label} section not registered: {_e!r}")
 
     runner = web.AppRunner(app, access_log=None)
     await runner.setup()
