@@ -2967,7 +2967,7 @@ background:var(--panel2);color:var(--muted);font-family:var(--sans)}
 <body>
 <header>
   <div class="brand"><span class="m">A</span>ABEXILAS <span class="faint" style="font-weight:600">EXCHANGE</span></div>
-  <nav><a href="/inventory">Inventory</a><a href="/ledger">Ledger</a><a class="on">Exchange</a><a href="/orders">Orders</a><a href="/teams">Teams</a><a href="/investor">Investor</a><a href="/liabilities">Liabilities</a><a href="/mymarket">My Market</a></nav>
+  <nav><a href="/inventory">Inventory</a><a href="/ledger">Ledger</a><a class="on">Exchange</a><a href="/orders">Orders</a><a href="/teams">Teams</a><a href="/mymarket">My Market</a></nav>
   <div class="rt"><div class="bp"><b class="mono" id="hWho">—</b><br><span id="hWhoSub">not linked</span></div></div>
 </header>
 <div class="grid">
@@ -3587,43 +3587,26 @@ async def _handle_api_investor(request):
 
     companies, dividends = [], {}
     try:
-        _mkts = db.get_public_markets() or {}
-    except Exception as e:
-        import traceback, sys
-        print(f"⚠️  /api/investor: get_public_markets failed: {e!r}", file=sys.stderr)
-        traceback.print_exc()
-        _mkts = {}
-    for mid in _mkts:
-        # Per-market isolation: one malformed market must NOT 500 the whole tab.
-        # Before this, any single exception below returned status=500 and the
-        # frontend showed "Could not load investor data" with every panel stuck.
-        try:
+        for mid in (db.get_public_markets() or {}):
             listing = db.get_market_shares(mid) or {}
             if not listing.get("active"):
                 continue
             raw = (_load_markets() or {}).get(mid) or {}
-            if not isinstance(raw, dict):
-                raw = {}
             price = float(listing.get("share_price") or 0)
             out = float(listing.get("shares_outstanding") or 0)
             try:
                 back = m._market_backing(mid)
             except Exception:
                 back = {}
-            if not isinstance(back, dict):
-                back = {}
             try:
                 cov_pct, cov_col, cov_face = m._bond_coverage(mid)
             except Exception:
                 cov_pct = cov_col = cov_face = 0
-            try:
-                hist = db.get_dividend_history(mid, 24) or []
-            except Exception:
-                hist = []
+            hist = db.get_dividend_history(mid, 24)
             dividends[mid] = hist
             companies.append({
                 "mid": mid,
-                "name": raw.get("name") or mid,
+                "name": (raw.get("name") if isinstance(raw, dict) else None) or mid,
                 "ticker": (core_tickers().get(mid) or "-"),
                 "price": price,
                 "shares_outstanding": out,
@@ -3638,11 +3621,8 @@ async def _handle_api_investor(request):
                 "last_dividend": (hist[0] if hist else None),
                 "dividend_12m": sum(float(h.get("per_share") or 0) for h in hist[:12]),
             })
-        except Exception as e:
-            import traceback, sys
-            print(f"⚠️  /api/investor: skipping market {mid!r}: {e!r}", file=sys.stderr)
-            traceback.print_exc()
-            continue
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=500)
 
     holdings, total_value, total_cost = [], 0.0, 0.0
     if uid:
