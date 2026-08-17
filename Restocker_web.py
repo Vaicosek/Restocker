@@ -5117,6 +5117,7 @@ async def start_webserver(port: int = 8080):
         ("estates_web",  "register_estates_routes",  "Estates"),
         ("messages_web", "register_messages_routes", "Messages"),
         ("history_web",  "register_history_routes",  "History"),
+        ("admin_web",    "register_admin_routes",    "Owner"),
     ):
         try:
             _mod = __import__(_mod_name)
