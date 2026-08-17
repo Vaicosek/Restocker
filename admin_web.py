@@ -19,7 +19,7 @@ owner could have written that", including the true ones, and spends the credibil
 of every record he owns to buy a capability he does not need. He owns his alts and
 signs into them normally; the dev login below covers testing.
 
-So this module gives him three things and no fourth:
+So this module gives him four things and no fifth:
 
   1. READ-ONLY VIEW-AS. Enter as any player by id or handle; the site then renders
      THEIR real pages (inbox, holdings, ledger, threads) with a banner that cannot be
@@ -35,7 +35,14 @@ So this module gives him three things and no fourth:
      prices, the P/E multiplier, treasury, share issuance, dividends and config are
      surfaced with their real numbers.
 
-  3. DEV LOGIN (local only, off by default). Become any user id for testing, behind
+  3. THE SALES LOG. Every share movement in the economy — off-book transfers and
+     exchange fills — in one table, both sides named, dated by the event and not by
+     when the bot wrote the row. It is the one read on this site that is not filtered
+     by the viewer's own id, so it is share movements ONLY (never `coin_ledger`), it
+     writes nothing, and every player whose rows it shows gets an audit row they can
+     read. See the section header above `read_all_otc`.
+
+  4. DEV LOGIN (local only, off by default). Become any user id for testing, behind
      three independent gates — see `h_dev_login`.
 
 IDENTITY, AS EVERYWHERE ELSE ON THIS SITE
@@ -63,7 +70,7 @@ import vt_web_shell as shell
 
 log = logging.getLogger("admin_web")
 
-ADMIN_VERSION = "1.0"
+ADMIN_VERSION = "1.1"
 
 #: Endpoint name the kill-switch claims under (see `shell.money_post`).
 FREEZE_ENDPOINT = "admin/freeze"
@@ -489,6 +496,7 @@ def _console_body(sess: dict) -> str:
 </div>
 <div class="adm-grid">
   {_view_as_tile(sess, va)}
+  {_sales_tile()}
   {_kill_tile(fr, key_on, key_off)}
   {_markets_tile(_markets_overview())}
   {_treasury_tile(_treasury_overview())}
@@ -768,6 +776,407 @@ async def h_dev_login(request):
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# THE SALES LOG — every share movement in the economy, in one table
+# ══════════════════════════════════════════════════════════════════════════
+#
+# WHY THIS EXISTS, AND WHAT IT COSTS
+# ──────────────────────────────────
+# `history_web` is deliberately "your own data only", staff included — the reason is
+# written at the top of that module and it still stands for the *player* surface. But
+# the owner has a real need it did not cover: a share left one account and arrived in
+# another, and nobody who can be asked about it is a party to the row. Before this page
+# the answer was to open the database.
+#
+# So this is the exception, and it is drawn as narrowly as an exception can be:
+#
+#   * SHARE MOVEMENTS ONLY. `share_gifts` and `stock_trade_log`. It does not read
+#     `coin_ledger`, so a player's wallet reasons — the free text the bot writes about
+#     what somebody spent money on — stay out of every staff surface, which is where
+#     the privacy of this site actually lives.
+#   * IT WRITES NOTHING to any economy table. Same property as `history_web`, and
+#     `test_admin_web` asserts it on the served bytes by counting rows around a view.
+#   * EVERY VIEW IS AUDITED, and the audit row is written ABOUT each player in the
+#     result — so `/api/admin/observed-me` shows them that their trades were read,
+#     by whom and when. An audit trail only the auditor can see is not a check on the
+#     auditor; that is the same sentence view-as is built on and it is not weakened
+#     here just because reading is quieter than impersonating.
+#
+# DATES: THE EVENT DATE, NEVER THE WRITE STAMP
+# ────────────────────────────────────────────
+# It reuses `history_web._event_date_from_note`, so an OTC row is dated by what the
+# note says happened and carries the literal text it was read from. `created_at` — when
+# the bot got round to writing the row — is not displayed here either, for the reason
+# recorded in `history_web`'s header: it was read as history and it is not history. It
+# orders rows that have no event date, and nothing else.
+
+
+#: Read cap per source. Both tables are two orders of magnitude below it today; the cap
+#: exists so that a page that grows never becomes a page that hangs. When it bites, the
+#: page SAYS it bit — a truncated read that renders silently is a wrong total.
+SALES_CAP = 400
+
+#: The type filter, in the order it is offered.
+SALES_TYPES = (("all", "Everything"), ("otc", "OTC transfers"),
+               ("exchange", "Exchange fills"))
+
+
+def _H():
+    """`history_web`, lazily. It owns the date parser, the counterparty resolver and the
+    number formatters, and one page's worth of copy-paste is how two pages start
+    disagreeing about who a Discord id belongs to."""
+    import history_web as _h
+    return _h
+
+
+def _exchange_party(mid: str) -> dict:
+    """The house side of an exchange fill. It is NOT a player and is never dressed as
+    one — the shares come out of, or go back into, the market's float."""
+    return {"id": "", "name": f"{_H().market_name(mid)} exchange", "sub": "the market float",
+            "linked": True}
+
+
+def read_all_otc() -> list:
+    """Every `share_gifts` row, both sides named. Economy-wide — this is the only read
+    on this site that is not filtered by the viewer's own id."""
+    H = _H()
+    with _core_db().db() as conn:
+        rows = conn.execute(
+            "SELECT key, market_id, from_user, to_user, shares, basis, value_coins, "
+            "       note, created_at FROM share_gifts "
+            " ORDER BY created_at DESC LIMIT ?", (SALES_CAP,)).fetchall()
+    out = []
+    for r in rows:
+        ev, raw, how = H._event_date_from_note(r["note"])
+        rec = H._ts(r["created_at"])
+        mid = str(r["market_id"] or "")
+        out.append({
+            "source": "otc", "eid": str(r["key"]), "type": "otc", "kind": "OTC TRANSFER",
+            "event_at": ev, "order_at": ev if ev is not None else rec,
+            "event_src": (f'stated in the note as “{raw}”, {how}' if raw else ""),
+            "from": H.counterparty(r["from_user"]), "to": H.counterparty(r["to_user"]),
+            "parties": [str(r["from_user"] or ""), str(r["to_user"] or "")],
+            "market_id": mid, "shares": float(r["shares"] or 0),
+            "value": r["value_coins"], "value_is_wallet": False,
+            "detail_text": (f"{H.sh(r['shares'])} shares · {H.market_name(mid)} · "
+                            f"value {H.c(r['value_coins'])} c as written on the transfer"),
+            "note": str(r["note"] or ""),
+        })
+    return out
+
+
+def read_all_trades() -> list:
+    """Every `stock_trade_log` row. `side` is not assumed to be buy or sell — the table
+    holds `liquidated` and `unliquidated` rows at a zero price, and printing those as a
+    sale for nothing is the exact lie `history_web` refuses; they are labelled with the
+    word the bot stored and claim no direction."""
+    H = _H()
+    with _core_db().db() as conn:
+        rows = conn.execute(
+            "SELECT id, user_id, market_id, side, shares, price_per_share, total_coins, "
+            "       traded_at FROM stock_trade_log ORDER BY id DESC LIMIT ?",
+            (SALES_CAP,)).fetchall()
+    out = []
+    for r in rows:
+        at = H._ts(r["traded_at"])
+        side = str(r["side"] or "").strip().lower()
+        mid = str(r["market_id"] or "")
+        who = H.counterparty(r["user_id"])
+        house = _exchange_party(mid)
+        total = float(r["total_coins"] or 0)
+        pps = float(r["price_per_share"] or 0)
+        if side == "buy":
+            kind, frm, to = "EXCHANGE BUY", house, who
+        elif side == "sell":
+            kind, frm, to = "EXCHANGE SELL", who, house
+        else:
+            kind, frm, to = (side or "movement").upper(), who, {"id": "", "name": "—",
+                                                                "sub": "", "linked": True}
+        if side in ("buy", "sell"):
+            det = (f"{H.sh(r['shares'])} shares at {H.c(pps)} c each · {H.c(total)} c total"
+                   if (total or pps) else
+                   f"{H.sh(r['shares'])} shares · no coins recorded against this fill")
+        else:
+            det = (f"{H.sh(r['shares'])} shares · recorded by the bot as “"
+                   f"{side or 'no side'}”, not an exchange fill"
+                   + ("" if (total or pps) else " · no coins moved"))
+        out.append({
+            "source": "stock_trade", "eid": str(int(r["id"])), "type": "exchange",
+            "kind": kind, "event_at": at, "order_at": at, "event_src": "",
+            "from": frm, "to": to, "parties": [str(r["user_id"] or "")],
+            "market_id": mid, "shares": float(r["shares"] or 0),
+            "value": total if (total or pps) else None, "value_is_wallet": bool(total),
+            "detail_text": det, "note": "",
+        })
+    return out
+
+
+def sales_events() -> tuple:
+    """`(rows, problems)` — both sources merged, newest first.
+
+    A source that fails to read is reported ON THE PAGE. A table that silently returns
+    nothing renders as "no sales", which is a different and much worse statement than
+    "one of the two tables could not be read"."""
+    rows, problems = [], []
+    for label, fn in (("OTC transfers", read_all_otc), ("exchange fills", read_all_trades)):
+        try:
+            rows.extend(fn())
+        except Exception:
+            log.warning("[admin][sales] %s could not be read", label, exc_info=True)
+            problems.append(f"the {label} table could not be read — rows are missing "
+                            f"from this page")
+    rows.sort(key=lambda e: (-(e.get("order_at") or 0.0), str(e.get("source")),
+                             str(e.get("eid"))))
+    return rows, problems
+
+
+def sales_totals(rows: list) -> dict:
+    """Shares moved, coins that actually moved through the exchange, and the value
+    WRITTEN on off-book transfers — three figures, never added together. An OTC
+    `value_coins` is a claim in a note; an exchange `total_coins` is a fill. Summing
+    them would produce a number that means nothing and looks like revenue."""
+    shares = sum(abs(float(e.get("shares") or 0)) for e in rows)
+    filled = sum(float(e.get("value") or 0) for e in rows if e.get("value_is_wallet"))
+    stated = sum(float(e.get("value") or 0) for e in rows
+                 if e["type"] == "otc" and e.get("value") is not None)
+    return {"rows": len(rows), "shares": shares, "filled": filled, "stated": stated,
+            "otc": sum(1 for e in rows if e["type"] == "otc"),
+            "exchange": sum(1 for e in rows if e["type"] == "exchange")}
+
+
+# ── the audit rows ────────────────────────────────────────────────────────
+
+#: `(actor, subject) -> ts` of the last audit row written for a sales view. One row per
+#: player per window, not one per refresh — an audit trail nobody can read through is
+#: as useless to the subject as no audit trail at all. Process-local on purpose: after a
+#: restart it writes again, and an extra audit row is harmless where a missing one is not.
+_SALES_AUDIT_SEEN: dict = {}
+SALES_AUDIT_WINDOW = 900.0
+
+
+def _audit_sales_view(request, actor: str, rows: list, scope: str) -> None:
+    """One summary row for the actor, and one row ABOUT each player in the result."""
+    ip = shell.client_ip(request)
+    shell.audit_admin(actor, "", "sales_log:view",
+                      f"{len(rows)} share movements · {scope}", ip)
+    now = time.time()
+    seen = set()
+    for e in rows:
+        for uid in e.get("parties") or []:
+            uid = str(uid or "")
+            if not uid or uid == actor or uid in seen:
+                continue
+            seen.add(uid)
+            if now - _SALES_AUDIT_SEEN.get((actor, uid), 0.0) < SALES_AUDIT_WINDOW:
+                continue
+            _SALES_AUDIT_SEEN[(actor, uid)] = now
+            shell.audit_admin(actor, uid, "sales_log:read",
+                              "their share movements were read in the owner's sales log",
+                              ip)
+
+
+# ── render ────────────────────────────────────────────────────────────────
+
+def _sales_party(p: dict) -> str:
+    name = esc(p.get("name") or "—")
+    sub = p.get("sub") or ""
+    tip = f' title="{esc(p.get("id"))}"' if p.get("id") else ""
+    out = f'<span{tip}>{name}</span>'
+    if sub:
+        out += f'<div class="sl-sub">{esc(sub)}</div>'
+    return out
+
+
+def _sales_chip(label: str, active: bool, href: str) -> str:
+    cls = "sl-chip on" if active else "sl-chip"
+    return f'<a class="{cls}" href="{esc(href)}">{esc(label)}</a>'
+
+
+def _sales_filters(rows: list, type_f: str, market_f: str) -> str:
+    H = _H()
+    counts = {"all": len(rows), "otc": sum(1 for e in rows if e["type"] == "otc"),
+              "exchange": sum(1 for e in rows if e["type"] == "exchange")}
+
+    def href(t: str, m: str) -> str:
+        parts = ([f"type={t}"] if t != "all" else []) + ([f"market={m}"] if m else [])
+        return "/admin/sales" + ("?" + "&".join(parts) if parts else "")
+
+    types = "".join(_sales_chip(f"{lab} {counts.get(key, 0)}", type_f == key,
+                                href(key, market_f))
+                    for key, lab in SALES_TYPES)
+    mids = []
+    for e in rows:
+        mid = e.get("market_id") or ""
+        if mid and mid not in mids:
+            mids.append(mid)
+    mids.sort(key=lambda m: H.market_name(m).lower())
+    markets = _sales_chip("All markets", not market_f, href(type_f, ""))
+    markets += "".join(_sales_chip(H.market_name(m), market_f == m, href(type_f, m))
+                       for m in mids)
+    return (f'<div class="sl-chips">{types}</div>'
+            f'<div class="sl-chips">{markets}</div>')
+
+
+def _sales_totals_html(t: dict) -> str:
+    H = _H()
+    return f"""<div class="sl-tot">
+  <div><div class="sl-k">Movements</div><div class="sl-v">{t['rows']}</div>
+    <div class="sl-n">{t['otc']} off-book · {t['exchange']} on the exchange</div></div>
+  <div><div class="sl-k">Shares moved</div><div class="sl-v">{esc(H.sh(t['shares']))}</div>
+    <div class="sl-n">across every market in this view</div></div>
+  <div><div class="sl-k">Coins filled</div><div class="sl-v">{esc(H.c(t['filled']))} c</div>
+    <div class="sl-n">exchange fills only · coins that actually moved</div></div>
+  <div><div class="sl-k">Value written off-book</div>
+    <div class="sl-v">{esc(H.c(t['stated']))} c</div>
+    <div class="sl-n">what the OTC notes state. Not a receipt, and not added to the
+    figure on its left — no coins moved through this site for it.</div></div>
+</div>"""
+
+
+def _sales_row_html(e: dict) -> str:
+    H = _H()
+    when = (f'<div class="sl-when">{esc(H._date(e["event_at"]))}</div>'
+            if e.get("event_at") is not None else
+            '<div class="sl-when sl-unk">unknown</div>'
+            '<div class="sl-sub">no event date recorded<br>placed by when the bot '
+            'wrote the row</div>')
+    arrow = ' <span class="sl-arrow">→</span> '
+    who = _sales_party(e["from"]) + arrow + _sales_party(e["to"])
+    prov = (f'<div class="sl-prov">event date {esc(e["event_src"])}</div>'
+            if e.get("event_src") else "")
+    note = (f'<div class="sl-note">{esc(_sales_clip(e["note"], 200))}</div>'
+            if e.get("note") else "")
+    val = (f'{esc(H.c(e["value"]))} c' if e.get("value") is not None
+           else '<span class="sl-faint">—</span>')
+    return (f'<tr><td>{when}</td>'
+            f'<td><span class="sl-kind {"otc" if e["type"] == "otc" else ""}">'
+            f'{esc(e["kind"])}</span></td>'
+            f'<td>{who}</td>'
+            f'<td>{esc(H.market_name(e["market_id"]))}</td>'
+            f'<td class="adm-num">{esc(H.sh(e["shares"]))}</td>'
+            f'<td class="adm-num">{val}</td></tr>'
+            f'<tr class="sl-x"><td></td><td></td><td colspan="4">'
+            f'<div class="sl-det">{esc(e["detail_text"])}</div>{prov}{note}</td></tr>')
+
+
+def _sales_clip(s: Any, limit: int) -> str:
+    t = " ".join(str(s or "").split())
+    return t if len(t) <= limit else t[:limit - 1].rstrip() + "…"
+
+
+def _sales_body(rows: list, problems: list, type_f: str, market_f: str,
+                all_rows: list) -> str:
+    H = _H()
+    warn = ""
+    if problems:
+        warn = ('<div class="adm-tile"><div class="adm-h">This page is incomplete</div>'
+                + "".join(f'<div class="adm-err">{esc(p)}</div>' for p in problems)
+                + '</div>')
+    if len(all_rows) >= SALES_CAP * 2:
+        warn += ('<div class="adm-tile"><div class="adm-err">This is the most recent '
+                 f'{SALES_CAP} rows from each table, not the whole history. The totals '
+                 'below count what is shown.</div></div>')
+    if rows:
+        table = ('<div class="adm-tile"><table class="sl-t"><thead><tr>'
+                 '<th>Date</th><th>Type</th><th>From → to</th><th>Market</th>'
+                 '<th class="adm-num">Shares</th><th class="adm-num">Value</th>'
+                 '</tr></thead><tbody>'
+                 + "".join(_sales_row_html(e) for e in rows)
+                 + '</tbody></table></div>')
+    else:
+        table = ('<div class="adm-tile"><div class="adm-empty">No share movements match '
+                 'this filter.</div></div>')
+    return f"""{_CSS}{_SALES_CSS}
+<div class="page-head">
+  <div>
+    <h1>Sales log</h1>
+    <div class="page-sub">Every share movement in the economy, both sides named —
+    off-book transfers and exchange fills, newest first. Dates are event dates: an
+    off-book transfer is dated by what its note says happened, and the text that was
+    read is printed under it. Wallet history is not on this page and is not readable by
+    staff anywhere. Each player whose rows appear here is told they were read.</div>
+  </div>
+</div>
+{warn}
+<div class="adm-tile">{_sales_totals_html(sales_totals(rows))}</div>
+{_sales_filters(all_rows, type_f, market_f)}
+{table}
+"""
+
+
+_SALES_CSS = """
+<style>
+.sl-chips{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0}
+.sl-chip{border:1px solid var(--border);background:var(--panel2);color:var(--muted);
+  font-size:11.5px;padding:6px 11px;text-decoration:none;font-family:var(--font-data)}
+.sl-chip:hover{border-color:var(--border-strong);color:var(--text)}
+.sl-chip.on{border-color:var(--accent);color:var(--accent)}
+.sl-t{width:100%;border-collapse:collapse}
+.sl-t th{text-align:left;font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;
+  color:var(--muted);font-weight:600;padding:0 10px 10px 0}
+.sl-t td{padding:10px 10px 0 0;vertical-align:top;font-size:13px;border-top:1px solid var(--border)}
+.sl-t tr.sl-x td{border-top:none;padding-top:2px;padding-bottom:12px}
+.sl-when{font-family:var(--font-data);white-space:nowrap}
+.sl-unk{color:var(--money-held)}
+.sl-kind{font-family:var(--font-data);font-size:10.5px;letter-spacing:.06em;
+  text-transform:uppercase;color:var(--muted);white-space:nowrap}
+.sl-kind.otc{color:var(--accent)}
+.sl-arrow{color:var(--faint)}
+.sl-sub,.sl-prov{font-size:11px;color:var(--muted);line-height:1.5}
+.sl-det{font-family:var(--font-data);font-size:11.5px;color:var(--text-body)}
+.sl-note{font-size:11.5px;color:var(--text-body);border-left:2px solid var(--border);
+  padding-left:9px;margin-top:5px;max-width:96ch}
+.sl-faint{color:var(--faint)}
+.sl-tot{display:flex;flex-wrap:wrap;gap:26px}
+.sl-tot>div{min-width:160px;max-width:34ch}
+.sl-k{font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+.sl-v{font-family:var(--font-data);font-variant-numeric:tabular-nums;font-size:19px;
+  margin:3px 0 2px}
+.sl-n{font-size:11px;color:var(--muted);line-height:1.5}
+a.btn{text-decoration:none}
+</style>
+"""
+
+
+async def h_sales(request):
+    """`GET /admin/sales` — the sales log. Staff only: 401 anon, 403 a normal player."""
+    sess, refusal = _require_staff_page(request)
+    if refusal is not None:
+        return refusal
+    type_f = str(request.query.get("type") or "all").strip().lower()
+    if type_f not in {k for k, _ in SALES_TYPES}:
+        type_f = "all"
+    market_f = str(request.query.get("market") or "").strip().lower()
+    all_rows, problems = sales_events()
+    rows = [e for e in all_rows
+            if (type_f == "all" or e["type"] == type_f)
+            and (not market_f or e.get("market_id") == market_f)]
+    scope = (dict(SALES_TYPES)[type_f]
+             + (f" · {_H().market_name(market_f)}" if market_f else " · all markets"))
+    _audit_sales_view(request, str(sess["user_id"]), rows, scope)
+    return shell.page("Sales log", "admin",
+                      _sales_body(rows, problems, type_f, market_f, all_rows),
+                      "loadMe && loadMe().then(()=>renderStrip && renderStrip());")
+
+
+def _sales_tile() -> str:
+    """The console's door to the log, with the count it will show."""
+    try:
+        rows, _ = sales_events()
+        n, otc = len(rows), sum(1 for e in rows if e["type"] == "otc")
+        figs = (f'<div class="adm-sub">{n} share movements on record · {otc} of them '
+                f'off-book transfers.</div>')
+    except Exception:
+        figs = '<div class="adm-sub">The sales tables could not be counted.</div>'
+    return ('<div class="adm-tile"><div class="adm-h">Sales log</div>'
+            + figs +
+            '<div class="adm-sub">Every share movement in the economy, both sides named '
+            '— including transfers you are not a party to. Wallet history is not on '
+            'it. Every player whose rows you read is told.</div>'
+            '<div class="adm-form"><a class="btn" href="/admin/sales">Open the sales '
+            'log</a></div></div>')
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # Mount
 # ══════════════════════════════════════════════════════════════════════════
 
@@ -791,6 +1200,7 @@ def register_admin_routes(app) -> None:
     shell.register_shell_routes(app)
     _register_with_hub()
     app.router.add_get("/admin", h_console)
+    app.router.add_get("/admin/sales", h_sales)
     # Control plane — the owner's levers over the view-as flag itself. Named so the
     # derived-route test can tell them apart from economy writes.
     app.router.add_post("/api/admin/view-as/enter", h_view_as_enter, name="admin_ctl_enter")
@@ -800,5 +1210,5 @@ def register_admin_routes(app) -> None:
     app.router.add_post("/api/admin/freeze", h_freeze)
     # Read routes.
     app.router.add_get("/api/admin/observed-me", h_my_observers)
-    log.info("[admin] v%s registered (console · view-as · kill switch · dev-login)",
-             ADMIN_VERSION)
+    log.info("[admin] v%s registered (console · view-as · sales log · kill switch · "
+             "dev-login)", ADMIN_VERSION)

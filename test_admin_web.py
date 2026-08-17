@@ -24,6 +24,8 @@ request path, so every attack here goes through the real route.
                          and it too is refused in view-as
   A13 dev login       -> refuses on EACH of the three gates independently; loopback unit
   A14 body identity   -> a body-supplied user_id on an admin write is ignored + alarmed
+  A15 sales log       -> staff only, both sides named, event-dated, writes nothing,
+                         and every player in the result can see it was read
 """
 
 from __future__ import annotations
@@ -109,7 +111,8 @@ _SESSIONS = {
 }
 
 # Names, primed directly (the bot is not running here). A FIXTURE inside a test file.
-for _mod in (M, A):
+import history_web as HW                      # noqa: E402  (the sales log's resolver)
+for _mod in (M, A, HW):
     _mod._NAMES_CACHE = {STAFF: "V Tech staff", TARGET: "Tamsin Roe", PLAYER: "Ord Vasey"}
     _mod._NAMES_AT = time.time()
 
@@ -524,8 +527,11 @@ async def t_kill_switch():
 
 class _FakeReq:
     """Just enough request for `_loopback_bound`: a transport with a sockname."""
-    def __init__(self, host):
+    def __init__(self, host, headers=None):
         self._host = host
+        # `_loopback_bound` also refuses on any proxy header — a fake request needs a
+        # headers mapping or the unit test dies before it asserts anything.
+        self.headers = dict(headers or {})
 
         class _T:
             def get_extra_info(_s, k):
@@ -622,6 +628,124 @@ async def t_body_identity():
 
 # ══════════════════════════════════════════════════════════════════════════
 
+# ══════════════════════════════════════════════════════════════════════════
+# A15 — THE SALES LOG. Staff-only, read-only, audited, and dated by the event
+# ══════════════════════════════════════════════════════════════════════════
+
+async def t_sales_log():
+    print("\n[A15] The sales log: staff only, writes nothing, tells the players it read")
+    app = build_app()
+
+    # The row this page exists for: an off-book transfer between two OTHER accounts,
+    # so no viewer of /history can see it. Inserted into the COPY, by the test.
+    with conn() as c:
+        c.execute("INSERT OR REPLACE INTO share_gifts (key, market_id, from_user, "
+                  "to_user, shares, basis, value_coins, note, created_at) "
+                  "VALUES (?,?,?,?,?,?,?,?,?)",
+                  ("test:sale:a->b", MARKET, TARGET, PLAYER, 12.5, 100.0, 250000,
+                   "Tamsin -> Ord: paid 250,000c on 3 Aug 2026, in-game.",
+                   "2026-08-14T09:00:00+00:00"))
+
+    before = {t: count(t) for t in ("share_gifts", "stock_trade_log", "coin_ledger",
+                                    "stock_holdings", "balances", "markets")}
+
+    async with client_for(app) as ca:
+        r = await ca.get("/admin/sales")
+        check("anonymous gets 401 on the sales log", r.status == 401, str(r.status))
+        anon = await r.text()
+        check("the anonymous refusal carries no sale in it",
+              "250,000" not in anon and TARGET not in anon, "the 401 leaks the log")
+
+    async with client_for(app, "tok-player") as cp:
+        r = await cp.get("/admin/sales")
+        check("a normal player gets 403", r.status == 403, str(r.status))
+        pbody = await r.text()
+        check("the player's 403 carries no sale in it",
+              "250,000" not in pbody and "OTC TRANSFER" not in pbody, "the 403 leaks")
+
+    async with client_for(app, "tok-staff") as cs:
+        r = await cs.get("/admin/sales")
+        body = await r.text()
+        check("staff get the sales log", r.status == 200, str(r.status))
+        check("the log shows a transfer neither party is the viewer",
+              "OTC TRANSFER" in body and "12.50" in body, "the row this page exists for")
+        check("both sides of that transfer are named",
+              "Tamsin Roe" in body and "Ord Vasey" in body, "a side is unnamed")
+        check("it is dated by the EVENT date read from the note",
+              "03 Aug 2026" in body, "the event date is missing")
+        check("and it prints the text that date was read from",
+              "stated in the note as" in body and "3 Aug 2026" in body,
+              "a parsed date with no visible source is a claim")
+        check("the row's write stamp is NOT on the page",
+              "14 Aug 2026" not in body, "created_at is rendered as if it were history")
+        check("exchange fills are on it too",
+              "EXCHANGE" in body, "only one of the two sources is read")
+        check("a zero-price unwind is not dressed as a sale",
+              ("liquidated" not in body) or ("not an exchange fill" in body),
+              "a forced unwind renders as a fill")
+        check("the console links to it",
+              "Open the sales log" in await (await cs.get("/admin")).text(), "")
+
+        # It is a READ. Every row count in the economy is identical afterwards.
+        after = {t: count(t) for t in before}
+        check("driving the sales log writes no row anywhere", before == after,
+              f"{before} -> {after}")
+
+        # The filters actually narrow, and never widen.
+        botc = await (await cs.get("/admin/sales?type=otc")).text()
+        bex = await (await cs.get("/admin/sales?type=exchange")).text()
+        bmk = await (await cs.get("/admin/sales?market=__nope__")).text()
+        check("the OTC filter excludes exchange fills", "EXCHANGE BUY" not in botc, "")
+        check("the exchange filter excludes OTC transfers", "OTC TRANSFER" not in bex, "")
+        check("an unknown market filters to nothing, and says so",
+              "No share movements match" in bmk, "an empty filter invented rows")
+
+    # THE AUDIT. Both players in the result can see that their rows were read.
+    for who, label in ((TARGET, "the sender"), (PLAYER, "the recipient")):
+        rows_ = shell.audit_for_subject(who, 50)
+        check(f"{label} can see the read in their own audit trail",
+              any(r["action"] == "sales_log:read" and r["actor_id"] == STAFF
+                  for r in rows_),
+              "a staff read of their trades left no row they can see")
+    async with client_for(app, "tok-target") as ct:
+        j = await (await ct.get("/api/admin/observed-me")).json()
+        acts = {row["action"] for row in j.get("observed", [])}
+        check("and it reaches them through the route they actually use",
+              "sales_log:read" in acts, str(sorted(acts))[:160])
+    check("the actor's own console shows the view",
+          any(r["action"] == "sales_log:view" for r in shell.audit_by_actor(STAFF, 50)), "")
+
+    # The one thing this page must never grow: a wallet reason. Asserted on the SQL
+    # STRINGS the sales functions actually execute — a docstring promising it is not a
+    # guarantee, and the prose above `read_all_otc` mentions the table by name on purpose.
+    tree = ast.parse(inspect.getsource(A))
+    sales_fns = {"read_all_otc", "read_all_trades", "sales_events", "sales_totals",
+                 "h_sales", "_sales_tile", "_audit_sales_view"}
+    lits = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in sales_fns:
+            body = node.body[1:] if (node.body and isinstance(node.body[0], ast.Expr)
+                                     and isinstance(getattr(node.body[0], "value", None),
+                                                    ast.Constant)) else node.body
+            for sub in body:
+                for n in ast.walk(sub):
+                    if isinstance(n, ast.Constant) and isinstance(n.value, str):
+                        lits.append(n.value)
+    # A statement, not any string containing the word "from" — the page has a
+    # "From -> to" column header and an error line that reads "missing from this page".
+    sql = [t for t in lits
+           if re.search(r"\bSELECT\b\s.*\bFROM\b|\b(INSERT|UPDATE|DELETE|DROP|ALTER|"
+                        r"CREATE|REPLACE)\b\s+(INTO|FROM|TABLE|SET|OR)\b", t, re.I | re.S)]
+    check("the sales functions execute at least the two reads they promise",
+          len(sql) >= 2, str(len(sql)))
+    check("no wallet or balance table is named in any SQL the sales log runs",
+          not any(re.search(r"coin_ledger|balances", t, re.I) for t in sql),
+          "a wallet reason is one query away from staff eyes")
+    check("every SQL the sales log runs is a SELECT",
+          all(t.strip().upper().startswith("SELECT") for t in sql),
+          "the sales log carries a write verb")
+
+
 async def main():
     t_append_only_ast()
     t_loopback_unit()
@@ -634,6 +758,7 @@ async def main():
     await t_kill_switch()
     await t_dev_login_gates()
     await t_body_identity()
+    await t_sales_log()
 
     print("\n" + "=" * 72)
     print(f"  {len(PASSES)} passed, {len(FAILS)} failed")
