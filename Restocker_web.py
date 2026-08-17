@@ -1575,6 +1575,10 @@ _TERMINAL_NAV = r"""
   <nav>
     <a href="/inventory" data-nav="inventory">Inventory</a>
     <a href="/ledger" data-nav="ledger">Ledger</a>
+    <!-- /history is per-VIEWER (every buy, sell, liquidation, OTC transfer and wallet
+         movement of the signed-in account). /ledger next to it is per-MARKET. They are
+         different books and the labels have to keep saying so. -->
+    <a href="/history" data-nav="history">History</a>
     <a href="/exchange" data-nav="exchange">Exchange</a>
     <a href="/orders" data-nav="orders">Orders</a>
     <a href="/teams" data-nav="teams">Teams</a>
@@ -1850,7 +1854,8 @@ td{padding:4px 6px;border-bottom:1px solid var(--line)}
 __NAV__
 <div class="grid">
   <div class="panel">
-    <div class="ph"><span class="t">Portfolio</span><span class="faint" id="pfNote"></span></div>
+    <div class="ph"><span class="t">Portfolio</span><span class="faint" id="pfNote"></span>
+      <a href="/history" style="margin-left:auto;color:var(--accent);text-decoration:none;font-size:10.5px">History</a></div>
     <div class="pb" id="pfBody"><div class="faint">loading...</div></div>
   </div>
   <div class="panel">
@@ -1876,8 +1881,13 @@ function renderPortfolio(){
  var b=document.getElementById('pfBody');
  if(!D.logged_in){b.innerHTML='<div class="faint">Link your Discord account (top right) to see your holdings, '
    +'dividends earned and voting weight.</div>';document.getElementById('pfNote').textContent='not linked';return;}
- if(!D.holdings.length){b.innerHTML='<div class="faint">You hold no shares yet. Buy on the '
-   +'<a href="/exchange" style="color:var(--accent)">Exchange</a>.</div>';return;}
+ // "You hold no shares YET" was wrong for the case that matters: someone who held
+ // shares and sold them reads an empty portfolio as their record being gone. Zero
+ // holdings is not the same fact as never having traded, so this offers the history
+ // instead of asserting a beginning. No row is invented — the panel stays empty.
+ if(!D.holdings.length){b.innerHTML='<div class="faint">No open positions. '
+   +'<a href="/history" style="color:var(--accent)">History</a> has every trade and transfer '
+   +'on this account; buy on the <a href="/exchange" style="color:var(--accent)">Exchange</a>.</div>';return;}
  var t=D.totals;
  document.getElementById('pfNote').textContent=D.holdings.length+' position'+(D.holdings.length>1?'s':'');
  var h='<div class="kv"><span>Market value</span><b>'+fmt(t.value)+'c</b></div>'
@@ -2967,7 +2977,7 @@ background:var(--panel2);color:var(--muted);font-family:var(--sans)}
 <body>
 <header>
   <div class="brand"><span class="m">A</span>ABEXILAS <span class="faint" style="font-weight:600">EXCHANGE</span></div>
-  <nav><a href="/inventory">Inventory</a><a href="/ledger">Ledger</a><a class="on">Exchange</a><a href="/orders">Orders</a><a href="/teams">Teams</a><a href="/investor">Investor</a><a href="/liabilities">Liabilities</a><a href="/mymarket">My Market</a></nav>
+  <nav><a href="/inventory">Inventory</a><a href="/ledger">Ledger</a><a href="/history">History</a><a class="on">Exchange</a><a href="/orders">Orders</a><a href="/teams">Teams</a><a href="/investor">Investor</a><a href="/liabilities">Liabilities</a><a href="/mymarket">My Market</a></nav>
   <div class="rt"><div class="bp"><b class="mono" id="hWho">—</b><br><span id="hWhoSub">not linked</span></div></div>
 </header>
 <div class="grid">

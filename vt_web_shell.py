@@ -772,6 +772,13 @@ NAV = (
     ("banking", "Banking", "/banking"),
     ("estates", "Lands · Auctions · Predictions", "/estates"),
     ("messages", "Messages", "/messages"),
+    # `history_web` also registers itself via `hub_web.register_section`, and
+    # `_nav_entries` renders that registry — but it is listed here too, because
+    # `test_history_web.t_wiring` asserts on this tuple directly and because the
+    # per-user record should not drop out of the nav on a deploy where the hub
+    # module fails to import. Listed here, it keeps this position; the merge
+    # dedupes on the key so it is never rendered twice.
+    ("history", "History", "/history"),
 )
 
 
@@ -786,6 +793,7 @@ const IC = {
   banking: svg('<path d="M3 21h18M4 10h16M12 3l9 5H3zM6 10v11M10 10v11M14 10v11M18 10v11"/>'),
   estates: svg('<path d="M9 4L3 7v13l6-3 6 3 6-3V4l-6 3z"/><path d="M9 4v13M15 7v13"/>'),
   messages: svg('<path d="M4 4h16v12H8l-4 4z"/><path d="M8 9h8M8 12h5"/>'),
+  history: svg('<path d="M5 3h14v18l-3-2-2 2-2-2-2 2-3-2z"/><path d="M9 8h6M9 12h6M9 16h3"/>'),
   arrow:   svg('<path d="M5 12h14M13 6l6 6-6 6"/>'),
   back:    svg('<path d="M19 12H5M11 18l-6-6 6-6"/>'),
   check:   svg('<path d="M20 6L9 17l-5-5"/>'),
@@ -1111,9 +1119,44 @@ setInterval(refreshUnread, 60000);
 """
 
 
+def _nav_entries() -> list:
+    """`NAV`, then every section that registered itself with `hub_web`.
+
+    `hub_web.register_section()` exists so a section module can put its own tab in the
+    nav, and `history_web` / `messages_web` both call it. Nothing ever rendered
+    `hub_web.sections()` though — `_nav_html` walked the hardcoded `NAV` tuple and
+    stopped there — so a registering section appended to a list that no page read and
+    its tab silently never appeared. `/history` shipped registered, routed, tested and
+    unreachable: there was no link to it anywhere on either surface. The tests passed
+    because they assert against `hub_web.sections()`, which is the registry, not the
+    rendered nav.
+
+    So the registry is the contract and `NAV` is only its built-in head. Returns
+    `(key, label, href, icon_svg_body)`; `icon_svg_body` is empty for `NAV` entries,
+    which take their icon from `IC` in the page script instead.
+    """
+    entries = [(key, label, href, "") for key, label, href in NAV]
+    seen = {key for key, _, _, _ in entries}
+    try:
+        import hub_web
+        registered = hub_web.sections()
+    except Exception:                                   # pragma: no cover
+        registered = []                                 # hub absent: NAV alone, no crash
+    for s in sorted(registered, key=lambda s: (s.get("order", 100), s.get("label") or "")):
+        key = str(s.get("key") or "")
+        href = str(s.get("path") or "")
+        # A section already in NAV keeps NAV's position and label — merging must never
+        # reorder or rename the five tabs that were there before this function existed.
+        if not key or not href or key in seen:
+            continue
+        seen.add(key)
+        entries.append((key, str(s.get("label") or key), href, str(s.get("icon") or "")))
+    return entries
+
+
 def _nav_html(active: str) -> str:
     out = []
-    for key, label, href in NAV:
+    for key, label, href, icon in _nav_entries():
         cur = ' aria-current="true"' if key == active else ""
         # The unread badge lives in the nav rather than the money strip: the strip is
         # coins and only coins, and a count with no unit standing in that row is the
@@ -1122,8 +1165,15 @@ def _nav_html(active: str) -> str:
         # messages section mounted, simply never shows it.
         badge = ('<span class="nav-badge" id="navUnread" style="display:none"></span>'
                  if key == "messages" else "")
+        # A registered section ships its own inline SVG, so it is rendered here rather
+        # than looked up in `IC` — that is what lets a new section appear in the nav
+        # without also editing `_ICONS_JS`. It deliberately carries NO `data-ic`: the
+        # page script fills `.nav-ic[data-ic]` only, so this markup survives it. The
+        # body is an SVG path from a section module (never user input) — not escaped.
+        ic = (f'<span class="nav-ic"><svg class="i" viewBox="0 0 24 24">{icon}</svg></span>'
+              if icon else f'<span class="nav-ic" data-ic="{key}"></span>')
         out.append(f'<a class="nav-tab" href="{href}" data-k="{key}"{cur}>'
-                   f'<span class="nav-ic" data-ic="{key}"></span>{html.escape(label)}'
+                   f'{ic}{html.escape(label)}'
                    f'{badge}</a>')
     return "".join(out)
 
@@ -1485,7 +1535,9 @@ __STRIP__
 __MODAL__
 <script>
 __ICONS__
-document.querySelectorAll('.nav-ic').forEach(e => { e.innerHTML = IC[e.dataset.ic] || ''; });
+// `[data-ic]` only: a registered section's tab renders its own inline SVG server-side
+// and has no data-ic, so this must not touch it. Selecting all `.nav-ic` blanked it.
+document.querySelectorAll('.nav-ic[data-ic]').forEach(e => { e.innerHTML = IC[e.dataset.ic] || ''; });
 __BASEJS__
 __PAGEJS__
 </script>
