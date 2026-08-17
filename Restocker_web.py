@@ -3572,6 +3572,24 @@ def _market_display_name(mid: str) -> str:
     return str(mid)
 
 
+def _finite_json(o):
+    """Recursively replace non-finite floats (inf/-inf/nan) with 0.0.
+
+    Python's json.dumps emits `Infinity`/`NaN` for these — tokens that are NOT
+    valid JSON, so the browser's JSON.parse throws and the whole response reads
+    as a failure ("Could not load investor data."). A single infinite value —
+    e.g. bond coverage for a market with zero bond face — used to take down the
+    entire Investor tab this way. This scrubs the payload so that can't happen.
+    """
+    if isinstance(o, float):
+        return o if (o == o and o not in (float("inf"), float("-inf"))) else 0.0
+    if isinstance(o, dict):
+        return {k: _finite_json(v) for k, v in o.items()}
+    if isinstance(o, (list, tuple)):
+        return [_finite_json(v) for v in o]
+    return o
+
+
 async def _handle_api_investor(request):
     """Everything an investor needs in one call: holdings marked to market, the dividend
     history those holdings actually earned, per-company detail, and open proposals with
@@ -3633,7 +3651,7 @@ async def _handle_api_investor(request):
                 "backing_cash": int(back.get("cash", 0) or 0),
                 "backing_assets": int(back.get("assets", 0) or 0),
                 "backing_cashable": int(back.get("cashable", 0) or 0),
-                "bond_coverage_pct": round(float(cov_pct or 0), 1),
+                "bond_coverage_pct": (lambda v: round(v, 1) if v == v and v not in (float("inf"), float("-inf")) else 0.0)(float(cov_pct or 0)),
                 "bond_face": int(cov_face or 0),
                 "last_dividend": (hist[0] if hist else None),
                 "dividend_12m": sum(float(h.get("per_share") or 0) for h in hist[:12]),
@@ -3698,13 +3716,13 @@ async def _handle_api_investor(request):
     except Exception:
         pass
 
-    return web.json_response({
+    return web.json_response(_finite_json({
         "ok": True, "logged_in": bool(uid),
         "companies": companies, "holdings": holdings,
         "totals": {"value": total_value, "cost": total_cost, "pnl": total_value - total_cost},
         "dividends": dividends, "proposals": proposals,
         "names": {m["mid"]: m["name"] for m in companies},
-    })
+    }))
 
 
 def core_tickers() -> dict:
