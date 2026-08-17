@@ -355,6 +355,9 @@ async def t_otc_row():
               "read day-first" in body, "an ambiguous date was read silently")
         check(f"{who} sees the note text itself",
               "paid 5,000,000c in-game" in body, "the note is not on the page")
+        check(f"{who} sees the END of a long note, not just its first 160 characters",
+              ("resold these shares" in body) or ("Supersedes" not in body),
+              "the note is clipped before the sentence that says who was sold to")
         check(f"{who} sees the value as recorded, not rounded",
               "4,999,999.74" in body, "the recorded value was rounded or invented")
         check(f"{who} is not shown the transfer as an exchange fill",

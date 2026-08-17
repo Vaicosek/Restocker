@@ -1155,9 +1155,18 @@ def _detail_cell(e: dict, permalink: bool = False) -> str:
         parts.append(f'<div class="h-prov">{" · ".join(prov)}</div>')
 
     if e.get("note"):
-        note = esc(e["note"]) if permalink else esc(_clip(e["note"], 160))
+        # 320, not 160. A note is the ONLY place a row can say what a bare transfer
+        # meant — the production OTC note is 288 characters and the old cap ate its
+        # last sentence, which was the one naming who the shares were resold to. A row
+        # that hides the fact it already holds is worse than a tall row.
+        note = esc(e["note"]) if permalink else esc(_clip(e["note"], NOTE_CLIP))
         parts.append(f'<div class="h-note">{note}</div>')
     return "".join(parts)
+
+
+#: How much of a `note` a row shows before the permalink has to be opened. The longest
+#: note in production is 288 characters; this is above it on purpose.
+NOTE_CLIP = 320
 
 
 def _clip(s: Any, limit: int) -> str:
