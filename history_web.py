@@ -39,9 +39,12 @@ Consequences, enforced rather than intended:
   per-share rate and a market total but no per-holder amount; this page shows the rate
   and the total and says the per-holder split is not recorded, instead of multiplying
   the rate by a holding measured today and presenting the product as history.
-* **An unknown event date says unknown.** It never falls back to the recorded date
-  wearing the event date's label. That single substitution is how an honest record
+* **An unknown event date says unknown.** It never falls back to the row's write
+  stamp wearing the event date's label. That single substitution is how an honest record
   becomes a misleading one, and it is the one mistake this feature cannot survive.
+* **The row's write stamp is never displayed.** `recorded_at` is a bookkeeping artefact,
+  not a date the reader can trust as history — printing it next to the event date invited
+  exactly the misreading it was meant to prevent. It survives only as a sort key.
 
 THE SIX SOURCES, AND WHAT EACH ONE HONESTLY SUPPORTS
 ────────────────────────────────────────────────────
@@ -71,11 +74,14 @@ THE OTC ROW — the one that matters, and the one to get exactly right
 `share_gifts` is the only table in this schema that records a transfer of shares
 outside the exchange. Its single production row is the transfer this feature exists
 for. It carries `created_at` (when the row was written) and a free-text `note` that
-happens to state when the payment actually happened. Those are two different dates and
-the row shows both, each labelled:
+happens to state when the payment actually happened. `created_at` is a bookkeeping
+stamp — when the bot got round to writing the row, sometimes days late and sometimes
+backfilled by a repair script — so it is NOT a fact about the event and is NOT printed
+anywhere on this page or its permalink. It is kept in the model because rows with no
+event date still have to be ordered somehow. Only the event date is shown:
 
     09 Aug 2026   OTC TRANSFER   from TestIGN123   +5,001.15 shares · GreyHames
-                  event date stated in the note as "09.08.26" · recorded 16 Aug 2026
+                  event date stated in the note as "09.08.26"
 
 `_event_date_from_note` reads a date out of the note text and — this is the part that
 matters — **reports the literal substring it read it from**, so a reader can check the
@@ -1065,9 +1071,9 @@ def _when_cell(e: dict) -> str:
     Three shapes, and the difference between them is the point of this file:
 
       * event date known         -> the date, plain.
-      * event date unknown, but a recorded date exists -> the word **unknown** in amber,
-        and underneath, in words, that the row is POSITIONED by its recorded date. The
-        recorded date is printed on the row's second line where it is labelled as one.
+      * event date unknown, but a write stamp exists -> the word **unknown** in amber,
+        and underneath, in words, that the row is POSITIONED by when the bot wrote it.
+        The write stamp itself is NOT printed — it is not a date about the event.
       * neither                  -> unknown, and "no date recorded".
     """
     ev, rec = e.get("event_at"), e.get("recorded_at")
@@ -1075,7 +1081,8 @@ def _when_cell(e: dict) -> str:
         return (f'<div class="h-when" title="{esc(_stamp(ev))}">{esc(_date(ev))}</div>')
     if rec is not None:
         return ('<div class="h-when h-unk">unknown</div>'
-                '<div class="h-sub">no event date recorded<br>placed by its recorded date</div>')
+                '<div class="h-sub">no event date recorded<br>'
+                'placed by when the bot wrote the row</div>')
     return '<div class="h-when h-unk">unknown</div><div class="h-sub">no date recorded</div>'
 
 
@@ -1131,8 +1138,9 @@ def _balance_cell(e: dict) -> str:
 def _detail_cell(e: dict, permalink: bool = False) -> str:
     """Headline, detail, provenance, note. THE SECOND LINE IS WHERE THE HONESTY LIVES.
 
-    For the OTC row it carries both dates and the note verbatim; for a wallet movement
-    it carries the raw `reason` in the tooltip so the humanised headline can be checked.
+    For the OTC row it carries where the event date was read from, and the note verbatim;
+    for a wallet movement it carries the raw `reason` in the tooltip so the humanised
+    headline can be checked. It does NOT carry `recorded_at` — see the header.
     """
     parts = [f'<div class="h-head">{esc(e["headline"])}</div>']
     if e.get("detail_text"):
@@ -1143,8 +1151,6 @@ def _detail_cell(e: dict, permalink: bool = False) -> str:
         prov.append(f'event date {esc(e["event_src"])}')
     elif e.get("event_at") is None and e.get("recorded_at") is not None:
         prov.append("no event date is recorded for this event")
-    if e.get("recorded_at") is not None and e.get("recorded_at") != e.get("event_at"):
-        prov.append(f'recorded {esc(_date(e["recorded_at"]))}')
     if prov:
         parts.append(f'<div class="h-prov">{" · ".join(prov)}</div>')
 
@@ -1300,8 +1306,9 @@ def _page_body(uid: str, events_all: list, events: list, page: int, pages: int,
     <h1>History</h1>
     <div class="page-sub">Every transaction this site has a record of, for your account,
     newest first. Each row is read from what the bot already wrote down and is labelled
-    for what it actually was — a transfer made outside the exchange says so, and where a
-    record was written after the event it describes, both dates are shown.</div>
+    for what it actually was — a transfer made outside the exchange says so, and each
+    date is the date of the event itself, with where it was read from printed under
+    it.</div>
   </div>
 </div>
 {warn}
@@ -1333,13 +1340,10 @@ def _event_page_body(uid: str, e: dict) -> str:
                              if e.get("event_src") else ""))
     else:
         add("Event date", '<span class="h-unk">unknown</span>'
-                          '<div class="h-prov">no event date is recorded for this event. '
-                          'The recorded date below is when the row was written, and it is '
-                          'not a substitute.</div>'
+                          '<div class="h-prov">no event date is recorded for this '
+                          'event.</div>'
             + (f'<div class="h-prov">{esc(e["event_src"])}</div>'
                if e.get("event_src") else ""))
-    add("Recorded", esc(_stamp(e.get("recorded_at")))
-        + '<div class="h-prov">when this row was written to the database</div>')
     if e.get("detail_text"):
         add("Detail", esc(e["detail_text"]))
     if other:

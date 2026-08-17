@@ -25,7 +25,7 @@ ids — `history_web` itself writes nothing, which is H3.
   H2  read-only            -> every SQL in the module is a SELECT (AST), and driving
                               every route leaves every row count identical
   H3  the OTC row          -> both parties see it, both dates, counterparty, note
-  H4  unknown event date   -> says "unknown", never the recorded date in its place
+  H4  unknown event date   -> says "unknown", and the write stamp is never shown
   H5  a stranger           -> sees none of another user's history, on the page or the
                               permalink; body/query user ids are ignored
   H6  permalink            -> both parties 200; third party 404 identical to a
@@ -334,7 +334,7 @@ async def t_read_only_rows():
 # ══════════════════════════════════════════════════════════════════════════
 
 async def t_otc_row():
-    print("\n[H3] The real OTC transfer, from both sides, with both dates")
+    print("\n[H3] The real OTC transfer, from both sides, event date only")
     st_s, seller = await get("tok-seller", "/history")
     st_b, buyer = await get("tok-buyer", "/history")
     check("the seller's page loads", st_s == 200, str(st_s))
@@ -345,8 +345,9 @@ async def t_otc_row():
         check(f"{who} sees the shares figure 5,001.15", "5,001.15" in body, "")
         check(f"{who} sees the EVENT date 09 Aug 2026 read from the note",
               "09 Aug 2026" in body, "the event date is missing")
-        check(f"{who} sees the RECORDED date 16 Aug 2026, labelled",
-              "recorded 16 Aug 2026" in body, "the recorded date is missing or unlabelled")
+        check(f"{who} is NOT shown the row's write stamp 16 Aug 2026",
+              "recorded 16 Aug 2026" not in body and "16 Aug 2026" not in body,
+              "the bookkeeping write stamp is printed as if it were history")
         check(f"{who} sees where the event date came from",
               "stated in the note as" in body and "09.08.26" in body,
               "the parse has no visible provenance")
@@ -394,13 +395,15 @@ async def t_unknown_event_date():
           "unknown" in body, "no unknown marker")
     check("it says explicitly that no event date is recorded",
           "no event date recorded" in body or "no event date is recorded" in body, "")
-    check("the recorded date is still shown, LABELLED as recorded",
-          "recorded 10 Aug 2026" in body, "the recorded date is missing or unlabelled")
-    check("the recorded date is NOT printed as the event date",
+    check("the row's write stamp is not printed at all",
+          "10 Aug 2026" not in body,
+          "the bookkeeping write stamp is printed as if it were history")
+    check("the write stamp is NOT printed as the event date",
           not re.search(r'class="h-when"[^>]*>10 Aug 2026', body),
-          "the recorded date was substituted for the event date")
-    check("the row says it is positioned by its recorded date",
-          "placed by its recorded date" in body, "silent ordering by a date we do not have")
+          "the write stamp was substituted for the event date")
+    check("the row still says how it is ordered",
+          "placed by when the bot wrote the row" in body,
+          "silent ordering by a date we do not have")
 
     # The same property on real data: a hive month has no exact date at all.
     st, body = await get("tok-seller", "/history?type=hive")
@@ -485,8 +488,9 @@ async def t_permalink():
     for who, body in (("sender", seller), ("recipient", buyer)):
         check(f"{who}'s permalink shows the event date, labelled",
               "Event date" in body and "09 Aug 2026" in body, "")
-        check(f"{who}'s permalink shows the recorded date, labelled separately",
-              "Recorded" in body and "16 Aug 2026" in body, "")
+        check(f"{who}'s permalink does not print the row's write stamp",
+              "16 Aug 2026" not in body,
+              "the permalink prints the bookkeeping write stamp")
         check(f"{who}'s permalink prints the note exactly as stored",
               "recorded retroactively" in body, "")
         check(f"{who}'s permalink prints the source table and row id",
