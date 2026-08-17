@@ -683,6 +683,17 @@ def _loopback_bound(request) -> bool:
     request that reached a public-facing bind fails this even if it claims to be
     from localhost, which is the whole point — the dev login must be unreachable
     from the internet, not merely un-advertised."""
+    # A reverse proxy (nginx, caddy) OR a Cloudflare tunnel terminates the public
+    # connection and re-originates it to 127.0.0.1 — so `sockname` is loopback for
+    # EVERY internet request in that topology, and the socket check alone would pass
+    # for the whole world. A proxied/tunnelled request is betrayed by a forwarding
+    # header; a genuine same-machine request to a loopback bind carries none. If any
+    # such header is present we are behind a proxy and this is NOT a local request,
+    # full stop. (John runs a Cloudflare tunnel — this gate is load-bearing for him.)
+    for h in ("X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto",
+              "X-Real-IP", "Forwarded", "CF-Connecting-IP", "CF-Ray"):
+        if request.headers.get(h):
+            return False
     try:
         sock = request.transport.get_extra_info("sockname")
     except Exception:

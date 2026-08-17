@@ -50,6 +50,7 @@ immediately before `web.AppRunner` in `Restocker_web.start_webserver`.
 
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import hmac
 import html
@@ -189,6 +190,252 @@ def is_staff(sess: Optional[dict]) -> bool:
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# Owner "god mode" — view-as, the write chokepoint, and the audit trail
+# ──────────────────────────────────────────────────────────────────────────
+# THESE PRIMITIVES LIVE IN THE SHELL ON PURPOSE, next to identity and the money
+# wrapper, for the same reason those do: the write-refusal is keyed off view-as
+# state, and a chokepoint that had to import the *surface* it protects
+# (`admin_web`) to know whether to refuse would be an import cycle waiting to
+# invert. `admin_web` is the page/route surface; the state, the guard and the
+# ledger of who-looked-at-whom are here, where every write path already passes.
+#
+# WHY THERE IS NO "WRITE AS ANOTHER ACCOUNT" MODE, AND NEVER WILL BE:
+# John owns the whole economy and can do anything to it — except author a row as
+# somebody else. The site's messaging and history are worth something for exactly
+# one reason: nobody can write the other side of them. The instant an owner can
+# post as any player, every record — including every true one — is answerable
+# with "the owner could have typed that", and the credibility of the entire log
+# is spent to buy a capability he does not need (he owns his alts and signs into
+# them normally; the dev login covers testing). So view-as changes only what is
+# RENDERED. Identity stays the session. Every write path reads the real session
+# and refuses the moment view-as is on — see `refuse_if_impersonating`, wired
+# into `require_post_session` (and therefore `money_post`) and
+# `hub_web.idempotent_post`, the two wrappers every mutating route already goes
+# through.
+# ══════════════════════════════════════════════════════════════════════════
+
+def _admin_db():
+    """The core connection. Same handle the idempotency table uses."""
+    import Restocker_db as _db
+    return _db
+
+
+#: State table: at most ONE active view-as per staff member, keyed by the staff
+#: id. Entering REPLACEs; exiting DELETEs. This is scratch state, not a record —
+#: the record is `admin_audit`, which is append-only.
+#:
+#: `admin_audit` is APPEND-ONLY. There is no UPDATE and no DELETE against it
+#: anywhere in this codebase, asserted on the AST by the test suite. An audit
+#: trail the auditor can quietly rewrite is not a check on the auditor; a subject
+#: can read the rows about themselves (`audit_for_subject`) for the same reason.
+_ADMIN_DDL = (
+    """
+    CREATE TABLE IF NOT EXISTS admin_view_as (
+        staff_id     TEXT PRIMARY KEY,
+        target_id    TEXT NOT NULL,
+        target_name  TEXT NOT NULL DEFAULT '',
+        started_at   REAL NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS admin_audit (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts         REAL NOT NULL,
+        actor_id   TEXT NOT NULL,
+        subject_id TEXT NOT NULL DEFAULT '',
+        action     TEXT NOT NULL,
+        detail     TEXT NOT NULL DEFAULT '',
+        ip         TEXT NOT NULL DEFAULT ''
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS ix_admin_audit_subject
+        ON admin_audit(subject_id, id DESC)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS ix_admin_audit_actor
+        ON admin_audit(actor_id, id DESC)
+    """,
+)
+
+_ADMIN_READY = False
+
+
+def _ensure_admin_tables() -> None:
+    global _ADMIN_READY
+    if _ADMIN_READY:
+        return
+    with _admin_db().db() as conn:
+        for stmt in _ADMIN_DDL:
+            conn.execute(stmt)
+    _ADMIN_READY = True
+
+
+def client_ip(request) -> str:
+    """Best-effort client IP for the audit row. Never raises."""
+    try:
+        fwd = request.headers.get("X-Forwarded-For", "")
+        if fwd:
+            return fwd.split(",")[0].strip()
+        return str(getattr(request, "remote", None) or "unknown")
+    except Exception:
+        return "unknown"
+
+
+def audit_admin(actor_id: str, subject_id: str, action: str,
+                detail: str = "", ip: str = "") -> None:
+    """Append one row to the append-only audit trail. INSERT ONLY, ever.
+
+    Guarded: a failure to write the audit row must never become a failure to
+    refuse or to render, but it is logged loudly because a missing audit row is
+    the one thing this table exists to make impossible.
+    """
+    try:
+        _ensure_admin_tables()
+        with _admin_db().db() as conn:
+            conn.execute(
+                "INSERT INTO admin_audit (ts, actor_id, subject_id, action, detail, ip) "
+                "VALUES (?,?,?,?,?,?)",
+                (time.time(), str(actor_id), str(subject_id or ""), str(action),
+                 str(detail or "")[:500], str(ip or "")))
+    except Exception:
+        log.exception("[vt_web][AUDIT] could not write admin audit row: actor=%s "
+                      "action=%s subject=%s", actor_id, action, subject_id)
+
+
+def audit_for_subject(subject_id: str, limit: int = 200) -> list:
+    """Every audit row ABOUT this user. This is what lets the subject see who
+    looked at their pages — the auditor is audited to the audited."""
+    try:
+        _ensure_admin_tables()
+        with _admin_db().db() as conn:
+            rows = conn.execute(
+                "SELECT id, ts, actor_id, subject_id, action, detail, ip FROM admin_audit "
+                "WHERE subject_id = ? ORDER BY id DESC LIMIT ?",
+                (str(subject_id), int(limit))).fetchall()
+        return [dict(r) for r in rows]
+    except Exception:
+        log.exception("[vt_web][AUDIT] subject audit read failed for %s", subject_id)
+        return []
+
+
+def audit_by_actor(actor_id: str, limit: int = 200) -> list:
+    """Every audit row BY this staff member — the console's own history view."""
+    try:
+        _ensure_admin_tables()
+        with _admin_db().db() as conn:
+            rows = conn.execute(
+                "SELECT id, ts, actor_id, subject_id, action, detail, ip FROM admin_audit "
+                "WHERE actor_id = ? ORDER BY id DESC LIMIT ?",
+                (str(actor_id), int(limit))).fetchall()
+        return [dict(r) for r in rows]
+    except Exception:
+        log.exception("[vt_web][AUDIT] actor audit read failed for %s", actor_id)
+        return []
+
+
+def active_view_as(staff_id: str) -> Optional[dict]:
+    """`{target_id, target_name, started_at}` if this staff member is currently
+    viewing the site as somebody, else None. Read on every write and every page."""
+    try:
+        _ensure_admin_tables()
+        with _admin_db().db() as conn:
+            row = conn.execute(
+                "SELECT target_id, target_name, started_at FROM admin_view_as "
+                "WHERE staff_id = ?", (str(staff_id),)).fetchone()
+        return dict(row) if row else None
+    except Exception:
+        log.exception("[vt_web] active_view_as read failed for %s", staff_id)
+        return None
+
+
+def enter_view_as(staff_id: str, target_id: str, target_name: str, ip: str = "") -> None:
+    """Begin a read-only view-as. Persists the state and audits the entry.
+
+    The caller (`admin_web`) has already checked that `staff_id` is staff; this
+    primitive does not re-authorise, it records. One active view per staff, so a
+    second entry REPLACEs the first (and both entries are in the audit trail)."""
+    _ensure_admin_tables()
+    with _admin_db().db() as conn:
+        conn.execute(
+            "INSERT INTO admin_view_as (staff_id, target_id, target_name, started_at) "
+            "VALUES (?,?,?,?) "
+            "ON CONFLICT(staff_id) DO UPDATE SET target_id=excluded.target_id, "
+            "  target_name=excluded.target_name, started_at=excluded.started_at",
+            (str(staff_id), str(target_id), str(target_name or ""), time.time()))
+    audit_admin(staff_id, target_id, "view_as_enter",
+                f"entered view-as {target_name or target_id}", ip)
+
+
+def exit_view_as(staff_id: str, ip: str = "") -> Optional[str]:
+    """End view-as. Returns the target that was being viewed, or None if there
+    was no active view. CLAIM-THEN-AUDIT: read the row, delete it, audit the exit
+    with what was actually there."""
+    _ensure_admin_tables()
+    with _admin_db().db() as conn:
+        row = conn.execute("SELECT target_id, target_name FROM admin_view_as "
+                           "WHERE staff_id = ?", (str(staff_id),)).fetchone()
+        conn.execute("DELETE FROM admin_view_as WHERE staff_id = ?", (str(staff_id),))
+    if row is None:
+        return None
+    audit_admin(staff_id, row["target_id"], "view_as_exit",
+                f"exited view-as {row['target_name'] or row['target_id']}", ip)
+    return str(row["target_id"])
+
+
+def refuse_if_impersonating(request) -> Optional[Any]:
+    """THE WRITE CHOKEPOINT. Returns a 403 refusal response if the REAL session
+    behind this request is currently in view-as, else None.
+
+    Keyed off `session_user` — the real identity, never the rendered one — so a
+    body-supplied id, a query param, or a forged cookie value cannot turn it off:
+    the flag lives server-side against the staff id and only ever NARROWS what a
+    session may do. A player who somehow set a view-as row for their own id gains
+    nothing — it can only cause their own writes to be refused.
+
+    Wired into `require_post_session` (hence every `money_post` route) and
+    `hub_web.idempotent_post`, so a mutating route added next month inherits the
+    refusal without a line of its own. The refused attempt is itself audited: an
+    owner poking at a write while in view-as is exactly the event the subject is
+    entitled to see later.
+    """
+    sess = session_user(request)
+    if not sess:
+        return None
+    va = active_view_as(str(sess.get("user_id")))
+    if not va:
+        return None
+    try:
+        audit_admin(str(sess["user_id"]), va["target_id"], "write_refused",
+                    f"{getattr(request, 'method', '?')} {getattr(request, 'path', '?')}",
+                    client_ip(request))
+    except Exception:  # pragma: no cover - audit is best-effort, refusal is not
+        pass
+    return json_err(
+        "view_as_read_only",
+        f"You are viewing V Tech as {va.get('target_name') or va['target_id']}. "
+        f"View-as is strictly read-only — nothing can be written, sent, traded or "
+        f"moved while it is on. Exit view-as first.", 403)
+
+
+#: Per-request render context. Set by `require_page_session` (and by
+#: `admin_web`'s staff gate) and read by `page()` to draw the view-as banner and,
+#: for staff, the admin nav tab. A contextvar because each aiohttp request runs
+#: in its own task with an isolated copy — nothing leaks between requests, and
+#: the default (None) means "ordinary page, no banner, no admin tab".
+_PAGE_CTX: "contextvars.ContextVar[Optional[dict]]" = contextvars.ContextVar(
+    "vt_page_ctx", default=None)
+
+
+def set_page_ctx(view_as: Optional[dict], staff: bool) -> None:
+    _PAGE_CTX.set({"view_as": view_as, "staff": bool(staff)})
+
+
+def page_ctx() -> dict:
+    return _PAGE_CTX.get() or {}
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # Responses — one JSON convention for both sections
 # ══════════════════════════════════════════════════════════════════════════
 
@@ -256,18 +503,51 @@ def require_page_session(request):
 
     The JSON API is gated by `require_session`; this is the same gate one level up, for
     the HTML shell itself. Both `banking_web.h_page` and `estates_web.h_page` start here.
+
+    VIEW-AS IS APPLIED HERE, and only here, and only to the RENDER. If the real
+    session is a staff member currently viewing the site as somebody, the returned
+    session carries the TARGET's id, so every section renders the target's real
+    pages (inbox, holdings, ledger) with no per-section change. The real identity
+    is never mutated — `session_user` still returns the staff member, which is what
+    every write path reads — and the swap is recorded: each page viewed under
+    view-as is an audit row the subject can later read. The banner is drawn by
+    `page()` off the context set here; it cannot be dismissed without exiting.
     """
     sess = session_user(request)
     if not sess:
+        set_page_ctx(None, False)
         return None, login_page(request)
+    staff = is_staff(sess)
+    va = active_view_as(str(sess["user_id"])) if staff else None
+    if va:
+        audit_admin(str(sess["user_id"]), va["target_id"], "view_page",
+                    f"GET {getattr(request, 'path', '?')}", client_ip(request))
+        set_page_ctx({"real_id": str(sess["user_id"]),
+                      "real_name": sess.get("name") or str(sess["user_id"]),
+                      "target_id": str(va["target_id"]),
+                      "target_name": va.get("target_name") or str(va["target_id"])},
+                     staff)
+        rendered = {"user_id": str(va["target_id"]),
+                    "name": va.get("target_name") or str(va["target_id"]),
+                    "csrf": sess.get("csrf") or "",
+                    "view_as": True, "real_user_id": str(sess["user_id"])}
+        return rendered, None
+    set_page_ctx(None, staff)
     return sess, None
 
 
 def require_post_session(request):
-    """Session + CSRF, the two checks every money POST starts with."""
+    """Session + CSRF, the two checks every money POST starts with — plus the
+    view-as write refusal, so every route that starts here (and `money_post`,
+    which starts here too) is structurally read-only while view-as is on."""
     sess, refusal = require_session(request)
     if refusal is not None:
         return None, refusal
+    # View-as is read-only. This is the one chokepoint; a new mutating route that
+    # starts at `require_post_session` or goes through `money_post` inherits it.
+    impersonating = refuse_if_impersonating(request)
+    if impersonating is not None:
+        return None, impersonating
     if not csrf_ok(request):
         return None, json_err("bad_csrf", "Bad or missing CSRF token. Reload the page.", 403)
     return sess, None
@@ -772,12 +1052,6 @@ NAV = (
     ("banking", "Banking", "/banking"),
     ("estates", "Lands · Auctions · Predictions", "/estates"),
     ("messages", "Messages", "/messages"),
-    # `history_web` also registers itself via `hub_web.register_section`, and
-    # `_nav_entries` renders that registry — but it is listed here too, because
-    # `test_history_web.t_wiring` asserts on this tuple directly and because the
-    # per-user record should not drop out of the nav on a deploy where the hub
-    # module fails to import. Listed here, it keeps this position; the merge
-    # dedupes on the key so it is never rendered twice.
     ("history", "History", "/history"),
 )
 
@@ -1119,44 +1393,9 @@ setInterval(refreshUnread, 60000);
 """
 
 
-def _nav_entries() -> list:
-    """`NAV`, then every section that registered itself with `hub_web`.
-
-    `hub_web.register_section()` exists so a section module can put its own tab in the
-    nav, and `history_web` / `messages_web` both call it. Nothing ever rendered
-    `hub_web.sections()` though — `_nav_html` walked the hardcoded `NAV` tuple and
-    stopped there — so a registering section appended to a list that no page read and
-    its tab silently never appeared. `/history` shipped registered, routed, tested and
-    unreachable: there was no link to it anywhere on either surface. The tests passed
-    because they assert against `hub_web.sections()`, which is the registry, not the
-    rendered nav.
-
-    So the registry is the contract and `NAV` is only its built-in head. Returns
-    `(key, label, href, icon_svg_body)`; `icon_svg_body` is empty for `NAV` entries,
-    which take their icon from `IC` in the page script instead.
-    """
-    entries = [(key, label, href, "") for key, label, href in NAV]
-    seen = {key for key, _, _, _ in entries}
-    try:
-        import hub_web
-        registered = hub_web.sections()
-    except Exception:                                   # pragma: no cover
-        registered = []                                 # hub absent: NAV alone, no crash
-    for s in sorted(registered, key=lambda s: (s.get("order", 100), s.get("label") or "")):
-        key = str(s.get("key") or "")
-        href = str(s.get("path") or "")
-        # A section already in NAV keeps NAV's position and label — merging must never
-        # reorder or rename the five tabs that were there before this function existed.
-        if not key or not href or key in seen:
-            continue
-        seen.add(key)
-        entries.append((key, str(s.get("label") or key), href, str(s.get("icon") or "")))
-    return entries
-
-
 def _nav_html(active: str) -> str:
     out = []
-    for key, label, href, icon in _nav_entries():
+    for key, label, href in NAV:
         cur = ' aria-current="true"' if key == active else ""
         # The unread badge lives in the nav rather than the money strip: the strip is
         # coins and only coins, and a count with no unit standing in that row is the
@@ -1165,17 +1404,62 @@ def _nav_html(active: str) -> str:
         # messages section mounted, simply never shows it.
         badge = ('<span class="nav-badge" id="navUnread" style="display:none"></span>'
                  if key == "messages" else "")
-        # A registered section ships its own inline SVG, so it is rendered here rather
-        # than looked up in `IC` — that is what lets a new section appear in the nav
-        # without also editing `_ICONS_JS`. It deliberately carries NO `data-ic`: the
-        # page script fills `.nav-ic[data-ic]` only, so this markup survives it. The
-        # body is an SVG path from a section module (never user input) — not escaped.
-        ic = (f'<span class="nav-ic"><svg class="i" viewBox="0 0 24 24">{icon}</svg></span>'
-              if icon else f'<span class="nav-ic" data-ic="{key}"></span>')
         out.append(f'<a class="nav-tab" href="{href}" data-k="{key}"{cur}>'
-                   f'{ic}{html.escape(label)}'
+                   f'<span class="nav-ic" data-ic="{key}"></span>{html.escape(label)}'
                    f'{badge}</a>')
+    # The Owner console tab is drawn ONLY for a staff session, and only server-side
+    # off the render context — a normal player never receives the markup, so it is
+    # not merely hidden with CSS. `admin_web` also 403s the route, so an unlinked
+    # tab is not the whole of the gate.
+    if page_ctx().get("staff"):
+        cur = ' aria-current="true"' if active == "admin" else ""
+        out.append(f'<a class="nav-tab" href="/admin" data-k="admin"{cur}>'
+                   f'<span class="nav-ic" data-ic="alert"></span>Owner</a>')
     return "".join(out)
+
+
+#: The view-as banner. Fixed, full-width, one accent no page uses for anything
+#: else, and NO dismiss control — the only way off it is the Exit button, which
+#: POSTs the exit route and reloads. It is injected into every page render while
+#: view-as is on, so a staff member can never forget which eyes they are wearing.
+def _view_as_banner_html(ctx: dict) -> str:
+    va = ctx.get("view_as") or {}
+    if not va:
+        return ""
+    target = html.escape(str(va.get("target_name") or va.get("target_id") or "?"))
+    tid = html.escape(str(va.get("target_id") or ""))
+    return f"""
+<div id="viewAsBar" role="alert">
+  <span class="va-dot"></span>
+  <span class="va-txt">VIEWING AS <b>{target}</b> <span class="va-id">{tid}</span>
+    &middot; read-only &middot; nothing you do here is written</span>
+  <button class="va-exit" onclick="exitViewAs()">Exit view-as</button>
+</div>
+<style>
+#viewAsBar{{position:sticky;top:0;z-index:200;display:flex;align-items:center;gap:12px;
+  padding:8px 16px;background:var(--nether);color:#000;font-family:var(--font-data);
+  font-size:12px;font-weight:600;letter-spacing:.04em;border-bottom:2px solid #000}}
+#viewAsBar .va-dot{{width:9px;height:9px;border-radius:50%;background:#000;flex:0 0 auto;
+  animation:vapulse 1.4s ease-in-out infinite}}
+@keyframes vapulse{{0%,100%{{opacity:1}}50%{{opacity:.35}}}}
+#viewAsBar .va-txt{{flex:1;text-transform:uppercase}}
+#viewAsBar .va-id{{opacity:.6;font-weight:400}}
+#viewAsBar .va-exit{{background:#000;color:var(--nether);border:none;padding:6px 14px;
+  font-family:var(--font-data);font-size:11px;font-weight:600;text-transform:uppercase;
+  letter-spacing:.06em;cursor:pointer}}
+#viewAsBar .va-exit:hover{{background:#111}}
+</style>
+<script>
+async function exitViewAs(){{
+  try{{
+    await fetch('/api/admin/view-as/exit', {{method:'POST', credentials:'same-origin',
+      headers:{{'Content-Type':'application/json',
+      'X-CSRF-Token': (window.VT && VT.csrf) || ''}}, body:'{{}}'}});
+  }}catch(e){{}}
+  location.reload();
+}}
+</script>
+"""
 
 
 _STRIP_HTML = """
@@ -1244,6 +1528,7 @@ def page(title: str, nav_key: str, body: str, page_js: str = "", strip: bool = T
     and adding one for two pages would be a deployment change nobody asked for.
     """
     doc = _PAGE.replace("__TITLE__", html.escape(title))
+    doc = doc.replace("__VIEWAS__", _view_as_banner_html(page_ctx()))
     doc = doc.replace("__NAV__", _nav_html(nav_key))
     doc = doc.replace("__STRIP__", _STRIP_HTML if strip else "")
     doc = doc.replace("__MODAL__", _MODAL_HTML)
@@ -1519,6 +1804,7 @@ tr:last-child td{border-bottom:none}
 .holdnote b{color:var(--amber);font-weight:600}
 </style>
 </head><body>
+__VIEWAS__
 <header>
   <a class="logo" href="/hub">
     <div class="logo-icon">V</div>
@@ -1535,9 +1821,7 @@ __STRIP__
 __MODAL__
 <script>
 __ICONS__
-// `[data-ic]` only: a registered section's tab renders its own inline SVG server-side
-// and has no data-ic, so this must not touch it. Selecting all `.nav-ic` blanked it.
-document.querySelectorAll('.nav-ic[data-ic]').forEach(e => { e.innerHTML = IC[e.dataset.ic] || ''; });
+document.querySelectorAll('.nav-ic').forEach(e => { e.innerHTML = IC[e.dataset.ic] || ''; });
 __BASEJS__
 __PAGEJS__
 </script>

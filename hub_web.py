@@ -144,19 +144,27 @@ _CHEVRON = '<path d="M6 9l6 6 6-6"/>'
 _SECTIONS: list[dict] = []
 
 
-def register_section(key: str, label: str, path: str, icon: str = "", order: int = 100) -> None:
+def register_section(key: str, label: str, path: str, icon: str = "", order: int = 100,
+                     staff_only: bool = False) -> None:
     """Add a nav entry. Called at import time by each section module.
 
     Idempotent on `key` so a module reloaded in a dev cycle doesn't double the
     nav. `icon` is an inline SVG path body (no emoji, ever) — omit it to use the
     built-in for a known key.
+
+    `staff_only` sections (the Owner console) are withheld from the nav for a
+    normal player: `_nav_html` never emits the markup for them unless the viewer
+    is staff, so it is not merely CSS-hidden. The route itself still 403s — an
+    unlinked tab is not the gate.
     """
     body = icon or _ICONS.get(key, "")
     for s in _SECTIONS:
         if s["key"] == key:
-            s.update({"label": label, "path": path, "icon": body, "order": order})
+            s.update({"label": label, "path": path, "icon": body, "order": order,
+                      "staff_only": bool(staff_only)})
             return
-    _SECTIONS.append({"key": key, "label": label, "path": path, "icon": body, "order": order})
+    _SECTIONS.append({"key": key, "label": label, "path": path, "icon": body,
+                      "order": order, "staff_only": bool(staff_only)})
     _SECTIONS.sort(key=lambda s: (s["order"], s["label"]))
 
 
@@ -445,9 +453,17 @@ def current_user(request: Any) -> Optional[dict]:
 
     Discord OAuth below is an additional way IN to that same store, not a second
     identity system.
+
+    Resolved through `vt_web_shell.session_user`, which is the site's single whoami:
+    in production it delegates to the very same `Restocker_web._session_user` this
+    used to call directly, so the deployed behaviour is unchanged — but it also means
+    the hub reads the SAME identity the money chokepoints read, including the test
+    seam, so there is one identity path and not two that can disagree about who the
+    user is.
     """
     try:
-        sess = _web()._session_user(request)
+        import vt_web_shell as _shell
+        sess = _shell.session_user(request)
     except Exception as e:      # never fail open
         log.warning("[hub] session lookup failed: %s", e)
         return None
@@ -946,9 +962,22 @@ def money_strip_html(snap: dict) -> str:
             + "".join(segs) + net_html + '</div>' + frozen + note + drawer + '</div>')
 
 
-def _nav_html(active: str) -> str:
+def _is_staff_user(user: Optional[dict]) -> bool:
+    if not user:
+        return False
+    try:
+        import vt_web_shell as _shell
+        return _shell.is_staff(user)
+    except Exception:  # pragma: no cover
+        return False
+
+
+def _nav_html(active: str, user: Optional[dict] = None) -> str:
+    staff = _is_staff_user(user)
     tabs = []
     for s in _SECTIONS:
+        if s.get("staff_only") and not staff:
+            continue
         cur = ' aria-current="true"' if s["key"] == active else ""
         icon = _svg(s["icon"]) if s["icon"] else ""
         badge = ('<span class="nav-badge" id="navUnread" style="display:none"></span>'
@@ -988,7 +1017,7 @@ def page(title: str, active: str, user: Optional[dict], snap: Optional[dict],
   </a>
   <div class="header-right"><span class="svc-note">{esc(svc)}</span>{who}</div>
 </header>
-{_nav_html(active)}
+{_nav_html(active, user)}
 {strip}
 <main>{body}</main>
 <script>{_STRIP_JS}</script>
@@ -1036,6 +1065,19 @@ async def idempotent_post(request: Any, endpoint: str,
     if not user:
         return _json({"ok": False, "error": "Log in first."}, 401)
     uid = user["user_id"]
+
+    # View-as is read-only. This wrapper is the second of the two chokepoints every
+    # mutating route passes through (the first is `vt_web_shell.require_post_session`);
+    # a staff member viewing the site as somebody cannot trade here, and the refused
+    # attempt is audited. Placed before CSRF and the claim so it fires on the bare
+    # request, keyed off the real session — never a body-supplied id.
+    try:
+        import vt_web_shell as _shell
+        _imp = _shell.refuse_if_impersonating(request)
+        if _imp is not None:
+            return _imp
+    except Exception:  # pragma: no cover - shell always present in the mounted app
+        pass
 
     fields = await _read_fields(request)
     _scan_body_identity(fields, request, uid, endpoint)
