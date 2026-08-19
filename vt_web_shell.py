@@ -1048,7 +1048,7 @@ class NoEffect(Exception):
 #: against each other and the house takes a rake, never a side.
 NAV = (
     ("hub", "Hub", "/hub"),
-    ("markets", "Markets", "/hub/markets"),
+    ("markets", "Markets", "/exchange"),
     ("banking", "Banking", "/banking"),
     ("estates", "Lands · Auctions · Predictions", "/estates"),
     ("messages", "Messages", "/messages"),

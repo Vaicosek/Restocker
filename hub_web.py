@@ -1960,7 +1960,7 @@ async def h_health(request: Any) -> Any:
                   "sections": [s["key"] for s in _SECTIONS], "ts": time.time()})
 
 
-register_section("markets", "Markets", f"{HUB_PREFIX}/markets", order=20)
+register_section("markets", "Markets", "/exchange", order=20)
 
 
 def register_hub_routes(app: Any) -> None:
