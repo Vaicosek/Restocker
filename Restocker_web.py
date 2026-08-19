@@ -1573,6 +1573,7 @@ _TERMINAL_NAV = r"""
 <header class="tshell">
   <div class="brand"><span class="m">A</span>ABEXILAS <span class="faint" style="font-weight:600">EXCHANGE</span></div>
   <nav>
+    <a href="/hub" data-nav="hub">← Hub</a>
     <a href="/inventory" data-nav="inventory">Inventory</a>
     <a href="/ledger" data-nav="ledger">Ledger</a>
     <!-- /history is per-VIEWER (every buy, sell, liquidation, OTC transfer and wallet
@@ -1633,13 +1634,17 @@ fetch('/api/me').then(r=>r.json()).then(me=>{
 """
 
 _TERMINAL_CSS = r"""
-:root{--bg:#0b0f10;--panel:#11171a;--panel2:#161d20;--row:#121a1c;--hover:#1a2427;--sel:#1c2a30;
---seam:#070b0b;--line:#212b2e;--line2:#2b3739;--ink:#d9e0e0;--ink2:#f0f4f4;--muted:#7a8a8a;--faint:#4b5a5a;
---up:#1fa97a;--down:#e5484d;--accent:#3f8fcf;--amber:#cfa637;
---sans:"IBM Plex Sans",-apple-system,"Segoe UI",Roboto,sans-serif;
---mono:"IBM Plex Mono",ui-monospace,"SF Mono",Menlo,Consolas,monospace}
+/* Reskinned to match the V Tech Hub design tokens (hub_web.py THEME_CSS): same
+   Space Grotesk / IBM Plex Mono fonts, same #080808 base and #22FF7A green accent,
+   so the Exchange and the Hub read as one product. Layout is untouched — only the
+   palette and font behind the existing var(--*) references changed. */
+:root{--bg:#080808;--panel:#0f0f0f;--panel2:#151515;--row:#111111;--hover:#1a1a1a;--sel:#141f18;
+--seam:#070707;--line:#1E1E1E;--line2:#2A2A2A;--ink:#F4F4F4;--ink2:#FFFFFF;--muted:#6a6a6a;--faint:#3f3f3f;
+--up:#22FF7A;--down:#FF4D4D;--accent:#22FF7A;--amber:#F5A623;
+--sans:'Space Grotesk',system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+--mono:'IBM Plex Mono',ui-monospace,"SF Mono",Menlo,Consolas,monospace}
 *{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:13px;-webkit-font-smoothing:antialiased}
+body{margin:0;background:var(--bg);background-image:radial-gradient(#151515 .5px,transparent .5px);background-size:24px 24px;color:var(--ink);font-family:var(--sans);font-size:13px;-webkit-font-smoothing:antialiased}
 .mono{font-family:var(--mono);font-variant-numeric:tabular-nums;font-feature-settings:"tnum" 1}
 .up{color:var(--up)}.down{color:var(--down)}.muted{color:var(--muted)}.faint{color:var(--faint)}
 header.tshell{display:flex;align-items:center;gap:20px;height:44px;padding:0 16px;border-bottom:1px solid var(--line);background:var(--panel)}
@@ -1666,7 +1671,7 @@ _INVENTORY_HTML = r"""<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>Inventory · Abexilas</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Space+Grotesk:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <style>__TERMINAL_CSS__
 .wrap{display:grid;grid-template-columns:1fr;gap:1px;background:var(--seam);padding:0}
 .bar{display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--panel);border-bottom:1px solid var(--line);flex-wrap:wrap}
@@ -1835,7 +1840,7 @@ _INVESTOR_HTML = r"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>Investor - Abexilas</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Space+Grotesk:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <style>__TERMINAL_CSS__
 .grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:10px}
 @media(max-width:900px){.grid{grid-template-columns:1fr}}
@@ -2145,7 +2150,7 @@ _LEDGER_HTML = r"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>Ledger · Abexilas</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Space+Grotesk:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <style>__TERMINAL_CSS__
 .bar{display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--panel);border-bottom:1px solid var(--line);flex-wrap:wrap}
 .chip{border:1px solid var(--line2);background:var(--panel2);color:var(--muted);font-family:var(--mono);font-size:11px;padding:5px 10px;cursor:pointer;white-space:nowrap}
@@ -2312,7 +2317,7 @@ _ORDERS_HTML = r"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>Orders · Abexilas</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Space+Grotesk:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <style>__TERMINAL_CSS__
 .bar{display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--panel);border-bottom:1px solid var(--line);flex-wrap:wrap}
 .chip{border:1px solid var(--line2);background:var(--panel2);color:var(--muted);font-family:var(--mono);font-size:11px;padding:5px 10px;cursor:pointer;white-space:nowrap}
@@ -2435,7 +2440,7 @@ _TEAMS_HTML = r"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>Teams · Abexilas</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Space+Grotesk:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <style>__TERMINAL_CSS__
 table.t{width:100%;border-collapse:collapse}
 table.t th{font-size:9.5px;letter-spacing:.5px;text-transform:uppercase;color:var(--faint);font-weight:600;text-align:right;padding:6px 12px;border-bottom:1px solid var(--line);background:var(--panel2)}
@@ -2499,7 +2504,7 @@ _MYMARKET_HTML = r"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>My Market · Abexilas</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Space+Grotesk:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <style>__TERMINAL_CSS__
 .bar{display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--panel);border-bottom:1px solid var(--line);flex-wrap:wrap}
 .chip{border:1px solid var(--line2);background:var(--panel2);color:var(--muted);font-family:var(--mono);font-size:11px;padding:5px 10px;cursor:pointer;white-space:nowrap}
@@ -2882,15 +2887,19 @@ _EXCHANGE_HTML = r"""<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>Abexilas Exchange</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Space+Grotesk:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <style>
-:root{--bg:#0b0f10;--panel:#11171a;--panel2:#161d20;--row:#121a1c;--hover:#1a2427;--sel:#1c2a30;
---seam:#070b0b;--line:#212b2e;--line2:#2b3739;--ink:#d9e0e0;--ink2:#f0f4f4;--muted:#7a8a8a;--faint:#4b5a5a;
---up:#1fa97a;--down:#e5484d;--accent:#3f8fcf;--amber:#cfa637;
---sans:"IBM Plex Sans",-apple-system,"Segoe UI",Roboto,sans-serif;
---mono:"IBM Plex Mono",ui-monospace,"SF Mono",Menlo,Consolas,monospace}
+/* Reskinned to match the V Tech Hub design tokens (hub_web.py THEME_CSS): same
+   Space Grotesk / IBM Plex Mono fonts, same #080808 base and #22FF7A green accent,
+   so the Exchange and the Hub read as one product. Layout is untouched — only the
+   palette and font behind the existing var(--*) references changed. */
+:root{--bg:#080808;--panel:#0f0f0f;--panel2:#151515;--row:#111111;--hover:#1a1a1a;--sel:#141f18;
+--seam:#070707;--line:#1E1E1E;--line2:#2A2A2A;--ink:#F4F4F4;--ink2:#FFFFFF;--muted:#6a6a6a;--faint:#3f3f3f;
+--up:#22FF7A;--down:#FF4D4D;--accent:#22FF7A;--amber:#F5A623;
+--sans:'Space Grotesk',system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+--mono:'IBM Plex Mono',ui-monospace,"SF Mono",Menlo,Consolas,monospace}
 *{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:13px;-webkit-font-smoothing:antialiased}
+body{margin:0;background:var(--bg);background-image:radial-gradient(#151515 .5px,transparent .5px);background-size:24px 24px;color:var(--ink);font-family:var(--sans);font-size:13px;-webkit-font-smoothing:antialiased}
 .mono{font-family:var(--mono);font-variant-numeric:tabular-nums;font-feature-settings:"tnum" 1}
 .up{color:var(--up)}.down{color:var(--down)}.muted{color:var(--muted)}.faint{color:var(--faint)}
 header{display:flex;align-items:center;gap:20px;height:44px;padding:0 16px;border-bottom:1px solid var(--line);background:var(--panel)}
@@ -2977,7 +2986,7 @@ background:var(--panel2);color:var(--muted);font-family:var(--sans)}
 <body>
 <header>
   <div class="brand"><span class="m">A</span>ABEXILAS <span class="faint" style="font-weight:600">EXCHANGE</span></div>
-  <nav><a href="/inventory">Inventory</a><a href="/ledger">Ledger</a><a href="/history">History</a><a class="on">Exchange</a><a href="/orders">Orders</a><a href="/teams">Teams</a><a href="/investor">Investor</a><a href="/liabilities">Liabilities</a><a href="/mymarket">My Market</a></nav>
+  <nav><a href="/hub">← Hub</a><a href="/inventory">Inventory</a><a href="/ledger">Ledger</a><a href="/history">History</a><a class="on">Exchange</a><a href="/orders">Orders</a><a href="/teams">Teams</a><a href="/investor">Investor</a><a href="/liabilities">Liabilities</a><a href="/mymarket">My Market</a></nav>
   <div class="rt"><div class="bp"><b class="mono" id="hWho">—</b><br><span id="hWhoSub">not linked</span></div></div>
 </header>
 <div class="grid">
