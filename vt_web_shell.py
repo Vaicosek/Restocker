@@ -1048,7 +1048,7 @@ class NoEffect(Exception):
 #: against each other and the house takes a rake, never a side.
 NAV = (
     ("hub", "Hub", "/hub"),
-    ("markets", "Markets", "/exchange"),
+    ("markets", "Markets", "/hub/markets"),
     ("banking", "Banking", "/banking"),
     ("estates", "Lands · Auctions · Predictions", "/estates"),
     ("messages", "Messages", "/messages"),
@@ -1811,7 +1811,6 @@ __VIEWAS__
     <div><div class="logo-text">V Tech Hub</div><div class="logo-sub">One economy</div></div>
   </a>
   <div class="header-right">
-    <span class="svc-note">Markets · Banking · Estates · Messages</span>
     <span class="user-tag" id="authTag"></span>
   </div>
 </header>

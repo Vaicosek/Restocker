@@ -1337,6 +1337,19 @@ try:
 except Exception as _db_init_err:
     log.error("DB init failed: %s", _db_init_err)
 
+# Ledger API v2 schema. This creates ledger_holds/entries/idempotency/meta, adds the
+# balances freeze columns, and installs the escrow-guard triggers. It is idempotent and
+# non-destructive (no row deleted, no balance touched), so it is safe to run every boot.
+# Without it, ledger_v2.get_balance raises "no such column: frozen" / "no such table:
+# ledger_holds" and the website's wallet strip 503s ("wallet_unavailable") on every page.
+try:
+    import Restocker_db as _db_module2
+    import ledger_migrate as _ledger_migrate
+    _ledger_migrate.migrate(_db_module2.DB_PATH, verbose=False)
+    log.info("[ledger-migrate] v2 schema ensured (holds, freeze columns, escrow guards)")
+except Exception as _lm_err:
+    log.warning("[ledger-migrate] non-fatal, skipped: %s", _lm_err)
+
 _orders_ui_state: dict = {"batch_dm_messages": {}}
 
 token = os.getenv("DISCORD_TOKEN") or config.get("TOKEN", "")
