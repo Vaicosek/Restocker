@@ -974,7 +974,12 @@ def _is_staff_user(user: Optional[dict]) -> bool:
 
 def _nav_html(active: str, user: Optional[dict] = None) -> str:
     staff = _is_staff_user(user)
-    tabs = []
+    # Home tab first, always — every hub page must be able to get back to the hub
+    # landing. Without it the Markets page (rendered by this shell) had no route to
+    # Hub while the banking/estates pages (rendered by vt_web_shell) did, so the nav
+    # disagreed page to page. `active=="hub"` (or the landing, active=="") lights it.
+    hub_cur = ' aria-current="true"' if active in ("hub", "") else ""
+    tabs = [f'<a class="nav-tab" href="{HUB_PREFIX}"{hub_cur}>Hub</a>']
     for s in _SECTIONS:
         if s.get("staff_only") and not staff:
             continue
@@ -999,7 +1004,6 @@ def page(title: str, active: str, user: Optional[dict], snap: Optional[dict],
         who = f'<a class="btn ghost sm" href="{HUB_PREFIX}/login">Sign in</a>'
 
     strip = money_strip_html(snap) if (user and snap) else ""
-    svc = " · ".join(s["label"] for s in _SECTIONS) or "V Tech"
     return f"""<!DOCTYPE html>
 <html lang="en"><head>
 <meta charset="utf-8">
@@ -1015,7 +1019,7 @@ def page(title: str, active: str, user: Optional[dict], snap: Optional[dict],
     <div class="logo-icon">V</div>
     <div><div class="logo-text">V Tech Hub</div><div class="logo-sub">One economy</div></div>
   </a>
-  <div class="header-right"><span class="svc-note">{esc(svc)}</span>{who}</div>
+  <div class="header-right">{who}</div>
 </header>
 {_nav_html(active, user)}
 {strip}
