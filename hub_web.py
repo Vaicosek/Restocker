@@ -754,6 +754,13 @@ main{max-width:1180px;margin:0 auto;padding:24px 24px 80px;animation:f .25s ease
 .page-head{display:flex;align-items:flex-end;gap:16px;flex-wrap:wrap;margin-bottom:18px}
 h1{font-size:21px;font-weight:600;letter-spacing:-.01em;margin:0}
 .page-sub{color:var(--muted);font-size:12.5px;margin-top:3px}
+.hub-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:14px;margin-top:20px}
+.hub-card{display:block;background:var(--surface);border:1px solid var(--border);padding:16px 16px 18px;text-decoration:none;color:var(--text);transition:border-color .12s,background .12s}
+.hub-card:hover{border-color:var(--accent);background:var(--panel2)}
+.hub-card-h{display:flex;align-items:center;gap:9px;font-weight:600;font-size:14px}
+.hub-card-h svg{width:15px;height:15px}
+.hub-card-b{margin-top:8px;color:var(--text-body);font-size:12px;line-height:1.5}
+.hub-card-go{margin-top:12px;color:var(--accent);font-size:11px;font-family:var(--font-data);text-transform:uppercase;letter-spacing:.06em}
 .section-h{font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin:24px 0 12px;display:flex;align-items:center;gap:10px;font-weight:600}
 .section-h::after{content:"";flex:1;height:1px;background:var(--border)}
 .tile-h{font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;gap:10px;font-weight:600}
@@ -1897,15 +1904,52 @@ async def h_market_trade(request: Any) -> Any:
 # Mount
 # ══════════════════════════════════════════════════════════════════════════
 
+_SECTION_BLURB = {
+    "markets":  "Shops, the stock exchange and hives — your V Tech core.",
+    "banking":  "Bank of Osentar — savings, credit and bonds.",
+    "estates":  "Parcels, auctions and prediction markets.",
+    "messages": "Your inbox — read and send.",
+    "history":  "Every transaction on your account, newest first.",
+    "admin":    "Owner console — view-as, kill switch, audit.",
+}
+
+
+def _hub_home_body(user: Optional[dict]) -> str:
+    """The `/hub` landing: a launcher of section cards. Distinct from Markets so
+    the Hub tab goes somewhere that is actually the hub, not straight to one
+    section. Cards are the SAME registered sections the nav shows, staff-gated the
+    same way, so this page can never drift from what a user can actually reach."""
+    staff = _is_staff_user(user)
+    cards = []
+    for s in _SECTIONS:
+        if s["key"] == "hub" or (s.get("staff_only") and not staff):
+            continue
+        icon = _svg(s["icon"]) if s.get("icon") else ""
+        blurb = _SECTION_BLURB.get(s["key"], "")
+        cards.append(
+            f'<a class="hub-card" href="{esc(s["path"])}">'
+            f'<div class="hub-card-h">{icon}<span>{esc(s["label"])}</span></div>'
+            f'<div class="hub-card-b">{esc(blurb)}</div>'
+            f'<div class="hub-card-go">Open →</div></a>'
+        )
+    name = esc((user or {}).get("name") or "")
+    sub = "One economy · one wallet" + (f" · {name}" if name else "")
+    return (
+        '<div class="page-head"><div><h1>V Tech Hub</h1>'
+        f'<div class="page-sub">{sub}</div></div></div>'
+        '<div class="hub-grid">' + "".join(cards) + "</div>"
+    )
+
+
 async def h_root(request: Any) -> Any:
-    """`/hub` lands on the first registered section. When only Markets is
-    registered that is Markets; when the Hub section registers itself it becomes
-    the landing page without this file changing."""
-    if not current_user(request):
+    """`/hub` is the hub landing — a launcher of section cards — for a signed-in
+    user. It used to redirect to the first section (Markets), which made the Hub
+    tab indistinguishable from Markets."""
+    user = current_user(request)
+    if not user:
         return _login_required_page(request)
-    if _SECTIONS:
-        raise web.HTTPFound(_SECTIONS[0]["path"])
-    raise web.HTTPFound(f"{HUB_PREFIX}/markets")
+    snap = money_snapshot(user["user_id"])
+    return _html(page("V Tech Hub", "hub", user, snap, _hub_home_body(user)))
 
 
 async def h_health(request: Any) -> Any:
