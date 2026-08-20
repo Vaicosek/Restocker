@@ -1050,7 +1050,9 @@ NAV = (
     ("hub", "Hub", "/hub"),
     ("markets", "Markets", "/exchange"),
     ("banking", "Banking", "/banking"),
-    ("estates", "Lands · Auctions · Predictions", "/estates"),
+    ("auctions", "Auctions", "/auctions"),
+    ("lands", "Lands", "/lands"),
+    ("predictions", "Predictions", "/predictions"),
     ("messages", "Messages", "/messages"),
     ("history", "History", "/history"),
 )
@@ -1180,14 +1182,14 @@ async function renderStrip(){
   el('sHeld').innerHTML  = cn(j.held);
   el('sSave').innerHTML  = j.savings === null ? '<span class="muted">unavailable</span>' : cn(j.savings);
   el('sSaveSub').textContent = j.savings === null
-    ? (j.bank_error || 'Osentar Bank unreachable')
-    : (j.savings_apr != null ? j.savings_apr + '% APR' : 'Osentar Bank');
+    ? (j.bank_error || 'V Tech Bank unreachable')
+    : (j.savings_apr != null ? j.savings_apr + '% APR' : 'V Tech Bank');
   /* Net is withheld, not guessed, when a term of it is missing. A net position that
      silently drops savings and debt is a wrong number wearing a confident font. */
   el('sNet').innerHTML = j.net === null ? '<span class="muted">—</span>' : cn(j.net);
   const note = document.getElementById('netNote');
   if(note) note.textContent = j.net === null
-    ? 'withheld — Osentar Bank is unreachable, so savings and loan debt are unknown'
+    ? 'withheld — V Tech Bank is unreachable, so savings and loan debt are unknown'
     : 'available + held + savings − loan · bonds & land excluded';
   el('sHeldSub').textContent = j.holds.length
     ? 'reserved by ' + j.holds.length + ' thing' + (j.holds.length > 1 ? 's' : '')
@@ -1476,7 +1478,7 @@ _STRIP_HTML = """
       <div class="sub" id="sHeldSub">&nbsp;</div>
     </button>
     <div class="seg">
-      <div class="lab">Savings · Osentar</div>
+      <div class="lab">Savings · V Tech Bank</div>
       <div class="val v-save num" id="sSave">—</div>
       <div class="sub" id="sSaveSub">&nbsp;</div>
     </div>
@@ -1903,7 +1905,7 @@ async def _handle_strip(request):
         loan_out = snap.get("loan_outstanding")
         apr = snap.get("savings_apr")
     except Exception as e:
-        bank_error = str(e) or "Osentar Bank unreachable"
+        bank_error = str(e) or "V Tech Bank unreachable"
 
     net = None
     if savings is not None and loan_out is not None:
@@ -1946,7 +1948,7 @@ def _describe_hold(h: dict, uid: str) -> tuple:
     except Exception:
         pass
     # Not one of ours to name. Now that the drawer lists every service's holds, say
-    # which service reserved it — "Osentar Bank — loan:collateral" is a row a player
+    # which service reserved it — "V Tech Bank — loan:collateral" is a row a player
     # can act on; a bare reason string from a section they have never opened is not.
     label = str(h.get("service_label") or h.get("service") or "").strip()
     if label and reason:

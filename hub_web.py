@@ -51,7 +51,7 @@ DATA HONESTY
 Where the mockups show a figure with no real source, the panel is left out
 rather than filled in. Concretely, as of this file: there is no savings table
 and no loans table anywhere in Restocker's schema, so the strip's "Savings" and
-"Net position" segments DO NOT RENDER until Osentar Bank registers a provider
+"Net position" segments DO NOT RENDER until V Tech Bank registers a provider
 via `register_money_provider`. `available` and `held` are real, from ledger_v2.
 """
 
@@ -134,6 +134,8 @@ _ICONS = {
     "markets": '<path d="M3 3v18h18"/><path d="M7 15l4-5 3 3 5-7"/>',
     "banking": '<rect x="3" y="8" width="18" height="12"/><path d="M3 8l9-5 9 5"/><path d="M8 20v-6M16 20v-6"/>',
     "lands": '<path d="M3 20h18"/><path d="M5 20V9l7-5 7 5v11"/><path d="M10 20v-6h4v6"/>',
+    "auctions": '<path d="M14 4l6 6"/><path d="M4 20l7-7"/><path d="M10 8l6 6"/><path d="M3 21h8"/>',
+    "predictions": '<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4"/><circle cx="12" cy="12" r="1"/>',
     "messages": '<path d="M4 4h16v12H8l-4 4z"/><path d="M8 9h8M8 12h5"/>',
     "ops": '<circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9L17 7M7 17l-2.1 2.1"/>',
     "hub": '<rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/>',
@@ -174,7 +176,7 @@ def sections() -> list[dict]:
 
 # ══════════════════════════════════════════════════════════════════════════
 # Money providers. Core (available/held) is always present. Savings and debt
-# belong to Osentar Bank, which owns no table in this schema yet — so until
+# belong to V Tech Bank, which owns no table in this schema yet — so until
 # Osentar registers, those segments do not render. An absent figure is honest;
 # a placeholder is not.
 # ══════════════════════════════════════════════════════════════════════════
@@ -199,7 +201,7 @@ def register_money_provider(name: str, fn: Callable[[str], Optional[dict]]) -> N
 
 SERVICE_NAMES = {
     "core": "V Tech core",
-    "osentar": "Osentar Bank",
+    "osentar": "V Tech Bank",
     "estates": "Estates",
     "markets": "Markets",
     "lands": "Lands & Auctions",
@@ -919,7 +921,7 @@ def money_strip_html(snap: dict) -> str:
     # Savings and net render only when every term they name has a real source.
     if snap.get("savings") is not None:
         note = snap.get("savings_note") or ""
-        segs.append('<div class="seg"><div class="lab">Savings · Osentar</div>'
+        segs.append('<div class="seg"><div class="lab">Savings · V Tech Bank</div>'
                     f'<div class="val v-save num">{cn(snap["savings"])}</div>'
                     f'<div class="sub">{esc(note)}</div></div>')
 
@@ -957,7 +959,7 @@ def money_strip_html(snap: dict) -> str:
 
     note = ""
     if snap.get("savings") is None or snap.get("debt") is None:
-        note = ('<div class="strip-note">Savings and net position need Osentar Bank — '
+        note = ('<div class="strip-note">Savings and net position need V Tech Bank — '
                 'not connected.</div>')
 
     frozen = ""
@@ -1906,8 +1908,10 @@ async def h_market_trade(request: Any) -> Any:
 
 _SECTION_BLURB = {
     "markets":  "Shops, the stock exchange and hives — your V Tech core.",
-    "banking":  "Bank of Osentar — savings, credit and bonds.",
-    "estates":  "Parcels, auctions and prediction markets.",
+    "banking":  "V Tech Bank — savings, credit and bonds.",
+    "auctions": "Bid to win lots — escrow-held until they settle.",
+    "lands":    "The parcel register — ownership, tenants and rent.",
+    "predictions": "Pari-mutuel prediction markets.",
     "messages": "Your inbox — read and send.",
     "history":  "Every transaction on your account, newest first.",
     "admin":    "Owner console — view-as, kill switch, audit.",

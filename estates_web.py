@@ -1233,27 +1233,52 @@ async def h_stake(request):
 # The page
 # ══════════════════════════════════════════════════════════════════════════
 
-_BODY = r"""
-<div class="page-head">
-  <div>
-    <h1>Lands, Auctions &amp; Prediction Markets</h1>
-    <div class="page-sub">Bids and stakes are escrow holds. Coins are reserved, never debited, until a lot settles or a market closes.</div>
-  </div>
-</div>
-<nav class="subtabs" id="subtabs" style="display:flex;gap:2px;border-bottom:1px solid var(--border);margin-bottom:16px">
-  <button class="nav-tab" data-t="auctions" aria-current="true" onclick="tab('auctions')">Auctions</button>
-  <button class="nav-tab" data-t="parcels" onclick="tab('parcels')">Parcel register</button>
-  <button class="nav-tab" data-t="markets" onclick="tab('markets')">Prediction markets</button>
-</nav>
-<div id="estView"><div class="empty">Loading…</div></div>
-"""
+# Three top-level sections, each its own page + subtabs. They share one JS bundle
+# and the /api/estates/* endpoints; the only per-page difference is which subtab the
+# page opens on (window.__ESTTAB__) and which subtabs its nav shows.
+_SECTIONS_DEF = {
+    "auctions": {
+        "label": "Auctions", "order": 40,
+        "h1": "Auctions",
+        "sub": "Bid to win lots. Every bid is an escrow hold — coins reserved, never spent, until the lot settles.",
+        "subtabs": [("auctions", "Open lots"), ("mybids", "My bids")],
+    },
+    "lands": {
+        "label": "Lands", "order": 41,
+        "h1": "Lands",
+        "sub": "The parcel register — ownership, tenants and rent. Nothing here debits a coin.",
+        "subtabs": [("parcels", "Parcel register"), ("myparcels", "My parcels")],
+    },
+    "predictions": {
+        "label": "Predictions", "order": 42,
+        "h1": "Prediction markets",
+        "sub": "Pari-mutuel markets. A stake is an escrow hold until the market closes; the house takes a rake, never a side.",
+        "subtabs": [("markets", "Open markets"), ("mystakes", "My stakes")],
+    },
+}
+
+
+def _body(key: str) -> str:
+    d = _SECTIONS_DEF[key]
+    parts = []
+    for i, (t, lbl) in enumerate(d["subtabs"]):
+        cur = ' aria-current="true"' if i == 0 else ''
+        parts.append(f'<button class="nav-tab" data-t="{t}"{cur} onclick="tab(\'{t}\')">{lbl}</button>')
+    tabs = "".join(parts)
+    return (
+        f'<div class="page-head"><div><h1>{d["h1"]}</h1>'
+        f'<div class="page-sub">{d["sub"]}</div></div></div>'
+        f'<nav class="subtabs" id="subtabs" style="display:flex;gap:2px;'
+        f'border-bottom:1px solid var(--border);margin-bottom:16px">{tabs}</nav>'
+        f'<div id="estView"><div class="empty">Loading…</div></div>'
+    )
 
 _JS = r"""
 /* Form keys are NOT held here any more. Each lot carries its own, each outcome
    carries its own, and they are read off the row being acted on — one key for the
    whole board is a key that commits any lot on it. */
-let E = {lots:null, parcels:null, markets:null};
-let TAB = 'auctions';
+let E = {lots:null, parcels:null, markets:null, period:''};
+let TAB = (window.__ESTTAB__ || 'auctions');
 
 function tab(t){
   TAB = t;
@@ -1311,17 +1336,22 @@ async function loadLots(){
   if(!j.lots.length) return '<div class="empty">No lots open.</div>';
   return '<div class="bento">' + j.lots.map(lotCard).join('') + '</div>';
 }
+async function loadMyBids(){
+  const j = await get('/api/estates/lots');
+  if(!j.ok) return unavailable(j, 'The auction exchange');
+  E.lots = j.lots;
+  const mine = (j.lots || []).filter(l => l.your_hold);
+  if(!mine.length) return '<div class="empty">You have no active bids. Bids you place appear here, held in escrow until the lot settles.</div>';
+  return '<div class="bento">' + mine.map(lotCard).join('') + '</div>';
+}
 
 /* ---------- parcels ---------- */
-async function loadParcels(){
-  const j = await get('/api/estates/parcels');
-  if(!j.ok) return unavailable(j, 'The parcel register');
-  if(!j.parcels.length) return '<div class="empty">No parcels on the register.</div>';
-  return `<div class="tile s12"><div class="tile-h">Parcel register · rent period ${esc(j.period)}</div>
+function parcelTable(parcels, period){
+  return `<div class="tile s12"><div class="tile-h">Parcel register · rent period ${esc(period)}</div>
     <div class="tablewrap"><table>
     <thead><tr><th>Parcel</th><th>Region</th><th>Status</th><th>Owner</th><th>Tenant</th>
       <th class="right">Rent</th><th>Lease ends</th><th>Rent due</th></tr></thead>
-    <tbody>${j.parcels.map(p=>`<tr${p.yours?' style="background:var(--panel2)"':''}>
+    <tbody>${parcels.map(p=>`<tr${p.yours?' style="background:var(--panel2)"':''}>
       <td>${esc(p.name)}<div class="tsub">${esc(p.slug)}</div></td>
       <td class="muted">${esc(p.region || '—')}</td>
       <td><span class="tag">${esc(p.status)}</span></td>
@@ -1339,6 +1369,20 @@ async function loadParcels(){
       <b>private</b> rather than a figure. On your own rows, every rent charge carries the
       key <code>estates:parcel:&lt;id&gt;:rent:&lt;period&gt;</code>. The period in the key
       is what stops a retried collection charging two months.</div></div>`;
+}
+async function loadParcels(){
+  const j = await get('/api/estates/parcels');
+  if(!j.ok) return unavailable(j, 'The parcel register');
+  E.parcels = j.parcels; E.period = j.period;
+  if(!j.parcels.length) return '<div class="empty">No parcels on the register.</div>';
+  return parcelTable(j.parcels, j.period);
+}
+async function loadMyParcels(){
+  const j = await get('/api/estates/parcels');
+  if(!j.ok) return unavailable(j, 'The parcel register');
+  const mine = (j.parcels || []).filter(p => p.yours || p.you_lease);
+  if(!mine.length) return '<div class="empty">You own or lease no parcels.</div>';
+  return parcelTable(mine, j.period);
 }
 
 /* ---------- prediction markets ---------- */
@@ -1387,13 +1431,25 @@ async function loadMarkets(){
   if(!j.markets.length) return '<div class="empty">No prediction markets.</div>';
   return '<div class="bento">' + j.markets.map(marketCard).join('') + '</div>';
 }
+async function loadMyStakes(){
+  const j = await get('/api/estates/markets');
+  if(!j.ok) return unavailable(j, 'Prediction markets');
+  E.markets = j.markets;
+  const mine = (j.markets || []).filter(m => m.your_total);
+  if(!mine.length) return '<div class="empty">You have no stakes. Stakes you place appear here, held until the market closes.</div>';
+  return '<div class="bento">' + mine.map(marketCard).join('') + '</div>';
+}
 
 async function render(){
   const v = document.getElementById('estView');
   v.innerHTML = '<div class="empty">Loading…</div>';
-  v.innerHTML = TAB === 'auctions' ? await loadLots()
-              : TAB === 'parcels'  ? await loadParcels()
-              : await loadMarkets();
+  v.innerHTML = TAB === 'auctions'  ? await loadLots()
+              : TAB === 'mybids'    ? await loadMyBids()
+              : TAB === 'parcels'   ? await loadParcels()
+              : TAB === 'myparcels' ? await loadMyParcels()
+              : TAB === 'markets'   ? await loadMarkets()
+              : TAB === 'mystakes'  ? await loadMyStakes()
+              : await loadLots();
 }
 
 /* ---------- flows ---------- */
@@ -1470,17 +1526,35 @@ def _register_with_hub(key: str, label: str, path: str, order: int) -> None:
         log.warning("[%s] could not register with the hub nav: %s", key, e)
 
 
-async def h_page(request):
-    """Lands, auctions and prediction markets. Logged out gets 401 and the sign-in card.
-
-    Same reason as `banking_web.h_page`: every figure on this page is either the
-    player's own money or an action that spends it, and none of it renders until we
-    know who is asking.
-    """
+async def _section_page(request, key: str):
+    """One of the three estates sites. Logged out gets 401 and the sign-in card —
+    every figure here is the player's own money. `key` is both the hub nav key (so
+    the right top tab lights) and the section whose subtabs/initial view we render."""
     _sess, refusal = shell.require_page_session(request)
     if refusal is not None:
         return refusal
-    return shell.page("Lands · Auctions · Predictions", "estates", _BODY, _JS)
+    d = _SECTIONS_DEF[key]
+    init = d["subtabs"][0][0]
+    js = "window.__ESTTAB__ = %r;\n" % init + _JS
+    return shell.page(d["h1"] + " · V Tech", key, _body(key), js)
+
+
+async def h_auctions(request):
+    return await _section_page(request, "auctions")
+
+
+async def h_lands(request):
+    return await _section_page(request, "lands")
+
+
+async def h_predictions(request):
+    return await _section_page(request, "predictions")
+
+
+async def h_page(request):
+    """`/estates` is the old combined route — kept as a redirect to Auctions so any
+    stale link or bookmark still lands somewhere real."""
+    raise web.HTTPFound("/auctions")
 
 
 def register_estates_routes(app) -> None:
@@ -1489,7 +1563,12 @@ def register_estates_routes(app) -> None:
         log.warning("[estates] aiohttp unavailable — estates not registered.")
         return
     shell.register_shell_routes(app)
-    _register_with_hub("lands", "Lands · Auctions · Predictions", "/estates", order=40)
+    _register_with_hub("auctions", "Auctions", "/auctions", order=40)
+    _register_with_hub("lands", "Lands", "/lands", order=41)
+    _register_with_hub("predictions", "Predictions", "/predictions", order=42)
+    app.router.add_get("/auctions", h_auctions)
+    app.router.add_get("/lands", h_lands)
+    app.router.add_get("/predictions", h_predictions)
     app.router.add_get("/estates", h_page)
     app.router.add_get("/api/estates/lots", h_lots)
     app.router.add_get("/api/estates/parcels", h_parcels)
